@@ -46,30 +46,54 @@ uv add tigerharness --extra all
 
 ## Quick start
 
-### Scaffold a new project
+### Scaffold a team and its first persona
+
+`tigerharness init` is interactive — it walks you through picking (or
+creating) a team and adding a persona inside it. Every persona always
+belongs to a team, and a team is a self-contained directory:
+
+```
+tigers/
+├── configs/
+│   ├── personas.yaml              # team registry (auto-updated)
+│   └── .env                       # Slack tokens (gitignored)
+├── skills/
+│   └── README.md                  # drop team-shared skills here
+├── personas/
+│   ├── chief/
+│   │   └── prompt.md              # the persona's system prompt
+│   └── scout/
+│       └── prompt.md
+└── memories/
+    ├── chief/
+    │   └── tiger-memory.config.yaml   # per-persona memory config
+    └── scout/
+        └── tiger-memory.config.yaml
+```
 
 ```bash
-# Create config files in the current directory
-tigerharness init --name researcher
+# Fully interactive — prompts for persona name, team, slack/memory opts
+tigerharness init
 
-# Or with tiger-memory support
-tigerharness init --name researcher --memory
+# Non-interactive — creates team 'tigers' with persona 'chief'
+tigerharness init --persona chief --team tigers --yes
 
-# This creates:
-#   personas/researcher.md     -- edit your agent's instructions
-#   .env                       -- fill in Slack tokens
-#   tiger-memory.config.yaml   -- (only with --memory)
+# Add a second persona to the same team
+tigerharness init --persona scout --team tigers --yes
+
+# Skip Slack or memory generation
+tigerharness init --persona chief --team tigers --no-memory --no-slack --yes
 ```
 
 ### Task runner
 
 ```bash
-# 1. Point tigerharness at your personas directory
-export TIGERHARNESS_PERSONAS_DIR=./personas
+# 1. Point tigerharness at your team's persona registry
+export TIGERHARNESS_PERSONAS_CONFIG=./tigers/configs/personas.yaml
 
 # 2. Assign a task (5 iterations)
 python -m tigerharness.task_runner assign \
-    --to researcher \
+    --to chief \
     --prompt "Research the latest developments in solar energy" \
     --iters 5
 
@@ -83,7 +107,7 @@ python -m tigerharness.task_runner logs <task-id>
 ### Slack bridge
 
 ```bash
-# 1. Fill in your Slack tokens in .env (from api.slack.com)
+# 1. Fill in your Slack tokens in tigers/configs/.env (from api.slack.com)
 #    SLACK_APP_TOKEN=xapp-...
 #    SLACK_BOT_TOKEN=xoxb-...
 #    ALLOWED_SLACK_USER_IDS=U0123ABC
@@ -94,26 +118,32 @@ python -m tigerharness.slack_bridge
 
 ### Tiger memory
 
+Each persona has its own memory config under
+`tigers/memories/<persona>/tiger-memory.config.yaml`. Edit it to point
+at your Claude Code project path, then:
+
+`--config` is a top-level option for the `tiger-memory` sub-command, so
+it must appear **before** the verb:
+
 ```bash
-# 1. Copy the example config
-cp examples/tiger-memory.config.yaml tiger-memory.config.yaml
-# Edit: set store.root and sources.project_path
+# Save typing — the same path is reused everywhere
+CFG=tigers/memories/chief/tiger-memory.config.yaml
 
-# 2. Initialize the memory store
-tiger-memory --config tiger-memory.config.yaml init
+# 1. Initialize the memory store (per persona)
+tigerharness tiger-memory --config $CFG init
 
-# 3. Bootstrap (one-time backfill from existing transcripts)
-tiger-memory --config tiger-memory.config.yaml bootstrap --dry-run
-tiger-memory --config tiger-memory.config.yaml bootstrap
+# 2. Bootstrap (one-time backfill from existing transcripts)
+tigerharness tiger-memory --config $CFG bootstrap --dry-run
+tigerharness tiger-memory --config $CFG bootstrap
 
-# 4. Rebuild (incremental, run after each session)
-tiger-memory --config tiger-memory.config.yaml rebuild
+# 3. Rebuild (incremental, run after each session)
+tigerharness tiger-memory --config $CFG rebuild
 
-# 5. Search memory
-tiger-memory --config tiger-memory.config.yaml search "solar energy"
+# 4. Search memory
+tigerharness tiger-memory --config $CFG search "solar energy"
 
-# 6. Pin a must-memorize fact
-tiger-memory --config tiger-memory.config.yaml pin "Prefers solar over wind"
+# 5. Pin a must-memorize fact
+tigerharness tiger-memory --config $CFG pin "Prefers solar over wind"
 ```
 
 ## Configuration
@@ -134,10 +164,11 @@ All paths are resolved from environment variables -- no hardcoded paths.
 
 ## Examples
 
-See [`examples/`](examples/) for sample configs:
-- [`tiger-memory.config.yaml`](examples/tiger-memory.config.yaml) -- annotated memory config
-- [`personas/researcher.md`](examples/personas/researcher.md) -- sample persona prompt
-- [`env.example`](examples/env.example) -- Slack bridge env template
+See [`examples/`](examples/) for a fully-populated sample team folder
+(`examples/tigers/`) and standalone reference configs:
+- [`examples/tigers/`](examples/tigers/) -- sample team scaffolded by `tigerharness init`
+- [`tiger-memory.config.yaml`](examples/tiger-memory.config.yaml) -- annotated memory config (standalone)
+- [`env.example`](examples/env.example) -- Slack bridge env template (standalone)
 
 ## Requirements
 
