@@ -42,11 +42,26 @@ Result: run.log + result.txt + lab_notebooks/tasks/<slug>.md
 | Env var | Default | Purpose |
 |---|---|---|
 | `TIGERHARNESS_STATE_DIR` | `~/.local/state/tigerharness-tasks/` | Job registry + per-job state |
-| `TIGERHARNESS_PERSONAS_DIR` | (none) | Directory of `<name>.md` prompt files |
+| `TIGERHARNESS_PERSONAS_CONFIG` | (none) | Path to a team's `configs/personas.yaml` (preferred -- see below) |
+| `TIGERHARNESS_PERSONAS_DIR` | (none) | Flat directory of `<name>.md` prompt files (legacy alternative) |
 | `TIGERHARNESS_SLACK_BRIDGE_DIR` | (none) | For notify CLI path in thread notice |
 | `TIGERHARNESS_SLACK_ENV` | (none) | Path to .env with SLACK_BOT_TOKEN |
 
 ## Persona registration
+
+The easiest path: scaffold a team with `tigerharness init`, then point
+the task runner at the generated registry:
+
+```bash
+tigerharness init --persona researcher --team tigers --yes
+export TIGERHARNESS_PERSONAS_CONFIG=./tigers/configs/personas.yaml
+```
+
+The generated `personas.yaml` is loaded automatically on import. To
+add more personas to the same team, just re-run with a new `--persona`.
+See the top-level [README](../README.md) for the full team layout.
+
+### Programmatic registration (advanced)
 
 ```python
 from tigerharness.task_runner.personas import register_persona
@@ -55,18 +70,23 @@ register_persona(
     "researcher",
     aliases=("researcher", "rs"),
     cwd="/path/to/project",
-    prompt_file="researcher",       # reads <PERSONAS_DIR>/researcher.md
+    prompt_file="researcher",
     permission_mode="bypassPermissions",
     disallowed_tools=["Bash(sudo:*)"],
     description="Research agent",
 )
 ```
 
-Or via environment:
+### Legacy flat-directory layout
+
 ```bash
 export TIGERHARNESS_PERSONAS_DIR=./personas
-# Then any file ./personas/<name>.md is auto-discoverable
+# Any file ./personas/<name>.md is then auto-discoverable
 ```
+
+Still supported but no longer the recommended setup -- the team-based
+layout keeps slack tokens, memory configs, and skills colocated with
+the prompt.
 
 ## Usage
 

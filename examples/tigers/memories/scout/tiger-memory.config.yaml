@@ -1,0 +1,27 @@
+# tiger-memory config for persona 'scout' (team 'tigers').
+# Docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
+
+agent:
+  name: scout
+  role: "A helpful assistant on team tigers."
+
+store:
+  # Memory store lives in this directory (memories/scout/).
+  root: .
+
+sources:
+  - kind: claude_code
+    project_path: ~/.claude/projects/-home-user-myproject/
+    # ^ Replace with your Claude Code project path.
+    #   Find yours under ~/.claude/projects/ -- the directory name
+    #   encodes the absolute project path with dashes replacing slashes.
+summarizer:
+  backend: anthropic
+  model: claude-sonnet-4-6
+  prompts: default/v1
+
+rebuild:
+  lock_path: /tmp/tiger-memory-tigers-scout.lock
+  idle_threshold_hours: 2
+  resummarize_window_days: 7
+  rebuild_timeout_minutes: 60

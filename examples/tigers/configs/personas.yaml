@@ -1,0 +1,31 @@
+# Team: tigers
+# Personas registry for tigerharness.task_runner.
+#
+# Load this file by pointing the env var at it (absolute or relative path):
+#     export TIGERHARNESS_PERSONAS_CONFIG=path/to/tigers/configs/personas.yaml
+#
+# `personas_dir`, `cwd`, and `extra.add_dirs` are resolved relative to
+# THIS FILE'S directory, not your cwd at load time, so the team folder
+# can be moved or invoked from anywhere.
+#
+# Convention used by `tigerharness init`:
+#   - `personas_dir: ../personas` -- prompts live next to this folder
+#   - `cwd: ..` on every persona  -- agents run from the team root
+#   - uncomment `extra.add_dirs: [../skills]` to expose team skills
+# Schema: tigerharness.task_runner.personas.load_personas_config.
+
+personas_dir: ../personas
+
+personas:
+  - name: chief
+    cwd: ..
+    prompt_file: chief/prompt
+    description: "chief on team tigers"
+    # extra:
+    #   add_dirs: [../skills]   # uncomment to expose team-shared skills
+  - name: scout
+    cwd: ..
+    prompt_file: scout/prompt
+    description: "scout on team tigers"
+    # extra:
+    #   add_dirs: [../skills]   # uncomment to expose team-shared skills

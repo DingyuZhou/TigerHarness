@@ -1,0 +1,7 @@
+# Tigerharness team -- secrets and runtime memory state
+configs/.env
+memories/*/archive/
+memories/*/journal/
+memories/*/briefing/
+memories/*/cache/
+memories/*/state.json

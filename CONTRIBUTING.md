@@ -63,9 +63,9 @@ tests/
     tiger_memory/            Tiger memory tests
     test_main_modules.py     __main__.py entrypoint tests
 examples/
-    tiger-memory.config.yaml Sample memory config (annotated)
-    personas/researcher.md   Sample persona prompt
-    env.example              Slack bridge env template
+    tigers/                  Sample team scaffolded by `tigerharness init`
+    tiger-memory.config.yaml Standalone memory config reference
+    env.example              Standalone Slack bridge env template
 docs/
     DESIGN.md                Architecture decisions + migration notes
     task-runner.md           Task runner module README
@@ -85,11 +85,24 @@ skills/                      Claude Code SKILL.md definitions
 
 ## Adding a custom persona
 
-1. Create a markdown file in your personas directory (e.g., `personas/analyst.md`).
-2. Set `TIGERHARNESS_PERSONAS_DIR` to point to that directory.
-3. Use `python -m tigerharness.task_runner assign --to analyst --prompt "..."`.
+Run `tigerharness init` -- it walks you through picking (or creating) a
+team and scaffolds the persona inside it. Non-interactive:
 
-See `examples/personas/researcher.md` for a template.
+```bash
+tigerharness init --persona analyst --team tigers --yes
+export TIGERHARNESS_PERSONAS_CONFIG=./tigers/configs/personas.yaml
+python -m tigerharness.task_runner assign --to analyst --prompt "..." --iters 5
+```
+
+The team folder structure is documented in the [README](README.md) and
+in `examples/tigers/`. Each persona lives at
+`<team>/personas/<name>/prompt.md` (edit this) with optional memory
+config at `<team>/memories/<name>/tiger-memory.config.yaml`. The
+generated `<team>/configs/personas.yaml` is the registry consumed by
+`tigerharness.task_runner.personas.load_personas_config`.
+
+If you need to register a persona programmatically (e.g. for tests),
+use `register_persona()` from `tigerharness.task_runner.personas`.
 
 ## Adding a custom memory backend
 
