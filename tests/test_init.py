@@ -10,6 +10,7 @@ import pytest
 
 from tigerharness.init import (
     _append_persona_to_yaml,
+    _command_prefix,
     _format_path,
     _prompt_choice,
     _prompt_text,
@@ -677,6 +678,27 @@ class TestFormatPath:
         assert _format_path(p, tmp_path) == "/etc/hosts"
 
 
+class TestCommandPrefix:
+    """`_command_prefix()` returns "uv run " when `tigerharness` isn't on PATH.
+
+    Driven entirely by `shutil.which("tigerharness")`. We monkeypatch
+    that lookup so the tests are independent of the host environment.
+    """
+
+    def test_on_path_returns_empty(self, monkeypatch: pytest.MonkeyPatch):
+        from tigerharness import init as init_mod
+        monkeypatch.setattr(
+            init_mod.shutil, "which",
+            lambda name: "/usr/local/bin/tigerharness" if name == "tigerharness" else None,
+        )
+        assert _command_prefix() == ""
+
+    def test_off_path_returns_uv_run(self, monkeypatch: pytest.MonkeyPatch):
+        from tigerharness import init as init_mod
+        monkeypatch.setattr(init_mod.shutil, "which", lambda name: None)
+        assert _command_prefix() == "uv run "
+
+
 # ---------------------------------------------------------------------------
 # CLI main()
 # ---------------------------------------------------------------------------
@@ -835,6 +857,57 @@ class TestMain:
         assert " init\n" in out  # the 'init' verb is at the end
         assert "TIGERHARNESS_PERSONAS_CONFIG=tigers/configs/personas.yaml" in out
         assert "task-runner assign --to chief" in out
+
+    def test_next_steps_uses_uv_run_prefix_when_off_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """In a `uv add` install, `tigerharness` is in .venv/bin (off PATH).
+        The "Next steps" output must prefix the runnable commands with
+        `uv run` so copy-paste from the user's shell actually works."""
+        from tigerharness import init as init_mod
+        monkeypatch.setattr(init_mod.shutil, "which", lambda name: None)
+        main([
+            "--dir", str(tmp_path),
+            "--persona", "chief",
+            "--team", "tigers",
+            "--yes",
+        ])
+        out = capsys.readouterr().out
+        assert "uv run tigerharness tiger-memory --config" in out
+        assert "uv run tigerharness task-runner assign --to chief" in out
+        # Every `tigerharness <subcommand>` invocation must be prefixed --
+        # if any bare one slipped through, the counts would differ.
+        assert (
+            out.count("tigerharness tiger-memory")
+            == out.count("uv run tigerharness tiger-memory")
+        )
+        assert (
+            out.count("tigerharness task-runner")
+            == out.count("uv run tigerharness task-runner")
+        )
+
+    def test_next_steps_uses_bare_command_when_on_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """When `tigerharness` is on PATH (pip / pipx / uv tool install),
+        no `uv run` prefix is needed -- printed commands stay bare."""
+        from tigerharness import init as init_mod
+        monkeypatch.setattr(
+            init_mod.shutil, "which",
+            lambda name: "/usr/local/bin/tigerharness" if name == "tigerharness" else None,
+        )
+        main([
+            "--dir", str(tmp_path),
+            "--persona", "chief",
+            "--team", "tigers",
+            "--yes",
+        ])
+        out = capsys.readouterr().out
+        assert "tigerharness tiger-memory --config" in out
+        assert "tigerharness task-runner assign --to chief" in out
+        assert "uv run tigerharness" not in out
 
     def test_next_steps_numbering_is_sequential_no_gaps(
         self, tmp_path: Path, capsys: pytest.CaptureFixture

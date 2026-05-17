@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -188,6 +189,28 @@ def _validate_name(value: str, *, kind: str) -> str:
             f"and '_' only (must start with a letter or digit)"
         )
     return v
+
+
+# ---------------------------------------------------------------------------
+# Command-prefix detection for "Next steps" output
+# ---------------------------------------------------------------------------
+
+def _command_prefix() -> str:
+    """Return ``"uv run "`` when ``tigerharness`` isn't on ``PATH``.
+
+    A user who installed via ``uv add tigerharness`` (the recommended
+    "scoped to this folder" recipe) will have the entrypoint inside
+    ``.venv/bin`` but no ``.venv/bin`` on their shell ``PATH`` -- so a
+    bare ``tigerharness ...`` line in our "Next steps" output would
+    fail with "command not found". Prefixing with ``uv run`` fixes it.
+
+    Cases handled correctly:
+      - ``uv add`` inside a uv project    -> prefix is "uv run "
+      - ``uv tool install tigerharness``  -> on PATH, prefix is ""
+      - ``pip install`` in active venv    -> on PATH, prefix is ""
+      - ``pipx install tigerharness``     -> on PATH, prefix is ""
+    """
+    return "" if shutil.which("tigerharness") else "uv run "
 
 
 # ---------------------------------------------------------------------------
@@ -633,6 +656,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print("Next steps:")
+    prefix = _command_prefix()
     steps: list[str] = [
         f"Edit {_format_path(team_dir / 'personas' / persona / 'prompt.md', search_root)}"
     ]
@@ -645,7 +669,7 @@ def main(argv: list[str] | None = None) -> int:
         steps.append(f"Edit {mem_rel} -- set sources.project_path")
         # `--config` is a top-level option, must precede the `init` subcommand.
         steps.append(
-            f"Initialize memory: tigerharness tiger-memory --config {mem_rel} init"
+            f"Initialize memory: {prefix}tigerharness tiger-memory --config {mem_rel} init"
         )
     for i, step in enumerate(steps, 1):
         print(f"  {i}. {step}")
@@ -654,5 +678,5 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("  To run tasks:")
     print(f"    export TIGERHARNESS_PERSONAS_CONFIG={_format_path(personas_cfg, search_root)}")
-    print(f"    tigerharness task-runner assign --to {persona} --prompt '...' --iters 5")
+    print(f"    {prefix}tigerharness task-runner assign --to {persona} --prompt '...' --iters 5")
     return 0
