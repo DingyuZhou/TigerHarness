@@ -1,5 +1,9 @@
 # TigerHarness
 
+[![PyPI](https://img.shields.io/pypi/v/tigerharness.svg)](https://pypi.org/project/tigerharness/)
+[![Python](https://img.shields.io/pypi/pyversions/tigerharness.svg)](https://pypi.org/project/tigerharness/)
+[![License](https://img.shields.io/pypi/l/tigerharness.svg)](https://github.com/DingyuZhou/TigerHarness/blob/main/LICENSE)
+
 A generic Claude Code agent harness: iterative task execution, Slack
 integration, and persistent memory management.
 

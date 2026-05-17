@@ -64,8 +64,11 @@ tigerharness = "tigerharness.cli:main"
 tiger-memory = "tigerharness.tiger_memory.cli:main"
 
 [project.urls]
+Homepage = "https://github.com/DingyuZhou/TigerHarness"
 Repository = "https://github.com/DingyuZhou/TigerHarness"
 Issues = "https://github.com/DingyuZhou/TigerHarness/issues"
+Changelog = "https://github.com/DingyuZhou/TigerHarness/releases"
+Documentation = "https://github.com/DingyuZhou/TigerHarness#readme"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tigerharness"]
