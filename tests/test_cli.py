@@ -1,0 +1,61 @@
+"""Top-level CLI dispatch tests."""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+
+from tigerharness.cli import main
+
+
+def test_help(capsys):
+    ret = main(["--help"])
+    assert ret == 0
+    out = capsys.readouterr().out
+    assert "task-runner" in out
+    assert "tiger-memory" in out
+
+
+def test_unknown_command(capsys):
+    ret = main(["unknown-cmd"])
+    assert ret == 2
+
+
+def test_empty_args(capsys):
+    ret = main([])
+    assert ret == 0
+
+
+def test_task_runner_dispatch():
+    # Should dispatch to task-runner's parser which requires a subcommand
+    with pytest.raises(SystemExit):
+        main(["task-runner"])
+
+
+def test_task_runner_alias():
+    with pytest.raises(SystemExit):
+        main(["tr"])
+
+
+def test_tiger_memory_dispatch():
+    # tiger-memory also requires subcommand
+    with pytest.raises(SystemExit):
+        main(["tiger-memory"])
+
+
+def test_tiger_memory_alias():
+    with pytest.raises(SystemExit):
+        main(["tm"])
+
+
+def test_slack_bridge_dispatch(monkeypatch):
+    # sb dispatches to notify CLI which requires a subcommand
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        main(["sb"])
+
+
+def test_help_alias(capsys):
+    ret = main(["help"])
+    assert ret == 0

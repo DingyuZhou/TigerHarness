@@ -1,0 +1,41 @@
+# tiger-memory configuration
+# Full docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
+
+agent:
+  name: researcher
+  role: "A research assistant specializing in technical topics."
+
+store:
+  # Where to persist the memory store (archive, journal, briefing).
+  root: ~/.local/share/tiger-memory/researcher
+
+sources:
+  - kind: claude_code
+    # Replace with your actual Claude Code project path.
+    # Find yours under ~/.claude/projects/ — the directory name encodes
+    # the absolute project path with dashes replacing slashes.
+    project_path: ~/.claude/projects/-home-user-myproject/
+
+summarizer:
+  # Choices: anthropic, mock (for testing without API spend)
+  backend: anthropic
+  model: claude-sonnet-4-6
+  prompts: default/v1
+
+# Optional: RAG embedder for semantic search
+# embedder:
+#   backend: fastembed          # or "openai"
+#   model: BAAI/bge-small-en-v1.5
+#   # For OpenAI:
+#   # backend: openai
+#   # model: text-embedding-3-small
+
+rebuild:
+  lock_path: /tmp/tiger-memory-researcher.lock
+  idle_threshold_hours: 2
+  resummarize_window_days: 7
+  rebuild_timeout_minutes: 60
+
+budgets:
+  must_memorize_rows: 150       # max rows in must_memorize.md
+  repeat_detection_similarity: 0.9

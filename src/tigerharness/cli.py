@@ -1,0 +1,60 @@
+"""Top-level CLI entry point for tigerharness.
+
+Dispatches to sub-package CLIs:
+    tigerharness task-runner <subcommand>
+    tigerharness slack-bridge <subcommand>
+    tigerharness tiger-memory <subcommand>
+"""
+
+from __future__ import annotations
+
+import sys
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = argv if argv is not None else sys.argv[1:]
+
+    if not args:
+        _usage()
+        return 0
+
+    cmd = args[0]
+    rest = args[1:]
+
+    if cmd == "init":
+        from .init import main as init_main
+        return init_main(rest)
+    elif cmd in ("task-runner", "task_runner", "tr"):
+        from .task_runner.cli import main as tr_main
+        return tr_main(rest)
+    elif cmd in ("tiger-memory", "tiger_memory", "tm"):
+        from .tiger_memory.cli import main as tm_main
+        return tm_main(rest)
+    elif cmd in ("slack-bridge", "slack_bridge", "sb"):
+        # slack-bridge doesn't have a CLI dispatcher -- it runs as a daemon.
+        # Forward to notify sub-CLI for now.
+        from .slack_bridge.notify import main as notify_main
+        return notify_main(rest)
+    elif cmd in ("--help", "-h", "help"):
+        _usage()
+        return 0
+    else:
+        print(f"unknown command: {cmd}", file=sys.stderr)
+        _usage()
+        return 2
+
+
+def _usage() -> None:
+    print("tigerharness -- Claude Code agent harness")
+    print()
+    print("Sub-commands:")
+    print("  init               Scaffold a new project (personas, .env, config)")
+    print("  task-runner (tr)   Iterative task execution")
+    print("  tiger-memory (tm)  Persistent memory management")
+    print("  slack-bridge (sb)  Slack notify CLI")
+    print()
+    print("Usage: tigerharness <sub-command> [args...]")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
