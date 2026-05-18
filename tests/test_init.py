@@ -9,9 +9,11 @@ from unittest.mock import patch
 import pytest
 
 from tigerharness.init import (
+    _append_lane_to_slack_bridge_index,
     _append_persona_to_yaml,
     _command_prefix,
     _format_path,
+    _maybe_register_slack_bridge_lane,
     _prompt_choice,
     _prompt_text,
     _prompt_yes_no,
@@ -351,6 +353,160 @@ class TestAddPersona:
         assert yp not in created
         # Memory file untouched (still contains the preexisting marker)
         assert "# preexisting" in mem.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Multi-lane slack-bridge auto-registration
+# ---------------------------------------------------------------------------
+
+class TestAppendLaneToSlackBridgeIndex:
+    def test_writes_header_when_file_lacks_lanes_key(self, tmp_path: Path):
+        idx = tmp_path / "slack-bridge.yaml"
+        idx.write_text("# just a comment\n")
+        appended = _append_lane_to_slack_bridge_index(idx, "shohoku")
+        assert appended is True
+        content = idx.read_text()
+        assert "lanes:\n" in content
+        assert "  - shohoku\n" in content
+
+    def test_appends_under_existing_header(self, tmp_path: Path):
+        idx = tmp_path / "slack-bridge.yaml"
+        idx.write_text("lanes:\n  - tigers\n")
+        appended = _append_lane_to_slack_bridge_index(idx, "shohoku")
+        assert appended is True
+        content = idx.read_text()
+        assert content.count("  - tigers\n") == 1
+        assert content.count("  - shohoku\n") == 1
+        # New entry comes after existing ones.
+        assert content.index("tigers") < content.index("shohoku")
+
+    def test_no_op_when_entry_already_present(self, tmp_path: Path):
+        idx = tmp_path / "slack-bridge.yaml"
+        idx.write_text("lanes:\n  - shohoku\n")
+        before = idx.read_text()
+        appended = _append_lane_to_slack_bridge_index(idx, "shohoku")
+        assert appended is False
+        assert idx.read_text() == before
+
+    def test_handles_file_without_trailing_newline(self, tmp_path: Path):
+        idx = tmp_path / "slack-bridge.yaml"
+        idx.write_text("lanes:\n  - tigers")  # no trailing newline
+        _append_lane_to_slack_bridge_index(idx, "shohoku")
+        content = idx.read_text()
+        # Existing entry preserved + new entry on its own line.
+        assert "  - tigers\n" in content
+        assert "  - shohoku\n" in content
+
+    def test_handles_empty_file(self, tmp_path: Path):
+        idx = tmp_path / "slack-bridge.yaml"
+        idx.write_text("")  # empty
+        appended = _append_lane_to_slack_bridge_index(idx, "shohoku")
+        assert appended is True
+        assert idx.read_text() == "lanes:\n  - shohoku\n"
+
+    def test_handles_unterminated_header_only_file(self, tmp_path: Path):
+        """File has a leading comment but no trailing newline AND no
+        `lanes:` header. Helper must inject the newline before writing
+        the new header + entry."""
+        idx = tmp_path / "slack-bridge.yaml"
+        idx.write_text("# top comment, no newline")  # deliberately ragged
+        _append_lane_to_slack_bridge_index(idx, "shohoku")
+        content = idx.read_text()
+        # Original comment preserved, header injected, entry appended.
+        assert content.startswith("# top comment, no newline\n")
+        assert "lanes:\n  - shohoku\n" in content
+
+
+class TestMaybeRegisterSlackBridgeLane:
+    def test_returns_empty_when_index_missing(self, tmp_path: Path):
+        # No top-level slack-bridge.yaml -> single-tenant mode, helper
+        # is a no-op.
+        team_dir = tmp_path / "shohoku"
+        team_dir.mkdir()
+        result = _maybe_register_slack_bridge_lane(
+            tmp_path, team_dir, "shohoku", "ayako"
+        )
+        assert result == []
+        # Helper must not have created the fragment either.
+        assert not (team_dir / "configs" / "slack-bridge.yaml").exists()
+
+    def test_writes_fragment_and_appends_to_index(self, tmp_path: Path):
+        team_dir = tmp_path / "shohoku"
+        team_dir.mkdir()
+        (team_dir / "configs").mkdir()
+        idx = tmp_path / "slack-bridge.yaml"
+        idx.write_text("")  # empty index -> opts the user into multi mode
+        result = _maybe_register_slack_bridge_lane(
+            tmp_path, team_dir, "shohoku", "ayako"
+        )
+        fragment_path = team_dir / "configs" / "slack-bridge.yaml"
+        assert fragment_path in result
+        assert idx in result
+        assert fragment_path.exists()
+        body = fragment_path.read_text()
+        assert "persona: ayako" in body
+        assert "shohoku" in body
+        assert "allowed_user_ids: []" in body
+        assert "  - shohoku\n" in idx.read_text()
+
+    def test_idempotent_when_called_twice(self, tmp_path: Path):
+        team_dir = tmp_path / "shohoku"
+        team_dir.mkdir()
+        (team_dir / "configs").mkdir()
+        (tmp_path / "slack-bridge.yaml").write_text("")
+        # First call creates both.
+        first = _maybe_register_slack_bridge_lane(
+            tmp_path, team_dir, "shohoku", "ayako"
+        )
+        assert len(first) == 2
+        # Second call -- fragment exists, index entry exists -- no-op.
+        second = _maybe_register_slack_bridge_lane(
+            tmp_path, team_dir, "shohoku", "ayako"
+        )
+        assert second == []
+
+
+class TestInitWithMultiBridgeIndex:
+    """End-to-end: when slack-bridge.yaml exists at the search root, init
+    auto-generates the fragment and appends to the index."""
+
+    def test_main_writes_fragment_and_extends_next_steps(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ):
+        # User opts in by creating the (empty) index.
+        (tmp_path / "slack-bridge.yaml").write_text("")
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "shohoku",
+            "--yes",
+        ])
+        assert rc == 0
+        fragment = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
+        assert fragment.exists()
+        idx_text = (tmp_path / "slack-bridge.yaml").read_text()
+        assert "  - shohoku\n" in idx_text
+        out = capsys.readouterr().out
+        # The new "Edit slack-bridge.yaml" reminder must appear in Next steps.
+        assert "shohoku/configs/slack-bridge.yaml" in out
+        assert "allowed_user_ids" in out
+
+    def test_main_skips_fragment_when_index_missing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ):
+        # No top-level index -> single-tenant mode.
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "shohoku",
+            "--yes",
+        ])
+        assert rc == 0
+        fragment = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
+        assert not fragment.exists()
+        out = capsys.readouterr().out
+        # No multi-bridge mention in Next steps when not opted in.
+        assert "slack-bridge.yaml" not in out
 
 
 # ---------------------------------------------------------------------------

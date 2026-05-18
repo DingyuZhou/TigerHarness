@@ -169,6 +169,32 @@ memories/*/cache/
 memories/*/state.json
 """
 
+# Multi-lane slack-bridge fragment. Generated only when a top-level
+# slack-bridge.yaml index exists in the search root -- i.e., the user
+# has opted into multi-team mode. See `multi.load_multi` for the loader.
+_SLACK_BRIDGE_FRAGMENT_TEMPLATE = """\
+# Multi-lane slack-bridge fragment for team '{team}'.
+# Loaded by tigerharness.slack_bridge.multi.load_multi() via the
+# top-level slack-bridge.yaml index.
+
+persona: {persona}
+
+# Slack user IDs allowed to DM this team's bot. Required (non-empty list).
+# Find your user ID at api.slack.com/methods/users.list, or the Slack
+# app -> Profile -> ... menu -> Copy member ID.
+allowed_user_ids: []  # TODO: add at least one user ID before starting the bridge
+
+# Where this lane persists its thread -> session map. Must be unique
+# across lanes (the multi loader rejects duplicates).
+state_dir: ~/.local/state/slack-bridge/{team}
+
+# Optional overrides (defaults shown):
+# env: configs/.env
+# agent_cwd: .
+# agent_prompt: personas/{persona}/prompt.md
+# tiger_memory_config: memories/{persona}/tiger-memory.config.yaml
+"""
+
 
 # ---------------------------------------------------------------------------
 # Name validation
@@ -408,6 +434,66 @@ def add_persona(
 
 
 # ---------------------------------------------------------------------------
+# Multi-lane slack-bridge integration
+# ---------------------------------------------------------------------------
+
+def _append_lane_to_slack_bridge_index(
+    index_path: Path, team_name: str
+) -> bool:
+    """Append ``  - {team_name}\\n`` to the top-level slack-bridge.yaml
+    index. Idempotent. Returns True if the file was modified.
+
+    Handles three pre-existing states of the index file:
+      - Has ``lanes:`` header + entries -> append new entry at the end.
+      - Has no ``lanes:`` header (empty / comments only) -> write the
+        header and the entry.
+      - Already contains the entry -> no-op.
+    """
+    needle = f"  - {team_name}\n"
+    content = index_path.read_text(encoding="utf-8")
+    if needle in content:
+        return False
+    if "lanes:" not in content:
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += "lanes:\n" + needle
+    else:
+        if not content.endswith("\n"):
+            content += "\n"
+        content += needle
+    index_path.write_text(content, encoding="utf-8")
+    return True
+
+
+def _maybe_register_slack_bridge_lane(
+    search_root: Path, team_dir: Path, team: str, persona: str
+) -> list[Path]:
+    """When a top-level ``slack-bridge.yaml`` index exists in
+    *search_root*, write the per-team fragment (idempotent) and append
+    the team to the index (idempotent).
+
+    Returning an empty list when the index is absent is the signal that
+    the user hasn't opted into multi-team mode -- single-tenant is the
+    default. To enable multi-team mode, the user creates
+    ``<search_root>/slack-bridge.yaml`` (even an empty file is fine);
+    subsequent ``tigerharness init`` runs will auto-register every team.
+    """
+    index_path = search_root / "slack-bridge.yaml"
+    if not index_path.exists():
+        return []
+    created: list[Path] = []
+    fragment_path = team_dir / "configs" / "slack-bridge.yaml"
+    if _write_if_missing(
+        fragment_path,
+        _SLACK_BRIDGE_FRAGMENT_TEMPLATE.format(persona=persona, team=team),
+    ):
+        created.append(fragment_path)
+    if _append_lane_to_slack_bridge_index(index_path, team):
+        created.append(index_path)
+    return created
+
+
+# ---------------------------------------------------------------------------
 # Interactive prompts (stdlib only -- no extra deps)
 # ---------------------------------------------------------------------------
 
@@ -550,6 +636,14 @@ def init(
         if p not in created:
             created.append(p)
 
+    # 5. multi-lane slack-bridge auto-registration (only when the user
+    # has opted in by creating a top-level slack-bridge.yaml).
+    for p in _maybe_register_slack_bridge_lane(
+        root, final_team_dir, team, persona
+    ):
+        if p not in created:
+            created.append(p)
+
     return final_team_dir, persona, created
 
 
@@ -670,6 +764,13 @@ def main(argv: list[str] | None = None) -> int:
         # `--config` is a top-level option, must precede the `init` subcommand.
         steps.append(
             f"Initialize memory: {prefix}tigerharness tiger-memory --config {mem_rel} init"
+        )
+    # Multi-lane slack-bridge: nudge the user to fill in the fragment.
+    sb_fragment = team_dir / "configs" / "slack-bridge.yaml"
+    if sb_fragment.exists():
+        steps.append(
+            f"Edit {_format_path(sb_fragment, search_root)} -- "
+            f"add allowed_user_ids before starting the multi-bridge"
         )
     for i, step in enumerate(steps, 1):
         print(f"  {i}. {step}")
