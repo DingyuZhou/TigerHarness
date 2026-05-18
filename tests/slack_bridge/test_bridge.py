@@ -16,6 +16,7 @@ from tigerharness.slack_bridge.bridge import (
     _strip_bot_mention,
     build_agent_config,
 )
+from tigerharness.agent_sdk import AgentConfig
 from tigerharness.slack_bridge.config import BridgeConfig
 from tigerharness.slack_bridge.persistence import ThreadStore
 
@@ -121,6 +122,170 @@ class TestBuildAgentConfig:
             build_agent_config(cfg)
 
 
+class TestTeamBridgeContext:
+    """Multi-persona team context: ``is_multi_persona`` toggles routing
+    + reply prefix behavior, ``_format_reply`` honors it."""
+
+    def _ctx(self, *names: str) -> "TeamBridgeContext":
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, TeamBridgeContext,
+        )
+        personas = {
+            n: PersonaSlot(
+                name=n,
+                agent_config=AgentConfig(name=n, instructions=f"You are {n}"),
+            )
+            for n in names
+        }
+        return TeamBridgeContext(
+            team_name="t",
+            slack_app_token="xapp-x",
+            slack_bot_token="xoxb-x",
+            allowed_user_ids=frozenset({"U0CEO"}),
+            agent_cwd="/tmp",
+            personas=personas,
+            default_persona=names[0],
+        )
+
+    def test_single_persona_is_not_multi(self):
+        ctx = self._ctx("ayako")
+        assert ctx.is_multi_persona is False
+
+    def test_two_personas_is_multi(self):
+        ctx = self._ctx("ayako", "sakuragi")
+        assert ctx.is_multi_persona is True
+
+
+class TestFormatReply:
+    """``_format_reply`` adds ``[<persona>]:`` only in multi-persona teams.
+    Single-persona output is identical to the pre-PR4 bridge."""
+
+    def test_single_persona_no_prefix(self):
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, TeamBridgeContext, _format_reply,
+        )
+        ctx = TeamBridgeContext(
+            team_name="", slack_app_token="x", slack_bot_token="x",
+            allowed_user_ids=frozenset({"U0"}), agent_cwd="/",
+            personas={"a": PersonaSlot(name="a", agent_config=AgentConfig(name="a", instructions="x"))},
+            default_persona="a",
+        )
+        assert _format_reply("hello", "a", ctx) == "hello"
+
+    def test_multi_persona_adds_prefix(self):
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, TeamBridgeContext, _format_reply,
+        )
+        personas = {
+            n: PersonaSlot(name=n, agent_config=AgentConfig(name=n, instructions=n))
+            for n in ("ayako", "sakuragi")
+        }
+        ctx = TeamBridgeContext(
+            team_name="shohoku", slack_app_token="x", slack_bot_token="x",
+            allowed_user_ids=frozenset({"U0"}), agent_cwd="/",
+            personas=personas,
+            default_persona="ayako",
+        )
+        assert _format_reply("hi from ayako", "ayako", ctx) == "[ayako]: hi from ayako"
+
+
+class TestTeamAwarenessPreamble:
+    """The preamble teaches a persona about teammates so it can handle
+    misroutes politely. Single-persona teams get an empty preamble."""
+
+    def test_single_persona_no_preamble(self):
+        from tigerharness.slack_bridge.bridge import _team_awareness_preamble
+        assert _team_awareness_preamble("ayako", "shohoku", ["ayako"]) == ""
+
+    def test_multi_persona_preamble_mentions_others(self):
+        from tigerharness.slack_bridge.bridge import _team_awareness_preamble
+        result = _team_awareness_preamble(
+            "ayako", "shohoku", ["ayako", "sakuragi", "mitsui"]
+        )
+        assert "ayako" in result
+        assert "sakuragi" in result
+        assert "mitsui" in result
+        # Self should appear once (as the active persona), not as a "other".
+        assert "Other team members reachable" in result
+
+    def test_empty_team_name_uses_generic_descriptor(self):
+        from tigerharness.slack_bridge.bridge import _team_awareness_preamble
+        result = _team_awareness_preamble(
+            "ayako", "", ["ayako", "sakuragi"]
+        )
+        assert "your team" in result
+
+
+class TestBuildPersonaAgentConfig:
+    def test_appends_preamble_for_multi_persona(self):
+        from tigerharness.slack_bridge.bridge import build_persona_agent_config
+        cfg = build_persona_agent_config(
+            persona_name="ayako",
+            prompt_text="You are Ayako.",
+            team_name="shohoku",
+            all_personas=["ayako", "sakuragi"],
+        )
+        assert "You are Ayako." in cfg.instructions
+        assert "sakuragi" in cfg.instructions
+        assert cfg.name == "agent-ayako"
+
+    def test_no_preamble_for_single_persona(self):
+        from tigerharness.slack_bridge.bridge import build_persona_agent_config
+        cfg = build_persona_agent_config(
+            persona_name="ayako",
+            prompt_text="You are Ayako.",
+            team_name="shohoku",
+            all_personas=["ayako"],
+        )
+        # The bare prompt is preserved, no preamble appended.
+        assert cfg.instructions == "You are Ayako."
+
+
+class TestBuildTeamBridge:
+    """``build_team_bridge`` is the multi-persona counterpart to
+    ``build_bridge``. Both factories build a ThreadStore at the given
+    state_path and pass the right context to SlackBridge."""
+
+    def test_uses_explicit_state_path(self, tmp_path: Path):
+        from tigerharness.slack_bridge import bridge as bridge_mod
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, TeamBridgeContext, build_team_bridge,
+        )
+        team_ctx = TeamBridgeContext(
+            team_name="shohoku",
+            slack_app_token="xapp-1", slack_bot_token="xoxb-1",
+            allowed_user_ids=frozenset({"U0CEO"}), agent_cwd=str(tmp_path),
+            personas={"ayako": PersonaSlot(
+                name="ayako",
+                agent_config=AgentConfig(name="ayako", instructions="x"),
+            )},
+            default_persona="ayako",
+        )
+        explicit = tmp_path / "shohoku" / "threads.json"
+        with patch.object(bridge_mod, "ThreadStore") as ts, \
+             patch.object(bridge_mod, "get_backend"):
+            build_team_bridge(team_ctx, state_path=explicit)
+        ts.assert_called_once_with(explicit)
+
+
+class TestSlackBridgeInitErrors:
+    """``SlackBridge`` requires either (cfg + agent_cfg) or team_ctx,
+    plus backend and store. Missing args produce clear errors."""
+
+    def test_missing_cfg_and_team_ctx_raises(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="must provide"):
+            SlackBridge(backend=MagicMock(), store=MagicMock())
+
+    def test_missing_backend_raises(self, tmp_path: Path):
+        cfg = BridgeConfig(
+            slack_app_token="xapp-x", slack_bot_token="xoxb-x",
+            allowed_user_ids=frozenset({"U0"}), agent_cwd="/",
+        )
+        agent_cfg = AgentConfig(name="x", instructions="x")
+        with pytest.raises(ValueError, match="backend and store"):
+            SlackBridge(cfg, None, agent_cfg, MagicMock())
+
+
 class TestBuildBridge:
     """`build_bridge(cfg, state_path=...)` composes the bridge wiring.
 
@@ -164,37 +329,42 @@ class TestBuildBridge:
 
 
 class TestTriggerTigerMemoryRebuild:
-    def test_no_config_path_is_noop(self, cfg):
+    """The rebuild trigger now takes the active persona's slot + the
+    team's tiger_memory_cli (so each lane can use its own CLI binary).
+    Tests construct minimal PersonaSlot fixtures rather than going
+    through the whole TeamBridgeContext."""
+
+    def _persona(self, *, memory_path: str = "") -> "PersonaSlot":
+        from tigerharness.slack_bridge.bridge import PersonaSlot
+        return PersonaSlot(
+            name="ayako",
+            agent_config=AgentConfig(name="x", instructions="x"),
+            tiger_memory_config_path=memory_path,
+        )
+
+    def test_no_config_path_is_noop(self):
         from tigerharness.slack_bridge.bridge import _trigger_tiger_memory_rebuild
-        # cfg has no tiger_memory_config_path by default
-        _trigger_tiger_memory_rebuild(cfg, "thread-1")  # should not raise
+        # Empty memory_path -> no-op (no exception).
+        _trigger_tiger_memory_rebuild(self._persona(), "", "thread-1")
 
     def test_cli_not_found(self):
         from tigerharness.slack_bridge.bridge import _trigger_tiger_memory_rebuild
-        cfg = BridgeConfig(
-            slack_app_token="xapp-x",
-            slack_bot_token="xoxb-x",
-            allowed_user_ids=frozenset({"U0X"}),
-            agent_cwd="/tmp",
-            tiger_memory_config_path="/tmp/config.yaml",
-            tiger_memory_cli="",  # not set
-        )
         with patch("tigerharness.slack_bridge.bridge.shutil.which", return_value=None):
-            # Should log warning but not raise
-            _trigger_tiger_memory_rebuild(cfg, "thread-1")
+            # CLI not on PATH + no explicit override -> warning + skip.
+            _trigger_tiger_memory_rebuild(
+                self._persona(memory_path="/tmp/config.yaml"),
+                "",
+                "thread-1",
+            )
 
     def test_explicit_cli_spawns(self):
         from tigerharness.slack_bridge.bridge import _trigger_tiger_memory_rebuild
-        cfg = BridgeConfig(
-            slack_app_token="xapp-x",
-            slack_bot_token="xoxb-x",
-            allowed_user_ids=frozenset({"U0X"}),
-            agent_cwd="/tmp",
-            tiger_memory_config_path="/tmp/config.yaml",
-            tiger_memory_cli="/usr/bin/tiger-memory",
-        )
         with patch("tigerharness.slack_bridge.bridge.subprocess.Popen") as mock_popen:
-            _trigger_tiger_memory_rebuild(cfg, "thread-1")
+            _trigger_tiger_memory_rebuild(
+                self._persona(memory_path="/tmp/config.yaml"),
+                "/usr/bin/tiger-memory",
+                "thread-1",
+            )
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
         assert "/usr/bin/tiger-memory" in cmd
@@ -203,16 +373,12 @@ class TestTriggerTigerMemoryRebuild:
 
     def test_spawn_failure_logged_not_raised(self):
         from tigerharness.slack_bridge.bridge import _trigger_tiger_memory_rebuild
-        cfg = BridgeConfig(
-            slack_app_token="xapp-x",
-            slack_bot_token="xoxb-x",
-            allowed_user_ids=frozenset({"U0X"}),
-            agent_cwd="/tmp",
-            tiger_memory_config_path="/tmp/config.yaml",
-            tiger_memory_cli="/usr/bin/tiger-memory",
-        )
         with patch("tigerharness.slack_bridge.bridge.subprocess.Popen", side_effect=OSError("fail")):
-            _trigger_tiger_memory_rebuild(cfg, "thread-1")  # should not raise
+            _trigger_tiger_memory_rebuild(
+                self._persona(memory_path="/tmp/config.yaml"),
+                "/usr/bin/tiger-memory",
+                "thread-1",
+            )
 
 
 class TestSlackBridge:

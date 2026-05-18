@@ -177,7 +177,11 @@ _SLACK_BRIDGE_FRAGMENT_TEMPLATE = """\
 # Loaded by tigerharness.slack_bridge.multi.load_multi() via the
 # top-level slack-bridge.yaml index.
 
-persona: {persona}
+# Persona used when the user's first DM doesn't address a specific
+# team member. ANY persona in this team's configs/personas.yaml is
+# reachable -- a user can DM "Hi <name>" to talk to that member.
+# This default kicks in only when no name was addressed.
+default_persona: {persona}
 
 # Slack user IDs allowed to DM this team's bot. Required (non-empty list).
 # Find your user ID at api.slack.com/methods/users.list, or the Slack
@@ -191,8 +195,6 @@ state_dir: ~/.local/state/slack-bridge/{team}
 # Optional overrides (defaults shown):
 # env: configs/.env
 # agent_cwd: .
-# agent_prompt: personas/{persona}/prompt.md
-# tiger_memory_config: memories/{persona}/tiger-memory.config.yaml
 """
 
 

@@ -162,27 +162,103 @@ lanes:
 Per-team fragment (`teams/shohoku/configs/slack-bridge.yaml`):
 
 ```yaml
-persona: ayako
+default_persona: ayako          # required; legacy `persona:` accepted as alias
 allowed_user_ids:
-  - U0123ABC               # required: at least one Slack user ID
+  - U0123ABC                    # required: at least one Slack user ID
 state_dir: ~/.local/state/slack-bridge/shohoku   # required, must be unique across lanes
 
 # Optional overrides (defaults shown):
 # env: configs/.env
 # agent_cwd: .
-# agent_prompt: personas/ayako/prompt.md
-# tiger_memory_config: memories/ayako/tiger-memory.config.yaml
 ```
+
+The routable persona roster is **auto-discovered** from the team's
+`configs/personas.yaml`. Adding a persona via `tigerharness init`
+automatically makes them reachable in the team's Slack bridge — no
+second edit needed.
 
 The loader (`tigerharness.slack_bridge.multi.load_multi`) enforces:
 
-- Required fields present, `allowed_user_ids` non-empty + each starts with `U`/`W`.
+- Required fields present, `default_persona` exists in the team's roster, `allowed_user_ids` non-empty + each starts with `U`/`W`.
 - Token prefixes (`xapp-` / `xoxb-`).
+- Every persona in the roster has a `personas/<name>/prompt.md` file.
 - No two lanes share a `state_dir` (would corrupt each other's `threads.json`).
 - No two lanes share a `SLACK_APP_TOKEN` (Slack rejects the duplicate Socket Mode connection).
 - No duplicate lane names in the index.
 
 Validation runs at startup; the bridge refuses to launch on any failure.
+
+### Multi-persona routing within a team
+
+A team's Slack app routes inbound DMs to one of the team's personas
+based on **who the first message addresses**. The choice is **sticky
+per thread** — every subsequent message in that thread goes to the
+same persona.
+
+Example:
+
+| First DM in a new thread | Routed to |
+|---|---|
+| `Hi Ayako, can you help me?` | Ayako |
+| `Sakuragi — practice plan for tomorrow?` | Sakuragi |
+| `What's the meeting agenda?` (no name) | `default_persona` |
+
+#### How routing works
+
+1. New thread arrives → bridge does a **one-shot LLM call** to the
+   same backend the personas use (no separate vendor dependency).
+   Prompt: "Given this roster and this message, which team member is
+   addressed? Return one name or `default`."
+2. If the response matches a roster name → that persona is bound to
+   the thread. The mapping is persisted to `threads.json`.
+3. If the response is `default`, unparseable, or off-roster → falls
+   back to `default_persona`. The bridge stays up; **misroutes are
+   handled conversationally** by the persona (see preamble below).
+4. Network failure during routing → also falls back to `default_persona`.
+
+#### Reply prefix
+
+In multi-persona teams, every reply is prefixed with `[<persona>]:`
+so the user can see who answered without scrolling up:
+
+```
+[Ayako]: Hi! Yes, I can help you set up the playbook for tomorrow's match.
+```
+
+Single-persona teams (legacy single-tenant bridge, or a team with only
+one entry in `personas.yaml`) skip the prefix — output stays identical
+to before.
+
+#### Misroute recovery: the team-awareness preamble
+
+Every persona's prompt has a **routing-awareness preamble** appended
+at startup that teaches them about teammates and how to handle
+misroutes politely:
+
+> *You are Ayako, a member of team shohoku.
+> Other team members reachable via separate Slack threads: Sakuragi, Mitsui.*
+>
+> *If a user's message in this thread is clearly addressed to a different
+> team member (e.g. "Hi Sakuragi" when you are Ayako), politely identify
+> yourself, suggest the user start a new DM thread to reach the intended
+> team member, and optionally help with anything within your own scope.
+> Don't attempt to act as another team member.*
+
+So if a user types "Hi Sakuragi" but the router somehow picked Ayako
+(or detection failed and fell back to default), Ayako responds with
+something like "I'm Ayako — for Sakuragi, please start a new thread."
+
+Single-persona teams skip the preamble (there's nobody to redirect to).
+
+#### Restart required for new personas
+
+Adding a new persona via `tigerharness init --persona <name> --team <existing>`
+updates the team's `personas.yaml` but the running multi-bridge has
+already cached the roster. **Restart the bridge** (`systemctl --user
+restart slack-bridge-multi`) for the new persona to become routable.
+
+This mirrors the deferred hot-reload decision: lane add/remove also
+requires a restart.
 
 ### Running the multi-team bridge
 

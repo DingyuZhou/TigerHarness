@@ -34,23 +34,40 @@ def _write_fragment(team_dir: Path, body: str) -> None:
     (configs / "slack-bridge.yaml").write_text(body)
 
 
-def _write_personas_layout(team_dir: Path, persona: str) -> None:
-    (team_dir / "personas" / persona).mkdir(parents=True, exist_ok=True)
-    (team_dir / "personas" / persona / "prompt.md").write_text(
-        f"You are {persona}."
-    )
-    (team_dir / "memories" / persona).mkdir(parents=True, exist_ok=True)
-    (team_dir / "memories" / persona / "tiger-memory.config.yaml").write_text(
-        "agent: {name: test}\n"
-    )
+def _write_personas_layout(team_dir: Path, *personas: str) -> None:
+    """Write `personas/<name>/prompt.md` and `memories/<name>/...` for each
+    persona, plus a minimal `configs/personas.yaml` listing them all
+    (the multi loader reads this to derive the routable roster)."""
+    if not personas:
+        raise ValueError("at least one persona required")
+    for persona in personas:
+        (team_dir / "personas" / persona).mkdir(parents=True, exist_ok=True)
+        (team_dir / "personas" / persona / "prompt.md").write_text(
+            f"You are {persona}."
+        )
+        (team_dir / "memories" / persona).mkdir(parents=True, exist_ok=True)
+        (team_dir / "memories" / persona / "tiger-memory.config.yaml").write_text(
+            "agent: {name: test}\n"
+        )
+    # personas.yaml: the routable roster the multi loader reads.
+    configs = team_dir / "configs"
+    configs.mkdir(parents=True, exist_ok=True)
+    body = "personas:\n" + "".join(f"  - name: {p}\n" for p in personas)
+    (configs / "personas.yaml").write_text(body)
 
 
 def _make_valid_team(
     root: Path, name: str, persona: str = "ayako",
     state_subdir: str | None = None,
     app: str | None = None, bot: str | None = None,
+    extra_personas: tuple[str, ...] = (),
 ) -> Path:
-    """Lay down a complete, valid team directory under *root*."""
+    """Lay down a complete, valid team directory under *root*.
+
+    *persona* is the default_persona for the lane and is included in
+    the team's personas.yaml roster. *extra_personas* extends the
+    roster for multi-persona tests.
+    """
     team_dir = root / name
     team_dir.mkdir(parents=True, exist_ok=True)
     _write_env(
@@ -58,10 +75,10 @@ def _make_valid_team(
         app=app or f"xapp-{name}-1",
         bot=bot or f"xoxb-{name}-1",
     )
-    _write_personas_layout(team_dir, persona)
+    _write_personas_layout(team_dir, persona, *extra_personas)
     state = state_subdir or f"state/{name}"
     _write_fragment(team_dir, f"""\
-persona: {persona}
+default_persona: {persona}
 allowed_user_ids:
   - U0CEO
 state_dir: {root / state}
@@ -89,18 +106,24 @@ class TestLoadMultiHappyPath:
         assert len(cfg.lanes) == 1
         lane = cfg.lanes[0]
         assert lane.name == "shohoku"
-        assert lane.bridge_cfg.slack_app_token == "xapp-shohoku-1"
-        assert lane.bridge_cfg.slack_bot_token == "xoxb-shohoku-1"
-        assert lane.bridge_cfg.allowed_user_ids == frozenset({"U0CEO"})
+        assert lane.team_ctx.slack_app_token == "xapp-shohoku-1"
+        assert lane.team_ctx.slack_bot_token == "xoxb-shohoku-1"
+        assert lane.team_ctx.allowed_user_ids == frozenset({"U0CEO"})
         # Default paths derived from team-folder convention.
-        assert lane.bridge_cfg.agent_cwd == str(tmp_path / "shohoku")
-        assert lane.bridge_cfg.agent_prompt_path == str(
-            tmp_path / "shohoku" / "personas" / "ayako" / "prompt.md"
-        )
-        assert lane.bridge_cfg.tiger_memory_config_path == str(
+        assert lane.team_ctx.agent_cwd == str(tmp_path / "shohoku")
+        # The roster picked up from personas.yaml is {ayako}; default is ayako.
+        assert set(lane.team_ctx.personas.keys()) == {"ayako"}
+        assert lane.team_ctx.default_persona == "ayako"
+        ayako_slot = lane.team_ctx.personas["ayako"]
+        # Memory config exists -- _write_personas_layout creates it.
+        assert ayako_slot.tiger_memory_config_path == str(
             tmp_path / "shohoku" / "memories" / "ayako"
             / "tiger-memory.config.yaml"
         )
+        # Persona's prompt body should include the team-awareness preamble
+        # only if there are other personas; with just one, the preamble is
+        # omitted -- so the agent_config carries the bare prompt text.
+        assert "You are ayako" in ayako_slot.agent_config.instructions
         assert lane.state_path == (tmp_path / "state" / "shohoku" / "threads.json").resolve()
 
     def test_two_lanes_distinct_tokens_and_state(self, tmp_path: Path):
@@ -111,11 +134,61 @@ class TestLoadMultiHappyPath:
         cfg = load_multi(idx)
         assert [l.name for l in cfg.lanes] == ["shohoku", "tigers"]
         # Distinct app_tokens carried through correctly.
-        assert {l.bridge_cfg.slack_app_token for l in cfg.lanes} == {"xapp-1", "xapp-2"}
+        assert {l.team_ctx.slack_app_token for l in cfg.lanes} == {"xapp-1", "xapp-2"}
+
+    def test_multi_persona_roster(self, tmp_path: Path):
+        """Roster auto-discovered from team's personas.yaml. Adding a
+        2nd persona makes them auto-routable in the same lane."""
+        _make_valid_team(
+            tmp_path, "shohoku", persona="ayako",
+            extra_personas=("sakuragi",),
+        )
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        lane = cfg.lanes[0]
+        assert set(lane.team_ctx.personas.keys()) == {"ayako", "sakuragi"}
+        assert lane.team_ctx.default_persona == "ayako"
+        assert lane.team_ctx.is_multi_persona
+        # The team-awareness preamble is appended only in multi-persona
+        # mode so each persona knows how to handle misroutes.
+        for slot in lane.team_ctx.personas.values():
+            assert "Other team members reachable" in slot.agent_config.instructions
+
+    def test_default_persona_must_be_in_roster(self, tmp_path: Path):
+        """If `default_persona` names someone not in personas.yaml, fail."""
+        team_dir = tmp_path / "shohoku"
+        team_dir.mkdir()
+        _write_env(team_dir)
+        _write_personas_layout(team_dir, "ayako")
+        _write_fragment(team_dir, f"""\
+default_persona: ghost
+allowed_user_ids: [U0CEO]
+state_dir: {tmp_path}/state/sh
+""")
+        idx = _write_index(tmp_path, ["shohoku"])
+        with pytest.raises(ValueError, match="default_persona 'ghost' is not in"):
+            load_multi(idx)
+
+    def test_legacy_persona_field_is_accepted_as_alias(self, tmp_path: Path):
+        """PR2-era fragments used `persona:`; the new schema is
+        `default_persona:`. Old fragments must keep working."""
+        team_dir = tmp_path / "shohoku"
+        team_dir.mkdir()
+        _write_env(team_dir)
+        _write_personas_layout(team_dir, "ayako")
+        _write_fragment(team_dir, f"""\
+persona: ayako
+allowed_user_ids: [U0CEO]
+state_dir: {tmp_path}/state/sh
+""")
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        assert cfg.lanes[0].team_ctx.default_persona == "ayako"
 
     def test_optional_overrides_applied(self, tmp_path: Path):
-        """env / agent_cwd / agent_prompt / tiger_memory_config can all
-        be overridden in the fragment."""
+        """env / agent_cwd can be overridden in the fragment. (The
+        per-persona prompt + memory paths come from the team's
+        roster -- no longer overridable in the fragment.)"""
         team_dir = tmp_path / "shohoku"
         team_dir.mkdir()
         # Non-default .env location
@@ -123,27 +196,25 @@ class TestLoadMultiHappyPath:
         custom_env.write_text(
             "SLACK_APP_TOKEN=xapp-x\nSLACK_BOT_TOKEN=xoxb-x\n"
         )
-        # Non-default prompt + memory paths
-        (team_dir / "custom_prompt.md").write_text("custom persona")
-        (team_dir / "custom_mem.yaml").write_text("agent: {name: x}\n")
+        _write_personas_layout(team_dir, "ayako")
         _write_fragment(team_dir, f"""\
-persona: ayako
+default_persona: ayako
 allowed_user_ids:
   - U0CEO
 state_dir: {tmp_path}/state/sh
 env: secrets.env
 agent_cwd: .
-agent_prompt: custom_prompt.md
-tiger_memory_config: custom_mem.yaml
 """)
         idx = _write_index(tmp_path, ["shohoku"])
         cfg = load_multi(idx)
         lane = cfg.lanes[0]
-        assert lane.bridge_cfg.agent_prompt_path == str(team_dir / "custom_prompt.md")
-        assert lane.bridge_cfg.tiger_memory_config_path == str(team_dir / "custom_mem.yaml")
+        # Custom .env was read (otherwise tokens validation would fail).
+        assert lane.team_ctx.slack_app_token == "xapp-x"
+        # agent_cwd resolved relative to team dir (.) -> team_dir
+        assert lane.team_ctx.agent_cwd == str(team_dir)
 
     def test_tiger_memory_cli_propagated_from_env(self, tmp_path: Path):
-        """If the lane's .env sets TIGER_MEMORY_CLI, the lane's BridgeConfig
+        """If the lane's .env sets TIGER_MEMORY_CLI, the team context
         carries it through (so per-lane rebuild triggers use the right
         binary)."""
         team_dir = tmp_path / "shohoku"
@@ -156,13 +227,13 @@ tiger_memory_config: custom_mem.yaml
         )
         _write_personas_layout(team_dir, "ayako")
         _write_fragment(team_dir, f"""\
-persona: ayako
+default_persona: ayako
 allowed_user_ids: [U0CEO]
 state_dir: {tmp_path}/state/sh
 """)
         idx = _write_index(tmp_path, ["shohoku"])
         cfg = load_multi(idx)
-        assert cfg.lanes[0].bridge_cfg.tiger_memory_cli == "/opt/tm/bin/tiger-memory"
+        assert cfg.lanes[0].team_ctx.tiger_memory_cli == "/opt/tm/bin/tiger-memory"
 
 
 # ---------------------------------------------------------------------------
@@ -236,30 +307,35 @@ class TestLoadMultiFragmentValidation:
         with pytest.raises(ValueError, match="fragment not found"):
             load_multi(idx)
 
-    def test_fragment_missing_persona(self, tmp_path: Path):
+    def test_fragment_missing_default_persona(self, tmp_path: Path):
         team_dir = _make_valid_team(tmp_path, "shohoku")
         _write_fragment(team_dir, "allowed_user_ids: [U0CEO]\nstate_dir: /tmp/s\n")
         idx = _write_index(tmp_path, ["shohoku"])
-        with pytest.raises(ValueError, match="missing required field 'persona'"):
+        with pytest.raises(
+            ValueError,
+            match="missing required field 'default_persona'",
+        ):
             load_multi(idx)
 
-    def test_fragment_empty_persona(self, tmp_path: Path):
+    def test_fragment_empty_default_persona(self, tmp_path: Path):
         team_dir = _make_valid_team(tmp_path, "shohoku")
-        _write_fragment(team_dir, "persona: ''\nallowed_user_ids: [U0CEO]\nstate_dir: /tmp/s\n")
+        _write_fragment(team_dir, "default_persona: ''\nallowed_user_ids: [U0CEO]\nstate_dir: /tmp/s\n")
         idx = _write_index(tmp_path, ["shohoku"])
-        with pytest.raises(ValueError, match="'persona' cannot be empty"):
+        # Empty -> validation reports as missing (since the alias logic
+        # treats "" as falsy).
+        with pytest.raises(ValueError, match="missing required field 'default_persona'"):
             load_multi(idx)
 
     def test_fragment_missing_state_dir(self, tmp_path: Path):
         team_dir = _make_valid_team(tmp_path, "shohoku")
-        _write_fragment(team_dir, "persona: ayako\nallowed_user_ids: [U0CEO]\n")
+        _write_fragment(team_dir, "default_persona: ayako\nallowed_user_ids: [U0CEO]\n")
         idx = _write_index(tmp_path, ["shohoku"])
         with pytest.raises(ValueError, match="missing required field 'state_dir'"):
             load_multi(idx)
 
     def test_fragment_empty_state_dir(self, tmp_path: Path):
         team_dir = _make_valid_team(tmp_path, "shohoku")
-        _write_fragment(team_dir, "persona: ayako\nallowed_user_ids: [U0CEO]\nstate_dir: ''\n")
+        _write_fragment(team_dir, "default_persona: ayako\nallowed_user_ids: [U0CEO]\nstate_dir: ''\n")
         idx = _write_index(tmp_path, ["shohoku"])
         with pytest.raises(ValueError, match="'state_dir' cannot be empty"):
             load_multi(idx)
@@ -272,12 +348,12 @@ class TestLoadMultiFragmentValidation:
 class TestLoadMultiAllowedUserIds:
     def _setup(self, tmp_path: Path, body: str) -> Path:
         team_dir = _make_valid_team(tmp_path, "shohoku")
-        _write_fragment(team_dir, f"persona: ayako\nstate_dir: /tmp/s\n{body}")
+        _write_fragment(team_dir, f"default_persona: ayako\nstate_dir: /tmp/s\n{body}")
         return _write_index(tmp_path, ["shohoku"])
 
     def test_missing(self, tmp_path: Path):
         team_dir = _make_valid_team(tmp_path, "shohoku")
-        _write_fragment(team_dir, "persona: ayako\nstate_dir: /tmp/s\n")
+        _write_fragment(team_dir, "default_persona: ayako\nstate_dir: /tmp/s\n")
         idx = _write_index(tmp_path, ["shohoku"])
         with pytest.raises(ValueError, match="missing required field 'allowed_user_ids'"):
             load_multi(idx)
@@ -416,21 +492,29 @@ class TestHelpers:
             _load_yaml(p)
 
     def test_check_lane_uniqueness_accepts_distinct(self, tmp_path: Path):
-        from tigerharness.slack_bridge.config import BridgeConfig
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, TeamBridgeContext,
+        )
+        from tigerharness.agent_sdk import AgentConfig
+        def _ctx(app: str, bot: str, cwd: str) -> TeamBridgeContext:
+            slot = PersonaSlot(
+                name="x",
+                agent_config=AgentConfig(name="x", instructions="x"),
+            )
+            return TeamBridgeContext(
+                team_name="t",
+                slack_app_token=app, slack_bot_token=bot,
+                allowed_user_ids=frozenset({"U0"}), agent_cwd=cwd,
+                personas={"x": slot}, default_persona="x",
+            )
         l1 = LaneConfig(
             name="a",
-            bridge_cfg=BridgeConfig(
-                slack_app_token="xapp-1", slack_bot_token="xoxb-1",
-                allowed_user_ids=frozenset({"U0"}), agent_cwd="/a",
-            ),
+            team_ctx=_ctx("xapp-1", "xoxb-1", "/a"),
             state_path=tmp_path / "a.json",
         )
         l2 = LaneConfig(
             name="b",
-            bridge_cfg=BridgeConfig(
-                slack_app_token="xapp-2", slack_bot_token="xoxb-2",
-                allowed_user_ids=frozenset({"U0"}), agent_cwd="/b",
-            ),
+            team_ctx=_ctx("xapp-2", "xoxb-2", "/b"),
             state_path=tmp_path / "b.json",
         )
         _check_lane_uniqueness((l1, l2))  # no raise
