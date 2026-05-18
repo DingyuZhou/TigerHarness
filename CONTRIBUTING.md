@@ -149,5 +149,73 @@ tiger-memory --help
 
 ```bash
 uv build
-# Creates dist/tigerharness-0.1.0-py3-none-any.whl
+# Creates dist/tigerharness-<version>-py3-none-any.whl
 ```
+
+## Releasing
+
+Releases are published to PyPI by [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which fires whenever a `v*` tag is pushed. It uses **PyPI Trusted
+Publishing** (OIDC) — no API token in any secret, no manual
+`twine upload`.
+
+### One-time setup (per project)
+
+Trusted Publishing only works after the publisher is registered on the
+PyPI side. This is a one-time manual step.
+
+1. Visit https://pypi.org/manage/project/tigerharness/settings/publishing/
+   (must be logged in as a PyPI maintainer of the project).
+2. Under **"Add a new publisher"** → **GitHub**, fill in *exactly*:
+   - **PyPI Project Name:** `tigerharness`
+   - **Owner:** `DingyuZhou`  *(GitHub URL slug — no spaces, exact case)*
+   - **Repository name:** `TigerHarness`
+   - **Workflow name:** `release.yml`
+   - **Environment name:** *(leave blank)*
+3. Click **Add**.
+
+If you forget this step, the workflow's "Publish to PyPI" step fails
+with a 4xx from PyPI. The build step before it still succeeds, so the
+wheel is built correctly — re-run the workflow after registering.
+
+### Per-release recipe
+
+```bash
+# 1. Bump the version in pyproject.toml (and any other versioned files).
+$EDITOR pyproject.toml          # e.g. 0.1.4 -> 0.1.5
+
+# 2. Commit the bump on a branch, open + merge a PR, then on main:
+git checkout main && git pull --ff-only
+
+# 3. Tag the merge commit. The tag name must match `v*`.
+git tag -a v0.1.5 -m "v0.1.5 -- short summary"
+git push origin v0.1.5
+
+# 4. Watch the workflow:
+# https://github.com/DingyuZhou/TigerHarness/actions/workflows/release.yml
+
+# 5. Once green, confirm on PyPI:
+curl -fsS https://pypi.org/pypi/tigerharness/0.1.5/json >/dev/null && echo OK
+```
+
+The workflow takes ~1-2 minutes. After it lands, downstream consumers
+can bump with `uv lock --upgrade-package tigerharness` (or
+`uv add -U tigerharness` if they want the version constraint widened).
+
+### Versioning policy
+
+We follow SemVer compatible-release semantics (`~=0.1.2` allows
+`>=0.1.2, <0.2.0`):
+
+- **Patch** (`0.1.x`) — bug fixes, doc improvements, additive options.
+- **Minor** (`0.x.0`) — new sub-packages, new CLI verbs, backwards-
+  compatible feature work that downstream pins (`~=0.x.0`) won't catch.
+- **Major** (`x.0.0`) — breaking changes to the CLI surface, generated
+  layouts, or persona/memory config schemas.
+
+### Re-running a failed release
+
+The workflow triggers on tag push, so the cleanest re-trigger is via
+the GitHub UI: open the failed run and click **"Re-run failed jobs"**.
+Avoid deleting + re-pushing the tag — anyone who fetched the original
+will see history churn.

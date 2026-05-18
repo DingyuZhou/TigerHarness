@@ -18,31 +18,65 @@ integration, and persistent memory management.
 
 ## Installation
 
+Pick the strategy that matches how you want to use tigerharness:
+
+### Option A — Scope it to one folder (recommended for teams)
+
+Best when you want a self-contained `teams/` directory that owns its
+own `tigerharness` install — nothing global, nothing borrowed:
+
 ```bash
-# Core (claude -p backend only; Claude Code CLI must be on PATH)
-pip install tigerharness
-
-# With the official claude-agent-sdk backend
-pip install tigerharness[anthropic]
-
-# With Slack bridge support
-pip install tigerharness[slack]
-
-# With memory support
-pip install tigerharness[memory]
-
-# With memory + RAG (local embeddings, free)
-pip install tigerharness[memory-rag]
-
-# Everything
-pip install tigerharness[all]
+mkdir -p ~/projects/teams && cd ~/projects/teams
+uv init --bare                       # creates a minimal pyproject.toml
+uv add 'tigerharness[all]'           # adds dep, creates .venv + uv.lock
+uv run tigerharness init             # interactive team scaffolder
 ```
 
-Or with uv:
+`tigerharness` only exists inside this folder's `.venv`; from then on
+you invoke it with `uv run tigerharness ...`.
+
+### Option B — Install as a global CLI
+
+Best when you want `tigerharness` available everywhere, like `git` or `gh`:
+
 ```bash
-uv add tigerharness
-uv add tigerharness --extra all
+uv tool install 'tigerharness[all]'  # one-time; puts `tigerharness` on PATH
+tigerharness init                    # works from any directory
 ```
+
+Equivalent with pipx: `pipx install 'tigerharness[all]'`.
+
+### Option C — Traditional pip into an active venv
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install 'tigerharness[all]'
+tigerharness init
+```
+
+### Choosing extras
+
+`tigerharness` has **zero hard dependencies** by design. Optional features
+are gated behind extras so you don't pay disk/install cost for things
+you don't use:
+
+| Extra | Pulls in | Enables / required for |
+|---|---|---|
+| *(none)* | — | `init` scaffolder, `task-runner` with the default `claude -p` subprocess backend |
+| `[anthropic]` | `claude-agent-sdk` | The official Claude Agent SDK backend (`anthropic_sdk`) |
+| `[slack]` | `slack-bolt`, `aiohttp`, `python-dotenv` | `slack-bridge` (Slack Socket Mode DM bridge) |
+| `[memory]` | `pyyaml` | `tiger-memory` (per-persona persistent memory; substring search only) |
+| `[memory-rag]` | `pyyaml`, `fastembed`, `sqlite-vec` | `tiger-memory` with semantic search via local embeddings (free, ~50 MB model download on first use) |
+| `[memory-rag-openai]` | `pyyaml`, `openai`, `sqlite-vec` | `tiger-memory` with semantic search via OpenAI embeddings (API key needed, no model download) |
+| `[all]` | union of everything above | Everything works out of the box |
+
+Pick the union that matches what you'll use, e.g.
+`'tigerharness[slack,memory,anthropic]'` for a Slack-fronted agent with
+persistent memory and the official SDK backend.
+
+> **Heads up:** the install commands quote the extras
+> (`'tigerharness[all]'`) because zsh treats `[` as a glob character.
+> In bash you can drop the quotes, but quoting always works.
 
 ## Quick start
 
