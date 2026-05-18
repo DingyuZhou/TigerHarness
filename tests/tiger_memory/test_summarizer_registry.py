@@ -124,3 +124,28 @@ class TestGetSummarizerErrors:
         )
         with pytest.raises(SummarizerError, match="\\(none\\)"):
             get_summarizer("anything", _sample_cfg())
+
+    def test_factory_returning_wrong_type_is_caught_early(self):
+        """If someone registers a factory that returns a non-Summarizer
+        (typo, refactor missed a return type change, etc.), the failure
+        must surface immediately at lookup time -- not as a confusing
+        AttributeError deep inside a later summarize() call."""
+
+        class _NotASummarizer:
+            """No inheritance from Summarizer; no .summarize method."""
+            name = "fake"
+            version = "v0"
+
+        def factory(cfg: SummarizerConfig):  # type: ignore[no-untyped-def]
+            return _NotASummarizer()
+
+        register_summarizer("bogus", factory)
+        try:
+            with pytest.raises(SummarizerError) as excinfo:
+                get_summarizer("bogus", _sample_cfg(backend="bogus"))
+            msg = str(excinfo.value)
+            assert "_NotASummarizer" in msg
+            assert "Summarizer subclass" in msg
+        finally:
+            from tigerharness.tiger_memory.summarizers import _REGISTRY
+            _REGISTRY.pop("bogus", None)

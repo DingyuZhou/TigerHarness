@@ -263,6 +263,13 @@ class SlackBridge:
         self._in_flight += 1
         self._drained.clear()
         try:
+            # Two voices come out of this block:
+            #   - persona_body: words from the persona (prefixed in multi mode)
+            #   - bridge_body:  bridge-generated message (errors, empty reply --
+            #                   never prefixed; "[Ayako]: backend error" would
+            #                   wrongly imply Ayako is reporting the error)
+            persona_body: str | None = None
+            bridge_body: str | None = None
             async with state.lock:
                 resume_id = state.session.id or "<new>"
                 log.info(
@@ -278,7 +285,10 @@ class SlackBridge:
                         max_attempts=3,
                         label=f"thread={thread_key} persona={state.persona}",
                     )
-                    reply = result.final_output or "_(empty reply)_"
+                    if result.final_output:
+                        persona_body = result.final_output
+                    else:
+                        bridge_body = "_(empty reply)_"
                     if state.session.id:
                         self._store.set(
                             thread_key,
@@ -291,12 +301,14 @@ class SlackBridge:
                     )
                 except Exception as exc:
                     log.exception("backend failure for thread %s", thread_key)
-                    reply = f":warning: backend error: `{exc}`"
+                    bridge_body = f":warning: backend error: `{exc}`"
 
-            await say(
-                text=_format_reply(reply, state.persona, self._team),
-                thread_ts=thread_key,
-            )
+            if persona_body is not None:
+                reply_text = _format_reply(persona_body, state.persona, self._team)
+            else:
+                # Bridge voice -- no persona prefix.
+                reply_text = bridge_body or ""
+            await say(text=reply_text, thread_ts=thread_key)
         finally:
             self._in_flight -= 1
             if self._in_flight == 0:
@@ -528,7 +540,11 @@ def _team_awareness_preamble(
         f"team member (e.g. \"Hi {others[0]}\" when you are {persona_name}), "
         f"politely identify yourself, suggest the user start a new DM thread to "
         f"reach the intended team member, and optionally help with anything within "
-        f"your own scope. Don't attempt to act as another team member."
+        f"your own scope. Don't attempt to act as another team member.\n"
+        f"\n"
+        f"You don't need to prefix your replies with your own name -- the Slack "
+        f"bridge automatically labels every reply with `[{persona_name}]:` so the "
+        f"user knows who answered."
     )
 
 

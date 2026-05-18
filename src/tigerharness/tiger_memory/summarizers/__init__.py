@@ -71,6 +71,10 @@ def get_summarizer(
 
     Raises ``SummarizerError`` with the list of registered backends if
     *name* isn't found -- callers see exactly which names are available.
+    Also raises ``SummarizerError`` if the factory returns something
+    that isn't a ``Summarizer`` (caught early -- otherwise the failure
+    surfaces as a confusing ``AttributeError`` inside ``.summarize()``
+    later).
     """
     factory = _REGISTRY.get(name)
     if factory is None:
@@ -81,7 +85,15 @@ def get_summarizer(
             f"Register a new one with `register_summarizer()` -- see "
             f"`tigerharness.tiger_memory.summarizers` module docstring."
         )
-    return factory(cfg)
+    instance = factory(cfg)
+    if not isinstance(instance, Summarizer):
+        raise SummarizerError(
+            f"summarizer factory for {name!r} returned "
+            f"{type(instance).__name__}, not a Summarizer subclass. "
+            f"Check your factory function -- it must construct a class "
+            f"that inherits from `tigerharness.tiger_memory.summarizers.Summarizer`."
+        )
+    return instance
 
 
 def registered_summarizers() -> list[str]:

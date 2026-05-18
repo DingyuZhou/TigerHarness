@@ -215,6 +215,19 @@ class TestTeamAwarenessPreamble:
         )
         assert "your team" in result
 
+    def test_preamble_tells_persona_not_to_self_identify(self):
+        """The bridge already prefixes every reply with [<persona>]:.
+        The preamble must tell the persona not to also identify in their
+        text, so users don't see `[Ayako]: I'm Ayako, here's my answer...`"""
+        from tigerharness.slack_bridge.bridge import _team_awareness_preamble
+        result = _team_awareness_preamble(
+            "ayako", "shohoku", ["ayako", "sakuragi"]
+        )
+        assert "automatically labels" in result or "labels every reply" in result
+        # The exact prefix format is mentioned so the persona understands
+        # why it doesn't need to self-identify.
+        assert "[ayako]" in result.lower()
+
 
 class TestBuildPersonaAgentConfig:
     def test_appends_preamble_for_multi_persona(self):
@@ -492,3 +505,136 @@ class TestSlackBridge:
             await b.handle_mention(event, say)
 
         say.assert_awaited_once()
+
+
+class TestReplyPrefixOnBridgeVoice:
+    """Bridge-generated messages (errors, empty replies) MUST NOT carry
+    the `[<persona>]:` prefix -- that would imply the persona is
+    reporting the error, when it's really the bridge itself."""
+
+    def _multi_bridge(self, tmp_path: Path):
+        """Build a multi-persona SlackBridge wired up with a mock
+        downloader + an empty backend. Caller supplies a custom
+        ``run_with_retry`` via ``patch`` for each scenario."""
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, SlackBridge, TeamBridgeContext,
+        )
+
+        @dataclass
+        class _Sess:
+            id: str = "sess-test"
+            async def close(self):
+                return None
+
+        backend = AsyncMock()
+        backend.open_session = AsyncMock(return_value=_Sess())
+
+        personas = {
+            n: PersonaSlot(name=n, agent_config=AgentConfig(name=n, instructions=n))
+            for n in ("Ayako", "Sakuragi")
+        }
+        team_ctx = TeamBridgeContext(
+            team_name="shohoku",
+            slack_app_token="xapp-x", slack_bot_token="xoxb-x",
+            allowed_user_ids=frozenset({"U0CEO"}),
+            agent_cwd=str(tmp_path),
+            personas=personas,
+            default_persona="Ayako",
+        )
+        store = ThreadStore(tmp_path / "threads.json")
+        downloader = MagicMock()
+        downloader.download = AsyncMock(return_value=None)
+        b = SlackBridge(
+            team_ctx=team_ctx, backend=backend, store=store, downloader=downloader,
+        )
+        return b
+
+    @pytest.mark.asyncio
+    async def test_persona_reply_has_prefix(self, tmp_path: Path):
+        """Sanity baseline: when the persona returns text, the prefix
+        DOES appear."""
+        from unittest.mock import patch as _patch
+
+        class _Res:
+            def __init__(self):
+                self.final_output = "Hello!"
+                self.cost_usd = 0.001
+
+        async def fake_run(*args, **kwargs):
+            return _Res()
+
+        b = self._multi_bridge(tmp_path)
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona",
+            new=AsyncMock(return_value="Ayako"),
+        ), _patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
+        ):
+            say = AsyncMock()
+            event = {
+                "channel_type": "im", "user": "U0CEO",
+                "text": "Hi", "ts": "1.1",
+            }
+            await b.handle_message(event, say)
+        say.assert_awaited_once()
+        assert say.call_args[1]["text"] == "[Ayako]: Hello!"
+
+    @pytest.mark.asyncio
+    async def test_empty_output_has_no_prefix(self, tmp_path: Path):
+        """Bridge voice: ``_(empty reply)_`` posted as bare text."""
+        from unittest.mock import patch as _patch
+
+        class _Res:
+            def __init__(self):
+                self.final_output = None
+                self.cost_usd = 0.0
+
+        async def fake_run(*args, **kwargs):
+            return _Res()
+
+        b = self._multi_bridge(tmp_path)
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona",
+            new=AsyncMock(return_value="Ayako"),
+        ), _patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
+        ):
+            say = AsyncMock()
+            event = {
+                "channel_type": "im", "user": "U0CEO",
+                "text": "Hi", "ts": "1.1",
+            }
+            await b.handle_message(event, say)
+        say.assert_awaited_once()
+        text = say.call_args[1]["text"]
+        # Persona prefix must NOT appear -- the bridge is reporting empty.
+        assert "[Ayako]" not in text
+        assert "empty reply" in text
+
+    @pytest.mark.asyncio
+    async def test_backend_error_has_no_prefix(self, tmp_path: Path):
+        """Bridge voice: backend errors posted as bare text. Otherwise
+        users would think the persona itself reported the error."""
+        from unittest.mock import patch as _patch
+
+        async def fake_run(*args, **kwargs):
+            raise RuntimeError("kaboom")
+
+        b = self._multi_bridge(tmp_path)
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona",
+            new=AsyncMock(return_value="Ayako"),
+        ), _patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
+        ):
+            say = AsyncMock()
+            event = {
+                "channel_type": "im", "user": "U0CEO",
+                "text": "Hi", "ts": "1.1",
+            }
+            await b.handle_message(event, say)
+        say.assert_awaited_once()
+        text = say.call_args[1]["text"]
+        assert "[Ayako]" not in text
+        assert "kaboom" in text
+        assert "backend error" in text

@@ -185,6 +185,17 @@ session (legacy single-tenant behavior, unchanged). The threads.json
 reader also accepts the pre-routing schema (bare `"session_id"`
 strings) so older state files still work.
 
+**`persona=None` semantics.** Both "not in `threads.json` at all"
+(local `claude -p` session, never went through the bridge) and
+"present but with `persona=None`" (pre-routing entry, from before the
+multi-persona bridge existed) are treated as *unattributed*. Under
+strict mode (default) they're excluded from every persona's memory.
+Flipping `include_unattributed: true` brings them in. There's no way
+to disambiguate "local work" from "stale pre-routing thread" via
+config — if you need that distinction, manually edit `threads.json`
+to migrate old entries to the new schema, or wait for them to age out
+of your memory window.
+
 ## Adding a new summarizer vendor
 
 Tiger-memory's summarizer is vendor-agnostic by design. The
@@ -244,3 +255,19 @@ Tiger-memory looks up `openai` in the registry and calls your factory.
 If the backend name isn't registered, you get a `SummarizerError` with
 a list of every registered backend so it's clear what to install or
 register.
+
+If your factory returns something that isn't a `Summarizer` subclass
+(e.g. a typo in a refactor), the registry catches that at lookup time
+and raises `SummarizerError` with the actual type name — much friendlier
+than the confusing `AttributeError` you'd otherwise get later when
+something calls `.summarize()` on the wrong object.
+
+**Future: entry-point-based registration.** Today downstream packages
+call `register_summarizer()` at import time, which means SOMEONE has
+to import the package before tiger-memory rebuilds. Python's
+`[project.entry-points."tigerharness.summarizers"]` mechanism would
+let plugins register without anyone explicitly importing them — useful
+if you publish a `tigerharness-openai-summarizer` package on PyPI and
+want it to "just work" after `pip install`. The in-process call is
+sufficient for single-org use; entry points are on the roadmap if
+demand picks up.
