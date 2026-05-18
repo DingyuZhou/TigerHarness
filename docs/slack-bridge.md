@@ -54,6 +54,7 @@ Reply posted to thread
 | `TIGERHARNESS_ATTACHMENT_DIR` | `/tmp/slack-attachments` | File staging dir |
 | `TIGER_MEMORY_CONFIG` | (none) | Auto-trigger memory rebuild on new threads |
 | `TIGER_MEMORY_CLI` | (none) | Path to tiger-memory binary |
+| `TIGERHARNESS_BRIDGES_CONFIG` | (none) | Path to a top-level `slack-bridge.yaml` index. When set, the bridge runs in **multi-team mode** ([details below](#multi-team-mode)). Single-team config vars above are ignored. |
 
 ## Running
 
@@ -100,3 +101,127 @@ slack_channel: D012ABCDEF
 ```
 
 Agents use this to route follow-up DMs via `--thread`.
+
+## Multi-team mode
+
+A single bridge process can serve N teams concurrently — one Slack app
+per team (own bot identity, own tokens, own persona, own
+`threads.json`), all multiplexed through one event loop. This is the
+"one bridge process, many bots" deployment shape.
+
+### When to use it
+
+- You have 2–10 teams and don't want N systemd units.
+- Each team needs its own bot identity in Slack (different name + avatar).
+- You're already using `tigerharness init` to scaffold teams.
+
+If you only have one team, single-tenant is simpler — multi-team adds
+a small config layer for no benefit at one team.
+
+### Opt in
+
+Multi-team mode activates when `TIGERHARNESS_BRIDGES_CONFIG` points at
+a top-level **index file**. Until that env var is set, the bridge runs
+in single-tenant mode exactly as before.
+
+To opt in once:
+
+```bash
+# In your teams directory (e.g. ~/projects/teams/)
+touch slack-bridge.yaml
+```
+
+From then on, every `tigerharness init` auto-appends the new team's
+lane to this index and writes a per-team fragment under
+`<team>/configs/slack-bridge.yaml`.
+
+### Config layout
+
+```
+teams/
+├── slack-bridge.yaml             ← top-level INDEX (lane names only)
+├── shohoku/
+│   ├── configs/
+│   │   ├── .env                  ← tokens for Shohoku's Slack app
+│   │   ├── personas.yaml         ← task-runner registry
+│   │   └── slack-bridge.yaml     ← per-team FRAGMENT (this file)
+│   ├── personas/ayako/prompt.md
+│   └── memories/ayako/tiger-memory.config.yaml
+└── tigers/
+    └── ...
+```
+
+Index (`teams/slack-bridge.yaml`):
+
+```yaml
+lanes:
+  - shohoku
+  - tigers
+```
+
+Per-team fragment (`teams/shohoku/configs/slack-bridge.yaml`):
+
+```yaml
+persona: ayako
+allowed_user_ids:
+  - U0123ABC               # required: at least one Slack user ID
+state_dir: ~/.local/state/slack-bridge/shohoku   # required, must be unique across lanes
+
+# Optional overrides (defaults shown):
+# env: configs/.env
+# agent_cwd: .
+# agent_prompt: personas/ayako/prompt.md
+# tiger_memory_config: memories/ayako/tiger-memory.config.yaml
+```
+
+The loader (`tigerharness.slack_bridge.multi.load_multi`) enforces:
+
+- Required fields present, `allowed_user_ids` non-empty + each starts with `U`/`W`.
+- Token prefixes (`xapp-` / `xoxb-`).
+- No two lanes share a `state_dir` (would corrupt each other's `threads.json`).
+- No two lanes share a `SLACK_APP_TOKEN` (Slack rejects the duplicate Socket Mode connection).
+- No duplicate lane names in the index.
+
+Validation runs at startup; the bridge refuses to launch on any failure.
+
+### Running the multi-team bridge
+
+```bash
+export TIGERHARNESS_BRIDGES_CONFIG=~/projects/teams/slack-bridge.yaml
+python -m tigerharness.slack_bridge
+```
+
+Logs gain a `lane=<name>` field so you can grep per team:
+
+```
+2026-05-17 10:00:00 lane=shohoku tigerharness.slack_bridge INFO starting bridge with 2 lane(s)
+2026-05-17 10:00:01 lane=tigers  tigerharness.slack_bridge INFO ...
+```
+
+### Adding a Slack app per team
+
+Each lane needs its own Slack app:
+
+1. https://api.slack.com/apps → **Create New App** → **From manifest**.
+2. Reuse the manifest at [`services/slack-bridge.manifest.yml`](../services/slack-bridge.manifest.yml) if present, or copy the structure: enable Socket Mode, subscribe to `message.im` + `app_mention`, scopes `chat:write`, `files:read`, `im:history`, `im:write`, `app_mentions:read`.
+3. Install to your workspace → grab `xapp-` (App-Level Token) + `xoxb-` (Bot User OAuth Token).
+4. Drop them into `teams/<team>/configs/.env`.
+5. Fill in the `allowed_user_ids` placeholder in `teams/<team>/configs/slack-bridge.yaml`.
+
+### Lifecycle
+
+On SIGTERM (e.g. `systemctl restart`), the multi-bridge:
+
+1. Sends `request_shutdown()` to every lane's bridge.
+2. `asyncio.gather`s each bridge's `wait_for_drain(timeout=90s)` — drains run **concurrently**, so the worst-case total wait is 90s, not 90s × N.
+3. Closes every `AsyncSocketModeHandler`.
+4. Exits.
+
+If a lane's drain times out, the others still get their full window and the process logs a per-lane warning before continuing.
+
+### Systemd unit
+
+See [`examples/slack-bridge-multi.service`](../examples/slack-bridge-multi.service) for a template. Key differences from the single-team unit:
+
+- `EnvironmentFile=` points at a small `.env` containing only `TIGERHARNESS_BRIDGES_CONFIG=...` (per-lane tokens live in each team's `.env`, referenced by the YAML).
+- `TimeoutStopSec=120` still applies; the 90 s drain budget is shared across lanes (concurrent), not per-lane.

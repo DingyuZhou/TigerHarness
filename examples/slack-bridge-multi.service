@@ -1,0 +1,61 @@
+# systemd user unit for the multi-team slack-bridge.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp slack-bridge-multi.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now slack-bridge-multi.service
+#
+# Inspect logs:
+#   journalctl --user -u slack-bridge-multi.service -f
+#
+# This is a *template* -- adjust the three placeholders marked TODO
+# below to match your setup.
+
+[Unit]
+Description=Tigerharness multi-team Slack bridge (Socket Mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# TODO: point at the directory that owns the slack-bridge.yaml index.
+# Tigerharness resolves the per-team .env paths relative to the index,
+# so the WorkingDirectory matters.
+WorkingDirectory=%h/projects/teams
+
+# TODO: path to a venv (or `uv tool install tigerharness[all]`'s tool
+# venv) that has tigerharness[slack,memory] installed.
+ExecStartPre=/run/current-system/sw/bin/test -x %h/projects/teams/.venv/bin/python
+ExecStart=%h/projects/teams/.venv/bin/python -m tigerharness.slack_bridge
+
+Restart=on-failure
+RestartSec=5
+
+# Give the bridge time to drain in-flight dispatches across ALL lanes
+# on stop/restart. Must exceed the per-lane drain budget (90s in
+# __main__._DRAIN_TIMEOUT_S). Lanes drain concurrently, so the
+# worst-case wall-clock wait is one drain budget, not N.
+TimeoutStopSec=120
+
+# Only SIGTERM the main process, not the whole cgroup. Otherwise each
+# `claude -p` child also gets SIGTERM mid-stream and the dispatch
+# returns with final_output=None -- Slack sees "(empty reply)". With
+# `mixed`, children keep running until the bridge's graceful drain
+# completes; SIGKILL at TimeoutStopSec still hits the whole cgroup.
+KillMode=mixed
+
+# TODO: this .env should contain ONLY:
+#   TIGERHARNESS_BRIDGES_CONFIG=%h/projects/teams/slack-bridge.yaml
+# Per-team tokens (SLACK_APP_TOKEN, SLACK_BOT_TOKEN) live in each
+# team's own configs/.env, referenced by the YAML index. Don't put
+# tokens here.
+EnvironmentFile=%h/projects/teams/configs/multi-bridge.env
+
+# Logs go to journalctl --user -u slack-bridge-multi
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

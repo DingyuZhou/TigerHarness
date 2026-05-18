@@ -36,11 +36,11 @@ class TestSlackBridgeMain:
         # but we can verify the module structure.
         from tigerharness.slack_bridge import __main__ as mod
         assert hasattr(mod, "main")
-        assert hasattr(mod, "_run")
+        assert hasattr(mod, "_run_single")
 
     @pytest.mark.asyncio
     async def test_run_starts_and_shuts_down(self):
-        """Test _run() with mocked Slack handler."""
+        """Test _run_single() with mocked Slack handler."""
         mock_cfg = MagicMock()
         mock_cfg.slack_app_token = "xapp-test"
         mock_cfg.agent_cwd = "/tmp"
@@ -59,6 +59,6 @@ class TestSlackBridgeMain:
             with patch("tigerharness.slack_bridge.__main__.build_bridge", return_value=mock_bridge):
                 with patch("tigerharness.slack_bridge.__main__.AsyncSocketModeHandler", return_value=mock_handler):
                     # start_async should return quickly (simulating a shutdown)
-                    from tigerharness.slack_bridge.__main__ import _run
-                    await _run()
+                    from tigerharness.slack_bridge.__main__ import _run_single
+                    await _run_single()
                     mock_handler.start_async.assert_called_once()

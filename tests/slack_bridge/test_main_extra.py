@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tigerharness.slack_bridge.__main__ import _run, main, _DRAIN_TIMEOUT_S
+from tigerharness.slack_bridge.__main__ import _run_single, main, _DRAIN_TIMEOUT_S
 
 
 class TestGracefulShutdown:
@@ -30,7 +30,7 @@ class TestGracefulShutdown:
         with patch("tigerharness.slack_bridge.__main__.load", return_value=mock_cfg):
             with patch("tigerharness.slack_bridge.__main__.build_bridge", return_value=mock_bridge):
                 with patch("tigerharness.slack_bridge.__main__.AsyncSocketModeHandler", return_value=mock_handler):
-                    await _run()
+                    await _run_single()
 
     @pytest.mark.asyncio
     async def test_drain_timeout_path(self):
@@ -52,7 +52,7 @@ class TestGracefulShutdown:
         with patch("tigerharness.slack_bridge.__main__.load", return_value=mock_cfg):
             with patch("tigerharness.slack_bridge.__main__.build_bridge", return_value=mock_bridge):
                 with patch("tigerharness.slack_bridge.__main__.AsyncSocketModeHandler", return_value=mock_handler):
-                    await _run()
+                    await _run_single()
 
 
 class TestMainKeyboardInterrupt:

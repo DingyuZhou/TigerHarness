@@ -150,6 +150,13 @@ python -m tigerharness.task_runner logs <task-id>
 python -m tigerharness.slack_bridge
 ```
 
+**Multi-team mode** — one bridge process can serve N teams (one Slack
+app per team, separate bot identities, separate `threads.json`). Opt
+in by creating `slack-bridge.yaml` in your teams dir; subsequent
+`tigerharness init` runs auto-register each team. See
+[`docs/slack-bridge.md#multi-team-mode`](docs/slack-bridge.md#multi-team-mode)
+for the full setup.
+
 ### Tiger memory
 
 Each persona has its own memory config under
