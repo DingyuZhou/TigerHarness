@@ -345,10 +345,16 @@ def build_agent_config(cfg: BridgeConfig) -> AgentConfig:
     )
 
 
-def build_bridge(cfg: BridgeConfig) -> SlackBridge:
+def build_bridge(cfg: BridgeConfig, *, state_path: Path | None = None) -> SlackBridge:
     """Compose the live wiring: real backend, real Slack app, persisted
-    thread -> session map under XDG state.
+    thread -> session map.
+
+    *state_path* is where the thread -> session map is persisted. When
+    ``None`` (single-tenant default), falls back to
+    ``persistence.default_state_path()``. Multi-lane callers pass an
+    explicit per-lane path so two bridges in one process don't fight
+    over the same ``threads.json`` file.
     """
     backend = get_backend("claude_p", cwd=cfg.agent_cwd)
-    store = ThreadStore(default_state_path())
+    store = ThreadStore(state_path if state_path is not None else default_state_path())
     return SlackBridge(cfg, backend, build_agent_config(cfg), store)

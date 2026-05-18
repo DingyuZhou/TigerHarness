@@ -40,6 +40,11 @@ def _load_slack_bridge_dotenv() -> None:
     if env_override:
         candidates.append(Path(env_override).expanduser())
     candidates.append(Path.cwd() / ".env")
+    # `tigerharness init` puts the team's .env at <team>/configs/.env.
+    # When an agent is invoked from the team root (the default for
+    # task-runner personas), this candidate lets `notify` find the
+    # right team's bot tokens without an explicit TIGERHARNESS_SLACK_ENV.
+    candidates.append(Path.cwd() / "configs" / ".env")
     # Also check our own package's parent dir
     pkg_env = Path(__file__).resolve().parents[1] / ".env"
     candidates.append(pkg_env)
