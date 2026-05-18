@@ -26,7 +26,7 @@ class TestGracefulShutdownViaSIGTERM:
         """Lines 37-41: drain succeeds."""
         import os
         import signal as sig_mod
-        from tigerharness.slack_bridge.__main__ import _run
+        from tigerharness.slack_bridge.__main__ import _run_single
 
         mock_cfg = MagicMock()
         mock_cfg.slack_app_token = "xapp-test"
@@ -56,7 +56,7 @@ class TestGracefulShutdownViaSIGTERM:
                 os.kill(os.getpid(), sig_mod.SIGTERM)
 
             signal_task = asyncio.create_task(send_signal_soon())
-            await _run()
+            await _run_single()
             await signal_task
 
         mock_bridge.request_shutdown.assert_called_once()
@@ -67,7 +67,7 @@ class TestGracefulShutdownViaSIGTERM:
         """Lines 42-43: drain times out."""
         import os
         import signal as sig_mod
-        from tigerharness.slack_bridge.__main__ import _run
+        from tigerharness.slack_bridge.__main__ import _run_single
 
         mock_cfg = MagicMock()
         mock_cfg.slack_app_token = "xapp-test"
@@ -96,7 +96,7 @@ class TestGracefulShutdownViaSIGTERM:
                 os.kill(os.getpid(), sig_mod.SIGTERM)
 
             signal_task = asyncio.create_task(send_signal_soon())
-            await _run()
+            await _run_single()
             await signal_task
 
         mock_bridge.wait_for_drain.assert_awaited_once()
@@ -106,7 +106,7 @@ class TestGracefulShutdownViaSIGTERM:
         """Lines 46-47: handler.close_async raising is logged, not fatal."""
         import os
         import signal as sig_mod
-        from tigerharness.slack_bridge.__main__ import _run
+        from tigerharness.slack_bridge.__main__ import _run_single
 
         mock_cfg = MagicMock()
         mock_cfg.slack_app_token = "xapp-test"
@@ -135,7 +135,7 @@ class TestGracefulShutdownViaSIGTERM:
                 os.kill(os.getpid(), sig_mod.SIGTERM)
 
             signal_task = asyncio.create_task(send_signal_soon())
-            await _run()  # should complete without raising
+            await _run_single()  # should complete without raising
             await signal_task
 
 
