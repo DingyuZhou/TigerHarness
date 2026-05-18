@@ -2,12 +2,14 @@
 
 A *single bridge process* serves N teams concurrently. Each team is a
 "lane" with its own Slack app (own tokens, own bot identity), its own
-persona prompt, its own ``threads.json`` state file, and its own
-``allowed_user_ids`` list.
+**multi-persona roster** (one bot, many personas reachable via routing),
+its own ``threads.json`` state file, and its own ``allowed_user_ids``
+list.
 
-The orchestrator that actually runs N ``AsyncSocketModeHandler``s in
-one event loop lives in PR3. This module is *just* the config layer:
-parse YAML, resolve paths, validate, return a typed object.
+The orchestrator that runs N ``AsyncSocketModeHandler``s in one event
+loop lives in ``__main__._run_multi``. This module is *just* the
+config layer: parse YAML, resolve paths, validate, return a fully-
+constructed ``TeamBridgeContext`` per lane.
 
 Config layout
 -------------
@@ -20,26 +22,18 @@ Top-level **index** (e.g. ``~/projects/teams/slack-bridge.yaml``)::
 
 Per-team **fragment** (e.g. ``shohoku/configs/slack-bridge.yaml``)::
 
-    persona: ayako
+    default_persona: ayako          # required (or legacy `persona:`)
     allowed_user_ids:
       - U0123ABC
     state_dir: ~/.local/state/slack-bridge/shohoku
     # Optional overrides; defaults shown:
     # env: configs/.env
     # agent_cwd: .
-    # agent_prompt: personas/<persona>/prompt.md
-    # tiger_memory_config: memories/<persona>/tiger-memory.config.yaml
 
-Tokens live in each team's ``.env`` (gitignored), referenced by the
-fragment via ``env:``. Loader reads each .env via ``dotenv_values()``
-*without* touching the process ``os.environ`` -- N lanes' tokens
-coexist in memory without overwriting each other.
-
-Backward compatibility
-----------------------
-
-The single-tenant entrypoint (``python -m tigerharness.slack_bridge``)
-ignores this module entirely. Only the multi-orchestrator imports it.
+Routable persona roster is **auto-discovered** from the team's
+``configs/personas.yaml`` -- single source of truth. Adding a persona
+via ``tigerharness init`` makes them automatically reachable in the
+team's Slack bridge.
 """
 from __future__ import annotations
 
@@ -47,7 +41,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import BridgeConfig
+from .bridge import (
+    PersonaSlot,
+    TeamBridgeContext,
+    build_persona_agent_config,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -56,12 +54,11 @@ from .config import BridgeConfig
 
 @dataclass(frozen=True)
 class LaneConfig:
-    """One lane = one team. Bundles the per-lane ``BridgeConfig`` plus
-    the explicit ``state_path`` the orchestrator passes to
-    ``build_bridge(cfg, state_path=...)``.
-    """
+    """One lane = one team. Bundles the per-lane ``TeamBridgeContext``
+    (which carries all of the team's personas) plus the explicit
+    ``state_path`` for that lane's ``threads.json``."""
     name: str
-    bridge_cfg: BridgeConfig
+    team_ctx: TeamBridgeContext
     state_path: Path
 
 
@@ -100,9 +97,7 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
-    """Parse a .env file into a dict WITHOUT polluting os.environ.
-    Using ``dotenv_values()`` (from python-dotenv, already a slack extra
-    dep) so we don't roll our own parser."""
+    """Parse a .env file into a dict WITHOUT polluting os.environ."""
     try:
         from dotenv import dotenv_values
     except ImportError as e:  # pragma: no cover - covered by [slack] extra
@@ -113,12 +108,11 @@ def _load_env_file(path: Path) -> dict[str, str]:
     if not path.exists():
         raise ValueError(f"env file not found: {path}")
     raw = dotenv_values(str(path))
-    # dotenv_values returns dict[str, str | None]; coerce None -> "".
     return {k: (v or "") for k, v in raw.items()}
 
 
 # ---------------------------------------------------------------------------
-# Validation + lane assembly
+# Validation helpers
 # ---------------------------------------------------------------------------
 
 def _require(d: dict, key: str, where: str) -> object:
@@ -181,6 +175,73 @@ def _resolve(maybe_rel: str | os.PathLike[str], base: Path) -> Path:
     return p if p.is_absolute() else (base / p)
 
 
+def _read_team_roster(team_dir: Path, where: str) -> list[str]:
+    """Return the persona names from ``<team>/configs/personas.yaml``.
+
+    Single source of truth for the lane's routable roster -- the
+    bridge auto-routes to any persona in this list. Order is preserved.
+    """
+    yaml_path = team_dir / "configs" / "personas.yaml"
+    if not yaml_path.exists():
+        raise ValueError(
+            f"{where}: personas.yaml not found at {yaml_path}. "
+            f"Run `tigerharness init --team {team_dir.name}` to scaffold."
+        )
+    data = _load_yaml(yaml_path)
+    raw = data.get("personas")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(
+            f"{where}: personas.yaml has no 'personas' list -- no personas to route to"
+        )
+    names: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"{where}: personas.yaml entries must be mappings, got {type(entry).__name__}"
+            )
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                f"{where}: personas.yaml entry missing/empty 'name' field"
+            )
+        names.append(name.strip())
+    return names
+
+
+def _build_persona_slot(
+    team_dir: Path, persona_name: str, lane_name: str,
+    roster: list[str], where: str,
+) -> PersonaSlot:
+    """Build a PersonaSlot for one persona in a team.
+
+    Reads the persona's prompt file, composes the agent config with
+    the team-awareness preamble appended, and finds the memory config
+    if one exists.
+    """
+    prompt_path = team_dir / "personas" / persona_name / "prompt.md"
+    if not prompt_path.exists():
+        raise ValueError(
+            f"{where}: persona '{persona_name}' prompt not found at {prompt_path}"
+        )
+    prompt_text = prompt_path.read_text(encoding="utf-8")
+    agent_cfg = build_persona_agent_config(
+        persona_name=persona_name,
+        prompt_text=prompt_text,
+        team_name=lane_name,
+        all_personas=roster,
+    )
+    memory_path = team_dir / "memories" / persona_name / "tiger-memory.config.yaml"
+    return PersonaSlot(
+        name=persona_name,
+        agent_config=agent_cfg,
+        tiger_memory_config_path=str(memory_path) if memory_path.exists() else "",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Lane assembly
+# ---------------------------------------------------------------------------
+
 def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
     team_dir = _resolve_team_dir(index_dir, lane_name)
     fragment_path = team_dir / "configs" / "slack-bridge.yaml"
@@ -192,9 +253,15 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
     where = f"lane '{lane_name}' ({fragment_path})"
     spec = _load_yaml(fragment_path)
 
-    persona = str(_require(spec, "persona", where)).strip()
-    if not persona:
-        raise ValueError(f"{where}: 'persona' cannot be empty")
+    # default_persona is required; legacy `persona:` accepted as alias
+    # for back-compat with PR2-era fragments.
+    default_raw = spec.get("default_persona", spec.get("persona"))
+    if not isinstance(default_raw, str) or not default_raw.strip():
+        raise ValueError(
+            f"{where}: missing required field 'default_persona' "
+            f"(legacy alias: 'persona')"
+        )
+    default_persona = default_raw.strip()
 
     allowed_user_ids = _validate_allowed_user_ids(
         _require(spec, "allowed_user_ids", where), where
@@ -205,38 +272,43 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
         raise ValueError(f"{where}: 'state_dir' cannot be empty")
     state_path = (_resolve(state_dir_raw, team_dir) / "threads.json").resolve()
 
-    # Optional overrides; defaults follow the team-folder convention.
+    # Optional overrides
     env_rel = str(spec.get("env") or "configs/.env")
     agent_cwd = str(spec.get("agent_cwd") or ".")
-    agent_prompt_rel = str(
-        spec.get("agent_prompt") or f"personas/{persona}/prompt.md"
-    )
-    tiger_memory_cfg_rel = str(
-        spec.get("tiger_memory_config")
-        or f"memories/{persona}/tiger-memory.config.yaml"
-    )
 
+    # Tokens
     env_path = _resolve(env_rel, team_dir)
     env_vars = _load_env_file(env_path)
     app_token, bot_token = _validate_tokens(env_vars, where)
 
-    bridge_cfg = BridgeConfig(
+    # Build per-persona configs from the team's personas.yaml roster
+    roster = _read_team_roster(team_dir, where)
+    if default_persona not in roster:
+        raise ValueError(
+            f"{where}: default_persona '{default_persona}' is not in the "
+            f"team's personas.yaml roster {roster}"
+        )
+    personas: dict[str, PersonaSlot] = {}
+    for name in roster:
+        personas[name] = _build_persona_slot(team_dir, name, lane_name, roster, where)
+
+    team_ctx = TeamBridgeContext(
+        team_name=lane_name,
         slack_app_token=app_token,
         slack_bot_token=bot_token,
         allowed_user_ids=allowed_user_ids,
         agent_cwd=str(_resolve(agent_cwd, team_dir)),
-        agent_prompt_path=str(_resolve(agent_prompt_rel, team_dir)),
-        tiger_memory_config_path=str(_resolve(tiger_memory_cfg_rel, team_dir)),
+        personas=personas,
+        default_persona=default_persona,
         tiger_memory_cli=env_vars.get("TIGER_MEMORY_CLI", ""),
     )
-    return LaneConfig(name=lane_name, bridge_cfg=bridge_cfg, state_path=state_path)
+    return LaneConfig(name=lane_name, team_ctx=team_ctx, state_path=state_path)
 
 
 def _check_lane_uniqueness(lanes: tuple[LaneConfig, ...]) -> None:
     """Two lanes sharing a state_path corrupt each other's threads.json.
     Two lanes sharing a Slack app token would try to open two Socket Mode
-    connections to the same app, which Slack rejects. Both must fail
-    loudly at load time."""
+    connections to the same app, which Slack rejects."""
     seen_state: dict[Path, str] = {}
     seen_app_token: dict[str, str] = {}
     for lane in lanes:
@@ -246,7 +318,7 @@ def _check_lane_uniqueness(lanes: tuple[LaneConfig, ...]) -> None:
                 f"share state_path {lane.state_path}; pick distinct state_dirs"
             )
         seen_state[lane.state_path] = lane.name
-        tok = lane.bridge_cfg.slack_app_token
+        tok = lane.team_ctx.slack_app_token
         if tok in seen_app_token:
             raise ValueError(
                 f"lane '{lane.name}' and lane '{seen_app_token[tok]}' "
@@ -282,9 +354,6 @@ def load_multi(index_path: Path) -> MultiBridgeConfig:
                 f"{index_path}: each 'lanes' entry must be a non-empty string"
             )
         names.append(item.strip())
-    # Catch duplicate lane names in the index early -- otherwise the
-    # downstream uniqueness checks would also fire, but with a less
-    # obvious message.
     dupes = [n for n in set(names) if names.count(n) > 1]
     if dupes:
         raise ValueError(

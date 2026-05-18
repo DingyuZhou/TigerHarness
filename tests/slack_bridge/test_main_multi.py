@@ -24,7 +24,8 @@ from tigerharness.slack_bridge.__main__ import (
     _setup_logging,
     main,
 )
-from tigerharness.slack_bridge.config import BridgeConfig
+from tigerharness.agent_sdk import AgentConfig
+from tigerharness.slack_bridge.bridge import PersonaSlot, TeamBridgeContext
 from tigerharness.slack_bridge.multi import LaneConfig, MultiBridgeConfig
 
 
@@ -33,14 +34,25 @@ from tigerharness.slack_bridge.multi import LaneConfig, MultiBridgeConfig
 # ---------------------------------------------------------------------------
 
 def _make_lane(name: str, *, app_token: str = "xapp-x") -> LaneConfig:
+    """Construct a minimal multi-persona LaneConfig for orchestrator tests.
+    The team has one persona named ``"agent"`` -- enough for the dispatch
+    tests; routing decisions aren't exercised at this level."""
+    slot = PersonaSlot(
+        name="agent",
+        agent_config=AgentConfig(name="agent", instructions="agent"),
+    )
+    team_ctx = TeamBridgeContext(
+        team_name=name,
+        slack_app_token=app_token,
+        slack_bot_token=f"xoxb-{name}",
+        allowed_user_ids=frozenset({"U0CEO"}),
+        agent_cwd=f"/tmp/{name}",
+        personas={"agent": slot},
+        default_persona="agent",
+    )
     return LaneConfig(
         name=name,
-        bridge_cfg=BridgeConfig(
-            slack_app_token=app_token,
-            slack_bot_token=f"xoxb-{name}",
-            allowed_user_ids=frozenset({"U0CEO"}),
-            agent_cwd=f"/tmp/{name}",
-        ),
+        team_ctx=team_ctx,
         state_path=Path(f"/tmp/state-{name}/threads.json"),
     )
 
@@ -215,9 +227,9 @@ class TestDriveHandlersMulti:
 class TestRunMulti:
     @pytest.mark.asyncio
     async def test_builds_one_bridge_handler_per_lane(self):
-        """`_run_multi` calls build_bridge once per lane (with the right
-        cfg + state_path) and AsyncSocketModeHandler once per lane (with
-        the right app_token)."""
+        """`_run_multi` calls build_team_bridge once per lane (with the
+        right team_ctx + state_path) and AsyncSocketModeHandler once per
+        lane (with the right app_token)."""
         multi_cfg = MultiBridgeConfig(lanes=(
             _make_lane("shohoku", app_token="xapp-1"),
             _make_lane("tigers", app_token="xapp-2"),
@@ -230,7 +242,7 @@ class TestRunMulti:
             os.kill(os.getpid(), sig_mod.SIGTERM)
 
         with patch(
-            "tigerharness.slack_bridge.__main__.build_bridge",
+            "tigerharness.slack_bridge.__main__.build_team_bridge",
             side_effect=built_bridges,
         ) as build_bridge_mock, patch(
             "tigerharness.slack_bridge.__main__.AsyncSocketModeHandler",

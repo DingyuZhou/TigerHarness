@@ -25,7 +25,7 @@ from pathlib import Path
 
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-from .bridge import SlackBridge, build_bridge
+from .bridge import SlackBridge, build_bridge, build_team_bridge
 from .config import load
 from .multi import MultiBridgeConfig, load_multi
 from .persistence import default_state_path
@@ -190,15 +190,16 @@ async def _run_multi(multi_cfg: MultiBridgeConfig) -> None:
     bridges: list[SlackBridge] = []
     handlers: list[AsyncSocketModeHandler] = []
     for lane in multi_cfg.lanes:
-        b = build_bridge(lane.bridge_cfg, state_path=lane.state_path)
-        h = AsyncSocketModeHandler(b.app, lane.bridge_cfg.slack_app_token)
+        b = build_team_bridge(lane.team_ctx, state_path=lane.state_path)
+        h = AsyncSocketModeHandler(b.app, lane.team_ctx.slack_app_token)
         bridges.append(b)
         handlers.append(h)
         log.info(
-            "lane=%s registered -- cwd=%s allowed_users=%s",
+            "lane=%s registered -- cwd=%s personas=%s allowed_users=%s",
             lane.name,
-            lane.bridge_cfg.agent_cwd,
-            sorted(lane.bridge_cfg.allowed_user_ids),
+            lane.team_ctx.agent_cwd,
+            sorted(lane.team_ctx.personas.keys()),
+            sorted(lane.team_ctx.allowed_user_ids),
         )
     log.info("starting bridge with %d lane(s)", len(multi_cfg.lanes))
     await _drive_handlers(

@@ -1,16 +1,35 @@
 """Slack Socket-Mode bridge to the `claude_p` backend.
 
-Flow per inbound message (DM or @mention in a channel):
-    1. Drop anything that isn't a real user message from the allowlist.
-    2. Resolve the Slack thread key (root `ts` or the existing `thread_ts`).
-    3. If the message has file attachments, download each via the bot
-       token and stage them.
-    4. Look up / create an agent-sdk `Session` for that thread.
-    5. Call `backend.run(cfg, prompt_with_file_paths, session=session)`.
-    6. Post `result.final_output` back into the same thread.
+Two modes:
 
-Serialisation: a per-thread `asyncio.Lock` ensures we don't dispatch two
-turns into the same `claude -p` session at once.
+* **Single-persona** (legacy). One bridge serves one persona. Constructor
+  takes a ``BridgeConfig`` + ``AgentConfig`` (existing call shape). No
+  routing call, no reply prefix -- output looks identical to before.
+
+* **Multi-persona** (PR4). One bridge serves N personas within a single
+  team's Slack app. The first message of each new thread is routed
+  through a one-shot ``router.detect_persona`` call to pick the addressed
+  persona; subsequent messages in that thread reuse the choice. Each
+  reply is prefixed with ``[<persona>]:`` for clarity. The team-awareness
+  preamble injected into each persona's prompt tells them how to handle
+  misroutes politely.
+
+Flow per inbound message:
+    1. Drop anything that isn't a real user message from the allowlist.
+    2. Resolve the Slack thread key.
+    3. Resolve the active persona (existing thread -> stored persona;
+       new thread -> router.detect_persona).
+    4. If the message has file attachments, download each via the bot
+       token and stage them.
+    5. Look up / create an agent-sdk ``Session`` for that thread (sessions
+       are persona-specific because the AgentConfig carries the prompt).
+    6. Dispatch via ``run_with_retry(backend, persona.agent_config, ...)``.
+    7. Persist ``(session_id, persona)`` to ``ThreadStore``.
+    8. Post ``result.final_output`` back into the thread, prefixed with
+       ``[<persona>]:`` in multi-persona mode.
+
+Serialisation: a per-thread ``asyncio.Lock`` ensures we don't dispatch
+two turns into the same ``claude -p`` session at once.
 """
 
 from __future__ import annotations
@@ -38,6 +57,7 @@ from .downloader import (
     augment_prompt,
 )
 from .persistence import ThreadStore, default_state_path
+from .router import detect_persona
 
 
 log = logging.getLogger("tigerharness.slack_bridge")
@@ -47,33 +67,104 @@ log = logging.getLogger("tigerharness.slack_bridge")
 _SUDO_DENY = ["Bash(sudo:*)", "Bash(sudo)"]
 
 
+# Internal name used for the single persona in a legacy single-tenant
+# bridge. Multi-persona configs name their personas explicitly; users
+# never see this string because the reply prefix is skipped for
+# one-persona teams.
+_SINGLE_PERSONA_NAME = "default"
+
+
+# ---------------------------------------------------------------------------
+# Team / persona data model
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PersonaSlot:
+    """One persona within a team's bridge.
+
+    ``agent_config.instructions`` is the persona's system prompt with
+    the team-awareness preamble already appended (built once at lane
+    load time -- see ``_build_persona_agent_config``).
+    """
+    name: str
+    agent_config: AgentConfig
+    tiger_memory_config_path: str = ""
+
+
+@dataclass(frozen=True)
+class TeamBridgeContext:
+    """One team's bridge wiring.
+
+    Multi-persona teams have N entries in ``personas``; single-persona
+    (legacy single-tenant) has exactly one with name ``"default"``.
+    The bridge skips the router and the reply prefix when N == 1.
+    """
+    team_name: str
+    slack_app_token: str
+    slack_bot_token: str
+    allowed_user_ids: frozenset[str]
+    agent_cwd: str
+    personas: dict[str, PersonaSlot]   # name -> slot (canonical case)
+    default_persona: str               # must be in personas
+    tiger_memory_cli: str = ""
+
+    @property
+    def is_multi_persona(self) -> bool:
+        return len(self.personas) > 1
+
+
+# ---------------------------------------------------------------------------
+# Misc constants + helpers
+# ---------------------------------------------------------------------------
+
+_ACCEPTED_SUBTYPES = {"file_share"}
+
+
 @dataclass
 class _ThreadState:
+    """One thread's in-memory state. ``persona`` is the active persona
+    for this thread; never changes once set."""
     session: Session
+    persona: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class SlackBridge:
     """Wires a `slack_bolt.AsyncApp` to an `AgentBackend`.
 
-    Held externally so tests can inject a fake backend and drive
-    handlers directly.
+    Construct via the legacy 4-arg form (BridgeConfig + AgentConfig +
+    ThreadStore -- single-persona) or via the ``team_ctx=`` kwarg
+    (multi-persona). The single-persona case is converted to a 1-entry
+    ``TeamBridgeContext`` internally so there's one dispatch code path.
     """
 
     def __init__(
         self,
-        cfg: BridgeConfig,
-        backend: AgentBackend,
-        agent_cfg: AgentConfig,
-        store: ThreadStore,
+        cfg: BridgeConfig | None = None,
+        backend: AgentBackend | None = None,
+        agent_cfg: AgentConfig | None = None,
+        store: ThreadStore | None = None,
         downloader: FileDownloader | None = None,
+        *,
+        team_ctx: TeamBridgeContext | None = None,
     ) -> None:
-        self._cfg = cfg
+        if team_ctx is not None:
+            self._team = team_ctx
+        else:
+            if cfg is None or agent_cfg is None:
+                raise ValueError(
+                    "SlackBridge: must provide (cfg + agent_cfg) for single-"
+                    "persona mode, or team_ctx= for multi-persona mode"
+                )
+            self._team = _single_persona_team_context(cfg, agent_cfg)
+
+        if backend is None or store is None:
+            raise ValueError("SlackBridge: backend and store are required")
+
         self._backend = backend
-        self._agent_cfg = agent_cfg
         self._store = store
         self._downloader: FileDownloader = downloader or SlackFileDownloader(
-            cfg.slack_bot_token
+            self._team.slack_bot_token
         )
         self._threads: dict[str, _ThreadState] = {}
         self._threads_guard = asyncio.Lock()
@@ -83,7 +174,7 @@ class SlackBridge:
         self._drained = asyncio.Event()
         self._drained.set()
 
-        self.app = AsyncApp(token=cfg.slack_bot_token)
+        self.app = AsyncApp(token=self._team.slack_bot_token)
         self._register_handlers()
 
     # ----- shutdown -----
@@ -112,7 +203,7 @@ class SlackBridge:
         """Route a single inbound Slack message (DM or tracked-thread reply)."""
         if not _is_user_dm(event) and not self._is_tracked_thread_reply(event):
             return
-        if event.get("user") not in self._cfg.allowed_user_ids:
+        if event.get("user") not in self._team.allowed_user_ids:
             log.info("dropping message from non-allowlisted user %s", event.get("user"))
             return
 
@@ -121,7 +212,7 @@ class SlackBridge:
 
     async def handle_mention(self, event: dict[str, Any], say: Callable[..., Awaitable[Any]]) -> None:
         """Route a single inbound @mention in a channel."""
-        if event.get("user") not in self._cfg.allowed_user_ids:
+        if event.get("user") not in self._team.allowed_user_ids:
             log.info("dropping mention from non-allowlisted user %s", event.get("user"))
             return
 
@@ -166,7 +257,8 @@ class SlackBridge:
         prompt = augment_prompt(text, attachments)
         prompt = _append_bridge_context(prompt, thread_key, event.get("channel"))
 
-        state = await self._get_or_open_thread(thread_key)
+        state = await self._get_or_open_thread(thread_key, text)
+        persona = self._team.personas[state.persona]
 
         self._in_flight += 1
         self._drained.clear()
@@ -174,30 +266,37 @@ class SlackBridge:
             async with state.lock:
                 resume_id = state.session.id or "<new>"
                 log.info(
-                    "thread=%s dispatch (resume=%s, chars=%d, files=%d)",
-                    thread_key, resume_id, len(prompt), len(attachments),
+                    "thread=%s persona=%s dispatch (resume=%s, chars=%d, files=%d)",
+                    thread_key, state.persona, resume_id, len(prompt), len(attachments),
                 )
                 try:
                     result = await run_with_retry(
                         self._backend,
-                        self._agent_cfg,
+                        persona.agent_config,
                         prompt,
                         session=state.session,
                         max_attempts=3,
-                        label=f"thread={thread_key}",
+                        label=f"thread={thread_key} persona={state.persona}",
                     )
                     reply = result.final_output or "_(empty reply)_"
                     if state.session.id:
-                        self._store.set(thread_key, state.session.id)
+                        self._store.set(
+                            thread_key,
+                            state.session.id,
+                            persona=state.persona,
+                        )
                     log.info(
-                        "thread=%s ok (session=%s, cost_usd=%s)",
-                        thread_key, state.session.id, result.cost_usd,
+                        "thread=%s persona=%s ok (session=%s, cost_usd=%s)",
+                        thread_key, state.persona, state.session.id, result.cost_usd,
                     )
                 except Exception as exc:
                     log.exception("backend failure for thread %s", thread_key)
                     reply = f":warning: backend error: `{exc}`"
 
-            await say(text=reply, thread_ts=thread_key)
+            await say(
+                text=_format_reply(reply, state.persona, self._team),
+                thread_ts=thread_key,
+            )
         finally:
             self._in_flight -= 1
             if self._in_flight == 0:
@@ -228,33 +327,69 @@ class SlackBridge:
         async def _on_mention(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001
             await self.handle_mention(event, say)
 
-    async def _get_or_open_thread(self, key: str) -> _ThreadState:
+    async def _get_or_open_thread(self, key: str, first_text: str) -> _ThreadState:
+        """Look up the thread's session + persona, or open a new one.
+
+        On the first message of a new thread, runs the router to pick
+        the active persona. On subsequent messages, reuses whatever was
+        stored in ``ThreadStore``.
+        """
         async with self._threads_guard:
             state = self._threads.get(key)
-            if state is None:
-                resume_id = self._store.get(key)
-                session = await self._backend.open_session(
-                    resume_id=resume_id
-                )
-                if resume_id:
-                    log.info(
-                        "thread=%s resuming claude session %s",
-                        key, resume_id,
-                    )
+            if state is not None:
+                return state
+
+            record = self._store.get_record(key)
+            if record is not None:
+                # Existing thread, resumed from disk.
+                resume_id = record.session_id
+                if record.persona and record.persona in self._team.personas:
+                    persona_name = record.persona
                 else:
-                    log.info("thread=%s opening new claude session", key)
-                state = _ThreadState(session=session)
-                self._threads[key] = state
-                _trigger_tiger_memory_rebuild(self._cfg, key)
+                    # Pre-routing record (persona=None) OR a persona
+                    # since removed from the roster -- fall back to default.
+                    persona_name = self._team.default_persona
+                log.info(
+                    "thread=%s resuming claude session %s (persona=%s)",
+                    key, resume_id, persona_name,
+                )
+            else:
+                # Brand-new thread: route the first message to a persona.
+                resume_id = None
+                persona_name = await detect_persona(
+                    self._backend,
+                    first_text,
+                    list(self._team.personas.keys()),
+                    self._team.default_persona,
+                )
+                log.info(
+                    "thread=%s opening new claude session (persona=%s)",
+                    key, persona_name,
+                )
+
+            session = await self._backend.open_session(resume_id=resume_id)
+            state = _ThreadState(session=session, persona=persona_name)
+            self._threads[key] = state
+            _trigger_tiger_memory_rebuild(
+                self._team.personas[persona_name],
+                self._team.tiger_memory_cli,
+                key,
+            )
         return state
 
 
-def _trigger_tiger_memory_rebuild(cfg: BridgeConfig, thread_key: str) -> None:
-    """Fire `tiger-memory rebuild --background` for this thread, if configured."""
-    if not cfg.tiger_memory_config_path:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _trigger_tiger_memory_rebuild(
+    persona: PersonaSlot, tiger_memory_cli: str, thread_key: str
+) -> None:
+    """Fire `tiger-memory rebuild --background` for the active persona's
+    memory config, if configured. Detached child; never blocks dispatch."""
+    if not persona.tiger_memory_config_path:
         return
-    # Use explicit CLI path if configured, otherwise search PATH.
-    cli = cfg.tiger_memory_cli or shutil.which("tiger-memory")
+    cli = tiger_memory_cli or shutil.which("tiger-memory")
     if not cli:
         log.warning(
             "thread=%s TIGER_MEMORY_CONFIG set but `tiger-memory` CLI not "
@@ -264,7 +399,7 @@ def _trigger_tiger_memory_rebuild(cfg: BridgeConfig, thread_key: str) -> None:
         return
     try:
         subprocess.Popen(
-            [cli, "--config", cfg.tiger_memory_config_path,
+            [cli, "--config", persona.tiger_memory_config_path,
              "rebuild", "--background"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -274,46 +409,70 @@ def _trigger_tiger_memory_rebuild(cfg: BridgeConfig, thread_key: str) -> None:
         log.info("thread=%s fired tiger-memory rebuild", thread_key)
     except Exception:  # noqa: BLE001
         log.warning(
-            "thread=%s failed to spawn tiger-memory rebuild",
+            "thread=%s tiger-memory rebuild trigger failed (ignored)",
             thread_key, exc_info=True,
         )
 
 
-# Slack encodes @mentions as `<@U0BOTID>`.
-_MENTION_RE = re.compile(r"<@[UW][A-Z0-9]+>\s*")
+_BOT_MENTION_RE = re.compile(r"<@[A-Z0-9]+>\s*")
 
 
 def _strip_bot_mention(text: str) -> str:
-    """Remove all `<@USERID>` mention tags from *text*."""
-    return _MENTION_RE.sub("", text)
+    """Strip all ``<@U...>`` / ``<@W...>`` Slack mention tokens.
 
-
-_ACCEPTED_SUBTYPES: frozenset[str] = frozenset({"file_share"})
+    Matches user IDs (``U`` prefix), workspace IDs (``W`` prefix), and
+    bot IDs (``B`` prefix). Any trailing whitespace immediately after
+    the closing ``>`` is also consumed so the result doesn't start
+    with a space when a leading mention is followed by " hello".
+    """
+    return _BOT_MENTION_RE.sub("", text)
 
 
 def _append_bridge_context(prompt: str, thread_ts: str, channel: str | None) -> str:
-    """Append a `[bridge-context]` block so the agent knows where to
-    address replies/uploads."""
-    lines = ["[bridge-context]", f"slack_thread_ts: {thread_ts}"]
+    """Append a small metadata block so the agent knows which thread
+    it's in (used by the slack-notify skill for `--thread` routing)."""
+    lines = [f"slack_thread_ts: {thread_ts}"]
     if channel:
         lines.append(f"slack_channel: {channel}")
-    return f"{prompt}\n\n" + "\n".join(lines)
+    return f"{prompt}\n\n[bridge-context]\n" + "\n".join(lines)
 
 
 def _is_user_dm(event: dict[str, Any]) -> bool:
-    """True iff this is a fresh human message in a DM channel."""
+    """True iff this is a real user DM (not bot, not subtype noise)."""
     if event.get("channel_type") != "im":
+        return False
+    if event.get("bot_id"):
         return False
     subtype = event.get("subtype")
     if subtype and subtype not in _ACCEPTED_SUBTYPES:
         return False
-    if event.get("bot_id"):
-        return False
     return True
 
 
+def _format_reply(text: str, persona_name: str, team: TeamBridgeContext) -> str:
+    """Prefix the reply with ``[<persona>]:`` in multi-persona teams.
+
+    Single-persona teams get the bare text so the user-visible output
+    stays identical to the pre-PR4 bridge. Empty agent output still
+    gets the prefix in multi-persona mode so the user can see *which*
+    persona returned nothing.
+    """
+    if not team.is_multi_persona:
+        return text
+    return f"[{persona_name}]: {text}"
+
+
+# ---------------------------------------------------------------------------
+# Agent-config builders
+# ---------------------------------------------------------------------------
+
 def build_agent_config(cfg: BridgeConfig) -> AgentConfig:
-    """Build the agent's config from the bridge configuration."""
+    """Build a single-persona AgentConfig from a (legacy) BridgeConfig.
+
+    Used by the single-tenant `_run_single` entrypoint. Multi-persona
+    callers use `build_persona_agent_config` instead so each persona
+    gets the team-awareness preamble.
+    """
     instructions = ""
     if cfg.agent_prompt_path:
         prompt_path = Path(cfg.agent_prompt_path).expanduser()
@@ -345,16 +504,108 @@ def build_agent_config(cfg: BridgeConfig) -> AgentConfig:
     )
 
 
-def build_bridge(cfg: BridgeConfig, *, state_path: Path | None = None) -> SlackBridge:
-    """Compose the live wiring: real backend, real Slack app, persisted
-    thread -> session map.
+def _team_awareness_preamble(
+    persona_name: str, team_name: str, all_personas: list[str]
+) -> str:
+    """Routing-aware preamble appended to every persona's prompt in a
+    multi-persona team. Tells the persona how to handle misroutes
+    politely.
 
-    *state_path* is where the thread -> session map is persisted. When
-    ``None`` (single-tenant default), falls back to
-    ``persistence.default_state_path()``. Multi-lane callers pass an
-    explicit per-lane path so two bridges in one process don't fight
-    over the same ``threads.json`` file.
+    Single-persona teams skip this preamble entirely -- there's nobody
+    to redirect to.
+    """
+    others = [n for n in all_personas if n != persona_name]
+    if not others:
+        return ""
+    others_str = ", ".join(others)
+    team_descriptor = f"team {team_name}" if team_name else "your team"
+    return (
+        "\n\n---\n\n"
+        f"You are {persona_name}, a member of {team_descriptor}. "
+        f"Other team members reachable via separate Slack threads: {others_str}.\n"
+        f"\n"
+        f"If a user's message in this thread is clearly addressed to a different "
+        f"team member (e.g. \"Hi {others[0]}\" when you are {persona_name}), "
+        f"politely identify yourself, suggest the user start a new DM thread to "
+        f"reach the intended team member, and optionally help with anything within "
+        f"your own scope. Don't attempt to act as another team member."
+    )
+
+
+def build_persona_agent_config(
+    persona_name: str,
+    prompt_text: str,
+    team_name: str,
+    all_personas: list[str],
+) -> AgentConfig:
+    """Compose a persona's AgentConfig: their prompt + the team-awareness
+    preamble appended for multi-persona teams."""
+    preamble = _team_awareness_preamble(persona_name, team_name, all_personas)
+    return AgentConfig(
+        name=f"agent-{persona_name}",
+        instructions=prompt_text + preamble,
+        extra={
+            "permission_mode": "bypassPermissions",
+            "disallowed_tools": list(_SUDO_DENY),
+        },
+    )
+
+
+def _single_persona_team_context(
+    cfg: BridgeConfig, agent_cfg: AgentConfig
+) -> TeamBridgeContext:
+    """Wrap a (legacy) single-tenant BridgeConfig + AgentConfig as a
+    1-persona team context, so the rest of SlackBridge has one code path.
+
+    The single persona is named ``"default"`` and skips the routing call
+    + reply prefix at runtime (see ``is_multi_persona``).
+    """
+    slot = PersonaSlot(
+        name=_SINGLE_PERSONA_NAME,
+        agent_config=agent_cfg,
+        tiger_memory_config_path=cfg.tiger_memory_config_path,
+    )
+    return TeamBridgeContext(
+        team_name="",
+        slack_app_token=cfg.slack_app_token,
+        slack_bot_token=cfg.slack_bot_token,
+        allowed_user_ids=cfg.allowed_user_ids,
+        agent_cwd=cfg.agent_cwd,
+        personas={_SINGLE_PERSONA_NAME: slot},
+        default_persona=_SINGLE_PERSONA_NAME,
+        tiger_memory_cli=cfg.tiger_memory_cli,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Factories
+# ---------------------------------------------------------------------------
+
+def build_bridge(
+    cfg: BridgeConfig, *, state_path: Path | None = None
+) -> SlackBridge:
+    """Single-persona factory (legacy + single-tenant entrypoint).
+
+    Multi-lane callers in the multi-orchestrator use
+    ``build_team_bridge`` instead. Kept stable so PR1's signature
+    (``build_bridge(cfg, *, state_path=...)``) keeps working.
     """
     backend = get_backend("claude_p", cwd=cfg.agent_cwd)
     store = ThreadStore(state_path if state_path is not None else default_state_path())
     return SlackBridge(cfg, backend, build_agent_config(cfg), store)
+
+
+def build_team_bridge(
+    team_ctx: TeamBridgeContext, *, state_path: Path | None = None
+) -> SlackBridge:
+    """Multi-persona factory.
+
+    Used by the multi-team orchestrator (`__main__._run_multi`). One
+    team context per lane; each lane has its own backend (cwd-scoped),
+    its own ThreadStore (state_path), and N personas with routing.
+    """
+    backend = get_backend("claude_p", cwd=team_ctx.agent_cwd)
+    store = ThreadStore(state_path if state_path is not None else default_state_path())
+    return SlackBridge(
+        backend=backend, store=store, team_ctx=team_ctx,
+    )
