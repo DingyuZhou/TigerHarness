@@ -199,6 +199,7 @@ class TestClaudeTranscriptAdapter:
         assert records[0].source == "claude_code"
 
     def test_discover_with_threads_json(self, tmp_path: Path):
+        """Pre-routing schema: bare session_id string. Must still load."""
         proj = tmp_path / "proj"
         proj.mkdir()
         uid = str(uuid4())
@@ -217,3 +218,207 @@ class TestClaudeTranscriptAdapter:
         assert len(records) == 1
         assert records[0].source == "slack"
         assert "1234.5678" in records[0].source_id
+
+    def test_discover_with_new_threads_schema(self, tmp_path: Path):
+        """Post-routing schema: {thread_ts: {session_id, persona}}.
+        Must be recognized as a Slack-attributed session."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        uid = str(uuid4())
+        jsonl = proj / f"{uid}.jsonl"
+        jsonl.write_text("\n".join([
+            json.dumps({"type": "human", "timestamp": "2026-05-18T10:00:00Z",
+                        "message": {"content": "Hi from new-schema Slack"}}),
+            json.dumps({"type": "assistant", "timestamp": "2026-05-18T10:01:00Z",
+                        "message": {"content": "Hello!"}}),
+        ]) + "\n")
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "1234.5678": {"session_id": uid, "persona": "ayako"},
+        }))
+        adapter = ClaudeTranscriptAdapter(project_path=proj, threads_json=threads)
+        records = list(adapter.discover())
+        assert len(records) == 1
+        assert records[0].source == "slack"
+        assert "1234.5678" in records[0].source_id
+
+    def test_threads_json_mixed_old_and_new_schemas(self, tmp_path: Path):
+        """A threads.json with both schemas (e.g. mid-migration) must
+        load entries from both forms."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        old_uid = str(uuid4())
+        new_uid = str(uuid4())
+        for u in (old_uid, new_uid):
+            (proj / f"{u}.jsonl").write_text("\n".join([
+                json.dumps({"type": "human", "timestamp": "2026-05-18T10:00:00Z",
+                            "message": {"content": "x"}}),
+                json.dumps({"type": "assistant", "timestamp": "2026-05-18T10:01:00Z",
+                            "message": {"content": "y"}}),
+            ]) + "\n")
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "old.ts": old_uid,
+            "new.ts": {"session_id": new_uid, "persona": "ayako"},
+        }))
+        adapter = ClaudeTranscriptAdapter(project_path=proj, threads_json=threads)
+        records = list(adapter.discover())
+        assert len(records) == 2
+        # Both classified as slack.
+        assert all(r.source == "slack" for r in records)
+
+    def test_threads_json_top_level_not_dict_is_tolerated(self, tmp_path: Path):
+        """If threads.json is malformed (a JSON list instead of object),
+        ignore it and classify everything as claude_code."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        uid = str(uuid4())
+        (proj / f"{uid}.jsonl").write_text("\n".join([
+            json.dumps({"type": "human", "timestamp": "2026-05-18T10:00:00Z",
+                        "message": {"content": "x"}}),
+            json.dumps({"type": "assistant", "timestamp": "2026-05-18T10:01:00Z",
+                        "message": {"content": "y"}}),
+        ]) + "\n")
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps(["not", "an", "object"]))
+        adapter = ClaudeTranscriptAdapter(project_path=proj, threads_json=threads)
+        records = list(adapter.discover())
+        assert records[0].source == "claude_code"
+
+    def test_threads_json_skips_malformed_entries(self, tmp_path: Path):
+        """Entries that aren't strings or dicts (or dicts with no
+        session_id) are silently dropped, not crash-causing."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        good_uid = str(uuid4())
+        (proj / f"{good_uid}.jsonl").write_text("\n".join([
+            json.dumps({"type": "human", "timestamp": "2026-05-18T10:00:00Z",
+                        "message": {"content": "x"}}),
+            json.dumps({"type": "assistant", "timestamp": "2026-05-18T10:01:00Z",
+                        "message": {"content": "y"}}),
+        ]) + "\n")
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "garbage1": 42,                          # not str / not dict
+            "garbage2": {"persona": "ayako"},        # dict missing session_id
+            "garbage3": {"session_id": ""},          # empty session_id
+            "good": {"session_id": good_uid, "persona": "ayako"},
+        }))
+        adapter = ClaudeTranscriptAdapter(project_path=proj, threads_json=threads)
+        records = list(adapter.discover())
+        assert len(records) == 1
+        assert records[0].source == "slack"
+
+
+class TestClaudeTranscriptAdapterPersonaFilter:
+    """Per-persona filtering: when ``persona=`` is set on the adapter,
+    only sessions owned by that persona in threads.json are emitted."""
+
+    def _make_jsonl(self, proj: Path, uid: str) -> None:
+        (proj / f"{uid}.jsonl").write_text("\n".join([
+            json.dumps({"type": "human", "timestamp": "2026-05-18T10:00:00Z",
+                        "message": {"content": "x"}}),
+            json.dumps({"type": "assistant", "timestamp": "2026-05-18T10:01:00Z",
+                        "message": {"content": "y"}}),
+        ]) + "\n")
+
+    def test_filter_keeps_matching_persona(self, tmp_path: Path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        ayako_uid = str(uuid4())
+        sakuragi_uid = str(uuid4())
+        for u in (ayako_uid, sakuragi_uid):
+            self._make_jsonl(proj, u)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "t1": {"session_id": ayako_uid, "persona": "ayako"},
+            "t2": {"session_id": sakuragi_uid, "persona": "sakuragi"},
+        }))
+        adapter = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads, persona="ayako",
+        )
+        records = list(adapter.discover())
+        uuids = {r.conversation_uuid for r in records}
+        assert uuids == {ayako_uid}
+
+    def test_filter_excludes_unattributed_by_default(self, tmp_path: Path):
+        """Sessions NOT in threads.json (local claude -p) are excluded
+        under the strict default."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        attributed_uid = str(uuid4())
+        local_uid = str(uuid4())
+        self._make_jsonl(proj, attributed_uid)
+        self._make_jsonl(proj, local_uid)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "t1": {"session_id": attributed_uid, "persona": "ayako"},
+        }))
+        adapter = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads, persona="ayako",
+        )
+        records = list(adapter.discover())
+        assert {r.conversation_uuid for r in records} == {attributed_uid}
+
+    def test_include_unattributed_brings_in_local_sessions(self, tmp_path: Path):
+        """``include_unattributed=True`` includes sessions with no
+        threads.json entry (local claude -p)."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        attributed_uid = str(uuid4())
+        local_uid = str(uuid4())
+        self._make_jsonl(proj, attributed_uid)
+        self._make_jsonl(proj, local_uid)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "t1": {"session_id": attributed_uid, "persona": "ayako"},
+        }))
+        adapter = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads, persona="ayako",
+            include_unattributed=True,
+        )
+        records = list(adapter.discover())
+        assert {r.conversation_uuid for r in records} == {attributed_uid, local_uid}
+
+    def test_include_unattributed_brings_in_old_schema_entries(self, tmp_path: Path):
+        """Pre-routing threads.json entries (bare session_id) have no
+        persona attribution. Strict mode excludes them; opt-in includes."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        old_uid = str(uuid4())
+        new_uid = str(uuid4())
+        self._make_jsonl(proj, old_uid)
+        self._make_jsonl(proj, new_uid)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "old.ts": old_uid,                                            # pre-routing
+            "new.ts": {"session_id": new_uid, "persona": "ayako"},        # post-routing
+        }))
+        strict = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads, persona="ayako",
+        )
+        assert {r.conversation_uuid for r in strict.discover()} == {new_uid}
+        relaxed = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads, persona="ayako",
+            include_unattributed=True,
+        )
+        assert {r.conversation_uuid for r in relaxed.discover()} == {old_uid, new_uid}
+
+    def test_no_persona_means_no_filter(self, tmp_path: Path):
+        """Legacy behavior: ``persona=None`` -> emit everything."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        ayako_uid = str(uuid4())
+        sakuragi_uid = str(uuid4())
+        for u in (ayako_uid, sakuragi_uid):
+            self._make_jsonl(proj, u)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "t1": {"session_id": ayako_uid, "persona": "ayako"},
+            "t2": {"session_id": sakuragi_uid, "persona": "sakuragi"},
+        }))
+        adapter = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads,
+        )
+        records = list(adapter.discover())
+        assert {r.conversation_uuid for r in records} == {ayako_uid, sakuragi_uid}

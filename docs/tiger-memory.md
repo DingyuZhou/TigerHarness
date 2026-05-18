@@ -62,10 +62,15 @@ store:
 sources:
   - kind: claude_code
     project_path: ~/.claude/projects/-my-project/
+    # Optional, for multi-persona Slack-bridge setups:
+    # persona: ayako                    # only ingest sessions owned by this persona
+    # include_unattributed: false        # opt-in to also include local claude-p sessions
   - kind: docs
     glob: docs/*.md
 
 summarizer:
+  # Pluggable -- "anthropic" is the default (via agent-sdk's claude_p).
+  # See "Adding a new summarizer vendor" below for swapping in OpenAI etc.
   backend: anthropic
   model: claude-opus-4-7
   prompts: default/v1
@@ -141,3 +146,101 @@ briefing/  The assembled view the agent reads
 - **OpenAI**: text-embedding-3-small, requires `OPENAI_API_KEY`
 
 Install with `pip install tigerharness[memory-rag]` or `[memory-rag-openai]`.
+
+## Per-persona filtering (multi-bridge integration)
+
+When the slack-bridge runs in **multi-persona mode** (one Slack app
+routes DMs to N team members), each persona has its own memory store
+and only wants to summarize **its own** conversations -- Ayako's memory
+shouldn't include Sakuragi's threads.
+
+Tell the source adapter which persona owns the conversation by adding
+a `persona:` field to the `claude_code` source:
+
+```yaml
+sources:
+  - kind: claude_code
+    project_path: ~/.claude/projects/-home-tigerleap-projects-teams-shohoku/
+    persona: ayako               # only ingest sessions owned by Ayako
+    # include_unattributed: false  # default: exclude local claude-p sessions
+  - kind: slack_thread
+    threads_json: ~/.local/state/slack-bridge/shohoku/threads.json
+```
+
+The bridge writes `{thread_ts: {session_id, persona}}` entries to
+`threads.json` as users DM the bot. The adapter reads that mapping and
+only emits records where the stored persona matches.
+
+**Three sessions, three outcomes:**
+
+| Session origin | `threads.json` entry | Strict mode (default) | `include_unattributed: true` |
+|---|---|---|---|
+| Slack DM addressed to Ayako | `{session_id, persona: "ayako"}` | ✅ in Ayako's memory | ✅ in Ayako's memory |
+| Slack DM addressed to Sakuragi | `{session_id, persona: "sakuragi"}` | ❌ excluded | ❌ excluded |
+| Local `claude -p` (not via bridge) | not in threads.json | ❌ excluded | ✅ in Ayako's memory |
+| Pre-routing Slack thread (PR1-era) | `"session_id"` bare string | ❌ excluded | ✅ in Ayako's memory |
+
+**Backward compat:** if `persona:` is omitted, the adapter emits every
+session (legacy single-tenant behavior, unchanged). The threads.json
+reader also accepts the pre-routing schema (bare `"session_id"`
+strings) so older state files still work.
+
+## Adding a new summarizer vendor
+
+Tiger-memory's summarizer is vendor-agnostic by design. The
+`anthropic` backend is pre-registered; plug in any other vendor in
+three steps:
+
+**1. Implement `Summarizer`** (see [`summarizers/base.py`](../src/tigerharness/tiger_memory/summarizers/base.py)):
+
+```python
+from tigerharness.tiger_memory.summarizers import Summarizer, SummarizerError
+
+class OpenAISummarizer(Summarizer):
+    name = "openai"
+    version = "v1"
+
+    def __init__(self, model: str, api_key: str):
+        super().__init__()
+        self.model = model
+        self.api_key = api_key
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        # Call your vendor's API; return markdown body
+        # Update self.cost_so_far from the API response if available
+        ...
+```
+
+**2. Register a factory:**
+
+```python
+from tigerharness.tiger_memory.summarizers import register_summarizer
+from tigerharness.tiger_memory.config import SummarizerConfig
+
+def _build_openai(cfg: SummarizerConfig) -> Summarizer:
+    import os
+    return OpenAISummarizer(
+        model=cfg.model,
+        api_key=os.environ["OPENAI_API_KEY"],
+    )
+
+register_summarizer("openai", _build_openai)
+```
+
+Call `register_summarizer()` at import time -- typically from your
+project's top-level `__init__.py` or a startup hook. The registration
+must run before `tiger-memory rebuild` is invoked.
+
+**3. Use it in any persona's config:**
+
+```yaml
+summarizer:
+  backend: openai
+  model: gpt-4.1
+  prompts: default/v1
+```
+
+Tiger-memory looks up `openai` in the registry and calls your factory.
+If the backend name isn't registered, you get a `SummarizerError` with
+a list of every registered backend so it's clear what to install or
+register.

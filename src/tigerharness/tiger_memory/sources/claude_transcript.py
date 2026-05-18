@@ -10,9 +10,20 @@ derives:
     content           = chronological dump of user/assistant message text
     activity_mtime    = mtime of the JSONL (rock-solid: append-only)
 
-The Slack reverse-lookup is optional — if ``threads_json`` isn't
+The Slack reverse-lookup is optional -- if ``threads_json`` isn't
 configured (or doesn't exist), all transcripts are classified
 ``claude_code``.
+
+Per-persona filtering (added when the multi-bridge introduced N-persona
+routing): if ``persona`` is set, the adapter only emits records owned
+by that persona (per the bridge's threads.json). Sessions with no
+attribution (local ``claude -p`` not via Slack, or pre-routing
+threads.json entries) are excluded unless ``include_unattributed=True``.
+
+threads.json schema compatibility: the post-routing schema is
+``{thread_ts: {session_id, persona}}``; the pre-routing schema was
+``{thread_ts: session_id}``. Both are tolerated; pre-routing entries
+have ``persona=None`` and are filtered out under strict mode.
 """
 from __future__ import annotations
 
@@ -38,38 +49,103 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         self,
         project_path: Path,
         threads_json: Path | None = None,
+        *,
+        persona: str | None = None,
+        include_unattributed: bool = False,
     ):
         self.project_path = Path(project_path).expanduser()
         self.threads_json = (
             Path(threads_json).expanduser() if threads_json else None
         )
+        # When set, only sessions owned by *persona* (per threads.json)
+        # are emitted. ``None`` preserves the legacy "emit everything"
+        # behavior.
+        self.persona = persona
+        # When persona-filtering, controls whether sessions with NO
+        # persona attribution (local claude -p, or pre-routing entries)
+        # are also emitted. Default False == strict.
+        self.include_unattributed = include_unattributed
 
     # ---- public --------------------------------------------------------
 
     def discover(self) -> Iterator[SourceRecord]:
-        thread_map = self._reverse_thread_map()  # session_id → thread_ts
+        # session_id -> (thread_ts, persona | None)
+        thread_map = self._reverse_thread_map()
         if not self.project_path.exists():
             return
         for jsonl in sorted(self.project_path.glob("*.jsonl")):
+            session_uuid = jsonl.stem
+            if not self._allowed(session_uuid, thread_map):
+                continue
             rec = self._record_for(jsonl, thread_map)
             if rec is not None:
                 yield rec
 
     # ---- helpers -------------------------------------------------------
 
-    def _reverse_thread_map(self) -> dict[str, str]:
-        """Build session_id → thread_ts from the bridge's threads.json."""
+    def _allowed(
+        self,
+        session_uuid: str,
+        thread_map: dict[str, tuple[str, str | None]],
+    ) -> bool:
+        """Apply the per-persona filter.
+
+        - No filter set (legacy / single-tenant): everything passes.
+        - Filter set + session in threads.json with matching persona: pass.
+        - Filter set + session in threads.json with different persona: drop.
+        - Filter set + session NOT in threads.json (local claude_p)
+          OR persona=None (pre-routing): pass iff include_unattributed.
+        """
+        if self.persona is None:
+            return True
+        entry = thread_map.get(session_uuid)
+        if entry is None:
+            # Local claude_p session, never went through the bridge.
+            return self.include_unattributed
+        _thread_ts, owner = entry
+        if owner is None:
+            # Pre-routing threads.json entry (bare session_id schema).
+            return self.include_unattributed
+        return owner == self.persona
+
+    def _reverse_thread_map(self) -> dict[str, tuple[str, str | None]]:
+        """Build session_id -> (thread_ts, persona | None) from the
+        bridge's threads.json.
+
+        Tolerates both schemas:
+
+        Pre-PR4: ``{thread_ts: "session_id"}`` -> persona is ``None``.
+        Post-PR4: ``{thread_ts: {session_id, persona}}`` -> persona
+        preserved (or ``None`` if missing/empty).
+        """
         if not self.threads_json or not self.threads_json.exists():
             return {}
         try:
             data = json.loads(self.threads_json.read_text())
         except (json.JSONDecodeError, OSError):
             return {}
-        # threads.json format: { "<thread_ts>": "<session_id>", ... }
-        return {sid: tts for tts, sid in data.items() if isinstance(sid, str)}
+        if not isinstance(data, dict):
+            return {}
+        result: dict[str, tuple[str, str | None]] = {}
+        for tts, val in data.items():
+            if isinstance(val, str) and val:
+                # Pre-routing: bare session_id string.
+                result[val] = (str(tts), None)
+            elif isinstance(val, dict):
+                sid = val.get("session_id")
+                if not isinstance(sid, str) or not sid:
+                    continue
+                persona = val.get("persona")
+                result[sid] = (
+                    str(tts),
+                    persona if isinstance(persona, str) and persona else None,
+                )
+        return result
 
     def _record_for(
-        self, jsonl: Path, thread_map: dict[str, str]
+        self,
+        jsonl: Path,
+        thread_map: dict[str, tuple[str, str | None]],
     ) -> SourceRecord | None:
         session_uuid = jsonl.stem  # filename minus .jsonl
         # Parse JSONL — gather timestamps + content
@@ -110,7 +186,7 @@ class ClaudeTranscriptAdapter(SourceAdapter):
 
         is_slack = session_uuid in thread_map
         if is_slack:
-            thread_ts = thread_map[session_uuid]
+            thread_ts, _owner = thread_map[session_uuid]
             source_id = (
                 f"{thread_ts}@{slack_channel}" if slack_channel else thread_ts
             )
