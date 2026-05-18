@@ -31,7 +31,12 @@ from .store import (
     WEEKLY_RE,
     Store,
 )
-from .summarizers import AnthropicSummarizer, MockSummarizer, Summarizer
+from .summarizers import (
+    AnthropicSummarizer,
+    MockSummarizer,
+    Summarizer,
+    get_summarizer,
+)
 
 
 log = logging.getLogger("tigerharness.tiger_memory.lifecycle")
@@ -252,10 +257,20 @@ def _build_adapters(cfg: Config) -> list[SourceAdapter]:
     )
     for s in cfg.sources:
         if s.kind == "claude_code":
+            # Per-persona filtering (added after multi-bridge introduced
+            # N-persona routing): when `persona:` is set on this source,
+            # only sessions owned by that persona in threads.json are
+            # ingested. `include_unattributed: true` brings in local
+            # claude-p sessions (no bridge attribution) as well.
+            persona = s.fields.get("persona")
+            persona = persona.strip() if isinstance(persona, str) and persona.strip() else None
+            include_unattributed = bool(s.fields.get("include_unattributed", False))
             adapters.append(
                 ClaudeTranscriptAdapter(
                     project_path=Path(s.fields["project_path"]),
                     threads_json=threads_json,
+                    persona=persona,
+                    include_unattributed=include_unattributed,
                 )
             )
         elif s.kind == "slack_thread":
@@ -279,16 +294,10 @@ def _build_adapters(cfg: Config) -> list[SourceAdapter]:
 def _build_summarizer(cfg: Config, mock: bool = False) -> Summarizer:
     if mock:
         return MockSummarizer()
-    if cfg.summarizer.backend == "anthropic":
-        return AnthropicSummarizer(
-            model=cfg.summarizer.model,
-            prompts_dir=cfg.summarizer.prompts,
-            max_attempts=cfg.summarizer.retry_max_attempts,
-        )
-    # Future backends would slot in here.
-    raise NotImplementedError(
-        f"summarizer backend not implemented: {cfg.summarizer.backend}"
-    )
+    # Look up the backend by name in the summarizer registry. Anthropic
+    # is pre-registered; external code can plug in new vendors via
+    # ``register_summarizer()`` -- see the summarizers package docstring.
+    return get_summarizer(cfg.summarizer.backend, cfg.summarizer)
 
 
 # ----- decision tree per §7.3 step 1 ---------------------------------------

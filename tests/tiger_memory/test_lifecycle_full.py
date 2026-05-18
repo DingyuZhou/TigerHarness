@@ -510,6 +510,11 @@ class TestBuildSummarizer:
         assert s.__class__.__name__ == "AnthropicSummarizer"
 
     def test_unknown_backend_raises(self, tmp_path: Path):
+        """An unregistered backend now raises ``SummarizerError`` (was
+        ``NotImplementedError`` before the registry refactor). The
+        message lists every registered backend so the user knows what
+        to install / configure."""
+        from tigerharness.tiger_memory.summarizers import SummarizerError
         cfg_path = tmp_path / "cfg3.yaml"
         cfg_path.write_text(dedent(f"""\
             agent: {{name: T, role: T}}
@@ -521,7 +526,7 @@ class TestBuildSummarizer:
             rebuild: {{lock_path: {tmp_path}/lock3}}
         """))
         cfg = load_config(cfg_path)
-        with pytest.raises(NotImplementedError, match="openai"):
+        with pytest.raises(SummarizerError, match="openai"):
             _build_summarizer(cfg)
 
 
