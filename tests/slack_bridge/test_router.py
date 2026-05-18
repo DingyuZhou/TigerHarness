@@ -96,8 +96,24 @@ class TestBuildRouterConfig:
         assert cfg.name == "slack-bridge-router"
         assert "EXACTLY one token" in cfg.instructions
         assert "default" in cfg.instructions
-        # bypassPermissions so the router never prompts for tool use.
-        assert cfg.extra.get("permission_mode") == "bypassPermissions"
+
+    def test_tools_locked_down(self):
+        """The router has no business reading files / running shells /
+        fetching URLs. Tool surface must be fully restricted so a
+        prompt-injection in a Slack DM can't escalate."""
+        cfg = _build_router_config()
+        # `plan` mode blocks write/exec tool calls at the CLI level.
+        assert cfg.extra.get("permission_mode") == "plan"
+        # Explicit deny list catches anything `plan` might let through.
+        disallowed = cfg.extra.get("disallowed_tools") or []
+        for must_be_denied in (
+            "Bash", "Read", "Write", "Edit", "WebFetch", "WebSearch", "Task",
+        ):
+            assert must_be_denied in disallowed, (
+                f"router must explicitly deny {must_be_denied} as defense in depth"
+            )
+        # One shot only.
+        assert cfg.extra.get("max_turns") == 1
 
 
 # ---------------------------------------------------------------------------

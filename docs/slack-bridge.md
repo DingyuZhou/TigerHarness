@@ -243,12 +243,40 @@ misroutes politely:
 > yourself, suggest the user start a new DM thread to reach the intended
 > team member, and optionally help with anything within your own scope.
 > Don't attempt to act as another team member.*
+>
+> *You don't need to prefix your replies with your own name — the Slack
+> bridge automatically labels every reply with `[Ayako]:` so the user
+> knows who answered.*
 
 So if a user types "Hi Sakuragi" but the router somehow picked Ayako
 (or detection failed and fell back to default), Ayako responds with
 something like "I'm Ayako — for Sakuragi, please start a new thread."
 
 Single-persona teams skip the preamble (there's nobody to redirect to).
+
+#### Routing is best-effort
+
+The router is an LLM call, not a hard classifier. Edge cases:
+
+- **Chatty model output** ("I think this is for Ayako" instead of just `Ayako`) is treated as off-roster and falls back to `default_persona`.
+- **Ambiguous addressing** ("ask Sakuragi about that, Ayako") picks one — typically whichever name the model considers primary. The persona handles the rest via the preamble.
+- **No name at all** ("What's tomorrow's plan?") -> `default_persona`.
+
+The team-awareness preamble is the safety net: even when routing picks
+"wrong," the persona will politely redirect rather than impersonate.
+
+#### Bridge voice vs persona voice
+
+The `[<persona>]:` prefix appears **only on the persona's own replies**.
+Bridge-generated messages (backend errors, empty agent output,
+attachment-download warnings) are posted unprefixed, so users can tell
+"the bridge says X" from "Ayako says X." Examples:
+
+```
+[Ayako]: Here's the playbook for tomorrow's match.   # ← persona voice
+:warning: backend error: `RequestTimeout(...)`        # ← bridge voice, unprefixed
+_(empty reply)_                                       # ← bridge voice, unprefixed
+```
 
 #### Restart required for new personas
 

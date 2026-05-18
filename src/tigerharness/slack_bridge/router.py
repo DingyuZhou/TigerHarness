@@ -52,18 +52,49 @@ No commentary, no punctuation, no quotes, no formatting.\
 """
 
 
+_ROUTER_DISALLOWED_TOOLS = [
+    # The router is a one-token classifier. It has no business reading
+    # files, running shells, fetching URLs, or doing anything other than
+    # emitting text. List the common Claude Code tools explicitly so a
+    # prompt-injection in an incoming Slack DM can't trick the router
+    # into executing anything.
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "NotebookRead",
+    "NotebookEdit",
+    "Task",
+    "TodoWrite",
+    "ExitPlanMode",
+]
+
+
 def _build_router_config() -> AgentConfig:
     """Routing-specific AgentConfig: terse instructions, no tools.
 
     No model override -- whatever the backend uses by default handles a
     one-token classification trivially.
+
+    Tool surface is locked down via ``disallowed_tools`` covering every
+    built-in tool we know about, plus ``permission_mode: plan`` which
+    blocks any write/exec action the disallow list might miss, plus
+    ``max_turns: 1`` so the model gets exactly one shot to emit its
+    answer. Belt + suspenders + zip-tie.
     """
     return AgentConfig(
         name=_ROUTER_AGENT_NAME,
         instructions=_ROUTER_SYSTEM_PROMPT,
         extra={
-            "permission_mode": "bypassPermissions",
-            # Strict short-answer setting where supported.
+            # `plan` mode prevents write/exec tool calls at the CLI level.
+            "permission_mode": "plan",
+            # Explicit deny list covering every common tool. Defense in depth.
+            "disallowed_tools": list(_ROUTER_DISALLOWED_TOOLS),
+            # Bound the conversation: one user message in, one reply out.
             "max_turns": 1,
         },
     )
