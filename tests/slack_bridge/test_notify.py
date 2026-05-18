@@ -332,3 +332,41 @@ class TestDotenvLoading:
         _load_slack_bridge_dotenv()
         import os
         assert os.environ["SLACK_BOT_TOKEN"] == "already-set"
+
+    def test_loads_from_cwd_configs_env(self, monkeypatch, tmp_path):
+        """Team-folder convention: `tigerharness init` puts the team's
+        .env at <team>/configs/.env. When an agent's cwd is the team
+        root, notify must find it without TIGERHARNESS_SLACK_ENV set."""
+        team_root = tmp_path
+        configs = team_root / "configs"
+        configs.mkdir()
+        (configs / ".env").write_text(
+            "SLACK_BOT_TOKEN=xoxb-from-team-configs\nSLACK_CEO_USER_ID=U0CFG\n"
+        )
+        monkeypatch.chdir(team_root)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        # The team root must NOT also have a top-level .env or that one
+        # wins (it appears earlier in the candidates list -- intentional).
+        assert not (team_root / ".env").exists()
+        _load_slack_bridge_dotenv()
+        import os
+        assert os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-team-configs"
+        assert os.environ["SLACK_CEO_USER_ID"] == "U0CFG"
+
+    def test_cwd_dotenv_beats_configs_dotenv(self, monkeypatch, tmp_path):
+        """If both <cwd>/.env and <cwd>/configs/.env exist, the top-level
+        one wins (it appears earlier in the candidate list). This
+        preserves the legacy single-team workflow where users put .env
+        at the project root."""
+        (tmp_path / ".env").write_text("SLACK_BOT_TOKEN=xoxb-from-root\n")
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / ".env").write_text("SLACK_BOT_TOKEN=xoxb-from-configs\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        _load_slack_bridge_dotenv()
+        import os
+        assert os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-root"

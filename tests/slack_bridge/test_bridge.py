@@ -121,6 +121,48 @@ class TestBuildAgentConfig:
             build_agent_config(cfg)
 
 
+class TestBuildBridge:
+    """`build_bridge(cfg, state_path=...)` composes the bridge wiring.
+
+    The *state_path* kwarg lets multi-lane callers pass a per-lane path
+    so two bridges in one process don't fight over the same threads.json.
+    When omitted (single-tenant default), falls back to
+    ``default_state_path()``.
+    """
+
+    def _cfg(self, tmp_path: Path) -> BridgeConfig:
+        return BridgeConfig(
+            slack_app_token="xapp-x",
+            slack_bot_token="xoxb-x",
+            allowed_user_ids=frozenset({"U0X"}),
+            agent_cwd=str(tmp_path),
+        )
+
+    def test_explicit_state_path_used(self, tmp_path: Path):
+        from tigerharness.slack_bridge import bridge as bridge_mod
+        explicit = tmp_path / "lane-shohoku" / "threads.json"
+        with patch.object(bridge_mod, "ThreadStore") as ts, \
+             patch.object(bridge_mod, "get_backend"):
+            bridge_mod.build_bridge(self._cfg(tmp_path), state_path=explicit)
+        # ThreadStore must be constructed with our explicit path, not
+        # whatever default_state_path() would return.
+        ts.assert_called_once_with(explicit)
+
+    def test_omitted_state_path_falls_back_to_default(self, tmp_path: Path, monkeypatch):
+        """Backward-compat: single-tenant callers pass no state_path
+        kwarg. Must resolve via ``default_state_path()`` -- this is the
+        invariant that keeps the existing systemd unit working."""
+        from tigerharness.slack_bridge import bridge as bridge_mod
+        sentinel = tmp_path / "from-default" / "threads.json"
+        monkeypatch.setattr(
+            bridge_mod, "default_state_path", lambda: sentinel
+        )
+        with patch.object(bridge_mod, "ThreadStore") as ts, \
+             patch.object(bridge_mod, "get_backend"):
+            bridge_mod.build_bridge(self._cfg(tmp_path))  # no state_path
+        ts.assert_called_once_with(sentinel)
+
+
 class TestTriggerTigerMemoryRebuild:
     def test_no_config_path_is_noop(self, cfg):
         from tigerharness.slack_bridge.bridge import _trigger_tiger_memory_rebuild

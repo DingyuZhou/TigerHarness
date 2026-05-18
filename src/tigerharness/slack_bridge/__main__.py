@@ -15,6 +15,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from .bridge import build_bridge
 from .config import load
+from .persistence import default_state_path
 
 log = logging.getLogger("tigerharness.slack_bridge")
 
@@ -28,7 +29,10 @@ async def _run() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     cfg = load()
-    bridge = build_bridge(cfg)
+    # Pass the state path explicitly so the wiring matches the multi-lane
+    # entrypoint (which derives a per-lane path) -- keeps a single
+    # convention regardless of how many lanes the process runs.
+    bridge = build_bridge(cfg, state_path=default_state_path())
     handler = AsyncSocketModeHandler(bridge.app, cfg.slack_app_token)
 
     shutdown_complete = asyncio.Event()
