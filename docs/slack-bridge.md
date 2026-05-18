@@ -285,6 +285,47 @@ updates the team's `personas.yaml` but the running multi-bridge has
 already cached the roster. **Restart the bridge** (`systemctl --user
 restart slack-bridge-multi`) for the new persona to become routable.
 
+#### Cost tracking
+
+The bridge accumulates both router LLM cost and agent LLM cost as
+each thread is dispatched. On graceful shutdown (`SIGTERM` /
+`request_shutdown`) the total is logged:
+
+```
+shutdown requested -- draining 0 in-flight dispatch(es), total LLM spend $0.4231
+```
+
+Useful for spot-checking how much a long-running multi-persona
+deployment is burning. The counter is per-process — it resets on
+every restart.
+
+### Migrating an old threads.json
+
+The bridge's threads.json schema changed in PR4 to include each
+thread's persona. Pre-PR4 entries (bare `"session_id"` strings) have
+no attribution, so per-persona memory filtering ([tiger-memory](tiger-memory.md))
+excludes them under strict mode.
+
+If you have an existing single-tenant bridge that you're migrating to
+multi-persona, run the migration tool once to attribute all old
+entries to a specific persona:
+
+```bash
+# See what would change without writing:
+python -m tigerharness.slack_bridge.migrate \
+    --state-dir ~/.local/state/slack-bridge/shohoku/ \
+    --to ayako --dry-run
+
+# Then run it for real:
+python -m tigerharness.slack_bridge.migrate \
+    --state-dir ~/.local/state/slack-bridge/shohoku/ \
+    --to ayako
+```
+
+After this, all pre-routing entries get a `persona: ayako` field;
+post-routing entries (already in the dict shape) are left alone. The
+tool is idempotent — safe to re-run.
+
 This mirrors the deferred hot-reload decision: lane add/remove also
 requires a restart.
 

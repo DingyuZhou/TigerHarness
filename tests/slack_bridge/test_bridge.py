@@ -566,7 +566,7 @@ class TestReplyPrefixOnBridgeVoice:
         b = self._multi_bridge(tmp_path)
         with _patch(
             "tigerharness.slack_bridge.bridge.detect_persona",
-            new=AsyncMock(return_value="Ayako"),
+            new=AsyncMock(return_value=("Ayako", 0.0)),
         ), _patch(
             "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
         ):
@@ -595,7 +595,7 @@ class TestReplyPrefixOnBridgeVoice:
         b = self._multi_bridge(tmp_path)
         with _patch(
             "tigerharness.slack_bridge.bridge.detect_persona",
-            new=AsyncMock(return_value="Ayako"),
+            new=AsyncMock(return_value=("Ayako", 0.0)),
         ), _patch(
             "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
         ):
@@ -623,7 +623,7 @@ class TestReplyPrefixOnBridgeVoice:
         b = self._multi_bridge(tmp_path)
         with _patch(
             "tigerharness.slack_bridge.bridge.detect_persona",
-            new=AsyncMock(return_value="Ayako"),
+            new=AsyncMock(return_value=("Ayako", 0.0)),
         ), _patch(
             "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
         ):
@@ -638,3 +638,299 @@ class TestReplyPrefixOnBridgeVoice:
         assert "[Ayako]" not in text
         assert "kaboom" in text
         assert "backend error" in text
+
+
+class TestDrainCoversFullDispatch:
+    """``_in_flight`` must cover the router LLM call and session-open,
+    not just the agent run. Otherwise ``wait_for_drain`` can report
+    True with init work still in flight, orphaning subprocesses on
+    SIGTERM."""
+
+    def _multi_bridge(self, tmp_path: Path):
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, SlackBridge, TeamBridgeContext,
+        )
+
+        @dataclass
+        class _Sess:
+            id: str = "sess"
+            async def close(self):
+                return None
+
+        backend = AsyncMock()
+        backend.open_session = AsyncMock(return_value=_Sess())
+        personas = {
+            n: PersonaSlot(name=n, agent_config=AgentConfig(name=n, instructions=n))
+            for n in ("Ayako", "Sakuragi")
+        }
+        team_ctx = TeamBridgeContext(
+            team_name="t", slack_app_token="xapp", slack_bot_token="xoxb",
+            allowed_user_ids=frozenset({"U0CEO"}), agent_cwd=str(tmp_path),
+            personas=personas, default_persona="Ayako",
+        )
+        store = ThreadStore(tmp_path / "threads.json")
+        downloader = MagicMock()
+        downloader.download = AsyncMock(return_value=None)
+        return SlackBridge(
+            team_ctx=team_ctx, backend=backend, store=store, downloader=downloader,
+        )
+
+    @pytest.mark.asyncio
+    async def test_in_flight_bumps_before_router(self, tmp_path: Path):
+        """Hold the dispatch inside the router call and verify
+        ``_in_flight > 0`` while we're there."""
+        from unittest.mock import patch as _patch
+        b = self._multi_bridge(tmp_path)
+        router_started = asyncio.Event()
+        router_done = asyncio.Event()
+
+        async def slow_router(*args, **kwargs):
+            router_started.set()
+            await router_done.wait()
+            return "Ayako", 0.001
+
+        async def fake_run(*args, **kwargs):
+            class _R:
+                final_output = "ok"
+                cost_usd = 0.0
+            return _R()
+
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona", new=slow_router,
+        ), _patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
+        ):
+            say = AsyncMock()
+            event = {
+                "channel_type": "im", "user": "U0CEO",
+                "text": "Hi", "ts": "1.1",
+            }
+            dispatch_task = asyncio.create_task(b.handle_message(event, say))
+            # Wait until we're inside the router call
+            await asyncio.wait_for(router_started.wait(), timeout=2.0)
+            # While the router is running, the dispatch must be counted.
+            assert b._in_flight == 1, (
+                "router call must be inside the drain barrier "
+                "(else SIGTERM leaves orphan subprocesses)"
+            )
+            assert not b._drained.is_set()
+            # Let the router complete and the dispatch finish.
+            router_done.set()
+            await asyncio.wait_for(dispatch_task, timeout=2.0)
+        assert b._in_flight == 0
+        assert b._drained.is_set()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_caught_after_router_returns(self, tmp_path: Path):
+        """If shutdown is requested while the router is running, the
+        dispatch must bail out before running the agent."""
+        from unittest.mock import patch as _patch
+        b = self._multi_bridge(tmp_path)
+        router_started = asyncio.Event()
+
+        async def slow_router(*args, **kwargs):
+            router_started.set()
+            # Let the dispatch wait here until we trigger shutdown.
+            await asyncio.sleep(0.05)
+            return "Ayako", 0.0
+
+        run_called = False
+
+        async def fake_run(*args, **kwargs):
+            nonlocal run_called
+            run_called = True
+            class _R:
+                final_output = "should not be reached"
+                cost_usd = 0.0
+            return _R()
+
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona", new=slow_router,
+        ), _patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
+        ):
+            say = AsyncMock()
+            event = {
+                "channel_type": "im", "user": "U0CEO",
+                "text": "Hi", "ts": "1.1",
+            }
+            dispatch_task = asyncio.create_task(b.handle_message(event, say))
+            await asyncio.wait_for(router_started.wait(), timeout=2.0)
+            # Request shutdown while the router is still running.
+            b.request_shutdown()
+            await asyncio.wait_for(dispatch_task, timeout=2.0)
+        # The agent run should NOT have happened -- bridge bailed out
+        # after the router returned because shutdown was set.
+        assert run_called is False
+        # And `say` should not have been called (no reply posted).
+        say.assert_not_awaited()
+
+
+class TestBridgeCostTracking:
+    """``cost_so_far`` accumulates router LLM + agent LLM spend."""
+
+    def _multi_bridge(self, tmp_path: Path):
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, SlackBridge, TeamBridgeContext,
+        )
+
+        @dataclass
+        class _Sess:
+            id: str = "sess"
+            async def close(self):
+                return None
+
+        backend = AsyncMock()
+        backend.open_session = AsyncMock(return_value=_Sess())
+        personas = {
+            n: PersonaSlot(name=n, agent_config=AgentConfig(name=n, instructions=n))
+            for n in ("Ayako", "Sakuragi")
+        }
+        team_ctx = TeamBridgeContext(
+            team_name="t", slack_app_token="xapp", slack_bot_token="xoxb",
+            allowed_user_ids=frozenset({"U0CEO"}), agent_cwd=str(tmp_path),
+            personas=personas, default_persona="Ayako",
+        )
+        store = ThreadStore(tmp_path / "threads.json")
+        downloader = MagicMock()
+        downloader.download = AsyncMock(return_value=None)
+        return SlackBridge(
+            team_ctx=team_ctx, backend=backend, store=store, downloader=downloader,
+        )
+
+    def test_initial_cost_is_zero(self, tmp_path: Path):
+        b = self._multi_bridge(tmp_path)
+        assert b.cost_so_far == 0.0
+
+    def test_record_cost_accumulates(self, tmp_path: Path):
+        b = self._multi_bridge(tmp_path)
+        b._record_cost(0.001)
+        b._record_cost(0.002)
+        assert b.cost_so_far == pytest.approx(0.003)
+
+    def test_record_cost_tolerates_none(self, tmp_path: Path):
+        """Backends that don't report cost (or transient None results)
+        must not crash dispatch."""
+        b = self._multi_bridge(tmp_path)
+        b._record_cost(None)
+        assert b.cost_so_far == 0.0
+
+    def test_record_cost_tolerates_bad_types(self, tmp_path: Path):
+        """Defensive: a backend returning a string instead of a float
+        should be silently ignored, not crash the bridge."""
+        b = self._multi_bridge(tmp_path)
+        b._record_cost("not-a-number")  # type: ignore[arg-type]
+        assert b.cost_so_far == 0.0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_records_router_and_agent_cost(self, tmp_path: Path):
+        """End-to-end: a full dispatch should accumulate BOTH the router
+        call cost AND the agent call cost on ``cost_so_far``."""
+        from unittest.mock import patch as _patch
+        b = self._multi_bridge(tmp_path)
+
+        async def fake_router(*args, **kwargs):
+            return "Ayako", 0.0010
+
+        async def fake_run(*args, **kwargs):
+            class _R:
+                final_output = "hello"
+                cost_usd = 0.0020
+            return _R()
+
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona", new=fake_router,
+        ), _patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry", new=fake_run,
+        ):
+            say = AsyncMock()
+            event = {
+                "channel_type": "im", "user": "U0CEO",
+                "text": "Hi", "ts": "1.1",
+            }
+            await b.handle_message(event, say)
+        assert b.cost_so_far == pytest.approx(0.0030)
+
+
+class TestGetOrOpenThreadConcurrency:
+    """The router LLM call is intentionally OUTSIDE ``_threads_guard``
+    so multiple new threads on the same bridge can route in parallel.
+    If two coroutines race for the same key, the loser closes its
+    session and uses the winner's state."""
+
+    def _multi_bridge(self, tmp_path: Path):
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, SlackBridge, TeamBridgeContext,
+        )
+
+        # Each open_session returns a DIFFERENT session so we can tell
+        # winner from loser.
+        sessions: list = []
+
+        class _Sess:
+            def __init__(self, sid):
+                self.id = sid
+                self.closed = False
+            async def close(self):
+                self.closed = True
+
+        async def make_session(*args, **kwargs):
+            s = _Sess(f"sess-{len(sessions)}")
+            sessions.append(s)
+            return s
+
+        backend = AsyncMock()
+        backend.open_session = make_session
+
+        personas = {
+            n: PersonaSlot(name=n, agent_config=AgentConfig(name=n, instructions=n))
+            for n in ("Ayako", "Sakuragi")
+        }
+        team_ctx = TeamBridgeContext(
+            team_name="t", slack_app_token="xapp", slack_bot_token="xoxb",
+            allowed_user_ids=frozenset({"U0CEO"}), agent_cwd=str(tmp_path),
+            personas=personas, default_persona="Ayako",
+        )
+        store = ThreadStore(tmp_path / "threads.json")
+        downloader = MagicMock()
+        downloader.download = AsyncMock(return_value=None)
+        b = SlackBridge(
+            team_ctx=team_ctx, backend=backend, store=store, downloader=downloader,
+        )
+        return b, sessions
+
+    @pytest.mark.asyncio
+    async def test_race_loser_closes_its_session(self, tmp_path: Path):
+        """When two coroutines call ``_get_or_open_thread`` for the same
+        key concurrently, both open sessions outside the lock. Only one
+        wins the dict claim; the other must close its session to avoid
+        an orphan subprocess."""
+        from unittest.mock import patch as _patch
+        b, sessions = self._multi_bridge(tmp_path)
+
+        async def fake_router(*args, **kwargs):
+            # Force ordering: both calls progress past the router.
+            await asyncio.sleep(0.01)
+            return "Ayako", 0.0
+
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona", new=fake_router,
+        ):
+            t1 = asyncio.create_task(
+                b._get_or_open_thread("thread-1", "Hi"),
+            )
+            t2 = asyncio.create_task(
+                b._get_or_open_thread("thread-1", "Hi"),
+            )
+            s1, s2 = await asyncio.gather(t1, t2)
+        # Both return the SAME state (winner's).
+        assert s1 is s2
+        # Two sessions were opened (one per coroutine).
+        assert len(sessions) == 2
+        # Exactly one was closed (the loser's). The winner's is still
+        # alive because it's bound to the live _ThreadState.
+        closed = [s for s in sessions if s.closed]
+        assert len(closed) == 1
+        kept = [s for s in sessions if not s.closed]
+        assert len(kept) == 1
+        assert kept[0].id == s1.session.id

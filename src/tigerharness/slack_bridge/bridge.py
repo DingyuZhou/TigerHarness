@@ -174,15 +174,34 @@ class SlackBridge:
         self._drained = asyncio.Event()
         self._drained.set()
 
+        # Running total of LLM USD spent through this bridge. Includes
+        # both router calls (one per new thread) and agent calls (one
+        # per dispatch). Logged on shutdown.
+        self.cost_so_far: float = 0.0
+
         self.app = AsyncApp(token=self._team.slack_bot_token)
         self._register_handlers()
+
+    def _record_cost(self, cost_usd: float | None) -> None:
+        """Accumulate LLM spend. Tolerates ``None`` / missing fields so
+        backends that don't report cost don't crash dispatch."""
+        if cost_usd is None:
+            return
+        try:
+            self.cost_so_far += float(cost_usd)
+        except (TypeError, ValueError):
+            pass
 
     # ----- shutdown -----
 
     def request_shutdown(self) -> None:
         """Signal the bridge to stop accepting new dispatches."""
         if not self._shutting_down.is_set():
-            log.info("shutdown requested -- draining %d in-flight dispatch(es)", self._in_flight)
+            log.info(
+                "shutdown requested -- draining %d in-flight dispatch(es), "
+                "total LLM spend $%.4f",
+                self._in_flight, self.cost_so_far,
+            )
             self._shutting_down.set()
 
     async def wait_for_drain(self, timeout: float = 120.0) -> bool:
@@ -257,12 +276,29 @@ class SlackBridge:
         prompt = augment_prompt(text, attachments)
         prompt = _append_bridge_context(prompt, thread_key, event.get("channel"))
 
-        state = await self._get_or_open_thread(thread_key, text)
-        persona = self._team.personas[state.persona]
-
+        # Reserve a drain slot for the entire dispatch lifecycle -- the
+        # router LLM call, the session open, AND the agent run. Earlier
+        # versions only counted the agent run, so wait_for_drain could
+        # return True with router/init work still in flight, leaving
+        # orphan claude subprocesses on SIGTERM.
         self._in_flight += 1
         self._drained.clear()
         try:
+            state = await self._get_or_open_thread(thread_key, text)
+
+            # The router LLM call took ~500ms-1s. Shutdown may have been
+            # requested while we were waiting for the routing decision.
+            # Bail out before opening claude sessions / running agents
+            # we won't be able to drain in time.
+            if self._shutting_down.is_set():
+                log.info(
+                    "thread=%s aborting dispatch -- shutdown caught after init",
+                    thread_key,
+                )
+                return
+
+            persona = self._team.personas[state.persona]
+
             # Two voices come out of this block:
             #   - persona_body: words from the persona (prefixed in multi mode)
             #   - bridge_body:  bridge-generated message (errors, empty reply --
@@ -295,6 +331,9 @@ class SlackBridge:
                             state.session.id,
                             persona=state.persona,
                         )
+                    # Track LLM spend: agent call cost contributes to the
+                    # bridge's running tally alongside router calls.
+                    self._record_cost(getattr(result, "cost_usd", None))
                     log.info(
                         "thread=%s persona=%s ok (session=%s, cost_usd=%s)",
                         thread_key, state.persona, state.session.id, result.cost_usd,
@@ -345,41 +384,72 @@ class SlackBridge:
         On the first message of a new thread, runs the router to pick
         the active persona. On subsequent messages, reuses whatever was
         stored in ``ThreadStore``.
+
+        Concurrency note: the router LLM call (~500ms-1s) and
+        ``backend.open_session`` (also async) run **outside** the
+        ``_threads_guard`` lock so multiple new threads on the same
+        bridge can initialize in parallel. The lock only wraps the
+        dict claim itself, with a double-check on entry. If two
+        coroutines race for the same key, the loser closes its session
+        and uses the winner's state.
         """
+        # Fast path: thread already in memory. Short critical section.
         async with self._threads_guard:
-            state = self._threads.get(key)
-            if state is not None:
-                return state
+            existing = self._threads.get(key)
+            if existing is not None:
+                return existing
 
-            record = self._store.get_record(key)
-            if record is not None:
-                # Existing thread, resumed from disk.
-                resume_id = record.session_id
-                if record.persona and record.persona in self._team.personas:
-                    persona_name = record.persona
-                else:
-                    # Pre-routing record (persona=None) OR a persona
-                    # since removed from the roster -- fall back to default.
-                    persona_name = self._team.default_persona
-                log.info(
-                    "thread=%s resuming claude session %s (persona=%s)",
-                    key, resume_id, persona_name,
-                )
+        # Slow path: figure out persona + open a session WITHOUT holding
+        # the guard. Multiple new threads can do this work concurrently.
+        record = self._store.get_record(key)
+        if record is not None:
+            # Existing thread, resumed from disk.
+            resume_id: str | None = record.session_id
+            if record.persona and record.persona in self._team.personas:
+                persona_name = record.persona
             else:
-                # Brand-new thread: route the first message to a persona.
-                resume_id = None
-                persona_name = await detect_persona(
-                    self._backend,
-                    first_text,
-                    list(self._team.personas.keys()),
-                    self._team.default_persona,
-                )
-                log.info(
-                    "thread=%s opening new claude session (persona=%s)",
-                    key, persona_name,
-                )
+                # Pre-routing record (persona=None) OR a persona since
+                # removed from the roster -- fall back to default.
+                persona_name = self._team.default_persona
+            log.info(
+                "thread=%s resuming claude session %s (persona=%s)",
+                key, resume_id, persona_name,
+            )
+        else:
+            # Brand-new thread: route the first message to a persona.
+            resume_id = None
+            persona_name, cost = await detect_persona(
+                self._backend,
+                first_text,
+                list(self._team.personas.keys()),
+                self._team.default_persona,
+            )
+            self._record_cost(cost)
+            log.info(
+                "thread=%s opening new claude session (persona=%s)",
+                key, persona_name,
+            )
 
-            session = await self._backend.open_session(resume_id=resume_id)
+        session = await self._backend.open_session(resume_id=resume_id)
+
+        # Claim the slot under lock. Double-check in case another
+        # coroutine raced ahead and inserted while we were in the
+        # slow path -- if so, drop our session and return theirs.
+        async with self._threads_guard:
+            existing = self._threads.get(key)
+            if existing is not None:
+                log.info(
+                    "thread=%s lost init race; discarding spare session",
+                    key,
+                )
+                try:
+                    await session.close()
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    log.warning(
+                        "thread=%s race-loser session.close raised",
+                        key, exc_info=True,
+                    )
+                return existing
             state = _ThreadState(session=session, persona=persona_name)
             self._threads[key] = state
             _trigger_tiger_memory_rebuild(

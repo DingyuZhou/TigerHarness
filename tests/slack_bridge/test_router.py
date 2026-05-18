@@ -149,7 +149,7 @@ class TestDetectPersona:
         result = await detect_persona(
             backend, "Hi there", roster=[], default_persona="ayako"
         )
-        assert result == "ayako"
+        assert result[0] == "ayako"
         backend.open_session.assert_not_called()
 
     @pytest.mark.asyncio
@@ -160,7 +160,7 @@ class TestDetectPersona:
         result = await detect_persona(
             backend, "Hi", roster=["ayako"], default_persona="ayako"
         )
-        assert result == "ayako"
+        assert result[0] == "ayako"
         backend.open_session.assert_not_called()
 
     @pytest.mark.asyncio
@@ -180,7 +180,7 @@ class TestDetectPersona:
             backend, "Hi Sakuragi!", roster=["ayako", "sakuragi"],
             default_persona="ayako",
         )
-        assert result == "sakuragi"
+        assert result[0] == "sakuragi"
 
     @pytest.mark.asyncio
     async def test_default_token_response_returns_default(self, monkeypatch):
@@ -198,7 +198,7 @@ class TestDetectPersona:
             backend, "no name mentioned", roster=["ayako", "sakuragi"],
             default_persona="ayako",
         )
-        assert result == "ayako"
+        assert result[0] == "ayako"
 
     @pytest.mark.asyncio
     async def test_off_roster_response_falls_back_to_default(self, monkeypatch):
@@ -216,7 +216,7 @@ class TestDetectPersona:
             backend, "anything", roster=["ayako", "sakuragi"],
             default_persona="ayako",
         )
-        assert result == "ayako"
+        assert result[0] == "ayako"
 
     @pytest.mark.asyncio
     async def test_backend_failure_falls_back_to_default(self, monkeypatch):
@@ -230,7 +230,7 @@ class TestDetectPersona:
             backend, "Hi", roster=["ayako", "sakuragi"],
             default_persona="ayako",
         )
-        assert result == "ayako"
+        assert result[0] == "ayako"
 
     @pytest.mark.asyncio
     async def test_session_close_failure_does_not_propagate(self, monkeypatch):
@@ -257,7 +257,7 @@ class TestDetectPersona:
             backend, "Hi", roster=["ayako", "sakuragi"],
             default_persona="ayako",
         )
-        assert result == "ayako"
+        assert result[0] == "ayako"
 
     @pytest.mark.asyncio
     async def test_empty_final_output_falls_back(self, monkeypatch):
@@ -277,4 +277,48 @@ class TestDetectPersona:
             backend, "Hi", roster=["ayako", "sakuragi"],
             default_persona="ayako",
         )
-        assert result == "ayako"
+        assert result[0] == "ayako"
+
+    @pytest.mark.asyncio
+    async def test_cost_propagated_from_result(self, monkeypatch):
+        """``detect_persona`` returns ``(persona, cost_usd)`` so the
+        bridge can sum router LLM spend across new threads."""
+        from unittest.mock import AsyncMock, MagicMock
+        backend = MagicMock()
+        backend.open_session = AsyncMock(return_value=_FakeSession())
+
+        async def fake_retry(*a, **kw):
+            return MagicMock(final_output="ayako", cost_usd=0.0042)
+
+        monkeypatch.setattr(
+            "tigerharness.slack_bridge.router.run_with_retry", fake_retry
+        )
+        persona, cost = await detect_persona(
+            backend, "Hi Ayako", roster=["ayako", "sakuragi"],
+            default_persona="ayako",
+        )
+        assert persona == "ayako"
+        assert cost == pytest.approx(0.0042)
+
+    @pytest.mark.asyncio
+    async def test_single_persona_returns_zero_cost(self):
+        """One-persona teams skip the LLM call -- cost must be 0."""
+        from unittest.mock import MagicMock
+        backend = MagicMock()
+        persona, cost = await detect_persona(
+            backend, "Hi", roster=["ayako"], default_persona="ayako",
+        )
+        assert (persona, cost) == ("ayako", 0.0)
+
+    @pytest.mark.asyncio
+    async def test_backend_failure_returns_zero_cost(self):
+        """When the routing call blows up, cost is 0 -- we don't know
+        the real value (no API response), so report 0 rather than guess."""
+        from unittest.mock import AsyncMock, MagicMock
+        backend = MagicMock()
+        backend.open_session = AsyncMock(side_effect=RuntimeError("offline"))
+        persona, cost = await detect_persona(
+            backend, "Hi", roster=["ayako", "sakuragi"],
+            default_persona="ayako",
+        )
+        assert (persona, cost) == ("ayako", 0.0)

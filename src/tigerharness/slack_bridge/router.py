@@ -141,11 +141,13 @@ async def detect_persona(
     message: str,
     roster: list[str],
     default_persona: str,
-) -> str:
+) -> tuple[str, float]:
     """Route the first message of a new thread to a persona.
 
-    Returns a name from *roster* (canonical case), or *default_persona*
-    on any failure path (backend error, off-roster response, empty).
+    Returns ``(persona_name, cost_usd)`` -- the matched persona (or
+    *default_persona* on any failure path), and the actual cost of the
+    routing call (0.0 when the call was skipped or failed before cost
+    could be reported).
 
     *default_persona* must itself be in *roster* -- the loader enforces
     that at startup, but we don't re-check here because the failure
@@ -154,14 +156,14 @@ async def detect_persona(
     if not roster:
         # No personas to route to. Shouldn't happen given loader
         # validation, but be defensive.
-        return default_persona
+        return default_persona, 0.0
 
     # Single-persona teams: skip the LLM call entirely. The routing
     # decision is forced; the awareness preamble in bridge.py still
     # tells the persona about her teammates (zero in this case, so
     # the preamble degenerates).
     if len(roster) == 1:
-        return roster[0]
+        return roster[0], 0.0
 
     cfg = _build_router_config()
     prompt = _format_router_prompt(message, roster)
@@ -183,7 +185,10 @@ async def detect_persona(
             "persona router failed; falling back to default=%s",
             default_persona, exc_info=True,
         )
-        return default_persona
+        return default_persona, 0.0
+
+    # Capture the call cost so the bridge can sum router + agent spend.
+    cost = float(getattr(result, "cost_usd", None) or 0.0)
 
     raw = result.final_output or ""
     matched = _parse_router_response(raw, roster)
@@ -192,8 +197,11 @@ async def detect_persona(
             "router response %r not in roster %s; falling back to default=%s",
             raw[:120], roster, default_persona,
         )
-        return default_persona
+        return default_persona, cost
     if matched == _DEFAULT_TOKEN:
-        return default_persona
-    log.info("router selected persona=%s for message: %r", matched, message[:120])
-    return matched
+        return default_persona, cost
+    log.info(
+        "router selected persona=%s for message: %r (cost_usd=%.6f)",
+        matched, message[:120], cost,
+    )
+    return matched, cost
