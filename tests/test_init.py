@@ -11,10 +11,13 @@ import pytest
 from tigerharness.init import (
     _append_lane_to_slack_bridge_index,
     _append_persona_to_yaml,
+    _auto_init_tiger_memory,
     _command_prefix,
     _format_path,
+    _inject_allowed_user_ids,
     _maybe_register_slack_bridge_lane,
     _prompt_choice,
+    _prompt_optional_text,
     _prompt_text,
     _prompt_yes_no,
     _render_memory_config,
@@ -24,6 +27,7 @@ from tigerharness.init import (
     create_team,
     detect_claude_project_path,
     discover_teams,
+    expected_claude_project_path,
     init,
     list_personas_in_team,
     main,
@@ -164,7 +168,12 @@ class TestDetectClaudeProjectPath:
 
 
 class TestRenderMemoryConfig:
-    def test_uses_placeholder_when_undetected(self, tmp_path: Path):
+    def test_writes_expected_path_when_dir_doesnt_exist_yet(
+        self, tmp_path: Path
+    ):
+        """No claude transcripts dir yet -> still writes the REAL
+        expected path (not a placeholder), so the user doesn't have
+        to come back and edit it once the bridge dispatches."""
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         proj = tmp_path / "tigers"
@@ -173,8 +182,10 @@ class TestRenderMemoryConfig:
             persona="chief", team="tigers",
             project_root=proj, home=fake_home,
         )
-        assert "~/.claude/projects/-home-user-myproject/" in cfg
-        assert "Replace with your Claude Code project path" in cfg
+        encoded = str(proj.resolve()).replace("/", "-")
+        # The REAL expected path appears, not the old placeholder.
+        assert encoded in cfg
+        assert "-home-user-myproject" not in cfg  # never use the placeholder
         assert "name: chief" in cfg
 
     def test_fills_in_detected_path(self, tmp_path: Path):
@@ -190,7 +201,33 @@ class TestRenderMemoryConfig:
             project_root=proj, home=fake_home,
         )
         assert str(transcripts) in cfg
-        assert "Auto-detected from the team root" in cfg
+
+    def test_multi_team_adds_persona_filter_and_slack_source(self, tmp_path: Path):
+        """When multi_team=True, the rendered config includes the
+        persona filter on the claude_code source and a slack_thread
+        source pointing at the bridge's per-team threads.json."""
+        fake_home = tmp_path / "home"
+        proj = tmp_path / "shohoku"
+        proj.mkdir()
+        cfg = _render_memory_config(
+            persona="ayako", team="shohoku",
+            project_root=proj, multi_team=True, home=fake_home,
+        )
+        assert "persona: ayako" in cfg
+        assert "kind: slack_thread" in cfg
+        assert "~/.local/state/slack-bridge/shohoku/threads.json" in cfg
+
+    def test_single_tenant_has_no_persona_filter(self, tmp_path: Path):
+        """multi_team=False keeps the legacy single-source layout."""
+        fake_home = tmp_path / "home"
+        proj = tmp_path / "shohoku"
+        proj.mkdir()
+        cfg = _render_memory_config(
+            persona="ayako", team="shohoku",
+            project_root=proj, multi_team=False, home=fake_home,
+        )
+        assert "persona: ayako" not in cfg
+        assert "kind: slack_thread" not in cfg
         # placeholder text should NOT appear
         assert "-home-user-myproject" not in cfg
 
@@ -491,10 +528,29 @@ class TestInitWithMultiBridgeIndex:
         assert "shohoku/configs/slack-bridge.yaml" in out
         assert "allowed_user_ids" in out
 
-    def test_main_skips_fragment_when_index_missing(
+    def test_main_skips_fragment_when_explicitly_opting_out(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ):
-        # No top-level index -> single-tenant mode.
+        """Legacy single-tenant mode via --no-multi-team. No fragment,
+        no top-level index, no multi-bridge mention in Next steps."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "shohoku",
+            "--yes", "--no-multi-team",
+        ])
+        assert rc == 0
+        fragment = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
+        assert not fragment.exists()
+        assert not (tmp_path / "slack-bridge.yaml").exists()
+        out = capsys.readouterr().out
+        assert "slack-bridge.yaml" not in out
+
+    def test_main_creates_index_by_default_under_yes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ):
+        """The new default: --yes opts into multi-team mode. Both the
+        index file and the per-team fragment get auto-generated."""
         rc = main([
             "--dir", str(tmp_path),
             "--persona", "ayako",
@@ -502,11 +558,16 @@ class TestInitWithMultiBridgeIndex:
             "--yes",
         ])
         assert rc == 0
+        # Top-level index exists with the team registered.
+        idx = tmp_path / "slack-bridge.yaml"
+        assert idx.exists()
+        assert "  - shohoku\n" in idx.read_text()
+        # Per-team fragment exists.
         fragment = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
-        assert not fragment.exists()
+        assert fragment.exists()
+        # Next-steps mentions the fragment.
         out = capsys.readouterr().out
-        # No multi-bridge mention in Next steps when not opted in.
-        assert "slack-bridge.yaml" not in out
+        assert "slack-bridge.yaml" in out
 
 
 # ---------------------------------------------------------------------------
@@ -895,23 +956,25 @@ class TestMain:
     def test_yes_defaults_to_first_existing_team(self, tmp_path: Path):
         """With --yes and no --team, the first existing team is used
         deterministically -- no prompt, no EOFError."""
-        # Seed
+        # Seed (--no-multi-team keeps this test focused on team selection,
+        # not multi-bridge scaffolding)
         main([
             "--dir", str(tmp_path),
             "--persona", "scout",
             "--team", "tigers",
-            "--yes", "--no-memory", "--no-slack",
+            "--yes", "--no-memory", "--no-slack", "--no-multi-team",
         ])
         # Now without --team
         rc = main([
             "--dir", str(tmp_path),
             "--persona", "chief",
-            "--yes", "--no-memory", "--no-slack",
+            "--yes", "--no-memory", "--no-slack", "--no-multi-team",
         ])
         assert rc == 0
         assert (tmp_path / "tigers" / "personas" / "chief" / "prompt.md").exists()
-        # No second team was spuriously created
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["tigers"]
+        # No second team was spuriously created (check directories only).
+        team_dirs = sorted(p.name for p in tmp_path.iterdir() if p.is_dir())
+        assert team_dirs == ["tigers"]
 
     def test_invalid_persona_name_returns_1(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -1008,9 +1071,12 @@ class TestMain:
         assert "Next steps" in out
         assert "tigers/personas/chief/prompt.md" in out
         assert "tigers/configs/.env" in out
-        # tiger-memory subcommand uses --config BEFORE the verb
-        assert "tiger-memory --config" in out
-        assert " init\n" in out  # the 'init' verb is at the end
+        # Memory config gets the auto-init treatment now -- "review",
+        # not "set sources.project_path" or "Initialize memory".
+        assert "tigers/memories/chief/tiger-memory.config.yaml" in out
+        # `tigerharness tiger-memory init` is no longer in the next-steps
+        # because we auto-run it in PR8's UX pass.
+        assert "tiger-memory --config" not in out
         assert "TIGERHARNESS_PERSONAS_CONFIG=tigers/configs/personas.yaml" in out
         assert "task-runner assign --to chief" in out
 
@@ -1019,8 +1085,11 @@ class TestMain:
         monkeypatch: pytest.MonkeyPatch,
     ):
         """In a `uv add` install, `tigerharness` is in .venv/bin (off PATH).
-        The "Next steps" output must prefix the runnable commands with
-        `uv run` so copy-paste from the user's shell actually works."""
+        The "To run tasks" snippet must prefix the runnable command with
+        `uv run` so copy-paste from the user's shell actually works.
+
+        (The `tiger-memory init` line is no longer printed -- auto-run
+        in PR8's UX pass -- so we only check the task-runner snippet.)"""
         from tigerharness import init as init_mod
         monkeypatch.setattr(init_mod.shutil, "which", lambda name: None)
         main([
@@ -1030,14 +1099,8 @@ class TestMain:
             "--yes",
         ])
         out = capsys.readouterr().out
-        assert "uv run tigerharness tiger-memory --config" in out
         assert "uv run tigerharness task-runner assign --to chief" in out
-        # Every `tigerharness <subcommand>` invocation must be prefixed --
-        # if any bare one slipped through, the counts would differ.
-        assert (
-            out.count("tigerharness tiger-memory")
-            == out.count("uv run tigerharness tiger-memory")
-        )
+        # Every `tigerharness <subcommand>` invocation must be prefixed.
         assert (
             out.count("tigerharness task-runner")
             == out.count("uv run tigerharness task-runner")
@@ -1061,42 +1124,48 @@ class TestMain:
             "--yes",
         ])
         out = capsys.readouterr().out
-        assert "tigerharness tiger-memory --config" in out
+        # `tigerharness tiger-memory init` line is no longer printed
+        # (auto-run in PR8); only task-runner remains as a Next Steps hint.
         assert "tigerharness task-runner assign --to chief" in out
         assert "uv run tigerharness" not in out
 
     def test_next_steps_numbering_is_sequential_no_gaps(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ):
-        """Skipping --no-slack must not leave a gap in the numbered list."""
+        """Skipping --no-slack must not leave a gap in the numbered list.
+        Uses --no-multi-team so this test stays focused on slack/memory
+        toggle interaction with the numbering (the multi-team default
+        would add another step that's tested separately).
+
+        Memory auto-init in PR8 removed the separate 'Initialize memory'
+        step; the review hint is now a single optional step."""
         main([
             "--dir", str(tmp_path),
             "--persona", "chief",
             "--team", "tigers",
-            "--no-slack",
+            "--no-slack", "--no-multi-team",
             "--yes",
         ])
         out = capsys.readouterr().out
-        # With slack skipped, memory still on, we expect:
+        # With slack + multi-team skipped, memory still on, we expect:
         #   1. Edit prompt
-        #   2. Edit memory config
-        #   3. Initialize memory
-        # No "4." and no missing "2.".
+        #   2. (Optional) review memory config
+        # No "3." and no missing "2.".
         assert "  1. Edit" in out
-        assert "  2. Edit" in out
-        assert "  3. Initialize" in out
-        assert "  4." not in out
+        assert "  2. (Optional)" in out
+        assert "  3." not in out
         # And no .env step (it was skipped)
         assert "Fill in" not in out
 
     def test_next_steps_minimal_when_no_memory_no_slack(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ):
+        """All toggles off -- single step: edit the persona prompt."""
         main([
             "--dir", str(tmp_path),
             "--persona", "chief",
             "--team", "tigers",
-            "--no-slack", "--no-memory",
+            "--no-slack", "--no-memory", "--no-multi-team",
             "--yes",
         ])
         out = capsys.readouterr().out
@@ -1227,3 +1296,280 @@ class TestDunderMain:
                     alter_sys=True,
                 )
             assert exc_info.value.code == 2
+
+
+class TestExpectedClaudeProjectPath:
+    """``expected_claude_project_path`` always returns a path, even when
+    the encoded dir doesn't exist yet (Claude Code hasn't run there)."""
+
+    def test_returns_encoded_path_for_nonexistent_dir(self, tmp_path: Path):
+        fake_home = tmp_path / "home"
+        proj = tmp_path / "fresh-team"
+        proj.mkdir()
+        result = expected_claude_project_path(proj, home=fake_home)
+        encoded = str(proj.resolve()).replace("/", "-")
+        assert result == fake_home / ".claude" / "projects" / encoded
+        assert not result.exists()
+
+
+class TestPromptOptionalText:
+    def test_empty_input_returns_empty(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(builtins, "input", lambda _: "")
+        assert _prompt_optional_text("anything") == ""
+
+    def test_returns_stripped_input(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(builtins, "input", lambda _: "  hello  ")
+        assert _prompt_optional_text("q") == "hello"
+
+
+class TestInjectAllowedUserIds:
+    """Rewrites the placeholder in a freshly-generated slack-bridge
+    fragment with a real YAML list of user IDs."""
+
+    _PLACEHOLDER = (
+        "allowed_user_ids: []  "
+        "# TODO: add at least one user ID before starting the bridge"
+    )
+
+    def test_writes_yaml_list_replacing_placeholder(self, tmp_path: Path):
+        frag = tmp_path / "slack-bridge.yaml"
+        frag.write_text(f"persona: ayako\n{self._PLACEHOLDER}\nstate_dir: /x\n")
+        _inject_allowed_user_ids(frag, "U0ABC, U0DEF, U0GHI")
+        content = frag.read_text()
+        assert "allowed_user_ids:\n  - U0ABC\n  - U0DEF\n  - U0GHI" in content
+        # Placeholder line gone.
+        assert self._PLACEHOLDER not in content
+
+    def test_empty_csv_is_no_op(self, tmp_path: Path):
+        frag = tmp_path / "slack-bridge.yaml"
+        original = f"persona: x\n{self._PLACEHOLDER}\n"
+        frag.write_text(original)
+        _inject_allowed_user_ids(frag, "   ,  ,")  # all blank
+        assert frag.read_text() == original
+
+    def test_no_placeholder_means_no_op(self, tmp_path: Path):
+        """If the fragment already has a populated allowlist, don't
+        touch it -- avoids stomping on user edits."""
+        frag = tmp_path / "slack-bridge.yaml"
+        original = "allowed_user_ids:\n  - U0EXISTING\n"
+        frag.write_text(original)
+        _inject_allowed_user_ids(frag, "U0NEW")
+        assert frag.read_text() == original
+
+    def test_strips_whitespace_around_each_id(self, tmp_path: Path):
+        frag = tmp_path / "slack-bridge.yaml"
+        frag.write_text(f"persona: x\n{self._PLACEHOLDER}\n")
+        _inject_allowed_user_ids(frag, "  U0A  ,U0B  ,  U0C")
+        content = frag.read_text()
+        assert "  - U0A\n" in content
+        assert "  - U0B\n" in content
+        assert "  - U0C\n" in content
+
+
+class TestAutoInitTigerMemory:
+    """``_auto_init_tiger_memory`` spawns a subprocess to run
+    ``tiger-memory init`` for a freshly-generated config. Failures are
+    non-fatal (warn + continue) so a missing CLI doesn't break the
+    main init flow."""
+
+    def test_runs_subprocess_with_correct_args(self, tmp_path: Path):
+        from unittest.mock import patch as _patch, MagicMock
+        cfg = tmp_path / "mem.yaml"
+        cfg.write_text("agent: {name: x, role: x}\n")
+        with _patch(
+            "tigerharness.init.subprocess.run",
+            return_value=MagicMock(returncode=0),
+        ) as run_mock:
+            _auto_init_tiger_memory(cfg)
+        run_mock.assert_called_once()
+        cmd = run_mock.call_args[0][0]
+        assert "tigerharness" in cmd
+        assert "tiger-memory" in cmd
+        assert "init" in cmd
+        assert str(cfg) in cmd
+
+    def test_subprocess_failure_logs_warning_doesnt_raise(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        from unittest.mock import patch as _patch
+        import subprocess
+        cfg = tmp_path / "mem.yaml"
+        cfg.write_text("x")
+        with _patch(
+            "tigerharness.init.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, cmd=["x"]),
+        ):
+            _auto_init_tiger_memory(cfg)  # should not raise
+        err = capsys.readouterr().err
+        assert "warning:" in err
+        assert "auto-init" in err
+
+    def test_timeout_is_caught(self, tmp_path: Path, capsys: pytest.CaptureFixture):
+        from unittest.mock import patch as _patch
+        import subprocess
+        cfg = tmp_path / "mem.yaml"
+        cfg.write_text("x")
+        with _patch(
+            "tigerharness.init.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["x"], timeout=30),
+        ):
+            _auto_init_tiger_memory(cfg)
+        assert "warning:" in capsys.readouterr().err
+
+    def test_oserror_is_caught(self, tmp_path: Path, capsys: pytest.CaptureFixture):
+        """e.g. command not found"""
+        from unittest.mock import patch as _patch
+        cfg = tmp_path / "mem.yaml"
+        cfg.write_text("x")
+        with _patch(
+            "tigerharness.init.subprocess.run",
+            side_effect=OSError("No such file"),
+        ):
+            _auto_init_tiger_memory(cfg)
+        assert "warning:" in capsys.readouterr().err
+
+
+class TestMainPromptsForUserIds:
+    """Interactive flow: when init creates a slack-bridge fragment, main
+    prompts for user IDs. ``--yes`` skips the prompt; empty input
+    leaves the placeholder; populated input rewrites the file."""
+
+    def test_yes_skips_prompt(self, tmp_path: Path):
+        """--yes mode never prompts -- fragment stays with empty list."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "shohoku",
+            "--yes",
+        ])
+        assert rc == 0
+        frag = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
+        assert "allowed_user_ids: []" in frag.read_text()
+
+    def test_interactive_prompt_populates_fragment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Without --yes, the prompt fires and populates the fragment."""
+        # Pre-create the index so init() goes straight into multi-team
+        # mode without firing the multi-team-mode prompt.
+        (tmp_path / "slack-bridge.yaml").write_text("")
+        responses = iter([
+            "n",                     # tiger-memory init prompt (skip memory)
+            "n",                     # slack .env prompt (skip slack -- so the
+                                     #   user-IDs prompt is the only stdin read
+                                     #   we expect, not interleaved with others)
+            "U0ABC,U0DEF",           # allowed_user_ids prompt
+        ])
+        monkeypatch.setattr(builtins, "input", lambda _: next(responses))
+        # We need to bypass the auto tiger-memory init subprocess to
+        # avoid hitting the venv -- not relevant to this test.
+        with patch("tigerharness.init.subprocess.run"):
+            rc = main([
+                "--dir", str(tmp_path),
+                "--persona", "ayako",
+                "--team", "shohoku",
+            ])
+        assert rc == 0
+        frag = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
+        content = frag.read_text()
+        assert "  - U0ABC\n" in content
+        assert "  - U0DEF\n" in content
+        assert "allowed_user_ids: []" not in content
+
+    def test_interactive_prompt_empty_leaves_placeholder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        (tmp_path / "slack-bridge.yaml").write_text("")
+        responses = iter(["n", "n", ""])
+        monkeypatch.setattr(builtins, "input", lambda _: next(responses))
+        with patch("tigerharness.init.subprocess.run"):
+            rc = main([
+                "--dir", str(tmp_path),
+                "--persona", "ayako",
+                "--team", "shohoku",
+            ])
+        assert rc == 0
+        frag = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
+        assert "allowed_user_ids: []" in frag.read_text()
+
+
+class TestMultiTeamEnvTemplate:
+    """In multi-team mode, the generated .env has tokens only -- the
+    allowlist lives in the yaml fragment (single source of truth)."""
+
+    def test_multi_team_env_omits_allowed_user_ids(self, tmp_path: Path):
+        (tmp_path / "slack-bridge.yaml").write_text("")
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "shohoku",
+            "--yes",
+        ])
+        assert rc == 0
+        env = (tmp_path / "shohoku" / "configs" / ".env").read_text()
+        assert "ALLOWED_SLACK_USER_IDS" not in env
+        assert "SLACK_APP_TOKEN" in env
+        assert "SLACK_BOT_TOKEN" in env
+
+    def test_legacy_env_keeps_allowed_user_ids(self, tmp_path: Path):
+        """--no-multi-team uses the legacy template, which still bundles
+        the allowlist for backwards compat with single-tenant users."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "shohoku",
+            "--yes", "--no-multi-team",
+        ])
+        assert rc == 0
+        env = (tmp_path / "shohoku" / "configs" / ".env").read_text()
+        assert "ALLOWED_SLACK_USER_IDS" in env
+
+    def test_multi_team_explicit_flag_works_without_yes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """`--multi-team` works without `--yes`; covers the elif branch
+        in main()."""
+        responses = iter(["n", "n", ""])
+        monkeypatch.setattr(builtins, "input", lambda _: next(responses))
+        with patch("tigerharness.init.subprocess.run"):
+            rc = main([
+                "--dir", str(tmp_path),
+                "--persona", "ayako",
+                "--team", "shohoku",
+                "--multi-team",
+            ])
+        assert rc == 0
+        assert (tmp_path / "slack-bridge.yaml").exists()
+
+    def test_interrupted_user_ids_prompt_leaves_placeholder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """If the user Ctrl-C's the user-IDs prompt, treat it as 'skip
+        for now' rather than aborting the whole init."""
+        # Pre-create the index so we go straight to multi-team mode.
+        (tmp_path / "slack-bridge.yaml").write_text("")
+        responses = [
+            "n",     # memory prompt -> skip
+            "n",     # slack .env prompt -> skip
+        ]
+        idx = iter(responses)
+
+        def _input(_prompt):
+            try:
+                return next(idx)
+            except StopIteration:
+                # We've exhausted scripted responses -- the next call
+                # is the user-IDs prompt. Simulate Ctrl-C.
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(builtins, "input", _input)
+        with patch("tigerharness.init.subprocess.run"):
+            rc = main([
+                "--dir", str(tmp_path),
+                "--persona", "ayako",
+                "--team", "shohoku",
+            ])
+        # init succeeded; fragment still has the placeholder.
+        assert rc == 0
+        frag = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
+        assert "allowed_user_ids: []" in frag.read_text()

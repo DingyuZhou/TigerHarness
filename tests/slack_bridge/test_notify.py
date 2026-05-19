@@ -370,3 +370,116 @@ class TestDotenvLoading:
         _load_slack_bridge_dotenv()
         import os
         assert os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-root"
+
+
+class TestResolveTargetUserIdFromYaml:
+    """In multi-team mode, the canonical user-id source is the team's
+    `configs/slack-bridge.yaml`. Notify's target-user resolution
+    consults that yaml between the explicit env override and the
+    legacy `ALLOWED_SLACK_USER_IDS` env var."""
+
+    def test_yaml_used_when_present(self, monkeypatch, tmp_path):
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text(
+            "persona: ayako\n"
+            "allowed_user_ids:\n"
+            "  - U0FROM_YAML\n"
+            "  - U0SECOND\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.delenv("ALLOWED_SLACK_USER_IDS", raising=False)
+        assert _resolve_target_user_id() == "U0FROM_YAML"
+
+    def test_env_override_beats_yaml(self, monkeypatch, tmp_path):
+        """Explicit `SLACK_CEO_USER_ID` env still wins over yaml --
+        operators have an escape hatch for emergency rerouting."""
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text(
+            "allowed_user_ids:\n  - U0YAML\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SLACK_CEO_USER_ID", "U0OVERRIDE")
+        assert _resolve_target_user_id() == "U0OVERRIDE"
+
+    def test_yaml_beats_legacy_env_var(self, monkeypatch, tmp_path):
+        """Yaml is preferred over the legacy `ALLOWED_SLACK_USER_IDS`
+        so multi-team users have a single source of truth."""
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text(
+            "allowed_user_ids:\n  - U0YAML\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0LEGACY")
+        assert _resolve_target_user_id() == "U0YAML"
+
+    def test_falls_back_to_legacy_env_when_no_yaml(self, monkeypatch, tmp_path):
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0LEGACY,U0OTHER")
+        assert _resolve_target_user_id() == "U0LEGACY"
+
+    def test_yaml_missing_file_falls_back_gracefully(
+        self, monkeypatch, tmp_path,
+    ):
+        """If the yaml doesn't exist, fall through to env var. No crash."""
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        monkeypatch.chdir(tmp_path)  # no configs/ dir at all
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0FALLBACK")
+        assert _resolve_target_user_id() == "U0FALLBACK"
+
+    def test_yaml_with_empty_allowlist_falls_through(
+        self, monkeypatch, tmp_path,
+    ):
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text("allowed_user_ids: []\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0FALLBACK")
+        assert _resolve_target_user_id() == "U0FALLBACK"
+
+    def test_yaml_malformed_falls_through(self, monkeypatch, tmp_path):
+        """Broken YAML -- don't crash, just fall through."""
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text("[ not valid yaml")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0FALLBACK")
+        assert _resolve_target_user_id() == "U0FALLBACK"
+
+    def test_yaml_non_mapping_top_level_falls_through(
+        self, monkeypatch, tmp_path,
+    ):
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text("- a\n- list\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0FALLBACK")
+        assert _resolve_target_user_id() == "U0FALLBACK"
+
+    def test_yaml_allowed_ids_not_list_falls_through(
+        self, monkeypatch, tmp_path,
+    ):
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text("allowed_user_ids: U0ABC\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0FALLBACK")
+        assert _resolve_target_user_id() == "U0FALLBACK"

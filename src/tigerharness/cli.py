@@ -31,8 +31,12 @@ def main(argv: list[str] | None = None) -> int:
         from .tiger_memory.cli import main as tm_main
         return tm_main(rest)
     elif cmd in ("slack-bridge", "slack_bridge", "sb"):
-        # slack-bridge doesn't have a CLI dispatcher -- it runs as a daemon.
-        # Forward to notify sub-CLI for now.
+        # Sub-dispatch:
+        #   slack-bridge gen-service ...  -> render a systemd user unit
+        #   slack-bridge text/file ...    -> forward to the notify CLI
+        if rest and rest[0] in ("gen-service", "gen_service"):
+            from .slack_bridge.gen_service import main as gs_main
+            return gs_main(rest[1:])
         from .slack_bridge.notify import main as notify_main
         return notify_main(rest)
     elif cmd in ("--help", "-h", "help"):

@@ -380,7 +380,24 @@ If a lane's drain times out, the others still get their full window and the proc
 
 ### Systemd unit
 
-See [`examples/slack-bridge-multi.service`](../examples/slack-bridge-multi.service) for a template. Key differences from the single-team unit:
+The fastest path: have tigerharness generate a unit file customized
+for your machine — absolute paths baked in, no `%h` specifiers, no
+manual editing.
+
+```bash
+cd ~/projects/teams
+uv run tigerharness slack-bridge gen-service \
+    > ~/.config/systemd/user/slack-bridge-multi.service
+
+systemctl --user daemon-reload
+systemctl --user enable --now slack-bridge-multi.service
+```
+
+`gen-service` is Linux-only. On other platforms it prints a friendly
+message and returns 1 (you'd write your own launchd plist / Docker
+recipe / whatever fits your stack).
+
+The reference [`examples/slack-bridge-multi.service`](../examples/slack-bridge-multi.service) (with `%h` specifiers) is also available if you'd rather copy + adapt by hand. Key invariants either way:
 
 - `EnvironmentFile=` points at a small `.env` containing only `TIGERHARNESS_BRIDGES_CONFIG=...` (per-lane tokens live in each team's `.env`, referenced by the YAML).
 - `TimeoutStopSec=120` still applies; the 90 s drain budget is shared across lanes (concurrent), not per-lane.
