@@ -542,18 +542,23 @@ def _append_lane_to_slack_bridge_index(
 
 
 def _maybe_register_slack_bridge_lane(
-    search_root: Path, team_dir: Path, team: str, persona: str
+    search_root: Path, team_dir: Path, team: str, persona: str,
+    *, enabled: bool = True,
 ) -> list[Path]:
-    """When a top-level ``slack-bridge.yaml`` index exists in
-    *search_root*, write the per-team fragment (idempotent) and append
-    the team to the index (idempotent).
+    """When multi-team mode is enabled AND the top-level
+    ``slack-bridge.yaml`` index exists in *search_root*, write the
+    per-team fragment (idempotent) and append the team to the index
+    (idempotent).
 
-    Returning an empty list when the index is absent is the signal that
-    the user hasn't opted into multi-team mode -- single-tenant is the
-    default. To enable multi-team mode, the user creates
-    ``<search_root>/slack-bridge.yaml`` (even an empty file is fine);
-    subsequent ``tigerharness init`` runs will auto-register every team.
+    *enabled* short-circuits the entire operation. This matters when an
+    index exists from a previous run but the caller explicitly opted
+    THIS team out (``--no-multi-team``): without ``enabled=False`` we'd
+    register the team as a lane while ``create_team`` / ``add_persona``
+    wrote single-tenant artifacts -- a half-and-half state the bridge
+    can't safely load.
     """
+    if not enabled:
+        return []
     index_path = search_root / "slack-bridge.yaml"
     if not index_path.exists():
         return []
@@ -711,16 +716,57 @@ def init(
             include_slack = _prompt_yes_no(
                 "Generate Slack-bridge .env template?", default=True
             )
+
+    # Multi-team mode is conditional on Slack -- no point asking a
+    # non-Slack user about a Slack feature. When include_multi_team is
+    # None (scripted default OR interactive-no-flag), gate the decision
+    # on whether Slack is going to be set up:
+    #   - No slack  -> no multi-team (deterministic, no prompt).
+    #   - Slack on  -> check existing index, else prompt.
+    # Callers can pass `include_multi_team=True` to force an opt-in
+    # even without Slack (advanced: pre-creating the index before
+    # Slack apps are ready).
+    if include_multi_team is None:
+        if not include_slack:
+            include_multi_team = False
+        elif index_path.exists():
+            include_multi_team = True
+        else:
+            try:
+                include_multi_team = _prompt_yes_no(
+                    "Enable multi-team Slack mode? (One bridge serves "
+                    "many teams; recommended)",
+                    default=True,
+                )
+            except (EOFError, KeyboardInterrupt):
+                # Re-raise so main()'s handler catches it like other
+                # interrupted prompts.
+                raise
+
+    if include_multi_team and not include_slack:
+        # Unusual but allowed: pre-creating the multi-team index before
+        # Slack apps are configured. Surface a warning so a typo doesn't
+        # silently land the user in a half-set-up state they can't run.
+        print(
+            "warning: --multi-team is on but --no-slack is set. The "
+            "index will be created, but the bridge can't run without "
+            "Slack tokens. Enable Slack later (manually fill in "
+            "configs/.env) or re-run init for this team with `--slack`.",
+            file=sys.stderr,
+        )
+
+    if include_multi_team and not index_path.exists():
+        index_path.write_text("", encoding="utf-8")
+        created.append(index_path)
+
     if include_memory is None:
         include_memory = _prompt_yes_no(
             f"Initialize tiger-memory for {persona}?", default=True
         )
 
     # 4. create
-    # `created` was initialized at the top so the multi-team opt-in step
-    # could already have appended the index file.
     is_new_team = not (final_team_dir / "configs" / "personas.yaml").exists()
-    is_multi_team = index_path.exists()
+    is_multi_team = include_multi_team
     if is_new_team:
         created.extend(create_team(
             final_team_dir,
@@ -746,10 +792,13 @@ def init(
         if p not in created:
             created.append(p)
 
-    # 5. multi-lane slack-bridge auto-registration (only when the user
-    # has opted in by creating a top-level slack-bridge.yaml).
+    # 5. multi-lane slack-bridge auto-registration. Gated on
+    # *include_multi_team* (and the index file's existence) so that
+    # `--no-multi-team` doesn't half-register a team into an existing
+    # multi-team index while writing single-tenant artifacts elsewhere.
     for p in _maybe_register_slack_bridge_lane(
-        root, final_team_dir, team, persona
+        root, final_team_dir, team, persona,
+        enabled=bool(include_multi_team),
     ):
         if p not in created:
             created.append(p)
@@ -905,26 +954,23 @@ def main(argv: list[str] | None = None) -> int:
             # prompting: first existing team, or "tigers" if none exist.
             team_kw = existing[0].name if existing else "tigers"
 
+    # Multi-team mode resolution: only honor explicit flags here; the
+    # interactive prompt (and the no-slack auto-skip) live in init() so
+    # the question is asked AFTER slack has been decided.
+    multi_team_kw: bool | None
+    if args.no_multi_team:
+        multi_team_kw = False
+    elif args.multi_team:
+        multi_team_kw = True
+    elif args.yes:
+        # --yes accepts the recommended default, but only if Slack is
+        # also being set up. `--yes --no-slack` opts out of both.
+        multi_team_kw = (slack_kw is not False)
+    else:
+        # Interactive: defer to init()'s slack-gated decision.
+        multi_team_kw = None
+
     try:
-        # Multi-team-mode decision happens inside the try block so that
-        # KeyboardInterrupt / EOFError on the prompt is caught by the
-        # same handler that catches them on other prompts inside init().
-        multi_team_kw: bool | None
-        if args.no_multi_team:
-            multi_team_kw = False
-        elif args.multi_team:
-            multi_team_kw = True
-        elif args.yes:
-            multi_team_kw = True
-        elif (search_root / "slack-bridge.yaml").exists():
-            # Index already exists -- nothing to ask.
-            multi_team_kw = True
-        else:
-            multi_team_kw = _prompt_yes_no(
-                "Enable multi-team Slack mode? (One bridge serves many "
-                "teams; recommended)",
-                default=True,
-            )
         team_dir, persona, created = init(
             persona=persona_kw,
             team=team_kw,

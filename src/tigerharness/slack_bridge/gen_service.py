@@ -48,9 +48,13 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory={teams_root}
 
-# Refuse to start if the venv vanished (e.g. user wiped .venv but
-# forgot to `uv sync`). Better a clear failure than a confused crash.
-ExecStartPre=/run/current-system/sw/bin/test -x {venv_python}
+# If the venv is missing or corrupt, systemd will fail at ExecStart
+# with status=203/EXEC and name the missing binary in the journal.
+# (Earlier versions of this template carried an `ExecStartPre=test`
+# pre-check, but `test`'s absolute path varies by distro -- the
+# NixOS path leaked into the template and broke on every other
+# distro. Dropping the duplicate check is portable + the systemd
+# error is already clear.)
 ExecStart={venv_python} -m tigerharness.slack_bridge
 
 Restart=on-failure
