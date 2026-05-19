@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "TigerHarness"
-version = "0.1.4"
+version = "0.2.0"
 description = "A generic Claude Code agent harness: iterative task execution, Slack integration, and persistent memory management."
 readme = "README.md"
 license = "MIT"
