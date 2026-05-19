@@ -182,15 +182,27 @@ class SlackBridge:
         self.app = AsyncApp(token=self._team.slack_bot_token)
         self._register_handlers()
 
-    def _record_cost(self, cost_usd: float | None) -> None:
-        """Accumulate LLM spend. Tolerates ``None`` / missing fields so
-        backends that don't report cost don't crash dispatch."""
+    def _record_cost(self, cost_usd: object) -> None:
+        """Accumulate LLM spend.
+
+        Accepts ``object`` (not ``float | None``) on purpose: backends
+        from arbitrary vendors may report cost in unexpected shapes
+        (``None``, missing field, ``Decimal``, even a string). We
+        prefer "log and drop" over crashing dispatch, since the only
+        consequence of a missed update is a slightly-low spend total.
+        """
         if cost_usd is None:
             return
         try:
             self.cost_so_far += float(cost_usd)
         except (TypeError, ValueError):
-            pass
+            # Logged so a "why is my cost reading low" investigation
+            # has a thread to pull. Debug level: not a user-facing
+            # error, just an unusual backend payload.
+            log.debug(
+                "ignoring cost_usd of unexpected type %s: %r",
+                type(cost_usd).__name__, cost_usd,
+            )
 
     # ----- shutdown -----
 
@@ -435,6 +447,11 @@ class SlackBridge:
         # Claim the slot under lock. Double-check in case another
         # coroutine raced ahead and inserted while we were in the
         # slow path -- if so, drop our session and return theirs.
+        # Critical: session.close() can take 10s of ms on claude_p
+        # (subprocess teardown), so we capture the loser session
+        # under lock but await its close OUTSIDE the lock -- otherwise
+        # we'd block other claimants on cleanup work.
+        loser_session: Session | None = None
         async with self._threads_guard:
             existing = self._threads.get(key)
             if existing is not None:
@@ -442,21 +459,25 @@ class SlackBridge:
                     "thread=%s lost init race; discarding spare session",
                     key,
                 )
-                try:
-                    await session.close()
-                except Exception:  # noqa: BLE001 - best-effort cleanup
-                    log.warning(
-                        "thread=%s race-loser session.close raised",
-                        key, exc_info=True,
-                    )
-                return existing
-            state = _ThreadState(session=session, persona=persona_name)
-            self._threads[key] = state
-            _trigger_tiger_memory_rebuild(
-                self._team.personas[persona_name],
-                self._team.tiger_memory_cli,
-                key,
-            )
+                loser_session = session
+                state = existing
+            else:
+                state = _ThreadState(session=session, persona=persona_name)
+                self._threads[key] = state
+                _trigger_tiger_memory_rebuild(
+                    self._team.personas[persona_name],
+                    self._team.tiger_memory_cli,
+                    key,
+                )
+
+        if loser_session is not None:
+            try:
+                await loser_session.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                log.warning(
+                    "thread=%s race-loser session.close raised",
+                    key, exc_info=True,
+                )
         return state
 
 

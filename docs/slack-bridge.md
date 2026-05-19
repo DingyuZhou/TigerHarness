@@ -326,6 +326,20 @@ After this, all pre-routing entries get a `persona: ayako` field;
 post-routing entries (already in the dict shape) are left alone. The
 tool is idempotent — safe to re-run.
 
+> **Important: stop the bridge before migrating.** Both the bridge
+> and the migration tool write `threads.json` atomically, but they
+> don't coordinate with each other. If the bridge writes a new entry
+> between the migration tool's read and write, that entry gets
+> clobbered by the migration's older snapshot — you'd lose the
+> attribution for whatever conversation just happened. To migrate
+> safely:
+>
+> ```bash
+> systemctl --user stop slack-bridge-multi
+> python -m tigerharness.slack_bridge.migrate --state-dir <path> --to <persona>
+> systemctl --user start slack-bridge-multi
+> ```
+
 This mirrors the deferred hot-reload decision: lane add/remove also
 requires a restart.
 
