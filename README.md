@@ -82,9 +82,17 @@ persistent memory and the official SDK backend.
 
 ### Scaffold a team and its first persona
 
-`tigerharness init` is interactive — it walks you through picking (or
-creating) a team and adding a persona inside it. Every persona always
-belongs to a team, and a team is a self-contained directory:
+`tigerharness init` is interactive — it walks you through:
+
+1. Multi-team Slack mode (recommended for new setups) — opt in or out.
+2. Persona name + team.
+3. Slack `.env` template + memory config (optional toggles).
+4. Slack user-ID allowlist for the team's bridge bot (optional).
+
+The memory store is auto-initialized for each new persona and the
+Claude Code transcripts path is auto-detected from the team root, so
+the user never has to come back and edit placeholders. Every persona
+always belongs to a team, and a team is a self-contained directory:
 
 ```
 tigers/

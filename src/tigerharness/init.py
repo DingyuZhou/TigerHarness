@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -64,7 +65,7 @@ End with "Next steps" if the work suggests follow-up.
 """
 
 _ENV_TEMPLATE = """\
-# Slack bridge environment variables
+# Slack bridge environment variables (legacy single-tenant template).
 # Fill in your tokens from https://api.slack.com/apps
 
 # Required: Slack app-level token (starts with xapp-)
@@ -78,6 +79,23 @@ ALLOWED_SLACK_USER_IDS=U0123ABCDEF
 
 # Optional: working directory for the Claude agent
 TIGERHARNESS_AGENT_CWD=.
+"""
+
+# Multi-team .env: tokens only. The allowlist lives in
+# `configs/slack-bridge.yaml`'s `allowed_user_ids` field -- one source
+# of truth in multi-team mode. The notify CLI also reads from there
+# (via cwd/configs/slack-bridge.yaml auto-discovery).
+_ENV_TEMPLATE_MULTI_TEAM = """\
+# Slack bridge environment variables (multi-team mode).
+# Fill in your tokens from https://api.slack.com/apps.
+# In this mode, the allowlist lives in configs/slack-bridge.yaml --
+# this file is for SECRETS only.
+
+# Required: Slack app-level token (starts with xapp-)
+SLACK_APP_TOKEN=xapp-1-your-app-token
+
+# Required: Slack bot token (starts with xoxb-)
+SLACK_BOT_TOKEN=xoxb-your-bot-token
 """
 
 _PERSONAS_YAML_HEADER = """\
@@ -124,9 +142,7 @@ store:
   root: .
 
 sources:
-  - kind: claude_code
-    project_path: {project_path}
-{project_path_comment}\
+{sources_block}\
 summarizer:
   backend: anthropic
   model: claude-sonnet-4-6
@@ -139,15 +155,13 @@ rebuild:
   rebuild_timeout_minutes: 60
 """
 
-_PROJECT_PATH_PLACEHOLDER = "~/.claude/projects/-home-user-myproject/"
-_PROJECT_PATH_PLACEHOLDER_COMMENT = (
-    "    # ^ Replace with your Claude Code project path.\n"
-    "    #   Find yours under ~/.claude/projects/ -- the directory name\n"
-    "    #   encodes the absolute project path with dashes replacing slashes.\n"
-)
 _PROJECT_PATH_DETECTED_COMMENT = (
-    "    # ^ Auto-detected from the team root. Override if the persona\n"
-    "    #   reads transcripts from a different Claude Code project.\n"
+    "    # ^ Auto-detected: Claude Code transcripts dir for this team.\n"
+    "    #   Override if this persona reads from a different project.\n"
+)
+_PROJECT_PATH_EXPECTED_COMMENT = (
+    "    # ^ Where Claude Code WILL write transcripts for this team.\n"
+    "    #   The dir is created on the first claude_p dispatch.\n"
 )
 
 _SKILLS_README = """\
@@ -303,12 +317,35 @@ def detect_claude_project_path(
     return candidate if candidate.is_dir() else None
 
 
+def expected_claude_project_path(
+    project_root: Path, *, home: Path | None = None
+) -> Path:
+    """Compute where Claude Code WILL write transcripts for *project_root*,
+    whether or not the directory exists yet.
+
+    Useful when scaffolding a fresh team: the agent hasn't run yet, so
+    the encoded dir doesn't exist, but we know exactly where it will
+    appear once the bridge dispatches its first message. Writing the
+    real path now means the user never has to come back and edit it.
+    """
+    abs_root = project_root.resolve()
+    encoded = str(abs_root).replace("/", "-")
+    return (home or Path.home()) / ".claude" / "projects" / encoded
+
+
 # ---------------------------------------------------------------------------
 # Team / persona scaffolding
 # ---------------------------------------------------------------------------
 
-def create_team(team_dir: Path, *, include_slack: bool) -> list[Path]:
-    """Create the empty scaffold for a team. Returns paths created."""
+def create_team(
+    team_dir: Path, *, include_slack: bool, multi_team: bool = False,
+) -> list[Path]:
+    """Create the empty scaffold for a team. Returns paths created.
+
+    *multi_team* selects which .env template to use: the multi-team
+    one carries tokens only (allowlist lives in the yaml fragment),
+    the legacy one bundles the allowlist via ``ALLOWED_SLACK_USER_IDS``.
+    """
     created: list[Path] = []
 
     gi = team_dir / ".gitignore"
@@ -321,7 +358,8 @@ def create_team(team_dir: Path, *, include_slack: bool) -> list[Path]:
 
     if include_slack:
         env = team_dir / "configs" / ".env"
-        if _write_if_missing(env, _ENV_TEMPLATE):
+        template = _ENV_TEMPLATE_MULTI_TEAM if multi_team else _ENV_TEMPLATE
+        if _write_if_missing(env, template):
             created.append(env)
 
     skills = team_dir / "skills" / "README.md"
@@ -363,24 +401,56 @@ def _append_persona_to_yaml(
 
 def _render_memory_config(
     *, persona: str, team: str, project_root: Path,
+    multi_team: bool = False,
     home: Path | None = None,
 ) -> str:
     """Render the per-persona tiger-memory config.
 
-    If a Claude Code transcripts directory exists for *project_root*,
-    fill it in; otherwise emit the placeholder + 'fill me in' comment.
+    Always produces a real project_path (auto-detected if the Claude
+    Code transcripts dir already exists, or computed-from-team-root if
+    not). The user never has to come back and fix a placeholder.
+
+    When *multi_team* is True (i.e. the slack-bridge multi-mode index
+    exists), also adds the ``persona:`` filter on the claude_code
+    source and a ``slack_thread`` source pointing at the bridge's
+    threads.json -- so the memory store ingests only this persona's
+    Slack conversations.
     """
     detected = detect_claude_project_path(project_root, home=home)
     if detected is not None:
         project_path = f"{detected}/"
         comment = _PROJECT_PATH_DETECTED_COMMENT
     else:
-        project_path = _PROJECT_PATH_PLACEHOLDER
-        comment = _PROJECT_PATH_PLACEHOLDER_COMMENT
+        # Even when the transcripts dir doesn't exist yet, emit the
+        # correct expected path -- it'll exist as soon as the agent runs.
+        project_path = f"{expected_claude_project_path(project_root, home=home)}/"
+        comment = _PROJECT_PATH_EXPECTED_COMMENT
+
+    if multi_team:
+        sources_block = (
+            f"  - kind: claude_code\n"
+            f"    project_path: {project_path}\n"
+            f"{comment}"
+            f"    # Filter: only ingest threads where the bridge stored\n"
+            f"    # persona == \"{persona}\". Excludes other personas' threads\n"
+            f"    # and unattributed local `claude -p` sessions (strict mode).\n"
+            f"    persona: {persona}\n"
+            f"  - kind: slack_thread\n"
+            f"    # The bridge's per-team state file -- provides the\n"
+            f"    # session_id -> (thread_ts, persona) reverse map used\n"
+            f"    # by the per-persona filter above.\n"
+            f"    threads_json: ~/.local/state/slack-bridge/{team}/threads.json\n"
+        )
+    else:
+        sources_block = (
+            f"  - kind: claude_code\n"
+            f"    project_path: {project_path}\n"
+            f"{comment}"
+        )
+
     return _MEMORY_CONFIG_TEMPLATE.format(
         persona=persona, team=team,
-        project_path=project_path,
-        project_path_comment=comment,
+        sources_block=sources_block,
     )
 
 
@@ -390,11 +460,15 @@ def add_persona(
     *,
     include_memory: bool,
     description: str = "",
+    multi_team: bool = False,
     home: Path | None = None,
 ) -> list[Path]:
     """Add a persona to a team. Returns paths created or updated.
 
     *home* overrides ``~`` for Claude transcripts detection (testing).
+    *multi_team* indicates the slack-bridge index exists -- when True,
+    the per-persona memory config is generated with the ``persona:``
+    filter + a ``slack_thread`` source pointing at the bridge's state.
 
     Raises ValueError if the persona's prompt already exists.
     """
@@ -422,7 +496,7 @@ def add_persona(
             mem_cfg,
             _render_memory_config(
                 persona=persona, team=team_dir.name,
-                project_root=team_dir, home=home,
+                project_root=team_dir, multi_team=multi_team, home=home,
             ),
         ):
             created.append(mem_cfg)
@@ -509,6 +583,13 @@ def _prompt_text(question: str, default: str = "") -> str:
             return default
 
 
+def _prompt_optional_text(question: str) -> str:
+    """Prompt for free-form text; empty input returns ``""``. Unlike
+    ``_prompt_text``, doesn't loop on empty input -- used for opt-in
+    fields where ``[skip]`` is a valid answer."""
+    return input(f"{question}: ").strip()
+
+
 def _prompt_yes_no(question: str, default: bool = True) -> bool:
     suffix = "Y/n" if default else "y/N"
     while True:
@@ -550,6 +631,7 @@ def init(
     team_dir: Path | None = None,
     include_memory: bool | None = None,
     include_slack: bool | None = None,
+    include_multi_team: bool | None = None,
     search_root: Path | None = None,
     home: Path | None = None,
 ) -> tuple[Path, str, list[Path]]:
@@ -563,6 +645,19 @@ def init(
         ValueError: persona already exists in the team.
     """
     root = (search_root or Path.cwd()).resolve()
+    created: list[Path] = []
+
+    # 0. multi-team mode opt-in.
+    # When *include_multi_team* is True and no top-level slack-bridge.yaml
+    # index exists yet, touch it so `_maybe_register_slack_bridge_lane`
+    # downstream picks up the team. ``None`` (scripted-default) preserves
+    # legacy single-tenant behavior; ``False`` is the explicit opt-out.
+    # Interactive prompting happens in `main()` so callers (tests,
+    # importing scripts) of `init()` don't hit stdin reads.
+    index_path = root / "slack-bridge.yaml"
+    if include_multi_team and not index_path.exists():
+        index_path.write_text("", encoding="utf-8")
+        created.append(index_path)
 
     # 1. persona name
     if persona is None:
@@ -622,17 +717,30 @@ def init(
         )
 
     # 4. create
-    created: list[Path] = []
+    # `created` was initialized at the top so the multi-team opt-in step
+    # could already have appended the index file.
     is_new_team = not (final_team_dir / "configs" / "personas.yaml").exists()
+    is_multi_team = index_path.exists()
     if is_new_team:
-        created.extend(create_team(final_team_dir, include_slack=include_slack))
+        created.extend(create_team(
+            final_team_dir,
+            include_slack=include_slack,
+            multi_team=is_multi_team,
+        ))
     elif include_slack:
-        if _write_if_missing(env_path, _ENV_TEMPLATE):
+        env_template = _ENV_TEMPLATE_MULTI_TEAM if is_multi_team else _ENV_TEMPLATE
+        if _write_if_missing(env_path, env_template):
             created.append(env_path)
 
+    # Memory config wiring depends on whether multi-team mode is on:
+    # when on, the per-persona memory config gets the ``persona:`` filter
+    # + slack_thread source so each persona's memory store only ingests
+    # threads belonging to that persona. (`is_multi_team` was already
+    # computed above in the create-team step.)
     for p in add_persona(
         final_team_dir, persona,
         include_memory=include_memory,
+        multi_team=is_multi_team,
         home=home,
     ):
         if p not in created:
@@ -646,7 +754,68 @@ def init(
         if p not in created:
             created.append(p)
 
+    # 6. Auto-init the persona's memory store. The bridge starts firing
+    # rebuilds on the very first thread, so the archive/journal/briefing
+    # dirs need to exist BEFORE the bridge dispatches anything. Doing
+    # this here saves the user from running `tiger-memory init` by hand.
+    if include_memory:
+        mem_cfg = (
+            final_team_dir / "memories" / persona / "tiger-memory.config.yaml"
+        )
+        if mem_cfg.exists():
+            _auto_init_tiger_memory(mem_cfg)
+
     return final_team_dir, persona, created
+
+
+def _inject_allowed_user_ids(fragment_path: Path, raw_csv: str) -> None:
+    """Replace the ``allowed_user_ids: []`` placeholder in *fragment_path*
+    with a real YAML list parsed from *raw_csv*. Idempotent: if the line
+    already has a populated list, this is a no-op."""
+    ids = [u.strip() for u in raw_csv.split(",") if u.strip()]
+    if not ids:
+        return
+    text = fragment_path.read_text(encoding="utf-8")
+    placeholder = (
+        "allowed_user_ids: []  "
+        "# TODO: add at least one user ID before starting the bridge"
+    )
+    if placeholder not in text:
+        return  # already populated or template diverged -- don't touch
+    yaml_list = "allowed_user_ids:\n" + "\n".join(f"  - {u}" for u in ids)
+    text = text.replace(placeholder, yaml_list)
+    fragment_path.write_text(text, encoding="utf-8")
+
+
+def _auto_init_tiger_memory(mem_cfg: Path) -> None:
+    """Run ``tiger-memory init`` via subprocess for *mem_cfg*.
+
+    Subprocess (not direct import) keeps init.py decoupled from
+    tiger-memory's lifecycle internals and means we use the exact
+    same code path users invoke by hand. Failures are logged but
+    non-fatal -- the user can always re-run `tiger-memory init`.
+    """
+    try:
+        subprocess.run(
+            [
+                sys.executable, "-m", "tigerharness", "tiger-memory",
+                "--config", str(mem_cfg), "init",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        # Non-fatal: print a hint so the user can fix it manually.
+        # We use print not logging so this surfaces alongside the
+        # interactive scaffolder's other output.
+        print(
+            f"warning: auto-init of tiger-memory store failed "
+            f"({type(exc).__name__}); run by hand: "
+            f"tigerharness tiger-memory --config {mem_cfg} init",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +853,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the Slack-bridge .env template.",
     )
     parser.add_argument(
+        "--multi-team",
+        action="store_true",
+        help="Enable multi-team Slack mode (creates the top-level "
+             "slack-bridge.yaml index). Skips the prompt.",
+    )
+    parser.add_argument(
+        "--no-multi-team",
+        action="store_true",
+        help="Stay in legacy single-tenant mode. Skips the prompt.",
+    )
+    parser.add_argument(
         "--yes", "-y",
         action="store_true",
         help="Accept defaults non-interactively. Defaults to persona "
@@ -716,7 +896,6 @@ def main(argv: list[str] | None = None) -> int:
         slack_kw = True
     else:
         slack_kw = None
-
     if args.yes:
         if not persona_kw:
             persona_kw = "assistant"
@@ -727,12 +906,32 @@ def main(argv: list[str] | None = None) -> int:
             team_kw = existing[0].name if existing else "tigers"
 
     try:
+        # Multi-team-mode decision happens inside the try block so that
+        # KeyboardInterrupt / EOFError on the prompt is caught by the
+        # same handler that catches them on other prompts inside init().
+        multi_team_kw: bool | None
+        if args.no_multi_team:
+            multi_team_kw = False
+        elif args.multi_team:
+            multi_team_kw = True
+        elif args.yes:
+            multi_team_kw = True
+        elif (search_root / "slack-bridge.yaml").exists():
+            # Index already exists -- nothing to ask.
+            multi_team_kw = True
+        else:
+            multi_team_kw = _prompt_yes_no(
+                "Enable multi-team Slack mode? (One bridge serves many "
+                "teams; recommended)",
+                default=True,
+            )
         team_dir, persona, created = init(
             persona=persona_kw,
             team=team_kw,
             team_dir=team_dir_kw,
             include_memory=memory_kw,
             include_slack=slack_kw,
+            include_multi_team=multi_team_kw,
             search_root=search_root,
         )
     except ValueError as e:
@@ -750,6 +949,22 @@ def main(argv: list[str] | None = None) -> int:
     for p in created:
         print(f"  {_format_path(p, search_root)}")
 
+    # Interactive prompt for Slack user IDs when we just generated a
+    # multi-bridge fragment. Skip in --yes mode (scripted callers) and
+    # when the fragment already existed (don't re-prompt). Empty input
+    # leaves the placeholder; user can fill it in later by hand.
+    sb_fragment = team_dir / "configs" / "slack-bridge.yaml"
+    if not args.yes and sb_fragment in created:
+        try:
+            ids_raw = _prompt_optional_text(
+                "\nSlack user IDs allowed to DM this bot "
+                "(comma-separated, blank to skip)"
+            )
+        except (EOFError, KeyboardInterrupt):
+            ids_raw = ""
+        if ids_raw:
+            _inject_allowed_user_ids(sb_fragment, ids_raw)
+
     print()
     print("Next steps:")
     prefix = _command_prefix()
@@ -762,10 +977,12 @@ def main(argv: list[str] | None = None) -> int:
     mem_cfg = team_dir / "memories" / persona / "tiger-memory.config.yaml"
     if mem_cfg.exists():
         mem_rel = _format_path(mem_cfg, search_root)
-        steps.append(f"Edit {mem_rel} -- set sources.project_path")
-        # `--config` is a top-level option, must precede the `init` subcommand.
+        # project_path is auto-detected (or filled with the expected path)
+        # and the memory store has been auto-init'd. Tell the user it's
+        # ready -- "review" is opt-in, not required.
         steps.append(
-            f"Initialize memory: {prefix}tigerharness tiger-memory --config {mem_rel} init"
+            f"(Optional) review {mem_rel} -- agent name/role, "
+            f"summarizer model, idle threshold"
         )
     # Multi-lane slack-bridge: nudge the user to fill in the fragment.
     sb_fragment = team_dir / "configs" / "slack-bridge.yaml"

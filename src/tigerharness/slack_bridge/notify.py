@@ -65,15 +65,51 @@ def _load_slack_bridge_dotenv() -> None:
 
 
 def _resolve_target_user_id() -> str | None:
-    """Explicit override -> first allowlisted user -> None."""
+    """Resolution order: explicit env override -> multi-team yaml ->
+    legacy env var -> None.
+
+    The yaml step covers the multi-team team-folder layout: when an
+    agent runs from a team root, ``configs/slack-bridge.yaml`` carries
+    the authoritative ``allowed_user_ids`` -- the bridge's allowlist
+    and notify's "who do I DM?" choice should agree.
+    """
     override = os.environ.get("SLACK_CEO_USER_ID", "").strip()
     if override:
         return override
+    from_yaml = _first_allowed_user_from_yaml(Path.cwd() / "configs" / "slack-bridge.yaml")
+    if from_yaml:
+        return from_yaml
     allow = os.environ.get("ALLOWED_SLACK_USER_IDS", "")
     for entry in allow.split(","):
         entry = entry.strip()
         if entry:
             return entry
+    return None
+
+
+def _first_allowed_user_from_yaml(path: Path) -> str | None:
+    """Best-effort read of ``allowed_user_ids[0]`` from a slack-bridge
+    fragment. Returns ``None`` on any failure (missing file, parse
+    error, no pyyaml installed, empty list) so the caller falls back
+    to the env-var path."""
+    if not path.exists():
+        return None
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    ids = data.get("allowed_user_ids")
+    if not isinstance(ids, list):
+        return None
+    for entry in ids:
+        if isinstance(entry, str) and entry.strip():
+            return entry.strip()
     return None
 
 

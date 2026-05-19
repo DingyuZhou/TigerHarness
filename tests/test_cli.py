@@ -56,6 +56,22 @@ def test_slack_bridge_dispatch(monkeypatch):
         main(["sb"])
 
 
+def test_slack_bridge_gen_service_dispatch(monkeypatch, tmp_path, capsys):
+    """`tigerharness slack-bridge gen-service ...` routes to the
+    gen_service subcommand (not the notify CLI)."""
+    monkeypatch.chdir(tmp_path)
+    from unittest.mock import patch as _patch
+    with _patch(
+        "tigerharness.slack_bridge.gen_service._is_linux", return_value=True,
+    ):
+        rc = main(["sb", "gen-service"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # gen-service emits a systemd unit, not a notify error.
+    assert "[Unit]" in out
+    assert "tigerharness.slack_bridge" in out
+
+
 def test_help_alias(capsys):
     ret = main(["help"])
     assert ret == 0
