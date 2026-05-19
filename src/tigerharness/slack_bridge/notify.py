@@ -87,16 +87,38 @@ def _resolve_target_user_id() -> str | None:
     return None
 
 
+# Module-level sentinel: log the pyyaml-missing diagnostic at most once
+# per process. Repeated logging would spam long-running task-runner
+# jobs that call notify many times.
+_PYYAML_MISSING_LOGGED = False
+
+
 def _first_allowed_user_from_yaml(path: Path) -> str | None:
     """Best-effort read of ``allowed_user_ids[0]`` from a slack-bridge
     fragment. Returns ``None`` on any failure (missing file, parse
     error, no pyyaml installed, empty list) so the caller falls back
-    to the env-var path."""
+    to the env-var path.
+
+    Diagnostic note: when pyyaml is missing, the yaml-driven path is
+    silently unavailable. A user with only ``[slack]`` installed (no
+    ``[memory]``) would wonder why their fragment's ``allowed_user_ids``
+    isn't being read. Logging at DEBUG (once per process, via the
+    ``_PYYAML_MISSING_LOGGED`` sentinel) gives them a trail to follow.
+    """
     if not path.exists():
         return None
     try:
         import yaml  # type: ignore[import-untyped]
     except ImportError:
+        global _PYYAML_MISSING_LOGGED
+        if not _PYYAML_MISSING_LOGGED:
+            log.debug(
+                "pyyaml not installed; skipping yaml-based allowlist lookup at %s. "
+                "Install with `pip install 'tigerharness[memory]'` (or just pyyaml) "
+                "to use the per-team slack-bridge.yaml as a single source of truth.",
+                path,
+            )
+            _PYYAML_MISSING_LOGGED = True
         return None
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))

@@ -483,3 +483,66 @@ class TestResolveTargetUserIdFromYaml:
         monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
         monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0FALLBACK")
         assert _resolve_target_user_id() == "U0FALLBACK"
+
+    def test_missing_pyyaml_logs_debug_message(
+        self, monkeypatch, tmp_path, caplog,
+    ):
+        """When pyyaml is missing, the yaml lookup silently falls
+        through -- BUT logs at DEBUG with install instructions so a
+        diagnostic session can find the trail."""
+        import sys
+        import logging
+        from tigerharness.slack_bridge import notify as notify_mod
+        from tigerharness.slack_bridge.notify import (
+            _first_allowed_user_from_yaml,
+        )
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text(
+            "allowed_user_ids:\n  - U0YAML\n"
+        )
+        # Reset the once-only sentinel so the test isn't affected by
+        # previous tests in the same process.
+        monkeypatch.setattr(notify_mod, "_PYYAML_MISSING_LOGGED", False)
+        # Block `yaml` so the lazy import raises ImportError.
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        with caplog.at_level(logging.DEBUG, logger="tigerharness.slack_bridge.notify"):
+            result = _first_allowed_user_from_yaml(
+                tmp_path / "configs" / "slack-bridge.yaml"
+            )
+        assert result is None
+        # Diagnostic message must include install instructions so the
+        # user can figure out what to do.
+        joined = " ".join(rec.message for rec in caplog.records)
+        assert "pyyaml" in joined.lower()
+        assert "tigerharness" in joined  # part of `pip install '...'`
+
+    def test_missing_pyyaml_logs_at_most_once(
+        self, monkeypatch, tmp_path, caplog,
+    ):
+        """Long-running processes (e.g., task-runner jobs calling
+        notify many times) shouldn't spam the same diagnostic. The
+        module-level sentinel keeps logging to once per process."""
+        import sys
+        import logging
+        from tigerharness.slack_bridge import notify as notify_mod
+        from tigerharness.slack_bridge.notify import (
+            _first_allowed_user_from_yaml,
+        )
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text(
+            "allowed_user_ids:\n  - U0YAML\n"
+        )
+        monkeypatch.setattr(notify_mod, "_PYYAML_MISSING_LOGGED", False)
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        path = tmp_path / "configs" / "slack-bridge.yaml"
+        with caplog.at_level(logging.DEBUG, logger="tigerharness.slack_bridge.notify"):
+            for _ in range(5):
+                _first_allowed_user_from_yaml(path)
+        pyyaml_msgs = [
+            rec for rec in caplog.records if "pyyaml" in rec.message.lower()
+        ]
+        assert len(pyyaml_msgs) == 1, (
+            f"expected 1 pyyaml-missing log over 5 calls, got {len(pyyaml_msgs)}"
+        )

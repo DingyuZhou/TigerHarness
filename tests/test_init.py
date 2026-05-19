@@ -652,6 +652,7 @@ class TestInitNonInteractive:
             team="tigers",
             include_memory=True,
             include_slack=True,
+            include_multi_team=False,  # scripted: opt out, don't prompt
             search_root=tmp_path,
         )
         assert persona == "chief"
@@ -731,10 +732,11 @@ class TestInitNonInteractive:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """Re-running init on a team whose .env exists must not re-ask."""
-        # Seed team with .env
+        # Seed team with .env (include_multi_team=False to avoid prompt)
         init(
             persona="chief", team="tigers",
             include_memory=False, include_slack=True,
+            include_multi_team=False,
             search_root=tmp_path,
         )
         # Now add scout interactively: only memory should be asked.
@@ -755,6 +757,7 @@ class TestInitNonInteractive:
             team="tigers",
             include_memory=False,
             include_slack=False,
+            include_multi_team=False,
             search_root=tmp_path,
         )
         # Add scout WITH slack now -- .env should appear
@@ -763,6 +766,7 @@ class TestInitNonInteractive:
             team="tigers",
             include_memory=False,
             include_slack=True,
+            include_multi_team=False,
             search_root=tmp_path,
         )
         assert (team_dir / "configs" / ".env").exists()
@@ -819,17 +823,25 @@ class TestInitInteractive:
     def test_full_interactive_no_existing_teams(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        """Interactive prompts in order: persona name -> team name ->
+        slack y/n -> multi-team y/n (gated on slack) -> memory y/n."""
         answers = iter([
             "chief",     # persona name
             "tigers",    # team name (new)
             "y",         # slack? yes
+            "y",         # multi-team? yes (only asked because slack=yes)
             "y",         # memory? yes
         ])
         monkeypatch.setattr(builtins, "input", lambda _: next(answers))
-        team_dir, persona, created = init(search_root=tmp_path)
+        # Mock the tiger-memory init subprocess so this test doesn't try
+        # to invoke the real CLI (which would need the venv).
+        with patch("tigerharness.init.subprocess.run"):
+            team_dir, persona, created = init(search_root=tmp_path)
         assert persona == "chief"
         assert team_dir.name == "tigers"
         assert (team_dir / "personas" / "chief" / "prompt.md").exists()
+        # Multi-team was enabled -> index exists.
+        assert (tmp_path / "slack-bridge.yaml").exists()
 
     def test_interactive_picks_existing_team(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1449,20 +1461,17 @@ class TestMainPromptsForUserIds:
     def test_interactive_prompt_populates_fragment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
-        """Without --yes, the prompt fires and populates the fragment."""
-        # Pre-create the index so init() goes straight into multi-team
-        # mode without firing the multi-team-mode prompt.
+        """Without --yes, the prompt fires and populates the fragment.
+        Pre-create the index so multi-team auto-resolves to True when
+        slack=yes (no separate multi-team prompt fires)."""
         (tmp_path / "slack-bridge.yaml").write_text("")
         responses = iter([
-            "n",                     # tiger-memory init prompt (skip memory)
-            "n",                     # slack .env prompt (skip slack -- so the
-                                     #   user-IDs prompt is the only stdin read
-                                     #   we expect, not interleaved with others)
+            "y",                     # slack .env? yes -> fragment will be made
+            "n",                     # memory? no
             "U0ABC,U0DEF",           # allowed_user_ids prompt
         ])
         monkeypatch.setattr(builtins, "input", lambda _: next(responses))
-        # We need to bypass the auto tiger-memory init subprocess to
-        # avoid hitting the venv -- not relevant to this test.
+        # Bypass tiger-memory init subprocess; we said no memory anyway.
         with patch("tigerharness.init.subprocess.run"):
             rc = main([
                 "--dir", str(tmp_path),
@@ -1480,7 +1489,8 @@ class TestMainPromptsForUserIds:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
         (tmp_path / "slack-bridge.yaml").write_text("")
-        responses = iter(["n", "n", ""])
+        # Same order as above: slack -> memory -> user-IDs.
+        responses = iter(["y", "n", ""])
         monkeypatch.setattr(builtins, "input", lambda _: next(responses))
         with patch("tigerharness.init.subprocess.run"):
             rc = main([
@@ -1541,6 +1551,152 @@ class TestMultiTeamEnvTemplate:
         assert rc == 0
         assert (tmp_path / "slack-bridge.yaml").exists()
 
+    def test_yes_with_no_slack_skips_multi_team(self, tmp_path: Path):
+        """`--yes --no-slack`: --yes accepts defaults BUT only when
+        slack is on. With slack opted out, multi-team is gated off
+        (no index, no fragment)."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "shohoku",
+            "--yes", "--no-slack",
+        ])
+        assert rc == 0
+        assert not (tmp_path / "slack-bridge.yaml").exists()
+        assert not (tmp_path / "shohoku" / "configs" / "slack-bridge.yaml").exists()
+
+    def test_yes_with_explicit_multi_team_overrides_no_slack(self, tmp_path: Path):
+        """`--yes --no-slack --multi-team`: the explicit --multi-team
+        flag overrides the slack-gating. Advanced users can pre-create
+        the index before having Slack apps ready."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "shohoku",
+            "--yes", "--no-slack", "--multi-team",
+        ])
+        assert rc == 0
+        # Index gets created because --multi-team is explicit.
+        assert (tmp_path / "slack-bridge.yaml").exists()
+
+
+class TestInitMultiTeamGating:
+    """``init()`` only prompts for multi-team when Slack is on. With
+    Slack opted out, multi-team is deterministically False -- no prompt."""
+
+    def test_no_slack_means_no_prompt_for_multi_team(self, tmp_path: Path):
+        """Direct init() call, scripted, include_slack=False ->
+        include_multi_team auto-resolves to False without prompting."""
+        team_dir, persona, created = init(
+            persona="chief", team="tigers",
+            include_memory=False,
+            include_slack=False,
+            # include_multi_team intentionally omitted (None)
+            search_root=tmp_path,
+        )
+        # No index because slack-gated decision -> False
+        assert not (tmp_path / "slack-bridge.yaml").exists()
+        # No per-team fragment either.
+        assert not (team_dir / "configs" / "slack-bridge.yaml").exists()
+
+    def test_slack_on_index_exists_means_no_prompt(self, tmp_path: Path):
+        """If the index already exists, multi-team is implicit -- no
+        prompt even with include_multi_team=None and include_slack=True."""
+        (tmp_path / "slack-bridge.yaml").write_text("")
+        with patch("tigerharness.init.subprocess.run"):
+            team_dir, _, _ = init(
+                persona="chief", team="tigers",
+                include_memory=False,
+                include_slack=True,
+                # include_multi_team intentionally omitted
+                search_root=tmp_path,
+            )
+        # Index still there + fragment got auto-registered.
+        assert (tmp_path / "slack-bridge.yaml").exists()
+        assert (team_dir / "configs" / "slack-bridge.yaml").exists()
+
+    def test_explicit_multi_team_overrides_no_slack(self, tmp_path: Path):
+        """Caller passes include_multi_team=True with include_slack=False.
+        The explicit override wins -- the index gets created even
+        without slack."""
+        init(
+            persona="chief", team="tigers",
+            include_memory=False,
+            include_slack=False,
+            include_multi_team=True,
+            search_root=tmp_path,
+        )
+        assert (tmp_path / "slack-bridge.yaml").exists()
+
+    def test_no_multi_team_with_existing_index_does_not_register_lane(
+        self, tmp_path: Path,
+    ):
+        """Bug fix: if an index exists from a prior run, passing
+        --no-multi-team for THIS team must NOT register it as a lane.
+        Otherwise we get a half-state: single-tenant .env + memory
+        config, but the team appears in the multi-bridge index."""
+        # Pre-create the index (simulating an earlier multi-team setup).
+        (tmp_path / "slack-bridge.yaml").write_text(
+            "lanes:\n  - existing-team\n"
+        )
+        # Now add a team WITHOUT multi-team scaffolding.
+        with patch("tigerharness.init.subprocess.run"):
+            team_dir, _, _ = init(
+                persona="solo", team="loner",
+                include_memory=True,
+                include_slack=True,
+                include_multi_team=False,
+                search_root=tmp_path,
+            )
+        # No per-team fragment.
+        assert not (team_dir / "configs" / "slack-bridge.yaml").exists()
+        # Team NOT appended to the index.
+        idx = (tmp_path / "slack-bridge.yaml").read_text()
+        assert "  - loner\n" not in idx
+        # The pre-existing entry survives untouched.
+        assert "  - existing-team\n" in idx
+
+    def test_explicit_multi_team_without_slack_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """--multi-team + --no-slack is unusual but allowed. We print
+        a warning to stderr so a typo doesn't leave the user confused."""
+        init(
+            persona="chief", team="tigers",
+            include_memory=False,
+            include_slack=False,
+            include_multi_team=True,
+            search_root=tmp_path,
+        )
+        err = capsys.readouterr().err
+        assert "warning:" in err
+        assert "Slack" in err
+
+    def test_index_exists_writes_memory_config_with_persona_filter(
+        self, tmp_path: Path,
+    ):
+        """Test gap from review: when the index pre-exists AND
+        include_slack=True AND include_multi_team=None (resolves to
+        True via auto-detect), the memory config gets the persona
+        filter and the slack_thread source. This is the path most
+        real users will hit when adding a 2nd persona to an
+        existing multi-team setup."""
+        # Pre-create the index.
+        (tmp_path / "slack-bridge.yaml").write_text("")
+        with patch("tigerharness.init.subprocess.run"):
+            team_dir, _, _ = init(
+                persona="ayako", team="shohoku",
+                include_memory=True,
+                include_slack=True,
+                # include_multi_team omitted -> auto-resolved by init
+                search_root=tmp_path,
+            )
+        mem = (team_dir / "memories" / "ayako" / "tiger-memory.config.yaml").read_text()
+        assert "persona: ayako" in mem
+        assert "kind: slack_thread" in mem
+        assert "threads_json:" in mem
+
+
     def test_interrupted_user_ids_prompt_leaves_placeholder(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
@@ -1549,8 +1705,8 @@ class TestMultiTeamEnvTemplate:
         # Pre-create the index so we go straight to multi-team mode.
         (tmp_path / "slack-bridge.yaml").write_text("")
         responses = [
+            "y",     # slack .env prompt -> yes (so fragment gets made)
             "n",     # memory prompt -> skip
-            "n",     # slack .env prompt -> skip
         ]
         idx = iter(responses)
 
