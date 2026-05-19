@@ -764,6 +764,11 @@ class TestDrainCoversFullDispatch:
         assert run_called is False
         # And `say` should not have been called (no reply posted).
         say.assert_not_awaited()
+        # Critical: the early-bail path must still decrement `_in_flight`
+        # via the dispatch's `finally`. If it doesn't, `wait_for_drain`
+        # would block forever and orchestrator shutdown would time out.
+        assert b._in_flight == 0
+        assert b._drained.is_set()
 
 
 class TestBridgeCostTracking:
