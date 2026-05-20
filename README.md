@@ -62,7 +62,7 @@ you don't use:
 
 | Extra | Pulls in | Enables / required for |
 |---|---|---|
-| *(none)* | — | `init` scaffolder, `task-runner` with the default `claude -p` subprocess backend |
+| *(none)* | — | `init` scaffolder, `dismiss` teardown, `task-runner` with the default `claude -p` subprocess backend |
 | `[anthropic]` | `claude-agent-sdk` | The official Claude Agent SDK backend (`anthropic_sdk`) |
 | `[slack]` | `slack-bolt`, `aiohttp`, `python-dotenv` | `slack-bridge` (Slack Socket Mode DM bridge) |
 | `[memory]` | `pyyaml` | `tiger-memory` (per-persona persistent memory; substring search only) |
@@ -126,6 +126,37 @@ tigerharness init --persona scout --team tigers --yes
 # Skip Slack or memory generation
 tigerharness init --persona chief --team tigers --no-memory --no-slack --yes
 ```
+
+### Tear down a team or persona
+
+`tigerharness dismiss` is the symmetric counterpart of `init` — it
+removes a team (or a single persona inside a team) and all of the
+associated state: configs, prompts, per-persona memory data, the
+multi-team index entry, and — for the *last* team in a multi-team
+setup — the `slack-bridge-multi` systemd user unit too.
+
+The command is always interactive and gated behind two confirmations
+(a backup acknowledgement and a type-the-name check), so it's hard to
+fire by accident:
+
+```bash
+# Walks you through: pick team-or-persona → preview → backup confirm
+# → type the name → execute. Out of scope: deleting the Slack app on
+# api.slack.com (the command prints a manual reminder).
+tigerharness dismiss
+
+# Same flow but exits after the preview — useful for checking what
+# would happen without touching anything.
+tigerharness dismiss --dry-run
+```
+
+Refusals are deliberate, not bugs:
+
+- Dismissing the **last** persona of a team is refused — use team-level
+  dismissal instead, or add another persona first.
+- Dismissing a persona that's the team's `default_persona` in the
+  Slack-bridge fragment is refused — pick a new default in the fragment
+  first, then re-run.
 
 ### Task runner
 
