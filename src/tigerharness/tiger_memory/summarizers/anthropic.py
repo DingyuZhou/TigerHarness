@@ -12,10 +12,28 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
+from pathlib import Path
 
 from tigerharness.agent_sdk import AgentConfig, get_backend, run_with_retry
 
 from .base import Summarizer, SummarizerError
+
+
+# Default cwd for `claude -p` subprocesses spawned by this summarizer.
+# Isolating cwd matters: `claude -p` writes its session transcript to
+# ~/.claude/projects/<slug(cwd)>/<uuid>.jsonl. If cwd is the same project
+# the adapter is reading from, those transcripts become "new" source
+# records the next rebuild will try to summarize -- a feedback loop that
+# can rack up thousands of self-referential calls. Pointing cwd at a
+# dedicated scratch dir routes the summarizer's own transcripts into a
+# separate project slug the adapter never sees.
+#
+# Known limitation: nothing prunes ~/.claude/projects/-tmp-tiger-memory-claude/
+# over time. The loop is broken but the scratch slug grows unboundedly.
+# Periodic cleanup should land alongside the broader rebuild redesign
+# (cost cap + scope cutoff + output validation).
+_DEFAULT_TRANSCRIPT_CWD = Path(tempfile.gettempdir()) / "tiger-memory-claude"
 
 
 # Public price table — refresh as Anthropic publishes new numbers.
@@ -38,18 +56,23 @@ class AnthropicSummarizer(Summarizer):
         prompts_dir: str = "default/v1",
         max_attempts: int = 3,
         prices_per_m_tokens: dict | None = None,
+        transcript_cwd: str | os.PathLike | None = None,
     ):
         super().__init__()
         self.model = model
         self.prompts_dir = prompts_dir
         self.max_attempts = max_attempts
         self.prices = prices_per_m_tokens or _PRICES_PER_M_TOKENS
+        self.transcript_cwd = Path(
+            transcript_cwd if transcript_cwd is not None else _DEFAULT_TRANSCRIPT_CWD
+        )
         # Lazy backend init so import doesn't require claude CLI on path.
         self._backend = None
 
     def _get_backend(self):
         if self._backend is None:
-            self._backend = get_backend("claude_p")
+            self.transcript_cwd.mkdir(parents=True, exist_ok=True)
+            self._backend = get_backend("claude_p", cwd=str(self.transcript_cwd))
         return self._backend
 
     def summarize(self, *, prompt: str, max_words: int) -> str:

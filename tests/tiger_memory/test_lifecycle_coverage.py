@@ -177,6 +177,51 @@ class TestBuildAdaptersMultiKind:
         # slack_thread doesn't add its own adapter, but sets threads_json on claude_code
         assert len(adapters) == 1
 
+    def _basic_cfg(self, tmp_path: Path):
+        cfg_path = tmp_path / "cfg.yaml"
+        cfg_path.write_text(dedent(f"""\
+            agent: {{name: T, role: T}}
+            store: {{root: {tmp_path}/memory}}
+            sources:
+              - kind: claude_code
+                project_path: {tmp_path}/proj/
+            summarizer: {{backend: anthropic, model: claude-sonnet-4-6, prompts: default/v1}}
+            rebuild: {{lock_path: {tmp_path}/lock}}
+        """))
+        return load_config(cfg_path)
+
+    def test_default_max_age_days_is_7(self, tmp_path: Path):
+        # _build_adapters' default mirrors rebuild's 7-day loop-prevention
+        # cap. Sites that need broader scope (bootstrap, resummarize)
+        # must opt out explicitly.
+        cfg = self._basic_cfg(tmp_path)
+        adapters = _build_adapters(cfg)
+        from tigerharness.tiger_memory.sources.claude_transcript import (
+            ClaudeTranscriptAdapter,
+        )
+        ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
+        assert ct.max_age_days == 7
+
+    def test_max_age_days_none_propagates(self, tmp_path: Path):
+        # Bootstrap and resummarize pass None to see the full corpus.
+        # The cap must not be reintroduced silently by _build_adapters.
+        cfg = self._basic_cfg(tmp_path)
+        adapters = _build_adapters(cfg, max_age_days=None)
+        from tigerharness.tiger_memory.sources.claude_transcript import (
+            ClaudeTranscriptAdapter,
+        )
+        ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
+        assert ct.max_age_days is None
+
+    def test_max_age_days_custom_value_propagates(self, tmp_path: Path):
+        cfg = self._basic_cfg(tmp_path)
+        adapters = _build_adapters(cfg, max_age_days=30)
+        from tigerharness.tiger_memory.sources.claude_transcript import (
+            ClaudeTranscriptAdapter,
+        )
+        ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
+        assert ct.max_age_days == 30
+
 
 class TestCascadeExceptions:
     def test_daily_rollup_exception_continues(self, tmp_path: Path):

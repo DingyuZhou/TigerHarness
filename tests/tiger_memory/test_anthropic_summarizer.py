@@ -7,6 +7,7 @@ import pytest
 
 from tigerharness.tiger_memory.summarizers.anthropic import (
     AnthropicSummarizer,
+    _DEFAULT_TRANSCRIPT_CWD,
     _strip_codefence,
 )
 from tigerharness.tiger_memory.summarizers.base import SummarizerError
@@ -41,17 +42,40 @@ class TestAnthropicSummarizer:
         assert s.max_attempts == 3
         assert s.cost_so_far == 0.0
 
-    def test_get_backend_lazy(self):
-        s = AnthropicSummarizer(model="claude-sonnet-4-6")
+    def test_get_backend_lazy(self, tmp_path):
+        s = AnthropicSummarizer(
+            model="claude-sonnet-4-6",
+            transcript_cwd=tmp_path / "scratch",
+        )
         assert s._backend is None
         with patch("tigerharness.tiger_memory.summarizers.anthropic.get_backend") as mock_gb:
             mock_gb.return_value = MagicMock()
             backend = s._get_backend()
-            mock_gb.assert_called_once_with("claude_p")
+            mock_gb.assert_called_once_with(
+                "claude_p", cwd=str(tmp_path / "scratch")
+            )
+            # transcript_cwd should have been created on first use.
+            assert (tmp_path / "scratch").is_dir()
             # Second call should reuse
             backend2 = s._get_backend()
             assert backend is backend2
             assert mock_gb.call_count == 1
+
+    def test_default_transcript_cwd(self):
+        # Without an explicit override, the summarizer falls back to the
+        # module-level scratch dir -- this is the loop-prevention default.
+        s = AnthropicSummarizer(model="claude-sonnet-4-6")
+        assert s.transcript_cwd == _DEFAULT_TRANSCRIPT_CWD
+
+    def test_transcript_cwd_not_created_on_init(self, tmp_path):
+        # Constructing a summarizer must not touch the filesystem. The
+        # scratch dir only materializes on the first backend invocation,
+        # which keeps imports / dry-runs / tests side-effect-free.
+        scratch = tmp_path / "lazy-scratch"
+        AnthropicSummarizer(
+            model="claude-sonnet-4-6", transcript_cwd=scratch
+        )
+        assert not scratch.exists()
 
     def test_summarize_success(self):
         s = AnthropicSummarizer(model="claude-sonnet-4-6")

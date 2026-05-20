@@ -77,7 +77,10 @@ def bootstrap(
             print("another tiger-memory run is in progress.")
             return 1
 
-        adapters = _build_adapters(cfg)
+        # Bootstrap is a one-shot backfill: ignore the 7-day rebuild cap.
+        # ``--limit`` is the user-visible safety; the discovery cutoff is
+        # only there to gate the lazy rebuild path.
+        adapters = _build_adapters(cfg, max_age_days=None)
         summarizer = summarizer_override or _build_summarizer(cfg, mock=dry_run)
         if dry_run:
             print(f"DRY-RUN: using {summarizer.tag} (no model spend)")
@@ -201,7 +204,10 @@ def resummarize(
             print("another run is in progress.")
             return 1
 
-        adapters = _build_adapters(cfg)
+        # ``--since`` is the user's explicit date range; the discovery
+        # cutoff would silently override anything older than 7 days.
+        # Disable it here so resummarize honors the requested window.
+        adapters = _build_adapters(cfg, max_age_days=None)
         summarizer_obj = _build_summarizer(cfg)
 
         # Find all sessions whose first_event_at >= since
@@ -244,7 +250,19 @@ def resummarize(
 # ----- adapter / summarizer factories --------------------------------------
 
 
-def _build_adapters(cfg: Config) -> list[SourceAdapter]:
+def _build_adapters(
+    cfg: Config, *, max_age_days: int | None = 7,
+) -> list[SourceAdapter]:
+    """Build source adapters from config.
+
+    ``max_age_days`` is forwarded to ``ClaudeTranscriptAdapter`` as the
+    discovery cutoff (skip JSONLs older than N days by mtime).
+    The default ``7`` is the loop-prevention cap used by ``rebuild``.
+    Pass ``None`` from ``bootstrap`` and ``resummarize`` -- both commands
+    have their own scoping (``--limit`` and ``--since`` respectively) and
+    must see the full corpus to honor it. Duplicates the constructor
+    default in ``ClaudeTranscriptAdapter``; keep them in sync.
+    """
     adapters: list[SourceAdapter] = []
     # Find slack threads.json (if a slack_thread source is configured)
     threads_json: Path | None = None
@@ -271,6 +289,7 @@ def _build_adapters(cfg: Config) -> list[SourceAdapter]:
                     threads_json=threads_json,
                     persona=persona,
                     include_unattributed=include_unattributed,
+                    max_age_days=max_age_days,
                 )
             )
         elif s.kind == "slack_thread":

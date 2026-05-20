@@ -28,6 +28,7 @@ have ``persona=None`` and are filtered out under strict mode.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -52,6 +53,7 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         *,
         persona: str | None = None,
         include_unattributed: bool = False,
+        max_age_days: int | None = 7,
     ):
         self.project_path = Path(project_path).expanduser()
         self.threads_json = (
@@ -65,6 +67,12 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         # persona attribution (local claude -p, or pre-routing entries)
         # are also emitted. Default False == strict.
         self.include_unattributed = include_unattributed
+        # Hard upper bound on how far back discovery looks, measured by
+        # the JSONL's mtime. Defense-in-depth against runaway rebuilds:
+        # even if the source directory accumulates years of transcripts,
+        # only the recent ``max_age_days`` worth are ever considered for
+        # summarization. ``None`` disables the cutoff (legacy behavior).
+        self.max_age_days = max_age_days
 
     # ---- public --------------------------------------------------------
 
@@ -73,7 +81,18 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         thread_map = self._reverse_thread_map()
         if not self.project_path.exists():
             return
+        cutoff = (
+            time.time() - self.max_age_days * 86400
+            if self.max_age_days is not None
+            else None
+        )
         for jsonl in sorted(self.project_path.glob("*.jsonl")):
+            if cutoff is not None:
+                try:
+                    if jsonl.stat().st_mtime < cutoff:
+                        continue
+                except OSError:
+                    continue
             session_uuid = jsonl.stem
             if not self._allowed(session_uuid, thread_map):
                 continue

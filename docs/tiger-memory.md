@@ -87,7 +87,7 @@ decay:
 
 rebuild:
   trigger: lazy
-  idle_threshold_hours: 2
+  idle_threshold_hours: 1
   resummarize_window_days: 7
 
 briefing:

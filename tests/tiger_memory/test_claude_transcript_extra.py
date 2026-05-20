@@ -422,3 +422,62 @@ class TestClaudeTranscriptAdapterPersonaFilter:
         )
         records = list(adapter.discover())
         assert {r.conversation_uuid for r in records} == {ayako_uid, sakuragi_uid}
+
+
+class TestClaudeTranscriptAdapterMaxAge:
+    """Defense-in-depth: discover() must skip transcripts older than the
+    ``max_age_days`` cutoff so a stale project directory can't trigger a
+    rebuild over years of history."""
+
+    def _make_jsonl(self, proj: Path, uid: str, *, mtime: float) -> Path:
+        import os
+        p = proj / f"{uid}.jsonl"
+        p.write_text("\n".join([
+            json.dumps({"type": "human", "timestamp": "2026-05-18T10:00:00Z",
+                        "message": {"content": "x"}}),
+            json.dumps({"type": "assistant", "timestamp": "2026-05-18T10:01:00Z",
+                        "message": {"content": "y"}}),
+        ]) + "\n")
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def test_default_cutoff_is_7_days(self, tmp_path: Path):
+        import time
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        recent_uid = str(uuid4())
+        old_uid = str(uuid4())
+        now = time.time()
+        self._make_jsonl(proj, recent_uid, mtime=now - 6 * 86400)   # 6 days
+        self._make_jsonl(proj, old_uid, mtime=now - 8 * 86400)      # 8 days
+        adapter = ClaudeTranscriptAdapter(project_path=proj)
+        uids = {r.conversation_uuid for r in adapter.discover()}
+        assert uids == {recent_uid}
+
+    def test_max_age_none_disables_cutoff(self, tmp_path: Path):
+        import time
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        recent_uid = str(uuid4())
+        ancient_uid = str(uuid4())
+        now = time.time()
+        self._make_jsonl(proj, recent_uid, mtime=now - 86400)
+        self._make_jsonl(proj, ancient_uid, mtime=now - 365 * 86400)
+        adapter = ClaudeTranscriptAdapter(project_path=proj, max_age_days=None)
+        uids = {r.conversation_uuid for r in adapter.discover()}
+        assert uids == {recent_uid, ancient_uid}
+
+    def test_custom_window(self, tmp_path: Path):
+        import time
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        d1_uid = str(uuid4())
+        d3_uid = str(uuid4())
+        d5_uid = str(uuid4())
+        now = time.time()
+        self._make_jsonl(proj, d1_uid, mtime=now - 1 * 86400)
+        self._make_jsonl(proj, d3_uid, mtime=now - 3 * 86400)
+        self._make_jsonl(proj, d5_uid, mtime=now - 5 * 86400)
+        adapter = ClaudeTranscriptAdapter(project_path=proj, max_age_days=2)
+        uids = {r.conversation_uuid for r in adapter.discover()}
+        assert uids == {d1_uid}

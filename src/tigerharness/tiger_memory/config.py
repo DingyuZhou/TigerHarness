@@ -88,7 +88,7 @@ class DecayConfig:
 @dataclass(frozen=True)
 class RebuildConfig:
     trigger: str = "lazy"
-    idle_threshold_hours: float = 2.0
+    idle_threshold_hours: float = 1.0
     resummarize_window_days: int = 7
     lock_path: Path = Path("/tmp/tiger-memory.lock")
     # Maximum wall-clock minutes a rebuild may hold the lock before
@@ -238,7 +238,7 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
     rebuild_raw = raw.get("rebuild") or {}
     rebuild = RebuildConfig(
         trigger=str(rebuild_raw.get("trigger", "lazy")),
-        idle_threshold_hours=float(rebuild_raw.get("idle_threshold_hours", 2.0)),
+        idle_threshold_hours=float(rebuild_raw.get("idle_threshold_hours", 1.0)),
         resummarize_window_days=int(rebuild_raw.get("resummarize_window_days", 7)),
         lock_path=Path(
             rebuild_raw.get("lock_path", "/tmp/tiger-memory.lock")
