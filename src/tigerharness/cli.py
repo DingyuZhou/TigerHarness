@@ -24,6 +24,9 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "init":
         from .init import main as init_main
         return init_main(rest)
+    elif cmd == "dismiss":
+        from .dismiss import main as dismiss_main
+        return dismiss_main(rest)
     elif cmd in ("task-runner", "task_runner", "tr"):
         from .task_runner.cli import main as tr_main
         return tr_main(rest)
@@ -53,6 +56,7 @@ def _usage() -> None:
     print()
     print("Sub-commands:")
     print("  init               Scaffold a new project (personas, .env, config)")
+    print("  dismiss            Interactively tear down a team or persona")
     print("  task-runner (tr)   Iterative task execution")
     print("  tiger-memory (tm)  Persistent memory management")
     print("  slack-bridge (sb)  Slack notify CLI")
