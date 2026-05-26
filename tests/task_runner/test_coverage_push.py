@@ -231,7 +231,13 @@ class TestRunnerLiveMetaSync:
 
 
 class TestRunnerStoreMissing:
-    """Lines 790->799, 895->899: store.get() returns None mid-loop."""
+    """Lines 790->799, 895->899: store.get() returns None mid-loop.
+
+    The runner calls store.get(job_id) at three points in the iter loop
+    to sync continuation/slack_thread_ts from live state. If the job was
+    deleted from the store between iterations (e.g. admin cleanup), the
+    get() returns None and the sync is skipped.
+    """
 
     @pytest.fixture
     def store(self, tmp_path, monkeypatch):
@@ -251,30 +257,26 @@ class TestRunnerStoreMissing:
         fake_backend = AsyncMock()
         fake_backend.open_session = AsyncMock(return_value=fake_session)
 
-        original_get = store.get
+        original_get = JobStore.get
+        get_call_count = 0
 
-        def _get_returns_none(job_id):
-            """Return None for the live-meta sync reads."""
-            # The first call is in the cancel-flag check; return real meta.
-            # Subsequent calls during the iter are the live-meta syncs.
+        def _selective_none(self, job_id):
+            """Return real meta for initial load, None for all live-meta syncs."""
+            nonlocal get_call_count
+            get_call_count += 1
+            # Call 1: initial meta load (line 684). Must return real meta.
+            # Call 2+: live-meta sync reads (lines 789, 894). Return None
+            # to exercise the "if live_meta is not None" false branches.
+            if get_call_count <= 1:
+                return original_get(self, job_id)
             return None
-
-        call_count = 0
-
-        async def _run_with_retry_side(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # Delete the job from the store during the first dispatch
-                # so the post-dispatch store.get() returns None
-                store._store.pop(meta.job_id, None)
-            return FakeResult()
 
         with patch("tigerharness.task_runner.runner.get_backend", return_value=fake_backend), \
              patch("tigerharness.task_runner.runner.run_with_retry",
-                   side_effect=_run_with_retry_side), \
+                   return_value=FakeResult()), \
              patch("tigerharness.task_runner.runner.notify_job_start", return_value=""), \
-             patch("tigerharness.task_runner.runner.notify_job_end", return_value=True):
+             patch("tigerharness.task_runner.runner.notify_job_end", return_value=True), \
+             patch.object(JobStore, "get", _selective_none):
             await run_job(meta.job_id, state_dir=tmp_path)
 
 
