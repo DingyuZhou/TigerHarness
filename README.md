@@ -256,6 +256,34 @@ See [`examples/`](examples/) for a fully-populated sample team folder
 - For the default `claude_p` backend: the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude`) on `PATH`.
 - For the `anthropic_sdk` backend: install with `[anthropic]` extra; pulls in [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/).
 
+## Known limitations & roadmap
+
+Gaps we've hit in real use, tracked here so they can be picked up later. None of these block normal use once the listed workaround is applied.
+
+### Bridge boot environment
+
+- **`claude` not found on PATH when the bridge auto-starts at boot.** On distros where the Claude Code CLI is installed outside `/usr/bin` (e.g. NixOS at `/run/current-system/sw/bin/`, npm-global at `~/.npm-global/bin/`, pipx at `~/.local/bin/`), the systemd unit emitted by `tigerharness slack-bridge gen-service` has no `Environment=PATH=...` line. Restarting from an interactive shell works (the rich PATH is inherited from the live user session), but a **cold boot auto-start** sees only the minimal systemd PATH (`/usr/bin:/bin`), so `shutil.which("claude")` in the SDK fails with `backend error: \`claude\` not found on PATH`.
+  - **Workaround**: a systemd drop-in at `~/.config/systemd/user/slack-bridge-multi.service.d/path.conf` containing `[Service]\nEnvironment="PATH=/run/current-system/sw/bin:/usr/bin:/bin"` (adapted to the local install location). Drop-ins survive `gen-service` regeneration.
+  - **Fix candidates**: (a) `gen-service` emits a sensible default `Environment=PATH=` covering common install locations; (b) add a `CLAUDE_CLI` env var the bridge reads and forwards as `cli=` to `ClaudePBackend()`, mirroring the existing `TIGER_MEMORY_CLI` knob.
+- **Same shape applies to the `tiger-memory` binary** used by the bridge's post-thread rebuild trigger. The existing `TIGER_MEMORY_CLI` env var already provides the per-team-`.env` workaround, but a PATH default in `gen-service` would fix both at once.
+
+### Bridge setup ergonomics
+
+- **`gen-service` references `multi-bridge.env` but doesn't create it.** The generated systemd unit has `EnvironmentFile=<teams-root>/multi-bridge.env`, and the bridge won't start without that file existing (systemd skips a missing optional EnvironmentFile silently, but the bridge then fails because `$TIGERHARNESS_BRIDGES_CONFIG` is unset). The user has to manually `echo "TIGERHARNESS_BRIDGES_CONFIG=/path/to/slack-bridge.yaml" > <teams-root>/multi-bridge.env` as a separate step after `gen-service`. **Fix candidate**: have `gen-service` either emit the env file alongside the unit (skipping if it already exists), or at least print a clear "you must now create this file with the following contents" hint.
+- **Two `.env` files with non-obvious, very different semantics.** In multi-team mode there are two distinct env files:
+  - `multi-bridge.env` (referenced by systemd `EnvironmentFile=`): loaded into the bridge process's `os.environ`. Used **only** for the bootstrap pointer `TIGERHARNESS_BRIDGES_CONFIG`. Adding other env vars here does **not** reach per-lane behavior, because the per-team loader reads from disk into a separate dict.
+  - per-team `configs/.env` (referenced by the YAML index's per-lane `env:` key): loaded via `_load_env_file` into a per-lane dict that deliberately does **not** pollute `os.environ`. This is where Slack tokens, `TIGER_MEMORY_CLI`, `SLACK_NOTIFY_CHANNEL`, `TIGERHARNESS_PERSONAS_CONFIG`, and any agent-facing env vars go.
+
+  The Configuration table above doesn't distinguish which env vars belong in which file. Worth a docs pass (or a single config table with a "where it goes" column) so users don't have to read the loader to find out.
+
+### `tigerharness init`
+
+- **Auto-init of the tiger-memory store fails intermittently** with `CalledProcessError` during `tigerharness init`'s last step. Running `tigerharness tiger-memory --config <path> init` by hand afterward always succeeds, suggesting environment propagation in the `sys.executable -m tigerharness ...` subprocess is the moving part. A direct in-process call would remove it.
+
+### Tiger-memory
+
+- **Stores are not relocatable.** `.embeddings.db` holds absolute paths in the `docs` table. Moving a memory store (team rename, persona rename, workspace move) breaks `tiger-memory search` until those rows are rewritten. A `tiger-memory relocate <new-root>` subcommand (or a `--rewrite-paths` flag on `rebuild`) would smooth team/persona migrations.
+
 ## License
 
 MIT

@@ -107,6 +107,7 @@ class TeamBridgeContext:
     personas: dict[str, PersonaSlot]   # name -> slot (canonical case)
     default_persona: str               # must be in personas
     tiger_memory_cli: str = ""
+    persona_aliases: dict[str, list[str]] | None = None  # name -> aliases
 
     @property
     def is_multi_persona(self) -> bool:
@@ -435,6 +436,7 @@ class SlackBridge:
                 first_text,
                 list(self._team.personas.keys()),
                 self._team.default_persona,
+                aliases=self._team.persona_aliases,
             )
             self._record_cost(cost)
             log.info(

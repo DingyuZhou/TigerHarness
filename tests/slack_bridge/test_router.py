@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import pytest
 
 from tigerharness.slack_bridge.router import (
+    _build_alias_index,
     _build_router_config,
     _format_router_prompt,
     _parse_router_response,
@@ -59,6 +60,74 @@ class TestParseRouterResponse:
         # `!` is NOT in the stripped chars -- the test is intentional:
         # we only strip `.\"'`. Anything else means "couldn't parse".
 
+    def test_alias_match_returns_canonical_name(self):
+        aliases = {"Anzai": ["安西教练", "Anxi", "Anxi Jiaolian"]}
+        assert _parse_router_response(
+            "Anxi", ["Ayako", "Anzai"], aliases=aliases
+        ) == "Anzai"
+
+    def test_alias_match_case_insensitive(self):
+        aliases = {"Anzai": ["Anxi"]}
+        assert _parse_router_response(
+            "anxi", ["Ayako", "Anzai"], aliases=aliases
+        ) == "Anzai"
+
+    def test_alias_unicode_match(self):
+        aliases = {"Anzai": ["安西教练", "Anxi", "Anxi Jiaolian"]}
+        assert _parse_router_response(
+            "安西教练", ["Ayako", "Anzai"], aliases=aliases
+        ) == "Anzai"
+
+    def test_alias_multi_word_match(self):
+        """Multi-word aliases like 'Anxi Jiaolian' should match."""
+        aliases = {"Anzai": ["Anxi Jiaolian"]}
+        assert _parse_router_response(
+            "Anxi Jiaolian", ["Ayako", "Anzai"], aliases=aliases
+        ) == "Anzai"
+
+    def test_no_alias_no_change(self):
+        """When aliases=None, behavior is unchanged from pre-alias code."""
+        assert _parse_router_response(
+            "Anzai", ["Ayako", "Anzai"], aliases=None
+        ) == "Anzai"
+        assert _parse_router_response(
+            "Anxi", ["Ayako", "Anzai"], aliases=None
+        ) is None
+
+    def test_alias_collision_first_canonical_wins(self):
+        """If two personas share an alias, first-registered wins."""
+        aliases = {"Ayako": ["Coach"], "Anzai": ["Coach"]}
+        result = _parse_router_response(
+            "Coach", ["Ayako", "Anzai"], aliases=aliases
+        )
+        assert result == "Ayako"
+
+
+# ---------------------------------------------------------------------------
+# _build_alias_index
+# ---------------------------------------------------------------------------
+
+class TestBuildAliasIndex:
+    def test_empty_roster(self):
+        assert _build_alias_index([], None) == {}
+
+    def test_canonical_names_indexed(self):
+        idx = _build_alias_index(["Ayako", "Anzai"], None)
+        assert idx["ayako"] == "Ayako"
+        assert idx["anzai"] == "Anzai"
+
+    def test_aliases_indexed(self):
+        aliases = {"Anzai": ["安西教练", "Anxi"]}
+        idx = _build_alias_index(["Ayako", "Anzai"], aliases)
+        assert idx["anxi"] == "Anzai"
+        assert idx["安西教练"] == "Anzai"
+        assert idx["ayako"] == "Ayako"
+
+    def test_collision_first_wins(self):
+        aliases = {"Ayako": ["shared"], "Anzai": ["shared"]}
+        idx = _build_alias_index(["Ayako", "Anzai"], aliases)
+        assert idx["shared"] == "Ayako"
+
 
 # ---------------------------------------------------------------------------
 # _format_router_prompt
@@ -84,6 +153,28 @@ class TestFormatRouterPrompt:
         assert "x" * 5000 not in prompt
         # The first 4096 chars should be present.
         assert "x" * 4096 in prompt
+
+    def test_aliases_included_in_prompt(self):
+        aliases = {"Anzai": ["安西教练", "Anxi"]}
+        prompt = _format_router_prompt(
+            "Hi Anxi!", ["Ayako", "Anzai"], aliases=aliases
+        )
+        assert "安西教练" in prompt
+        assert "Anxi" in prompt
+        assert "also known as" in prompt
+
+    def test_no_aliases_no_also_known_as(self):
+        prompt = _format_router_prompt("Hi", ["Ayako", "Anzai"])
+        assert "also known as" not in prompt
+
+    def test_persona_without_aliases_shown_plain(self):
+        aliases = {"Anzai": ["Anxi"]}
+        prompt = _format_router_prompt(
+            "Hi", ["Ayako", "Anzai"], aliases=aliases
+        )
+        # Ayako has no aliases, so shown without parenthetical
+        assert "Ayako (also known as" not in prompt
+        assert "Anzai (also known as: Anxi)" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -322,3 +413,25 @@ class TestDetectPersona:
             default_persona="ayako",
         )
         assert (persona, cost) == ("ayako", 0.0)
+
+    @pytest.mark.asyncio
+    async def test_alias_response_maps_to_canonical(self, monkeypatch):
+        """LLM returns an alias -> detect_persona returns the canonical name."""
+        from unittest.mock import AsyncMock, MagicMock
+        backend = MagicMock()
+        backend.open_session = AsyncMock(return_value=_FakeSession())
+
+        async def fake_retry(*a, **kw):
+            return MagicMock(final_output="Anxi", cost_usd=0.0)
+
+        monkeypatch.setattr(
+            "tigerharness.slack_bridge.router.run_with_retry", fake_retry
+        )
+        aliases = {"Anzai": ["Anxi", "安西教练"]}
+        result = await detect_persona(
+            backend, "Hi Anxi Jiaolian!",
+            roster=["Ayako", "Anzai"],
+            default_persona="Ayako",
+            aliases=aliases,
+        )
+        assert result[0] == "Anzai"
