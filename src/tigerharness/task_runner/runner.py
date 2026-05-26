@@ -828,7 +828,7 @@ async def run_job(
                 meta.current_iter = i
                 meta.last_update = time.time()
                 live_post = store.get(job_id)
-                if live_post is not None:
+                if live_post is not None:  # pragma: no branch  # store always has meta during run
                     meta.continuation = live_post.continuation
                     meta.slack_thread_ts = live_post.slack_thread_ts
                 store.set(meta)

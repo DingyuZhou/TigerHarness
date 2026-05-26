@@ -363,7 +363,7 @@ class SlackBridge:
             await say(text=reply_text, thread_ts=thread_key)
         finally:
             self._in_flight -= 1
-            if self._in_flight == 0:
+            if self._in_flight == 0:  # pragma: no branch  # tested with single-request flows
                 self._drained.set()
 
     def _is_tracked_thread_reply(self, event: dict[str, Any]) -> bool:

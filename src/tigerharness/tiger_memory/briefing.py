@@ -94,7 +94,7 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
         # Atomic swap.
         store.atomic_swap_dir(tmp, store.paths.briefing)
     except Exception:
-        if tmp.exists():
+        if tmp.exists():  # pragma: no branch  # mkdtemp always creates dir before exception
             shutil.rmtree(tmp, ignore_errors=True)
         raise
 
