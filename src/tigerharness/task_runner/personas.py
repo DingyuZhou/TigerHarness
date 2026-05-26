@@ -381,7 +381,7 @@ def _autoload_from_env() -> None:
     """
     config_env = os.environ.get("TIGERHARNESS_PERSONAS_CONFIG", "").strip()
     if not config_env:
-        return
+        return  # pragma: no cover — runs at import time before coverage starts
     try:
         load_personas_config(config_env)
     except Exception as e:

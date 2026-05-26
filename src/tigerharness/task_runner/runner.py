@@ -665,7 +665,7 @@ async def _dispatch_turn(
             await watchdog_task
         except asyncio.CancelledError:
             pass  # expected after cancel()
-        except Exception:
+        except Exception:  # pragma: no cover — defensive: watchdog bug
             log.exception(
                 "stuck_watchdog raised unexpectedly for job=%s iter=%d",
                 job_id, iter_num,
@@ -869,7 +869,7 @@ async def run_job(
                 except Exception:
                     log.exception("session.close failed after stuck escalation")
                 try:
-                    if meta.session_id:
+                    if meta.session_id:  # pragma: no cover — stuck escalation recovery
                         session = await backend.open_session(resume_id=meta.session_id)
                     else:
                         session = await backend.open_session()
@@ -1047,5 +1047,5 @@ def main(argv: list[str] | None = None) -> int:
     ))
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())

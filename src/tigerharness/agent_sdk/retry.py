@@ -121,5 +121,5 @@ async def run_with_retry(
 
     # Unreachable: loop either returned, raised on the final attempt,
     # or raised CancelledError. Defensive belt + braces:
-    assert last_exc is not None
-    raise last_exc
+    assert last_exc is not None  # pragma: no cover
+    raise last_exc  # pragma: no cover

@@ -143,7 +143,7 @@ def _human_size(n: int) -> str:
         f /= 1024
         if f < 1024 or unit == "TB":
             return f"{f:.1f} {unit}"
-    return f"{f:.1f} TB"
+    return f"{f:.1f} TB"  # pragma: no cover — loop always returns on TB
 
 
 # ---------------------------------------------------------------------------

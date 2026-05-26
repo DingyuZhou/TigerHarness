@@ -98,4 +98,4 @@ omit = [
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 98.5
+fail_under = 99.5

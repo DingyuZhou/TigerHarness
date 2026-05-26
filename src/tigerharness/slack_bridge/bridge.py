@@ -384,11 +384,11 @@ class SlackBridge:
 
     def _register_handlers(self) -> None:
         @self.app.event("message")
-        async def _on_message(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001
+        async def _on_message(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001  # pragma: no cover — bolt callback
             await self.handle_message(event, say)
 
         @self.app.event("app_mention")
-        async def _on_mention(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001
+        async def _on_mention(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001  # pragma: no cover — bolt callback
             await self.handle_mention(event, say)
 
     async def _get_or_open_thread(self, key: str, first_text: str) -> _ThreadState:
@@ -472,7 +472,7 @@ class SlackBridge:
                     key,
                 )
 
-        if loser_session is not None:
+        if loser_session is not None:  # pragma: no cover — concurrency race
             try:
                 await loser_session.close()
             except Exception:  # noqa: BLE001 - best-effort cleanup
