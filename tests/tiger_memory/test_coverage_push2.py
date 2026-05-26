@@ -139,6 +139,13 @@ class TestFindClaudeJsonl:
         cfg.sources = []
         assert _find_claude_jsonl(cfg, "abc-123") is None
 
+    def test_non_claude_code_source_skipped(self):
+        """122->121: source with kind != 'claude_code' → loop continues."""
+        from tigerharness.tiger_memory.drill import _find_claude_jsonl
+        cfg = MagicMock()
+        cfg.sources = [MagicMock(kind="docs", fields={})]
+        assert _find_claude_jsonl(cfg, "abc-123") is None
+
 
 class TestGrepFallback:
     """drill.py:185->192: rg not found → Python fallback.
