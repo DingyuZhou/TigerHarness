@@ -187,16 +187,29 @@ class TestInitMemoryConfigNotExists:
 
     def test_memory_enabled_but_config_not_present(self, tmp_path):
         """When include_memory=True but tiger-memory.config.yaml doesn't exist,
-        _auto_init_tiger_memory is NOT called (814->817 branch)."""
+        _auto_init_tiger_memory is NOT called (814->817 false branch)."""
         from tigerharness.init import init
 
         search_root = tmp_path / "search"
         search_root.mkdir()
 
-        # Run init with memory enabled but no config file will exist
-        # (the scaffolding doesn't auto-create tiger-memory.config.yaml
-        # unless certain conditions are met)
-        with patch("tigerharness.init._auto_init_tiger_memory") as mock_auto:
+        original_write_if_missing = None
+
+        def _skip_memory_config(path, content):
+            """_write_if_missing replacement that skips the memory config."""
+            if "tiger-memory.config.yaml" in str(path):
+                # Don't write it — we want line 814 to be False
+                return False
+            # Import and call the real function for all other files
+            import tigerharness.init as init_mod
+            return original_write_if_missing(path, content)
+
+        import tigerharness.init as init_mod
+        original_write_if_missing = init_mod._write_if_missing
+
+        with patch("tigerharness.init._auto_init_tiger_memory") as mock_auto, \
+             patch("tigerharness.init._write_if_missing",
+                   side_effect=_skip_memory_config):
             team_dir, persona_name, _ = init(
                 persona="tester",
                 team="TestTeam",
@@ -206,9 +219,5 @@ class TestInitMemoryConfigNotExists:
                 include_memory=True,
             )
 
-        # The config file doesn't exist, so _auto_init should NOT be called
-        # (line 814 condition is False → jumps to 817)
-        # Actually, init may scaffold the config file. Let's check:
-        mem_cfg = team_dir / "memories" / persona_name / "tiger-memory.config.yaml"
-        if not mem_cfg.exists():
-            mock_auto.assert_not_called()
+        # The config file was NOT written, so _auto_init should NOT be called
+        mock_auto.assert_not_called()

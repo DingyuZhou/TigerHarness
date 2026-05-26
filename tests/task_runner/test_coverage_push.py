@@ -230,6 +230,54 @@ class TestRunnerLiveMetaSync:
         assert final.continuation == "new-continuation"
 
 
+class TestRunnerStoreMissing:
+    """Lines 790->799, 895->899: store.get() returns None mid-loop."""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TIGERHARNESS_STATE_DIR", str(tmp_path))
+        return JobStore(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_store_get_returns_none(self, store, tmp_path):
+        """790->799 false, 895->899 false: store.get returns None mid-loop."""
+        from tigerharness.task_runner.runner import run_job
+        meta = _make_meta(store, max_iters=1, stuck_timeout=0)
+
+        fake_session = MagicMock()
+        fake_session.id = "sess-1"
+        fake_session.close = AsyncMock()
+
+        fake_backend = AsyncMock()
+        fake_backend.open_session = AsyncMock(return_value=fake_session)
+
+        original_get = store.get
+
+        def _get_returns_none(job_id):
+            """Return None for the live-meta sync reads."""
+            # The first call is in the cancel-flag check; return real meta.
+            # Subsequent calls during the iter are the live-meta syncs.
+            return None
+
+        call_count = 0
+
+        async def _run_with_retry_side(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Delete the job from the store during the first dispatch
+                # so the post-dispatch store.get() returns None
+                store._store.pop(meta.job_id, None)
+            return FakeResult()
+
+        with patch("tigerharness.task_runner.runner.get_backend", return_value=fake_backend), \
+             patch("tigerharness.task_runner.runner.run_with_retry",
+                   side_effect=_run_with_retry_side), \
+             patch("tigerharness.task_runner.runner.notify_job_start", return_value=""), \
+             patch("tigerharness.task_runner.runner.notify_job_end", return_value=True):
+            await run_job(meta.job_id, state_dir=tmp_path)
+
+
 class TestRunnerZeroCost:
     """Lines 886->889: cost is zero/None → skip accumulation."""
 
@@ -256,6 +304,40 @@ class TestRunnerZeroCost:
         with patch("tigerharness.task_runner.runner.get_backend", return_value=fake_backend), \
              patch("tigerharness.task_runner.runner.run_with_retry",
                    return_value=zero_cost_result), \
+             patch("tigerharness.task_runner.runner.notify_job_start", return_value=""), \
+             patch("tigerharness.task_runner.runner.notify_job_end", return_value=True):
+            await run_job(meta.job_id, state_dir=tmp_path)
+
+        final = store.get(meta.job_id)
+        assert final.total_cost_usd == 0.0
+
+
+class TestRunnerCompactZeroCost:
+    """Line 986->988: compact dispatch returns zero cost."""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TIGERHARNESS_STATE_DIR", str(tmp_path))
+        return JobStore(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_compact_zero_cost(self, store, tmp_path):
+        """986->988: ccost is 0 → total_cost not incremented."""
+        from tigerharness.task_runner.runner import run_job
+        meta = _make_meta(store, max_iters=2, compact_every=1, stuck_timeout=0)
+
+        fake_session = MagicMock()
+        fake_session.id = "sess-1"
+        fake_session.close = AsyncMock()
+
+        fake_backend = AsyncMock()
+        fake_backend.open_session = AsyncMock(return_value=fake_session)
+
+        zero_cost = FakeResult(cost_usd=0.0)
+
+        with patch("tigerharness.task_runner.runner.get_backend", return_value=fake_backend), \
+             patch("tigerharness.task_runner.runner.run_with_retry",
+                   return_value=zero_cost), \
              patch("tigerharness.task_runner.runner.notify_job_start", return_value=""), \
              patch("tigerharness.task_runner.runner.notify_job_end", return_value=True):
             await run_job(meta.job_id, state_dir=tmp_path)
@@ -297,6 +379,17 @@ class TestRunnerMainFlags:
 
         with patch("tigerharness.task_runner.runner.asyncio.run") as mock_run:
             main(["main-bare"])
+        mock_run.assert_called_once()
+
+    def test_main_with_unknown_flag(self, tmp_path, monkeypatch):
+        """1041->1037: unknown flag is silently consumed."""
+        from tigerharness.task_runner.runner import main
+        monkeypatch.setenv("TIGERHARNESS_STATE_DIR", str(tmp_path))
+        store = JobStore(tmp_path)
+        meta = _make_meta(store, job_id="main-unk")
+
+        with patch("tigerharness.task_runner.runner.asyncio.run") as mock_run:
+            main(["main-unk", "--unknown-flag"])
         mock_run.assert_called_once()
 
 
