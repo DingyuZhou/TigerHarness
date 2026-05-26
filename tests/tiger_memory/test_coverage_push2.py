@@ -332,3 +332,29 @@ class TestClaudeTranscriptContentBlocks:
         ]}}
         result = _extract_text(event)
         assert "inner text" in result
+
+    def test_briefing_read_with_non_string_id(self):
+        """334->336 false branch: tool_use id is not a string."""
+        from tigerharness.tiger_memory.sources.claude_transcript import _extract_text
+
+        event = {"message": {"content": [
+            {"type": "tool_use", "name": "Read", "id": 12345,
+             "input": {"file_path": "/memory/briefing/README.md"}},
+            {"type": "text", "text": "after"},
+        ]}}
+        result = _extract_text(event)
+        assert "after" in result
+
+    def test_tool_result_not_in_skipped_set(self):
+        """340->326 both sides: tool_result whose tu_id is NOT in skipped set."""
+        from tigerharness.tiger_memory.sources.claude_transcript import _extract_text
+
+        event = {"message": {"content": [
+            {"type": "tool_use", "name": "Bash", "id": "tu_99",
+             "input": {"command": "ls"}},
+            {"type": "tool_result", "tool_use_id": "tu_99",
+             "content": "file1.txt"},
+        ]}}
+        result = _extract_text(event)
+        assert "[tool_use: Bash]" in result
+        assert "file1.txt" in result

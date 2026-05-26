@@ -230,8 +230,42 @@ class TestRunnerLiveMetaSync:
         assert final.continuation == "new-continuation"
 
 
+class TestRunnerZeroCost:
+    """Lines 886->889: cost is zero/None → skip accumulation."""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TIGERHARNESS_STATE_DIR", str(tmp_path))
+        return JobStore(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_zero_cost_not_accumulated(self, store, tmp_path):
+        """886->889: cost_usd=0.0 → total_cost unchanged."""
+        from tigerharness.task_runner.runner import run_job
+        meta = _make_meta(store, max_iters=1, stuck_timeout=0)
+
+        fake_session = MagicMock()
+        fake_session.id = "sess-1"
+        fake_session.close = AsyncMock()
+
+        fake_backend = AsyncMock()
+        fake_backend.open_session = AsyncMock(return_value=fake_session)
+
+        zero_cost_result = FakeResult(cost_usd=0.0)
+
+        with patch("tigerharness.task_runner.runner.get_backend", return_value=fake_backend), \
+             patch("tigerharness.task_runner.runner.run_with_retry",
+                   return_value=zero_cost_result), \
+             patch("tigerharness.task_runner.runner.notify_job_start", return_value=""), \
+             patch("tigerharness.task_runner.runner.notify_job_end", return_value=True):
+            await run_job(meta.job_id, state_dir=tmp_path)
+
+        final = store.get(meta.job_id)
+        assert final.total_cost_usd == 0.0
+
+
 class TestRunnerMainFlags:
-    """Line 1041->1037: main() parses --start-iter."""
+    """Line 1041->1037: main() parses --start-iter and --resume-session."""
 
     def test_main_with_start_iter(self, tmp_path, monkeypatch):
         from tigerharness.task_runner.runner import main
@@ -241,6 +275,28 @@ class TestRunnerMainFlags:
 
         with patch("tigerharness.task_runner.runner.asyncio.run") as mock_run:
             main(["main-test", "--start-iter", "3"])
+        mock_run.assert_called_once()
+
+    def test_main_with_resume_session_only(self, tmp_path, monkeypatch):
+        """1041->1037: --resume-session without --start-iter."""
+        from tigerharness.task_runner.runner import main
+        monkeypatch.setenv("TIGERHARNESS_STATE_DIR", str(tmp_path))
+        store = JobStore(tmp_path)
+        meta = _make_meta(store, job_id="main-resume")
+
+        with patch("tigerharness.task_runner.runner.asyncio.run") as mock_run:
+            main(["main-resume", "--resume-session", "sess-abc"])
+        mock_run.assert_called_once()
+
+    def test_main_with_no_flags(self, tmp_path, monkeypatch):
+        """1041->1037: no extra flags — while rest is False immediately."""
+        from tigerharness.task_runner.runner import main
+        monkeypatch.setenv("TIGERHARNESS_STATE_DIR", str(tmp_path))
+        store = JobStore(tmp_path)
+        meta = _make_meta(store, job_id="main-bare")
+
+        with patch("tigerharness.task_runner.runner.asyncio.run") as mock_run:
+            main(["main-bare"])
         mock_run.assert_called_once()
 
 

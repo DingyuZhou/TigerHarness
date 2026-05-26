@@ -74,6 +74,12 @@ class TestPickExt:
         result = _pick_ext({})
         assert result == ""
 
+    def test_no_filetype_name_with_trailing_dot(self):
+        """161->163: name has dot but ext after split is empty."""
+        from tigerharness.slack_bridge.downloader import _pick_ext
+        result = _pick_ext({"filetype": "", "name": "file."})
+        assert result == ""
+
 
 class TestPersistencePreRoutingSchema:
     """persistence.py: loading pre-routing schema and invalid entries."""

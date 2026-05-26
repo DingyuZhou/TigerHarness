@@ -250,6 +250,38 @@ class TestGetOrOpenThreadResumeFromStore:
         say.assert_awaited_once()
 
 
+class TestDispatchNoSessionId:
+    """Line 341->349: session.id is empty → skip store.set."""
+
+    @pytest.mark.asyncio
+    async def test_empty_session_id_skips_store(self, tmp_path):
+        store = ThreadStore(tmp_path / "threads.json")
+        b, backend = _make_bridge(store)
+
+        # Make open_session return a session with empty id
+        empty_session = FakeSession(id="")
+        backend.open_session = AsyncMock(return_value=empty_session)
+
+        result = FakeResult()
+        with patch("tigerharness.slack_bridge.bridge.run_with_retry",
+                   return_value=result):
+            with patch("tigerharness.slack_bridge.bridge.detect_persona",
+                       return_value=("alpha", 0.001)):
+                say = AsyncMock()
+                event = {
+                    "channel_type": "im",
+                    "user": "U0CEO",
+                    "text": "hello",
+                    "ts": "800.0",
+                }
+                await b.handle_message(event, say)
+
+        say.assert_awaited_once()
+        # session.id is empty → store.set should NOT have been called
+        # for this thread (no session_id to store)
+        assert store.get_record("800.0") is None
+
+
 class TestRaceLoserSessionClose:
     """Lines 478-479: race-loser session.close() raises."""
 
