@@ -1241,6 +1241,18 @@ def main(argv: list[str] | None = None) -> int:
     steps: list[str] = [
         f"Edit {_format_path(team_dir / 'personas' / persona / 'prompt.md', search_root)}"
     ]
+    # Charter customization. The seeded charter ships with TODOs for
+    # mission + project repo; without a nudge users often don't realize
+    # they need to fill these in and the team's entry-point doc stays
+    # half-empty. Only mention the charter when this run actually
+    # created it (`charter` in `created`) -- on subsequent re-runs the
+    # team's charter is already there and presumably edited.
+    charter_path = team_dir / "charter" / "README.md"
+    if charter_path in created:
+        steps.append(
+            f"Customize {_format_path(charter_path, search_root)} -- "
+            f"fill in the Mission and 'Primary project this team owns' TODOs"
+        )
     env_path = team_dir / "configs" / ".env"
     if env_path.exists():
         steps.append(f"Fill in {_format_path(env_path, search_root)} (Slack tokens)")

@@ -1281,6 +1281,10 @@ class TestMain:
         out = capsys.readouterr().out
         assert "Next steps" in out
         assert "tigers/personas/chief/prompt.md" in out
+        # Charter customization gets a nudge on first scaffold -- the
+        # seeded charter ships with TODO markers users often forget.
+        assert "tigers/charter/README.md" in out
+        assert "Mission" in out
         assert "tigers/configs/.env" in out
         # Memory config gets the auto-init treatment now -- "review",
         # not "set sources.project_path" or "Initialize memory".
@@ -1290,6 +1294,37 @@ class TestMain:
         assert "tiger-memory --config" not in out
         assert "TIGERHARNESS_PERSONAS_CONFIG=tigers/configs/personas.yaml" in out
         assert "task-runner assign --to chief" in out
+
+    def test_next_steps_charter_nudge_only_on_first_scaffold(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ):
+        """The charter-customization step appears the first time a team
+        is scaffolded (the TODOs are fresh), but NOT on re-runs (the
+        team may have already filled in the charter). Tying the nudge
+        to ``charter in created`` prevents nagging existing teams."""
+        # First run: charter step should appear.
+        main([
+            "--dir", str(tmp_path),
+            "--persona", "chief",
+            "--team", "tigers",
+            "--yes",
+        ])
+        first_out = capsys.readouterr().out
+        assert "tigers/charter/README.md" in first_out
+
+        # Second run: add another persona to the same team. Charter
+        # already exists, so the nudge must NOT fire again.
+        main([
+            "--dir", str(tmp_path),
+            "--persona", "scout",
+            "--team", "tigers",
+            "--yes",
+        ])
+        second_out = capsys.readouterr().out
+        assert "tigers/charter/README.md" not in second_out
+        # Confirm the run actually did something else (sanity check
+        # the re-run wasn't a no-op that would trivially pass).
+        assert "tigers/personas/scout/prompt.md" in second_out
 
     def test_next_steps_uses_uv_run_prefix_when_off_path(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
@@ -1358,20 +1393,25 @@ class TestMain:
             "--yes",
         ])
         out = capsys.readouterr().out
-        # With slack + multi-team skipped, memory still on, we expect:
+        # With slack + multi-team skipped, memory still on, and the
+        # team freshly scaffolded (so the charter customization nudge
+        # fires), we expect:
         #   1. Edit prompt
-        #   2. (Optional) review memory config
-        # No "3." and no missing "2.".
+        #   2. Customize charter
+        #   3. (Optional) review memory config
+        # No "4." and no missing slot.
         assert "  1. Edit" in out
-        assert "  2. (Optional)" in out
-        assert "  3." not in out
+        assert "  2. Customize" in out
+        assert "  3. (Optional)" in out
+        assert "  4." not in out
         # And no .env step (it was skipped)
         assert "Fill in" not in out
 
     def test_next_steps_minimal_when_no_memory_no_slack(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ):
-        """All toggles off -- single step: edit the persona prompt."""
+        """Memory + Slack off, on a fresh team scaffold -- two steps:
+        edit the persona prompt, customize the seeded charter."""
         main([
             "--dir", str(tmp_path),
             "--persona", "chief",
@@ -1381,7 +1421,7 @@ class TestMain:
         ])
         out = capsys.readouterr().out
         assert "  1. Edit" in out
-        assert "  2." not in out
+        assert "  2. Customize" in out
         assert "  3." not in out
 
     def test_nothing_to_do_branch(
