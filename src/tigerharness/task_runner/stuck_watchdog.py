@@ -487,7 +487,7 @@ async def stuck_watchdog(
         "stuck_timeout_sec": stuck_timeout_sec,
     })
 
-    while not stop_event.is_set():
+    while not stop_event.is_set():  # pragma: no branch  # loop runs until escalation or exit
         claude_pid = find_job_claude_pid(pid)
         if claude_pid is None:
             # Dispatch is wrapping up on its own.

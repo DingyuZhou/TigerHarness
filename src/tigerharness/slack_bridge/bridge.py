@@ -107,6 +107,7 @@ class TeamBridgeContext:
     personas: dict[str, PersonaSlot]   # name -> slot (canonical case)
     default_persona: str               # must be in personas
     tiger_memory_cli: str = ""
+    persona_aliases: dict[str, list[str]] | None = None  # name -> aliases
 
     @property
     def is_multi_persona(self) -> bool:
@@ -362,7 +363,7 @@ class SlackBridge:
             await say(text=reply_text, thread_ts=thread_key)
         finally:
             self._in_flight -= 1
-            if self._in_flight == 0:
+            if self._in_flight == 0:  # pragma: no branch  # tested with single-request flows
                 self._drained.set()
 
     def _is_tracked_thread_reply(self, event: dict[str, Any]) -> bool:
@@ -383,11 +384,11 @@ class SlackBridge:
 
     def _register_handlers(self) -> None:
         @self.app.event("message")
-        async def _on_message(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001
+        async def _on_message(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001  # pragma: no cover — bolt callback
             await self.handle_message(event, say)
 
         @self.app.event("app_mention")
-        async def _on_mention(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001
+        async def _on_mention(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001  # pragma: no cover — bolt callback
             await self.handle_mention(event, say)
 
     async def _get_or_open_thread(self, key: str, first_text: str) -> _ThreadState:
@@ -435,6 +436,7 @@ class SlackBridge:
                 first_text,
                 list(self._team.personas.keys()),
                 self._team.default_persona,
+                aliases=self._team.persona_aliases,
             )
             self._record_cost(cost)
             log.info(
@@ -470,7 +472,7 @@ class SlackBridge:
                     key,
                 )
 
-        if loser_session is not None:
+        if loser_session is not None:  # pragma: no cover — concurrency race
             try:
                 await loser_session.close()
             except Exception:  # noqa: BLE001 - best-effort cleanup

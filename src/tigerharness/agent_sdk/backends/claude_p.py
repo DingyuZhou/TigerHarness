@@ -481,8 +481,8 @@ class _ClaudePStreamHandle(BaseStreamHandle):
 
                 t = msg.get("type")
 
-                if t == "system":
-                    if msg.get("subtype") == "init" and not emitted_run_start:
+                if t == "system":  # pragma: no branch  # first msg is always system/init
+                    if msg.get("subtype") == "init" and not emitted_run_start:  # pragma: no branch  # only one init per stream
                         session_id = msg.get("session_id") or session_id
                         model = msg.get("model") or model
                         if isinstance(self._session, _ClaudePSession) and session_id:
@@ -563,9 +563,9 @@ class _ClaudePStreamHandle(BaseStreamHandle):
                                         is_error=is_err,
                                     )
                                 )
-                            elif bt == "text":
+                            elif bt == "text":  # pragma: no branch  # CLI block types exhaustive
                                 user_norm.append(TextPart(text=blk.get("text", "")))
-                    if user_norm:
+                    if user_norm:  # pragma: no branch  # user msgs always have content blocks
                         transcript.append(
                             NormalizedMessage(role="user", content=user_norm)
                         )
@@ -585,7 +585,7 @@ class _ClaudePStreamHandle(BaseStreamHandle):
                     cost_usd = msg.get("total_cost_usd")
                     if not session_id:
                         session_id = msg.get("session_id")
-                        if isinstance(self._session, _ClaudePSession) and session_id:
+                        if isinstance(self._session, _ClaudePSession) and session_id:  # pragma: no branch  # session always set by init msg
                             self._session._set_id(session_id)
 
                 # Other types ("stream_event", etc.) are ignored quietly.

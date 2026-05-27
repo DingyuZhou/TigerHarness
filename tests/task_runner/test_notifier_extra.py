@@ -9,6 +9,7 @@ import pytest
 
 from tigerharness.task_runner.notifier import (
     _find_slack_env_file,
+    _first_allowed_user_from_yaml,
     _load_bridge_dotenv_into_env,
     _resolve_creds,
     notify_job_end,
@@ -189,3 +190,132 @@ class TestNotifyJobStart:
                     return_value=None):
             ts = notify_job_start(meta)
             assert ts == ""
+
+
+# ---------------------------------------------------------------------------
+# Team-folder credential discovery (cwd/configs/.env + yaml)
+# ---------------------------------------------------------------------------
+
+class TestFindSlackEnvTeamFolder:
+    """_find_slack_env_file discovers cwd/configs/.env for team layouts."""
+
+    def test_team_configs_env(self, tmp_path: Path, monkeypatch):
+        """When cwd is the team root and configs/.env exists, find it."""
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_BRIDGE_DIR", raising=False)
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        env_file = configs / ".env"
+        env_file.write_text("SLACK_BOT_TOKEN=xoxb-team\n")
+        monkeypatch.chdir(tmp_path)
+        assert _find_slack_env_file() == env_file
+
+    def test_explicit_env_takes_precedence(self, tmp_path: Path, monkeypatch):
+        """TIGERHARNESS_SLACK_ENV wins over cwd/configs/.env."""
+        explicit = tmp_path / "explicit.env"
+        explicit.write_text("SLACK_BOT_TOKEN=xoxb-explicit\n")
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / ".env").write_text("SLACK_BOT_TOKEN=xoxb-team\n")
+        monkeypatch.setenv("TIGERHARNESS_SLACK_ENV", str(explicit))
+        monkeypatch.delenv("TIGERHARNESS_SLACK_BRIDGE_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert _find_slack_env_file() == explicit
+
+    def test_no_configs_dir_returns_none(self, tmp_path: Path, monkeypatch):
+        """When no candidates exist, returns None."""
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_BRIDGE_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert _find_slack_env_file() is None
+
+
+class TestFirstAllowedUserFromYaml:
+    """_first_allowed_user_from_yaml reads slack-bridge.yaml fragments."""
+
+    def test_reads_first_user_id(self, tmp_path: Path):
+        yaml_file = tmp_path / "slack-bridge.yaml"
+        yaml_file.write_text(
+            "default_persona: Ayako\n"
+            "allowed_user_ids:\n"
+            "  - U0FIRST\n"
+            "  - U0SECOND\n"
+        )
+        assert _first_allowed_user_from_yaml(yaml_file) == "U0FIRST"
+
+    def test_missing_file_returns_none(self, tmp_path: Path):
+        assert _first_allowed_user_from_yaml(tmp_path / "nope.yaml") is None
+
+    def test_empty_list_returns_none(self, tmp_path: Path):
+        yaml_file = tmp_path / "slack-bridge.yaml"
+        yaml_file.write_text("allowed_user_ids: []\n")
+        assert _first_allowed_user_from_yaml(yaml_file) is None
+
+    def test_no_yaml_key_returns_none(self, tmp_path: Path):
+        yaml_file = tmp_path / "slack-bridge.yaml"
+        yaml_file.write_text("default_persona: Ayako\n")
+        assert _first_allowed_user_from_yaml(yaml_file) is None
+
+    def test_invalid_yaml_returns_none(self, tmp_path: Path):
+        yaml_file = tmp_path / "slack-bridge.yaml"
+        yaml_file.write_text(": : : invalid\n")
+        assert _first_allowed_user_from_yaml(yaml_file) is None
+
+    def test_non_dict_yaml_returns_none(self, tmp_path: Path):
+        yaml_file = tmp_path / "slack-bridge.yaml"
+        yaml_file.write_text("- just\n- a\n- list\n")
+        assert _first_allowed_user_from_yaml(yaml_file) is None
+
+    def test_no_pyyaml_returns_none(self, tmp_path: Path):
+        yaml_file = tmp_path / "slack-bridge.yaml"
+        yaml_file.write_text("allowed_user_ids:\n  - U0FIRST\n")
+        with patch.dict("sys.modules", {"yaml": None}):
+            # force ImportError on `import yaml`
+            import importlib
+            with patch("builtins.__import__", side_effect=lambda name, *a, **kw:
+                        (_ for _ in ()).throw(ImportError("no yaml"))
+                        if name == "yaml" else importlib.__import__(name, *a, **kw)):
+                assert _first_allowed_user_from_yaml(yaml_file) is None
+
+
+class TestResolveCredsTeamFolder:
+    """_resolve_creds uses cwd/configs/slack-bridge.yaml for user ID."""
+
+    def test_yaml_based_user_resolution(self, tmp_path: Path, monkeypatch):
+        """When .env has the token and yaml has the user ID, creds resolve."""
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / ".env").write_text(
+            "SLACK_BOT_TOKEN=xoxb-team\n"
+            "SLACK_NOTIFY_CHANNEL=C0OPS\n"
+        )
+        (configs / "slack-bridge.yaml").write_text(
+            "default_persona: Ayako\n"
+            "allowed_user_ids:\n"
+            "  - U0TEAMLEAD\n"
+        )
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_BRIDGE_DIR", raising=False)
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.delenv("ALLOWED_SLACK_USER_IDS", raising=False)
+        monkeypatch.chdir(tmp_path)
+        result = _resolve_creds()
+        assert result == ("xoxb-team", "U0TEAMLEAD")
+
+    def test_ceo_env_var_beats_yaml(self, tmp_path: Path, monkeypatch):
+        """SLACK_CEO_USER_ID takes precedence over yaml."""
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / ".env").write_text("SLACK_BOT_TOKEN=xoxb-team\n")
+        (configs / "slack-bridge.yaml").write_text(
+            "allowed_user_ids:\n  - U0YAML\n"
+        )
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_BRIDGE_DIR", raising=False)
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.setenv("SLACK_CEO_USER_ID", "U0CEO")
+        monkeypatch.chdir(tmp_path)
+        result = _resolve_creds()
+        assert result is not None
+        assert result[1] == "U0CEO"

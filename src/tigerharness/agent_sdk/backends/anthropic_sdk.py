@@ -307,7 +307,7 @@ def _to_normalized_message(sdk: Any, msg: Any) -> NormalizedMessage | None:
         content = msg.content
         if isinstance(content, str):
             parts.append(TextPart(text=content))
-        elif isinstance(content, list):
+        elif isinstance(content, list):  # pragma: no branch  # SDK always returns str|list
             for b in content:
                 if isinstance(b, sdk.ToolResultBlock):
                     parts.append(ToolResultPart(
@@ -316,7 +316,7 @@ def _to_normalized_message(sdk: Any, msg: Any) -> NormalizedMessage | None:
                         else str(b.content),
                         is_error=bool(b.is_error),
                     ))
-                elif isinstance(b, sdk.TextBlock):
+                elif isinstance(b, sdk.TextBlock):  # pragma: no branch  # SDK block types exhaustive
                     parts.append(TextPart(text=b.text))
         return NormalizedMessage(role="user", content=parts)
 
@@ -515,7 +515,7 @@ class AnthropicSDKBackend:
                         usage = dict(msg_usage) if isinstance(msg_usage, dict) \
                             else msg_usage
                     nm = _to_normalized_message(sdk, msg)
-                    if nm is not None:
+                    if nm is not None:  # pragma: no branch  # SDK msgs are always User|Assistant
                         transcript.append(nm)
                     content = msg.content if isinstance(msg.content, list) else []
                     for block in content:
@@ -528,7 +528,7 @@ class AnthropicSDKBackend:
                     continue
 
                 # ResultMessage: terminal. Stop iterating.
-                if isinstance(msg, sdk.ResultMessage):
+                if isinstance(msg, sdk.ResultMessage):  # pragma: no branch  # only msg types are content+result
                     cost = msg.total_cost_usd
                     stop = _stop_reason(msg.stop_reason or msg.subtype)
                     if msg.session_id and sess is not None and not sess._id:

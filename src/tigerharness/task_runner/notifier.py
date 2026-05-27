@@ -40,9 +40,14 @@ def _find_slack_env_file() -> Path | None:
     """Find the slack-bridge .env file.
 
     Checks in order:
-    1. TIGERHARNESS_SLACK_ENV env var
+    1. TIGERHARNESS_SLACK_ENV env var (explicit override)
     2. Colocated .env in the slack-bridge service dir (if configured)
-    3. None
+    3. cwd/configs/.env (team-folder layout from ``tigerharness init``)
+    4. None
+
+    Step 3 mirrors the discovery in ``slack_bridge/notify.py`` so that
+    detached task-runner children (whose cwd is the team root) find
+    the team's Slack tokens automatically.
     """
     explicit = os.environ.get("TIGERHARNESS_SLACK_ENV", "").strip()
     if explicit:
@@ -55,6 +60,12 @@ def _find_slack_env_file() -> Path | None:
         p = Path(bridge_dir).expanduser() / ".env"
         if p.exists():
             return p
+    # Team-folder layout: cwd/configs/.env (task-runner child processes
+    # run with cwd = persona.cwd, which is the team root for team-based
+    # layouts scaffolded by `tigerharness init`).
+    team_env = Path.cwd() / "configs" / ".env"
+    if team_env.exists():
+        return team_env
     return None
 
 
@@ -78,13 +89,53 @@ def _load_bridge_dotenv_into_env() -> None:
         log.warning("notifier: could not read .env: %r", exc)
 
 
+def _first_allowed_user_from_yaml(path: Path) -> str | None:
+    """Best-effort read of ``allowed_user_ids[0]`` from a slack-bridge
+    fragment YAML file.  Returns ``None`` on any failure so the caller
+    falls back to env-var resolution.
+
+    Mirrors ``slack_bridge.notify._first_allowed_user_from_yaml`` so
+    the task-runner notifier and the bridge notify CLI agree on who to
+    DM when the env vars aren't set.
+    """
+    if not path.exists():
+        return None
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, Exception):  # noqa: BLE001 — best-effort
+        return None
+    if not isinstance(data, dict):
+        return None
+    ids = data.get("allowed_user_ids")
+    if not isinstance(ids, list):
+        return None
+    for entry in ids:
+        if isinstance(entry, str) and entry.strip():
+            return entry.strip()
+    return None
+
+
 def _resolve_creds() -> tuple[str, str] | None:
-    """Returns (bot_token, target_user_id) or None if either is missing."""
+    """Returns (bot_token, target_user_id) or None if either is missing.
+
+    Resolution order for the target user:
+    1. ``SLACK_CEO_USER_ID`` env var (explicit override)
+    2. ``cwd/configs/slack-bridge.yaml`` → ``allowed_user_ids[0]``
+    3. ``ALLOWED_SLACK_USER_IDS`` env var (comma-separated, first entry)
+    """
     _load_bridge_dotenv_into_env()
     token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
     if not token:
         return None
     ceo = os.environ.get("SLACK_CEO_USER_ID", "").strip()
+    if not ceo:
+        ceo = _first_allowed_user_from_yaml(
+            Path.cwd() / "configs" / "slack-bridge.yaml"
+        ) or ""
     if not ceo:
         allow = os.environ.get("ALLOWED_SLACK_USER_IDS", "")
         for entry in allow.split(","):

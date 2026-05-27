@@ -18,6 +18,13 @@ Design notes
   The "wrong" persona then politely redirects via the team-awareness
   preamble (see ``bridge._build_persona_agent_config``).
 
+* **Alias-aware.** Persona aliases (Chinese pinyin, alternate spellings,
+  etc.) are included in the routing prompt and accepted in response
+  parsing. The caller passes an optional ``aliases`` dict mapping
+  canonical persona names to their alias lists; the router expands the
+  prompt and builds a reverse index so both the LLM and the parser
+  handle aliases correctly.
+
 * **Mock-able.** ``detect_persona`` takes the backend as a parameter so
   unit tests can inject a fake backend with deterministic responses.
 """
@@ -43,12 +50,13 @@ the first message of a Slack thread, identify which team member is \
 being addressed.
 
 Rules:
-- If a team member is clearly addressed by name (e.g. "Hi Ayako"), \
-return that exact name.
+- If a team member is clearly addressed by name or by any of their \
+listed aliases (e.g. "Hi Ayako" or "Hi 安西教练"), return the \
+team member's CANONICAL name (the first name listed, before the aliases).
 - If no team member is clearly addressed, or the addressed name is \
 not in the roster, return the literal word "default".
-- Return EXACTLY one token: a name from the roster, or "default". \
-No commentary, no punctuation, no quotes, no formatting.\
+- Return EXACTLY one token: a canonical name from the roster, or \
+"default". No commentary, no punctuation, no quotes, no formatting.\
 """
 
 
@@ -100,23 +108,72 @@ def _build_router_config() -> AgentConfig:
     )
 
 
-def _format_router_prompt(message: str, roster: Iterable[str]) -> str:
+def _format_router_prompt(
+    message: str,
+    roster: Iterable[str],
+    aliases: dict[str, list[str]] | None = None,
+) -> str:
     names = list(roster)
     options = ", ".join(names + [_DEFAULT_TOKEN])
     # Cap the message body so a pathologically long first DM doesn't
     # blow up the routing token budget. 4 KB is plenty for a Slack DM
     # opener and still leaves headroom for the rest of the prompt.
     body = message[:4096]
+
+    # Build roster lines. When aliases are provided, show them so the
+    # LLM can match non-canonical names (e.g. Chinese pinyin, nicknames).
+    if aliases:
+        roster_lines: list[str] = []
+        for n in names:
+            aka = aliases.get(n)
+            if aka:
+                roster_lines.append(f"{n} (also known as: {', '.join(aka)})")
+            else:
+                roster_lines.append(n)
+        roster_display = "; ".join(roster_lines)
+    else:
+        roster_display = ", ".join(names)
+
     return (
-        f"Roster: {', '.join(names)}\n"
+        f"Roster: {roster_display}\n"
         f'Message: """{body}"""\n\n'
         f"Return one of: {options}"
     )
 
 
-def _parse_router_response(raw: str, roster: list[str]) -> str | None:
+def _build_alias_index(
+    roster: list[str],
+    aliases: dict[str, list[str]] | None,
+) -> dict[str, str]:
+    """Build a lowercase token -> canonical name reverse index.
+
+    Includes each canonical name itself (lowercased) plus all its
+    aliases. On collision, the first canonical name wins -- this
+    mirrors the persona registry's first-registered-wins behavior.
+    """
+    idx: dict[str, str] = {}
+    for name in roster:
+        key = name.lower()
+        if key not in idx:
+            idx[key] = name
+        if aliases:
+            for alias in aliases.get(name, ()):
+                akey = alias.lower()
+                if akey not in idx:
+                    idx[akey] = name
+    return idx
+
+
+def _parse_router_response(
+    raw: str,
+    roster: list[str],
+    aliases: dict[str, list[str]] | None = None,
+) -> str | None:
     """Return a matched persona name (canonical case from *roster*),
     or ``None`` if the response is unparseable or off-roster.
+
+    When *aliases* is provided, the response is also checked against
+    alias values, mapping back to the canonical persona name.
 
     The router is told to return one token. We tolerate trailing
     punctuation, whitespace, or surrounding quotes so a model that
@@ -130,9 +187,11 @@ def _parse_router_response(raw: str, roster: list[str]) -> str | None:
     if token == _DEFAULT_TOKEN:
         # Caller resolves "default" to the team's default_persona.
         return _DEFAULT_TOKEN
-    for name in roster:
-        if token == name.lower():
-            return name
+    # Build reverse index covering canonical names + aliases.
+    idx = _build_alias_index(roster, aliases)
+    canonical = idx.get(token)
+    if canonical is not None:
+        return canonical
     return None
 
 
@@ -141,6 +200,7 @@ async def detect_persona(
     message: str,
     roster: list[str],
     default_persona: str,
+    aliases: dict[str, list[str]] | None = None,
 ) -> tuple[str, float]:
     """Route the first message of a new thread to a persona.
 
@@ -148,6 +208,11 @@ async def detect_persona(
     *default_persona* on any failure path), and the actual cost of the
     routing call (0.0 when the call was skipped or failed before cost
     could be reported).
+
+    *aliases* is an optional mapping of canonical persona name to a
+    list of alternate names (nicknames, translations, pinyin, etc.).
+    When provided, aliases are included in the LLM routing prompt and
+    accepted in response parsing.
 
     *default_persona* must itself be in *roster* -- the loader enforces
     that at startup, but we don't re-check here because the failure
@@ -166,7 +231,7 @@ async def detect_persona(
         return roster[0], 0.0
 
     cfg = _build_router_config()
-    prompt = _format_router_prompt(message, roster)
+    prompt = _format_router_prompt(message, roster, aliases=aliases)
 
     try:
         session = await backend.open_session(resume_id=None)
@@ -191,7 +256,7 @@ async def detect_persona(
     cost = float(getattr(result, "cost_usd", None) or 0.0)
 
     raw = result.final_output or ""
-    matched = _parse_router_response(raw, roster)
+    matched = _parse_router_response(raw, roster, aliases=aliases)
     if matched is None:
         log.info(
             "router response %r not in roster %s; falling back to default=%s",

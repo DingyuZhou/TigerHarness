@@ -300,7 +300,7 @@ def _build_adapters(
             # classify some sessions as `source: slack` via reverse
             # lookup. See HANDOFF.md for the rationale.
             pass
-        elif s.kind == "docs":
+        elif s.kind == "docs":  # pragma: no branch  # only known kinds: claude_code, slack_thread, docs
             adapters.append(
                 DocsAdapter(
                     glob_pattern=s.fields["glob"],

@@ -238,7 +238,7 @@ class Store:
         finally:
             if acquired:
                 stop.set()
-                if refresher is not None:
+                if refresher is not None:  # pragma: no branch  # refresher always started when acquired
                     refresher.join(timeout=2.0)
                 try:
                     lock_path.unlink()

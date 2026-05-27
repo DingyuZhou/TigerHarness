@@ -175,11 +175,15 @@ def _resolve(maybe_rel: str | os.PathLike[str], base: Path) -> Path:
     return p if p.is_absolute() else (base / p)
 
 
-def _read_team_roster(team_dir: Path, where: str) -> list[str]:
-    """Return the persona names from ``<team>/configs/personas.yaml``.
+def _read_team_roster(team_dir: Path, where: str) -> tuple[list[str], dict[str, list[str]]]:
+    """Return persona names and aliases from ``<team>/configs/personas.yaml``.
 
     Single source of truth for the lane's routable roster -- the
     bridge auto-routes to any persona in this list. Order is preserved.
+
+    Returns ``(names, aliases)`` where *aliases* maps canonical persona
+    names to their alias lists (from the ``aliases:`` field in
+    personas.yaml). Personas without aliases are omitted from the dict.
     """
     yaml_path = team_dir / "configs" / "personas.yaml"
     if not yaml_path.exists():
@@ -194,6 +198,7 @@ def _read_team_roster(team_dir: Path, where: str) -> list[str]:
             f"{where}: personas.yaml has no 'personas' list -- no personas to route to"
         )
     names: list[str] = []
+    aliases: dict[str, list[str]] = {}
     for entry in raw:
         if not isinstance(entry, dict):
             raise ValueError(
@@ -204,8 +209,12 @@ def _read_team_roster(team_dir: Path, where: str) -> list[str]:
             raise ValueError(
                 f"{where}: personas.yaml entry missing/empty 'name' field"
             )
-        names.append(name.strip())
-    return names
+        canon = name.strip()
+        names.append(canon)
+        raw_aliases = entry.get("aliases")
+        if isinstance(raw_aliases, list) and raw_aliases:
+            aliases[canon] = [str(a) for a in raw_aliases]
+    return names, aliases
 
 
 def _build_persona_slot(
@@ -282,7 +291,7 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
     app_token, bot_token = _validate_tokens(env_vars, where)
 
     # Build per-persona configs from the team's personas.yaml roster
-    roster = _read_team_roster(team_dir, where)
+    roster, persona_aliases = _read_team_roster(team_dir, where)
     if default_persona not in roster:
         raise ValueError(
             f"{where}: default_persona '{default_persona}' is not in the "
@@ -301,6 +310,7 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
         personas=personas,
         default_persona=default_persona,
         tiger_memory_cli=env_vars.get("TIGER_MEMORY_CLI", ""),
+        persona_aliases=persona_aliases or None,
     )
     return LaneConfig(name=lane_name, team_ctx=team_ctx, state_path=state_path)
 
