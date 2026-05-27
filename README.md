@@ -99,6 +99,11 @@ tigers/
 ├── configs/
 │   ├── personas.yaml              # team registry (auto-updated)
 │   └── .env                       # Slack tokens (gitignored)
+├── charter/
+│   └── README.md                  # team's mission, scope, conventions
+│                                  # (single entry point for personas)
+├── knowledge/
+│   └── README.md                  # curated, lazy-loaded reference base
 ├── skills/
 │   └── README.md                  # drop team-shared skills here
 ├── personas/

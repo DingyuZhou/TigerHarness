@@ -245,6 +245,14 @@ class TestCreateTeam:
         assert (team / "configs" / "personas.yaml").exists()
         assert (team / "configs" / ".env").exists()
         assert (team / "skills" / "README.md").exists()
+        # charter + knowledge: the team's entry point + curated base.
+        assert (team / "charter" / "README.md").exists()
+        assert (team / "knowledge" / "README.md").exists()
+        charter_text = (team / "charter" / "README.md").read_text()
+        assert "Team charter -- tigers" in charter_text
+        assert "First-read checklist" in charter_text
+        knowledge_text = (team / "knowledge" / "README.md").read_text()
+        assert "Team knowledge -- tigers" in knowledge_text
         # .claude/ directory scaffolded
         assert (team / ".claude" / "settings.json").exists()
         settings_text = (team / ".claude" / "settings.json").read_text()
@@ -264,14 +272,33 @@ class TestCreateTeam:
         defaults_text = (team / "configs" / "tiger-memory.defaults.yaml").read_text()
         assert "summarizer:" in defaults_text
         assert "claude-sonnet-4-6" in defaults_text
-        # Base paths (5) + settings.json + 2 skills = 8
-        assert len(created) >= 8
+        # Base paths (7: gitignore, personas.yaml, mem defaults, .env,
+        # skills README, charter README, knowledge README) +
+        # settings.json + 2 skills = 10.
+        assert len(created) >= 10
 
     def test_skip_slack(self, tmp_path: Path):
         team = tmp_path / "tigers"
         create_team(team, include_slack=False)
         assert not (team / "configs" / ".env").exists()
         assert (team / "configs" / "personas.yaml").exists()
+        # charter + knowledge: scaffolded regardless of slack opt-in
+        assert (team / "charter" / "README.md").exists()
+        assert (team / "knowledge" / "README.md").exists()
+
+    def test_charter_and_knowledge_seeded_for_team_name(self, tmp_path: Path):
+        """Charter and knowledge READMEs interpolate the team name in
+        their headers -- so the team isn't reading a generic doc."""
+        team = tmp_path / "shohoku"
+        create_team(team, include_slack=False)
+        assert (
+            "Team charter -- shohoku"
+            in (team / "charter" / "README.md").read_text()
+        )
+        assert (
+            "Team knowledge -- shohoku"
+            in (team / "knowledge" / "README.md").read_text()
+        )
 
     def test_idempotent(self, tmp_path: Path):
         team = tmp_path / "tigers"
