@@ -252,12 +252,20 @@ class TestCreateTeam:
         # Skills copied from package
         assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
         assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
-        # gitignore excludes secrets
-        assert "configs/.env" in (team / ".gitignore").read_text()
+        # gitignore excludes secrets but NOT archive/journal (those are git-tracked)
+        gi_text = (team / ".gitignore").read_text()
+        assert "configs/.env" in gi_text
+        assert "memories/*/archive/" not in gi_text
+        assert "memories/*/journal/" not in gi_text
         # personas.yaml header references team name
         assert "Team: tigers" in (team / "configs" / "personas.yaml").read_text()
-        # Base paths (4) + settings.json + 2 skills = 7
-        assert len(created) >= 7
+        # tiger-memory defaults created
+        assert (team / "configs" / "tiger-memory.defaults.yaml").exists()
+        defaults_text = (team / "configs" / "tiger-memory.defaults.yaml").read_text()
+        assert "summarizer:" in defaults_text
+        assert "claude-sonnet-4-6" in defaults_text
+        # Base paths (5) + settings.json + 2 skills = 8
+        assert len(created) >= 8
 
     def test_skip_slack(self, tmp_path: Path):
         team = tmp_path / "tigers"
