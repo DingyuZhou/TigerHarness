@@ -29,6 +29,9 @@ Top-down, with a clear entry point:
 
 ## What does NOT belong here
 
+- Team governance -- mission, scope, permissions, and conventions
+  live in `../charter/`, not here. Knowledge is reference material;
+  the charter is the operating manual.
 - Task working notes -- the task-runner writes those to
   `../task_journal/` automatically (gitignored runtime artifact).
 - Personal memory -- use `../memories/<persona>/`.

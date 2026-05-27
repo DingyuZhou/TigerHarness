@@ -25,10 +25,12 @@ team. Read this first; everything else follows from here.
 
 - Branch naming: `work/YYYY-MM-DD-<slug>`
 - Commit prefix: `<persona>:` (e.g. `chief:`, `scout:`)
-- Self-critique on non-trivial changes (correctness, then safety/edge
-  cases) before handing off.
+- Self-critique 2x on every non-trivial change: round 1 for
+  correctness/completeness, round 2 for safety/edge cases. Document
+  what each round caught in the commit body under a
+  `Self-critique 2x applied:` block.
 - Never `git push --force`, never amend after push, never
-  `git add -A`.
+  `git add -A`, never `--no-verify`.
 
 ## Using team knowledge
 
@@ -46,10 +48,11 @@ Before any substantive work, every persona reads (in order):
 
 1. This charter (you are here).
 2. `../knowledge/INDEX.md` (or `../knowledge/README.md`).
-3. Their own briefing at `../memories/<persona>/briefing/README.md`
-   if tiger-memory is enabled.
-4. The owned project repo's top-level `README.md` for context on
-   the work.
+3. The owned project repo's top-level `README.md` for context on
+   the work the team actually does.
+4. Their own briefing at `../memories/<persona>/briefing/README.md`
+   if tiger-memory is enabled. The briefing is most useful once you
+   already know what the team is and what it works on.
 
 ## Updating this charter
 

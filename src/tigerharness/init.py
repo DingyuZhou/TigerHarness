@@ -53,19 +53,22 @@ present clear results.
 
 ## Before you start work (read these first)
 
-Every persona on this team reads two files before doing anything
-substantive:
+These files set the team's mission, allowed write zones, and working
+conventions. Skip them and you'll drift, repeat work, or step
+outside scope. Read them before any substantive task:
 
 1. `../charter/README.md` -- the team's charter: mission, project
    scope, permissions, working conventions, and how to use team
    knowledge. This is the single entry point.
-2. `../knowledge/README.md` (or `../knowledge/INDEX.md` once an
-   index exists) -- the team's curated reference base. Drill into
+2. `../knowledge/INDEX.md` (or `../knowledge/README.md` until an
+   INDEX exists) -- the team's curated reference base. Drill into
    the specific topic you need; don't load the whole base eagerly.
 
 If you have a tiger-memory briefing at
 `../memories/{persona}/briefing/README.md`, read that too -- it's
-your persistent cross-session memory.
+your persistent cross-session memory. The briefing is most useful
+once you've already oriented on the team's charter and the project
+the team owns.
 
 ## Working style
 
@@ -233,10 +236,12 @@ team. Read this first; everything else follows from here.
 
 - Branch naming: `work/YYYY-MM-DD-<slug>`
 - Commit prefix: `<persona>:` (e.g. `chief:`, `scout:`)
-- Self-critique on non-trivial changes (correctness, then safety/edge
-  cases) before handing off.
+- Self-critique 2x on every non-trivial change: round 1 for
+  correctness/completeness, round 2 for safety/edge cases. Document
+  what each round caught in the commit body under a
+  `Self-critique 2x applied:` block.
 - Never `git push --force`, never amend after push, never
-  `git add -A`.
+  `git add -A`, never `--no-verify`.
 
 ## Using team knowledge
 
@@ -254,10 +259,11 @@ Before any substantive work, every persona reads (in order):
 
 1. This charter (you are here).
 2. `../knowledge/INDEX.md` (or `../knowledge/README.md`).
-3. Their own briefing at `../memories/<persona>/briefing/README.md`
-   if tiger-memory is enabled.
-4. The owned project repo's top-level `README.md` for context on
-   the work.
+3. The owned project repo's top-level `README.md` for context on
+   the work the team actually does.
+4. Their own briefing at `../memories/<persona>/briefing/README.md`
+   if tiger-memory is enabled. The briefing is most useful once you
+   already know what the team is and what it works on.
 
 ## Updating this charter
 
@@ -301,6 +307,9 @@ Top-down, with a clear entry point:
 
 ## What does NOT belong here
 
+- Team governance -- mission, scope, permissions, and conventions
+  live in `../charter/`, not here. Knowledge is reference material;
+  the charter is the operating manual.
 - Task working notes -- the task-runner writes those to
   `../task_journal/` automatically (gitignored runtime artifact).
 - Personal memory -- use `../memories/<persona>/`.

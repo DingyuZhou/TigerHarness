@@ -188,3 +188,24 @@ Each job writes a per-task markdown journal at:
 This is a runtime artifact, not a git-tracked source. `tigerharness
 init` scaffolds the team's `.gitignore` to exclude `task_journal/`,
 so the folder accumulates locally without polluting commits.
+
+### Migration from `lab_notebooks/tasks/`
+
+Before v0.2.x the iteration log was written to
+`<cwd>/lab_notebooks/tasks/<slug>.md`. The rename is a hard cut --
+the runner writes to `task_journal/` from that release forward,
+nothing reads from `lab_notebooks/` any more.
+
+If you have an existing team with a populated `lab_notebooks/`
+folder:
+
+1. Move the contents you care about: `mv lab_notebooks/tasks/*
+   task_journal/` (create `task_journal/` first if it doesn't exist).
+2. Remove the now-empty `lab_notebooks/` directory: `rmdir
+   lab_notebooks/tasks lab_notebooks`.
+3. Add `task_journal/` to the team's `.gitignore` if it isn't
+   already (teams scaffolded post-rename have this from the
+   template).
+
+Old `lab_notebooks/` folders left in place are harmless -- the
+runner just stops writing to them.
