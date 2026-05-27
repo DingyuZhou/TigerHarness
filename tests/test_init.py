@@ -260,9 +260,11 @@ class TestCreateTeam:
         # Skills copied from package
         assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
         assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
-        # gitignore excludes secrets but NOT archive/journal (those are git-tracked)
+        # gitignore excludes secrets and the runner's working journal,
+        # but NOT archive/journal (those are git-tracked memory summaries).
         gi_text = (team / ".gitignore").read_text()
         assert "configs/.env" in gi_text
+        assert "task_journal/" in gi_text
         assert "memories/*/archive/" not in gi_text
         assert "memories/*/journal/" not in gi_text
         # personas.yaml header references team name

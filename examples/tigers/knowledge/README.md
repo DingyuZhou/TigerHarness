@@ -30,7 +30,7 @@ Top-down, with a clear entry point:
 ## What does NOT belong here
 
 - Task working notes -- the task-runner writes those to
-  `../lab_notebooks/tasks/` automatically.
+  `../task_journal/` automatically (gitignored runtime artifact).
 - Personal memory -- use `../memories/<persona>/`.
 - Source code -- use the project repo.
 - Stale content -- prune aggressively.

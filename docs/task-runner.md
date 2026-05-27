@@ -23,7 +23,7 @@ Runner (detached child process)
     |-- early-exit classifier (opt-in)
     |-- Slack notifier (job start/end DMs)
     v
-Result: run.log + result.txt + lab_notebooks/tasks/<slug>.md
+Result: run.log + result.txt + task_journal/<slug>.md
 ```
 
 ## Key modules
@@ -180,7 +180,11 @@ safety net for cases the agent misses.
 
 ## Iteration log
 
-Each job writes a git-trackable markdown log at:
+Each job writes a per-task markdown journal at:
 ```
-<cwd>/lab_notebooks/tasks/<name>--<job_id>.md
+<cwd>/task_journal/<name>--<job_id>.md
 ```
+
+This is a runtime artifact, not a git-tracked source. `tigerharness
+init` scaffolds the team's `.gitignore` to exclude `task_journal/`,
+so the folder accumulates locally without polluting commits.
