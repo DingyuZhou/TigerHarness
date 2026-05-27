@@ -21,6 +21,7 @@ from tigerharness.init import (
     _prompt_text,
     _prompt_yes_no,
     _render_memory_config,
+    _scaffold_claude_dir,
     _validate_name,
     _write_if_missing,
     add_persona,
@@ -244,12 +245,19 @@ class TestCreateTeam:
         assert (team / "configs" / "personas.yaml").exists()
         assert (team / "configs" / ".env").exists()
         assert (team / "skills" / "README.md").exists()
+        # .claude/ directory scaffolded
+        assert (team / ".claude" / "settings.json").exists()
+        settings_text = (team / ".claude" / "settings.json").read_text()
+        assert "TIGERHARNESS_PERSONAS_CONFIG" in settings_text
+        # Skills copied from package
+        assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
+        assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
         # gitignore excludes secrets
         assert "configs/.env" in (team / ".gitignore").read_text()
         # personas.yaml header references team name
         assert "Team: tigers" in (team / "configs" / "personas.yaml").read_text()
-        # All four paths returned
-        assert len(created) == 4
+        # Base paths (4) + settings.json + 2 skills = 7
+        assert len(created) >= 7
 
     def test_skip_slack(self, tmp_path: Path):
         team = tmp_path / "tigers"
@@ -263,6 +271,90 @@ class TestCreateTeam:
         # Second run creates nothing
         created = create_team(team, include_slack=True)
         assert created == []
+
+
+class TestScaffoldClaudeDir:
+    """_scaffold_claude_dir creates .claude/settings.json + skills."""
+
+    def test_settings_json_written(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        team.mkdir()
+        created = _scaffold_claude_dir(team)
+        settings = team / ".claude" / "settings.json"
+        assert settings.exists()
+        assert settings in created
+        text = settings.read_text()
+        assert "TIGERHARNESS_PERSONAS_CONFIG" in text
+        assert "myteam" in text
+
+    def test_skills_copied(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        team.mkdir()
+        created = _scaffold_claude_dir(team)
+        assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
+        assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
+        # At least settings.json + 2 skills
+        assert len(created) >= 3
+
+    def test_idempotent(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        team.mkdir()
+        _scaffold_claude_dir(team)
+        created = _scaffold_claude_dir(team)
+        assert created == []
+
+    def test_no_bundled_skills_dir_is_fine(self, tmp_path: Path):
+        """When _bundled_skills doesn't exist, only settings.json is created."""
+        team = tmp_path / "myteam"
+        team.mkdir()
+        import tigerharness.init as init_mod
+        real_file = Path(init_mod.__file__).resolve()
+        real_skills = real_file.parent / "_bundled_skills"
+        backup = real_skills.rename(real_skills.with_suffix(".gone"))
+        try:
+            created = _scaffold_claude_dir(team)
+            # settings.json still created, but no skills
+            assert (team / ".claude" / "settings.json").exists()
+            assert not (team / ".claude" / "skills").exists()
+            assert len(created) == 1
+        finally:
+            backup.rename(real_skills)
+
+    def test_skill_dir_without_skill_md_skipped(self, tmp_path: Path):
+        """A subdirectory in _bundled_skills with no SKILL.md is skipped."""
+        team = tmp_path / "myteam"
+        team.mkdir()
+        # Patch the package skills dir to include a bogus entry
+        fake_skills = tmp_path / "fake_skills"
+        fake_skills.mkdir()
+        (fake_skills / "real-skill").mkdir()
+        (fake_skills / "real-skill" / "SKILL.md").write_text("# real\n")
+        (fake_skills / "empty-dir").mkdir()  # no SKILL.md
+        with patch("tigerharness.init.Path.__file__", create=True):
+            # Simpler: patch the resolved path directly
+            import tigerharness.init as init_mod
+            original = init_mod.Path
+            with patch.object(init_mod, "Path", wraps=original) as mock_path:
+                # Can't easily patch __file__; just call _scaffold_claude_dir
+                # with a custom bundled skills dir. Refactor: use the real
+                # function but point it at our fake dir.
+                pass
+        # Direct approach: temporarily replace the skills dir
+        import tigerharness.init as init_mod
+        real_file = Path(init_mod.__file__).resolve()
+        real_skills = real_file.parent / "_bundled_skills"
+        # Rename real -> backup, put fake in its place
+        backup = real_skills.rename(real_skills.with_suffix(".bak"))
+        try:
+            fake_skills.rename(real_skills)
+            created = _scaffold_claude_dir(team)
+            # Should have settings.json + real-skill, NOT empty-dir
+            assert (team / ".claude" / "skills" / "real-skill" / "SKILL.md").exists()
+            assert not (team / ".claude" / "skills" / "empty-dir").exists()
+        finally:
+            # Restore
+            real_skills.rename(fake_skills)
+            backup.rename(real_skills)
 
 
 # ---------------------------------------------------------------------------
