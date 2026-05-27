@@ -185,6 +185,58 @@ def _post_json(endpoint: str, token: str, payload: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Dual-post helper
+# ---------------------------------------------------------------------------
+
+def _post_notification(
+    token: str,
+    target_user: str,
+    text: str,
+    *,
+    thread_ts: str = "",
+) -> dict | None:
+    """Post a notification, handling the channel/thread mismatch.
+
+    When ``SLACK_NOTIFY_CHANNEL`` is set AND ``thread_ts`` is set, the
+    notification goes to **two** destinations:
+
+    1. ``SLACK_NOTIFY_CHANNEL`` — top-level message (no ``thread_ts``,
+       because that ts belongs to a different channel).
+    2. ``target_user`` — in-thread reply (with ``thread_ts``), so the
+       user sees the update inline in their DM conversation.
+
+    When only one is set, posts once to the appropriate destination.
+    Returns the first successful Slack response, or None if all fail.
+    """
+    notify_channel = os.environ.get("SLACK_NOTIFY_CHANNEL", "").strip()
+    result: dict | None = None
+
+    if notify_channel:
+        # Ops-log: always top-level (never pass thread_ts from a DM).
+        channel_payload: dict[str, str] = {
+            "channel": notify_channel, "text": text,
+        }
+        result = _post_json("chat.postMessage", token, channel_payload)
+
+    if thread_ts:
+        # DM thread: reply in the user's conversation thread.
+        thread_payload: dict[str, str] = {
+            "channel": target_user,
+            "text": text,
+            "thread_ts": thread_ts,
+        }
+        thread_result = _post_json("chat.postMessage", token, thread_payload)
+        if result is None:
+            result = thread_result
+    elif not notify_channel:
+        # No channel, no thread — plain DM to the user.
+        dm_payload: dict[str, str] = {"channel": target_user, "text": text}
+        result = _post_json("chat.postMessage", token, dm_payload)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -206,19 +258,11 @@ def notify_job_end(meta: JobMeta, store: JobStore) -> bool:
             return False
         token, target_user = creds
 
-        # If SLACK_NOTIFY_CHANNEL is set, post there instead of the
-        # user's DM. Keeps the inbox clean; ops traffic goes to
-        # a dedicated channel.
-        channel = os.environ.get("SLACK_NOTIFY_CHANNEL", "").strip() or target_user
-
         text = _render(meta, store)
-        payload: dict[str, str] = {"channel": channel, "text": text}
-        # If the job was kicked off from a Slack thread, reply in that
-        # thread so the user sees the notification inline.
         thread_ts = getattr(meta, "slack_thread_ts", "")
-        if thread_ts:
-            payload["thread_ts"] = thread_ts
-        return _post_json("chat.postMessage", token, payload) is not None
+        return _post_notification(
+            token, target_user, text, thread_ts=thread_ts,
+        ) is not None
     except Exception as exc:  # last-ditch safety net
         log.exception("notifier: unexpected failure for job=%s: %r", meta.job_id, exc)
         return False
@@ -233,8 +277,7 @@ def notify_stuck_escalation(
     """DM the user when the stuck-watchdog escalates an iteration.
 
     Best-effort: returns False and logs on any failure. **Never raises.**
-    Replies in ``meta.slack_thread_ts`` if set, so the message lands in
-    the same thread as the job-start DM.
+    Posts to ops-log (if configured) AND the DM thread (if set).
     """
     try:
         if not getattr(meta, "notify", True):
@@ -245,7 +288,6 @@ def notify_stuck_escalation(
             log.info("notifier: slack creds not available; skipping stuck DM for job=%s", meta.job_id)
             return False
         token, ceo = creds
-        channel = os.environ.get("SLACK_NOTIFY_CHANNEL", "").strip() or ceo
 
         headline = f"iter {iter_num} exceeded stuck timeout"
         lines = [f":rotating_light: task-runner job `{meta.job_id}` {headline}"]
@@ -254,23 +296,23 @@ def notify_stuck_escalation(
         if detail:
             lines.append(detail)
 
-        payload: dict[str, str] = {"channel": channel, "text": "\n".join(lines)}
         thread_ts = getattr(meta, "slack_thread_ts", "")
-        if thread_ts:
-            payload["thread_ts"] = thread_ts
-        return _post_json("chat.postMessage", token, payload) is not None
+        return _post_notification(
+            token, ceo, "\n".join(lines), thread_ts=thread_ts,
+        ) is not None
     except Exception as exc:
         log.exception("notify_stuck_escalation: unexpected failure for job=%s: %r", meta.job_id, exc)
         return False
 
 
 def notify_job_start(meta: JobMeta) -> str:
-    """Post a 'job started' DM and return the Slack message ``ts``.
+    """Post a 'job started' notification and return the thread anchor ``ts``.
 
-    The returned ``ts`` becomes the thread anchor: all subsequent
-    notifications reply into this thread.
+    Posts to ops-log (if configured) AND the DM thread (if ``--thread``
+    was passed). The returned ``ts`` is the DM thread anchor for
+    subsequent notifications.
 
-    Returns ``""`` if the DM couldn't be sent. **Never raises.**
+    Returns ``""`` if no DM could be sent. **Never raises.**
     """
     try:
         if not getattr(meta, "notify", True):
@@ -283,7 +325,6 @@ def notify_job_start(meta: JobMeta) -> str:
             return ""
 
         token, target_user = creds
-        channel = os.environ.get("SLACK_NOTIFY_CHANNEL", "").strip() or target_user
 
         cap_label = str(meta.max_iters) if meta.max_iters > 0 else "forever"
         name_part = f"  |  _{meta.name}_" if meta.name else ""
@@ -292,12 +333,10 @@ def notify_job_start(meta: JobMeta) -> str:
             f"persona: `{meta.persona}`  |  iters: {cap_label}{name_part}"
         )
 
-        payload: dict[str, str] = {"channel": channel, "text": text}
         existing_ts = getattr(meta, "slack_thread_ts", "")
-        if existing_ts:
-            payload["thread_ts"] = existing_ts
-
-        result = _post_json("chat.postMessage", token, payload)
+        result = _post_notification(
+            token, target_user, text, thread_ts=existing_ts,
+        )
         if result is None:
             return ""
 
