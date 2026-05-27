@@ -135,6 +135,11 @@ class Config:
 def load_config(path: str | Path | None = None) -> Config:
     """Load config from *path* (or ``$TIGER_MEMORY_CONFIG`` if None).
 
+    When a team-level defaults file is found (auto-discovered or
+    explicitly referenced via the ``defaults:`` key), its values are
+    deep-merged *under* the per-persona config: persona wins on any
+    key it sets, defaults fill in the rest.
+
     Raises ``ConfigError`` on missing file, YAML parse error, or any
     schema/minimum violation.
     """
@@ -154,7 +159,83 @@ def load_config(path: str | Path | None = None) -> Config:
     except yaml.YAMLError as exc:
         raise ConfigError(f"Could not parse YAML at {path}: {exc}") from exc
 
+    if isinstance(raw, dict):
+        defaults_raw = _load_defaults(raw, path)
+        if defaults_raw:
+            raw = _deep_merge(defaults_raw, raw)
+
     return _from_dict(raw, source_path=path)
+
+
+# ----- team-level defaults discovery + merge ---------------------------------
+
+
+def _load_defaults(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    """Locate and load the team-level defaults file, if any.
+
+    Discovery order:
+      1. Explicit ``defaults:`` key in *raw* (path resolved relative to
+         the persona config's directory).
+      2. Auto-discovery: ``../../configs/tiger-memory.defaults.yaml``
+         relative to the persona config (matches the standard team
+         layout ``memories/<persona>/tiger-memory.config.yaml``).
+
+    Returns an empty dict when no defaults file is found.
+    """
+    anchor = config_path.parent
+
+    explicit = raw.pop("defaults", None)
+    if explicit:
+        p = Path(explicit).expanduser()
+        if not p.is_absolute():
+            p = (anchor / p).resolve()
+        if not p.exists():
+            raise ConfigError(
+                f"Explicit defaults file not found: {p} "
+                f"(referenced from {config_path})"
+            )
+        try:
+            return yaml.safe_load(p.read_text()) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(
+                f"Could not parse defaults YAML at {p}: {exc}"
+            ) from exc
+
+    # Auto-discover: <team>/configs/tiger-memory.defaults.yaml
+    auto = (anchor / ".." / "configs" / "tiger-memory.defaults.yaml").resolve()
+    if not auto.exists():
+        # Also try the alternative: the persona config IS inside
+        # memories/<persona>/ which is two levels below the team root.
+        auto = (anchor / ".." / ".." / "configs" / "tiger-memory.defaults.yaml").resolve()
+    if auto.exists():
+        try:
+            return yaml.safe_load(auto.read_text()) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(
+                f"Could not parse defaults YAML at {auto}: {exc}"
+            ) from exc
+
+    return {}
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *overlay* on top of *base*. Returns a new dict.
+
+    - Dict values are merged recursively (overlay keys win).
+    - All other types (str, list, int, ...) are replaced wholesale by
+      the overlay value when present.
+    """
+    merged = dict(base)
+    for key, val in overlay.items():
+        if (
+            key in merged
+            and isinstance(merged[key], dict)
+            and isinstance(val, dict)
+        ):
+            merged[key] = _deep_merge(merged[key], val)
+        else:
+            merged[key] = val
+    return merged
 
 
 def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:

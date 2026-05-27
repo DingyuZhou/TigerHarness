@@ -70,9 +70,18 @@ class Store:
     # ----- layout -------------------------------------------------------
 
     def init_layout(self) -> None:
-        """Create the folder layout if missing."""
+        """Create the folder layout if missing.
+
+        Drops ``.gitkeep`` in ``archive/`` and ``journal/`` so the
+        empty directories are trackable by git from the first commit
+        (briefing/ is gitignored and doesn't need one).
+        """
         for d in (self.paths.archive, self.paths.journal, self.paths.briefing):
             d.mkdir(parents=True, exist_ok=True)
+        for d in (self.paths.archive, self.paths.journal):
+            gitkeep = d / ".gitkeep"
+            if not gitkeep.exists():
+                gitkeep.write_text("")
 
     def exists(self) -> bool:
         return self.paths.archive.exists() and self.paths.journal.exists()

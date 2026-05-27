@@ -27,6 +27,19 @@ def test_init_layout(tmp_path: Path) -> None:
     assert store.paths.archive.is_dir()
     assert store.paths.journal.is_dir()
     assert store.paths.briefing.is_dir()
+    # .gitkeep in archive/ and journal/ (git-trackable), not in briefing/
+    assert (store.paths.archive / ".gitkeep").exists()
+    assert (store.paths.journal / ".gitkeep").exists()
+    assert not (store.paths.briefing / ".gitkeep").exists()
+
+
+def test_init_layout_gitkeep_idempotent(tmp_path: Path) -> None:
+    """Calling init_layout twice doesn't fail or overwrite .gitkeep."""
+    store = Store(tmp_path / "mem")
+    store.init_layout()
+    store.init_layout()  # second call
+    assert (store.paths.archive / ".gitkeep").exists()
+    assert (store.paths.journal / ".gitkeep").exists()
 
 
 def test_atomic_write_no_partial_on_crash(tmp_path: Path) -> None:

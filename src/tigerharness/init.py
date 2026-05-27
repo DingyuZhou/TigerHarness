@@ -129,8 +129,28 @@ _PERSONA_ENTRY = """\
     #   add_dirs: [../skills]   # uncomment to expose team-shared skills
 """
 
+_MEMORY_DEFAULTS_TEMPLATE = """\
+# Team-level tiger-memory defaults (team '{team}').
+# Shared by all personas. Per-persona configs inherit these values;
+# any key a persona sets in its own tiger-memory.config.yaml wins.
+# Docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
+
+summarizer:
+  backend: anthropic
+  model: claude-sonnet-4-6
+  prompts: default/v1
+
+rebuild:
+  idle_threshold_hours: 1
+  resummarize_window_days: 7
+  rebuild_timeout_minutes: 60
+"""
+
 _MEMORY_CONFIG_TEMPLATE = """\
 # tiger-memory config for persona '{persona}' (team '{team}').
+# Shared settings (summarizer, rebuild, etc.) are inherited from
+# configs/tiger-memory.defaults.yaml. Override any key here to
+# customize this persona.
 # Docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
 
 agent:
@@ -143,16 +163,8 @@ store:
 
 sources:
 {sources_block}\
-summarizer:
-  backend: anthropic
-  model: claude-sonnet-4-6
-  prompts: default/v1
-
 rebuild:
   lock_path: /tmp/tiger-memory-{team}-{persona}.lock
-  idle_threshold_hours: 1
-  resummarize_window_days: 7
-  rebuild_timeout_minutes: 60
 """
 
 _PROJECT_PATH_DETECTED_COMMENT = (
@@ -174,13 +186,13 @@ folder to that agent.
 """
 
 _GITIGNORE = """\
-# Tigerharness team -- secrets and runtime memory state
+# Tigerharness team -- secrets and runtime state
 configs/.env
-memories/*/archive/
-memories/*/journal/
 memories/*/briefing/
 memories/*/cache/
 memories/*/state.json
+# archive/ and journal/ are version-controlled (memory summaries).
+# .gitkeep files inside them ensure the empty dirs are tracked.
 """
 
 # .claude/settings.json -- env vars that Claude Code injects into agent
@@ -410,6 +422,13 @@ def create_team(
     pyaml = team_dir / "configs" / "personas.yaml"
     if _write_if_missing(pyaml, _PERSONAS_YAML_HEADER.format(team=team_dir.name)):
         created.append(pyaml)
+
+    mem_defaults = team_dir / "configs" / "tiger-memory.defaults.yaml"
+    if _write_if_missing(
+        mem_defaults,
+        _MEMORY_DEFAULTS_TEMPLATE.format(team=team_dir.name),
+    ):
+        created.append(mem_defaults)
 
     if include_slack:
         env = team_dir / "configs" / ".env"

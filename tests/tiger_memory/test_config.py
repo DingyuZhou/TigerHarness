@@ -10,6 +10,7 @@ from tigerharness.tiger_memory.config import (
     MIN_DAILIES_WORKING_DAYS,
     MIN_WEEKLIES_WORKING_DAYS,
     ConfigError,
+    _deep_merge,
     load_config,
 )
 
@@ -144,3 +145,222 @@ summarizer: {{backend: anthropic, model: m, prompts: default/v1}}
     assert loaded.store.root.parent.name == "memory"
     # NOT memory/sai/sai
     assert loaded.store.root.parent.parent != loaded.store.root.parent
+
+
+# ----- team-level defaults ---------------------------------------------------
+
+
+class TestDeepMerge:
+    def test_overlay_wins(self):
+        assert _deep_merge({"a": 1}, {"a": 2}) == {"a": 2}
+
+    def test_base_fills_gaps(self):
+        assert _deep_merge({"a": 1, "b": 2}, {"a": 9}) == {"a": 9, "b": 2}
+
+    def test_nested_merge(self):
+        base = {"summarizer": {"backend": "anthropic", "model": "sonnet"}}
+        overlay = {"summarizer": {"model": "opus"}}
+        result = _deep_merge(base, overlay)
+        assert result == {"summarizer": {"backend": "anthropic", "model": "opus"}}
+
+    def test_list_replaced_not_merged(self):
+        base = {"sources": [{"kind": "claude_code"}]}
+        overlay = {"sources": [{"kind": "docs"}]}
+        assert _deep_merge(base, overlay) == {"sources": [{"kind": "docs"}]}
+
+
+def _write_team_layout(
+    tmp_path: Path,
+    *,
+    defaults_content: str | None = None,
+    persona_content: str,
+    persona: str = "scout",
+) -> Path:
+    """Set up a realistic team layout and return the persona config path."""
+    configs_dir = tmp_path / "configs"
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    if defaults_content is not None:
+        (configs_dir / "tiger-memory.defaults.yaml").write_text(defaults_content)
+    mem_dir = tmp_path / "memories" / persona
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path = mem_dir / "tiger-memory.config.yaml"
+    cfg_path.write_text(persona_content)
+    return cfg_path
+
+
+class TestTeamDefaults:
+    def test_auto_discovers_defaults(self, tmp_path: Path):
+        """Persona inherits summarizer from team defaults."""
+        cfg_path = _write_team_layout(
+            tmp_path,
+            defaults_content=(
+                "summarizer:\n"
+                "  backend: anthropic\n"
+                "  model: claude-sonnet-4-6\n"
+                "  prompts: default/v1\n"
+            ),
+            persona_content=(
+                f"agent:\n  name: Scout\n  role: test\n"
+                f"store:\n  root: .\n"
+                f"sources:\n  - kind: claude_code\n"
+                f"    project_path: {tmp_path}/p/\n"
+            ),
+        )
+        cfg = load_config(cfg_path)
+        assert cfg.summarizer.model == "claude-sonnet-4-6"
+        assert cfg.summarizer.backend == "anthropic"
+
+    def test_persona_overrides_defaults(self, tmp_path: Path):
+        """Per-persona model wins over team default."""
+        cfg_path = _write_team_layout(
+            tmp_path,
+            defaults_content=(
+                "summarizer:\n"
+                "  backend: anthropic\n"
+                "  model: claude-sonnet-4-6\n"
+                "  prompts: default/v1\n"
+            ),
+            persona_content=(
+                f"agent:\n  name: Scout\n  role: test\n"
+                f"store:\n  root: .\n"
+                f"sources:\n  - kind: claude_code\n"
+                f"    project_path: {tmp_path}/p/\n"
+                f"summarizer:\n  model: claude-opus-4-7\n"
+            ),
+        )
+        cfg = load_config(cfg_path)
+        # model overridden, backend inherited
+        assert cfg.summarizer.model == "claude-opus-4-7"
+        assert cfg.summarizer.backend == "anthropic"
+
+    def test_explicit_defaults_path(self, tmp_path: Path):
+        """The `defaults:` key points to an explicit file."""
+        custom_defaults = tmp_path / "custom-defaults.yaml"
+        custom_defaults.write_text(
+            "summarizer:\n"
+            "  backend: anthropic\n"
+            "  model: claude-opus-4-7\n"
+            "  prompts: default/v1\n"
+        )
+        cfg_path = _write_team_layout(
+            tmp_path,
+            persona_content=(
+                f"defaults: {custom_defaults}\n"
+                f"agent:\n  name: Scout\n  role: test\n"
+                f"store:\n  root: .\n"
+                f"sources:\n  - kind: claude_code\n"
+                f"    project_path: {tmp_path}/p/\n"
+            ),
+        )
+        cfg = load_config(cfg_path)
+        assert cfg.summarizer.model == "claude-opus-4-7"
+
+    def test_explicit_defaults_relative_path(self, tmp_path: Path):
+        """A relative `defaults:` path resolves against persona config dir."""
+        # Put defaults next to the persona config
+        cfg_path = _write_team_layout(
+            tmp_path,
+            persona_content=(
+                f"defaults: ../../configs/tiger-memory.defaults.yaml\n"
+                f"agent:\n  name: Scout\n  role: test\n"
+                f"store:\n  root: .\n"
+                f"sources:\n  - kind: claude_code\n"
+                f"    project_path: {tmp_path}/p/\n"
+            ),
+            defaults_content=(
+                "summarizer:\n"
+                "  backend: anthropic\n"
+                "  model: claude-opus-4-7\n"
+                "  prompts: default/v1\n"
+            ),
+        )
+        cfg = load_config(cfg_path)
+        assert cfg.summarizer.model == "claude-opus-4-7"
+
+    def test_explicit_defaults_bad_yaml_raises(self, tmp_path: Path):
+        """Bad YAML in an explicitly referenced defaults file raises."""
+        bad_defaults = tmp_path / "bad-defaults.yaml"
+        bad_defaults.write_text("summarizer: [unclosed")
+        cfg_path = _write_team_layout(
+            tmp_path,
+            persona_content=(
+                f"defaults: {bad_defaults}\n"
+                f"agent:\n  name: Scout\n  role: test\n"
+                f"store:\n  root: .\n"
+                f"sources:\n  - kind: claude_code\n"
+                f"    project_path: {tmp_path}/p/\n"
+                f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+            ),
+        )
+        with pytest.raises(ConfigError, match="defaults YAML"):
+            load_config(cfg_path)
+
+    def test_explicit_defaults_missing_raises(self, tmp_path: Path):
+        cfg_path = _write_team_layout(
+            tmp_path,
+            persona_content=(
+                f"defaults: /nonexistent/defaults.yaml\n"
+                f"agent:\n  name: Scout\n  role: test\n"
+                f"store:\n  root: .\n"
+                f"sources:\n  - kind: claude_code\n"
+                f"    project_path: {tmp_path}/p/\n"
+                f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+            ),
+        )
+        with pytest.raises(ConfigError, match="defaults file not found"):
+            load_config(cfg_path)
+
+    def test_auto_discovers_from_one_level_up(self, tmp_path: Path):
+        """Config at memories/tiger-memory.config.yaml (one level, not two)
+        still finds configs/tiger-memory.defaults.yaml via the fallback."""
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        (configs_dir / "tiger-memory.defaults.yaml").write_text(
+            "summarizer:\n"
+            "  backend: anthropic\n"
+            "  model: claude-sonnet-4-6\n"
+            "  prompts: default/v1\n"
+        )
+        # Config directly in memories/ (not memories/<persona>/)
+        mem_dir = tmp_path / "memories"
+        mem_dir.mkdir()
+        cfg_path = mem_dir / "tiger-memory.config.yaml"
+        cfg_path.write_text(
+            f"agent:\n  name: Solo\n  role: test\n"
+            f"store:\n  root: .\n"
+            f"sources:\n  - kind: claude_code\n"
+            f"    project_path: {tmp_path}/p/\n"
+        )
+        cfg = load_config(cfg_path)
+        assert cfg.summarizer.model == "claude-sonnet-4-6"
+
+    def test_no_defaults_file_works(self, tmp_path: Path):
+        """Without any defaults file, persona config is self-contained."""
+        cfg_path = _write_team_layout(
+            tmp_path,
+            defaults_content=None,  # no defaults file
+            persona_content=(
+                f"agent:\n  name: Scout\n  role: test\n"
+                f"store:\n  root: .\n"
+                f"sources:\n  - kind: claude_code\n"
+                f"    project_path: {tmp_path}/p/\n"
+                f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+            ),
+        )
+        cfg = load_config(cfg_path)
+        assert cfg.summarizer.model == "m"
+
+    def test_defaults_bad_yaml_raises(self, tmp_path: Path):
+        cfg_path = _write_team_layout(
+            tmp_path,
+            defaults_content="summarizer: [unclosed",
+            persona_content=(
+                f"agent:\n  name: Scout\n  role: test\n"
+                f"store:\n  root: .\n"
+                f"sources:\n  - kind: claude_code\n"
+                f"    project_path: {tmp_path}/p/\n"
+                f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+            ),
+        )
+        with pytest.raises(ConfigError, match="defaults YAML"):
+            load_config(cfg_path)
