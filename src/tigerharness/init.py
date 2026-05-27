@@ -183,6 +183,17 @@ memories/*/cache/
 memories/*/state.json
 """
 
+# .claude/settings.json -- env vars that Claude Code injects into agent
+# subprocesses. The persona config path lets the task-runner and its
+# detached children auto-discover the team's persona registry.
+_CLAUDE_SETTINGS_TEMPLATE = """\
+{{
+  "env": {{
+    "TIGERHARNESS_PERSONAS_CONFIG": "{personas_config_abs}"
+  }}
+}}
+"""
+
 # Multi-lane slack-bridge fragment. Generated only when a top-level
 # slack-bridge.yaml index exists in the search root -- i.e., the user
 # has opted into multi-team mode. See `multi.load_multi` for the loader.
@@ -337,6 +348,50 @@ def expected_claude_project_path(
 # Team / persona scaffolding
 # ---------------------------------------------------------------------------
 
+def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
+    """Create ``.claude/settings.json`` and ``.claude/skills/`` for a team.
+
+    Claude Code reads ``.claude/settings.json`` from the project root
+    to inject env vars into ``claude -p`` subprocesses, and discovers
+    skills from ``.claude/skills/<name>/SKILL.md``. Scaffolding these
+    at ``tigerharness init`` time means every new team gets:
+
+    - ``TIGERHARNESS_PERSONAS_CONFIG`` wired up automatically, so the
+      task-runner and its detached children find the team's personas.
+    - ``slack-notify`` and ``assign-task`` skills, so agents know how
+      to send Slack messages and assign background tasks.
+
+    Skills are read from the ``skills/`` directory shipped inside the
+    tigerharness package. If a skill file already exists on disk, it's
+    left untouched (idempotent, user edits preserved).
+    """
+    created: list[Path] = []
+
+    # settings.json
+    personas_cfg_abs = str((team_dir / "configs" / "personas.yaml").resolve())
+    settings_path = team_dir / ".claude" / "settings.json"
+    content = _CLAUDE_SETTINGS_TEMPLATE.format(
+        personas_config_abs=personas_cfg_abs,
+    )
+    if _write_if_missing(settings_path, content):
+        created.append(settings_path)
+
+    # Skills: copy from tigerharness package's _bundled_skills/ directory.
+    # Each skill lives at _bundled_skills/<name>/SKILL.md, shipped as
+    # package data so they're available in installed wheels too.
+    pkg_skills_dir = Path(__file__).resolve().parent / "_bundled_skills"
+    if pkg_skills_dir.is_dir():
+        for skill_dir in sorted(pkg_skills_dir.iterdir()):
+            skill_src = skill_dir / "SKILL.md"
+            if not skill_src.is_file():
+                continue
+            dest = team_dir / ".claude" / "skills" / skill_dir.name / "SKILL.md"
+            if _write_if_missing(dest, skill_src.read_text(encoding="utf-8")):
+                created.append(dest)
+
+    return created
+
+
 def create_team(
     team_dir: Path, *, include_slack: bool, multi_team: bool = False,
 ) -> list[Path]:
@@ -365,6 +420,9 @@ def create_team(
     skills = team_dir / "skills" / "README.md"
     if _write_if_missing(skills, _SKILLS_README):
         created.append(skills)
+
+    # .claude/ directory: settings.json + skills from the package.
+    created.extend(_scaffold_claude_dir(team_dir))
 
     return created
 

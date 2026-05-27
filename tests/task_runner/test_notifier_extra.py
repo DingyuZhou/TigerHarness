@@ -303,6 +303,43 @@ class TestResolveCredsTeamFolder:
         result = _resolve_creds()
         assert result == ("xoxb-team", "U0TEAMLEAD")
 
+    def test_dual_post_channel_and_thread(self, tmp_path: Path, monkeypatch):
+        """When SLACK_NOTIFY_CHANNEL and thread_ts are both set, posts to both."""
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / ".env").write_text(
+            "SLACK_BOT_TOKEN=xoxb-team\n"
+            "SLACK_NOTIFY_CHANNEL=C0OPS\n"
+        )
+        (configs / "slack-bridge.yaml").write_text(
+            "allowed_user_ids:\n  - U0TEAMLEAD\n"
+        )
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_BRIDGE_DIR", raising=False)
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.delenv("ALLOWED_SLACK_USER_IDS", raising=False)
+        monkeypatch.delenv("SLACK_NOTIFY_CHANNEL", raising=False)
+        monkeypatch.chdir(tmp_path)
+        store = JobStore(tmp_path)
+        meta = _make_meta(slack_thread_ts="999.123")
+        store.set(meta)
+
+        calls = []
+        def fake_post(endpoint, token, payload):
+            calls.append(payload.copy())
+            return {"ok": True, "ts": "posted.ts"}
+
+        with patch("tigerharness.task_runner.notifier._post_json", fake_post):
+            result = notify_job_end(meta, store)
+        assert result is True
+        # Two posts: one to ops-log (no thread_ts), one to DM (with thread_ts)
+        assert len(calls) == 2
+        assert calls[0]["channel"] == "C0OPS"
+        assert "thread_ts" not in calls[0]
+        assert calls[1]["channel"] == "U0TEAMLEAD"
+        assert calls[1]["thread_ts"] == "999.123"
+
     def test_ceo_env_var_beats_yaml(self, tmp_path: Path, monkeypatch):
         """SLACK_CEO_USER_ID takes precedence over yaml."""
         configs = tmp_path / "configs"
