@@ -24,7 +24,7 @@ def test_claude_transcript_discovers_jsonl(tmp_path: Path) -> None:
             {"type": "user", "timestamp": "2026-05-14T08:21:36.000Z",
              "message": {"role": "user", "content": "Hello Sai"}},
             {"type": "assistant", "timestamp": "2026-05-14T08:22:00.000Z",
-             "message": {"role": "assistant", "content": "Hi CEO"}},
+             "message": {"role": "assistant", "content": "Hi Operator"}},
         ],
     )
     adapter = ClaudeTranscriptAdapter(project_path=project)
@@ -36,7 +36,7 @@ def test_claude_transcript_discovers_jsonl(tmp_path: Path) -> None:
     assert r.source_id == uid
     assert r.first_event_at.year == 2026
     assert "Hello Sai" in r.content
-    assert "Hi CEO" in r.content
+    assert "Hi Operator" in r.content
 
 
 def test_claude_transcript_classifies_slack_via_threads_json(tmp_path: Path) -> None:

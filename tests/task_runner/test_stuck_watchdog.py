@@ -688,8 +688,9 @@ async def test_watchdog_dm_wording_reflects_is_last_iter(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The Slack DM detail should say 'continuing with next iteration'
-    on non-last iters and 'last in run' on the final iter — so the CEO
-    can tell at a glance whether the job is still running or has ended."""
+    on non-last iters and 'last in run' on the final iter — so the
+    Operator can tell at a glance whether the job is still running or
+    has ended."""
     captured: list[dict] = []
 
     def capture_notify(meta, *, iter_num, detail=""):

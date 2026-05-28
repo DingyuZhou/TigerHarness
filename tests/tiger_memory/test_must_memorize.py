@@ -170,7 +170,7 @@ def test_save_load_roundtrip(tmp_path: Path) -> None:
     store.init_layout()
     rows = [
         Row(kind=KIND_OWNER_EXPLICIT, memo="Never --force.", locked=True,
-            score=5, last_bump="2026-05-14", source="CEO"),
+            score=5, last_bump="2026-05-14", source="operator"),
         Row(kind=KIND_INCIDENT, memo="Buffer overflow.", score=5,
             last_bump="2026-05-13", source="extract"),
     ]
