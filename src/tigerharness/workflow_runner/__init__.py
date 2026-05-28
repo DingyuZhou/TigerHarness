@@ -65,13 +65,8 @@ from tigerharness.workflow_runner.paths import (
     new_task_id,
 )
 
-# TODO(anzai): re-export trailer types (Approve, Block, ParseError,
-# Revise, Verdict, parse_trailer) once Mitsui's
-# work/2026-05-28-workflow-runner-trailer-parser branch merges.
-# Importing trailer here pre-merge would fail local tests because
-# trailer.py lives on a parallel branch. Per Akagi's review and
-# Anzai's adjudication, this is a small follow-up commit on the
-# merged tip, not part of either Phase 1 #1 branch.
+# TODO(anzai): re-export trailer types once Mitsui's parser branch
+# merges (deferred per Akagi review / Anzai adjudication).
 
 __all__ = [
     # paths

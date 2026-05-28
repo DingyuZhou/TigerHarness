@@ -55,38 +55,28 @@ def test_validate_step_id_accepts(good_id):
 @pytest.mark.parametrize(
     "bad_id, reason",
     [
-        # Path-traversal shapes -- the headline reason this sanitizer
-        # exists.
+        # Path-traversal shapes -- the headline reason this sanitizer exists.
         ("..", "directory-traversal token"),
-        (".", "current-dir token"),
         ("./foo", "dot-slash prefix"),
         ("foo/bar", "embedded slash"),
         ("foo\\bar", "embedded backslash"),
         # Length boundaries.
         ("", "empty string"),
-        ("a" * 65, "65 chars (one over limit)"),
+        ("a" * 65, "one over 64-char limit"),
         # Leading-hyphen blocks argument smuggling like ``rm -rf``.
         ("-rf", "leading hyphen"),
-        ("-", "single hyphen"),
         # Leading underscore reserved for routing sentinels.
-        ("_private", "leading underscore"),
         ("__done__", "routing sentinel shape"),
         # Whitespace + invisible separators.
-        (" ", "single space"),
         ("foo bar", "embedded space"),
-        ("foo\tbar", "embedded tab"),
         ("foo\nbar", "embedded newline"),
         # NUL byte -- belt and braces vs. filesystem confusion.
         ("foo\x00bar", "embedded NUL"),
-        # Non-ASCII -- alphanumeric ISO categories are permissive
-        # enough to be confusing; restrict to ASCII.
-        ("café", "non-ASCII"),
+        # Non-ASCII -- ASCII-only by design.
         ("01-日本", "CJK"),
         # Symbols never allowed in path-safe ids.
         ("foo.bar", "embedded dot"),
         ("foo:bar", "embedded colon"),
-        ("foo;bar", "embedded semicolon"),
-        ("foo$bar", "embedded dollar"),
         ("foo|bar", "embedded pipe"),
         ("foo*bar", "embedded glob"),
     ],

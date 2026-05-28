@@ -175,12 +175,8 @@ class TaskPaths:
     def step_log_dir(self, step_id: str) -> Path:
         """Return ``logs/<step_id>/`` (not created).
 
-        Defense in depth: ``validate_step_id`` is also called from
-        :class:`StepFrontmatter.__post_init__`, so by the time a step
-        reaches the executor this should already be checked. Doing it
-        again here means a bad id minted by hand-typed CLI invocation
-        or a future code path that bypasses model validation still
-        fails closed, not into a path-traversal write.
+        Re-validates the id so a caller that bypasses model construction
+        still fails closed instead of writing outside the task root.
         """
         validate_step_id(step_id)
         return self.logs_dir / step_id
@@ -198,11 +194,7 @@ class TaskPaths:
         return self.step_log_dir(step_id) / f"iter-{iter_num:02d}"
 
     def step_file(self, step_id: str) -> Path:
-        """Return ``steps/<step_id>.md``.
-
-        Defense in depth: validate the id here too -- same rationale
-        as :meth:`step_log_dir`.
-        """
+        """Return ``steps/<step_id>.md``. Re-validates the id."""
         validate_step_id(step_id)
         return self.steps_dir / f"{step_id}.md"
 

@@ -51,14 +51,8 @@ _SENTINELS = frozenset({"__done__", "__escalate__"})
 # Verdict literals used in step history and trailers.
 _VERDICTS = frozenset({"APPROVE", "REVISE", "BLOCK"})
 
-# Phase literals used in Status.
-#
-# ``cancelling`` is the *active transition* state set by
-# ``workflow cancel`` while the executor finishes its current iter and
-# releases the lock; ``cancelled`` is the terminal state. The spec's
-# Cancel/Resume section (docs/workflow-runner.md) treats these as two
-# distinct phases -- omitting ``cancelling`` would silently break any
-# executor write of ``Status(phase="cancelling", ...)``.
+# Phase literals used in Status. ``cancelling`` is the active-transition
+# state during ``workflow cancel``; ``cancelled`` is the terminal state.
 _PHASES = frozenset(
     {
         "compile",
@@ -199,10 +193,8 @@ class StepFrontmatter:
 
     def __post_init__(self) -> None:
         self.id = _require_str(self.id, "id")
-        # Step ids become path segments under ``logs/<id>/`` and
-        # ``steps/<id>.md``; enforce a filesystem-safe charset here so
-        # untrusted (Phase 2 AI-compiled) inputs can't escape the
-        # task root. See ``ids.py`` for the contract.
+        # Defense in depth: step ids become path segments, so enforce
+        # the filesystem-safe charset from ``ids.py`` at the model boundary.
         validate_step_id(self.id)
         self.persona = _require_str(self.persona, "persona")
         self.role = _require_str(self.role, "role")

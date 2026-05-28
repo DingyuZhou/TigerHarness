@@ -144,17 +144,13 @@ def test_task_paths_iter_rejects_zero(tmp_path):
     ["..", "foo/bar", "-rf", ""],
 )
 def test_task_paths_step_helpers_reject_unsafe_ids(tmp_path, bad_id):
-    """Defense in depth: even if a bad id sneaks past model validation
-    (e.g. a CLI caller bypassing ``StepFrontmatter``), the path
-    helpers themselves refuse to mint traversal-shaped paths. Full
-    charset matrix lives in ``test_ids.py``; this row just pins the
-    integration at the path layer."""
+    """Pin the sanitizer integration at the path layer. Full charset
+    matrix lives in ``test_ids.py``."""
     tp = TaskPaths(root=tmp_path, task_id="t1")
     with pytest.raises(WorkflowModelError):
         tp.step_log_dir(bad_id)
     with pytest.raises(WorkflowModelError):
         tp.step_file(bad_id)
-    # iter_dir delegates to step_log_dir so it inherits the rejection.
     with pytest.raises(WorkflowModelError):
         tp.iter_dir(bad_id, 1)
 

@@ -156,14 +156,12 @@ def test_step_frontmatter_parallel_with_explicit_none():
         "-rf",         # leading hyphen (argument smuggling shape)
         "__done__",    # routing-sentinel collision
         "a" * 65,      # over 64-char limit
-        " ",           # whitespace
+        "foo bar",     # embedded whitespace
     ],
 )
 def test_step_frontmatter_rejects_path_unsafe_ids(bad_id):
-    """The step-id sanitizer is enforced at model boundary, not just
-    in path helpers -- so a bad id surfaces at compile time, not
-    silently at mkdir time. Coverage of the full charset matrix lives
-    in ``test_ids.py``; this row just pins the integration."""
+    """Pin the sanitizer integration at the model boundary. Full
+    charset matrix lives in ``test_ids.py``."""
     raw = _good_frontmatter(id=bad_id)
     with pytest.raises(WorkflowModelError):
         StepFrontmatter.from_dict(raw)
