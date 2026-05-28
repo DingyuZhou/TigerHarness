@@ -242,6 +242,19 @@ class SessionManager:
                 error=f"timeout after {timeout_sec} seconds",
                 raw_envelope={},
             )
+        except BaseException:
+            # SIGINT / SIGTERM / executor shutdown mid-turn: same
+            # orphan-leak risk as a timeout. Reap the subtree *before*
+            # propagating so the surrounding cleanup can't leave
+            # claude tool subprocesses running. Re-raises the original
+            # exception (including KeyboardInterrupt / SystemExit) so
+            # callers see the failure they expected.
+            self._kill_process_group(proc)
+            try:
+                proc.wait(timeout=_DRAIN_TIMEOUT_SEC)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
 
         envelope, parse_error = _parse_envelope(stdout)
 

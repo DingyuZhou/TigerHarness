@@ -732,6 +732,80 @@ def test_kill_process_group_swallows_direct_kill_errors(monkeypatch):
     SessionManager._kill_process_group(_Proc())  # type: ignore[arg-type]
 
 
+def test_keyboard_interrupt_reaps_subtree_then_propagates(
+    fake_claude, task_dir, personas_dir, monkeypatch
+):
+    """SIGINT / SIGTERM mid-``communicate`` is the same orphan-leak
+    class as a timeout. The ``except BaseException`` clause must reap
+    the subtree (via ``killpg``) and then re-raise the original
+    exception unchanged. Otherwise a Ctrl-C at the executor would
+    silently leak every in-flight claude tool subprocess.
+    """
+    # Keep the real Popen so we have a real pid for getpgid/killpg,
+    # but force ``communicate`` to raise KeyboardInterrupt before it
+    # would naturally return. Also keep the fake busy so the pid is
+    # definitely alive when killpg fires.
+    monkeypatch.setenv("FAKE_SLEEP_SEC", "10")
+
+    killpg_called: dict = {"value": False}
+    real_killpg = sessions_mod.os.killpg
+
+    def spy_killpg(pgid, sig):
+        killpg_called["value"] = True
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(sessions_mod.os, "killpg", spy_killpg)
+
+    real_popen = sessions_mod.subprocess.Popen
+
+    class InterruptedPopen(real_popen):  # type: ignore[misc, valid-type]
+        def communicate(self, input=None, timeout=None):  # type: ignore[override]
+            # Pretend the user hit Ctrl-C while we were blocked on
+            # claude's reply. We intentionally never call super() —
+            # the prompt may or may not have reached the child, that's
+            # not what this test pins down.
+            raise KeyboardInterrupt("user pressed ctrl-c")
+
+    monkeypatch.setattr(sessions_mod.subprocess, "Popen", InterruptedPopen)
+
+    mgr = SessionManager(task_dir)
+    with pytest.raises(KeyboardInterrupt):
+        mgr.invoke("rukawa", "p", timeout_sec=10)
+
+    assert killpg_called["value"] is True, (
+        "process-group SIGKILL was not delivered before propagating "
+        "the interrupt — subtree would orphan on executor cancel"
+    )
+
+
+def test_interrupt_path_swallows_wait_timeout(
+    fake_claude, task_dir, personas_dir, monkeypatch
+):
+    """If ``proc.wait`` after the post-interrupt killpg itself times
+    out (defensive belt-and-braces — pipes / zombie should clear fast
+    after SIGKILL of the whole group), we must still propagate the
+    original interrupt, not the inner ``TimeoutExpired``.
+    """
+    monkeypatch.setenv("FAKE_SLEEP_SEC", "10")
+
+    real_popen = sessions_mod.subprocess.Popen
+    timeout_cls = sessions_mod.subprocess.TimeoutExpired
+
+    class StubbornInterruptedPopen(real_popen):  # type: ignore[misc, valid-type]
+        def communicate(self, input=None, timeout=None):  # type: ignore[override]
+            raise KeyboardInterrupt("ctrl-c during turn")
+
+        def wait(self, timeout=None):  # type: ignore[override]
+            # Pretend the zombie hasn't been reaped yet.
+            raise timeout_cls(cmd=self.args, timeout=timeout)
+
+    monkeypatch.setattr(sessions_mod.subprocess, "Popen", StubbornInterruptedPopen)
+
+    mgr = SessionManager(task_dir)
+    with pytest.raises(KeyboardInterrupt):
+        mgr.invoke("rukawa", "p", timeout_sec=10)
+
+
 def test_drain_after_kill_timeout_does_not_propagate(
     fake_claude, task_dir, personas_dir, tmp_path, monkeypatch
 ):
