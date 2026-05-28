@@ -20,8 +20,13 @@ Phase 1 sub-steps shipped so far provide:
 * Per-persona Claude session manager
   (`sessions.SessionManager`, `sessions.InvocationResult`,
   `sessions.TIMEOUT_EXIT_CODE`).
+* Trailer parser + verdict ADT
+  (`trailer.parse_trailer`, `trailer.Verdict`, `trailer.Approve`,
+  `trailer.Revise`, `trailer.Block`, `trailer.ParseError`).
+* Basic CLI entrypoints
+  (`cli.main`, `cli.build_parser`).
 
-The compile phase, executor, trailer parser, and CLI land in later
+The compile phase and the sequential executor land in later
 sub-steps; this module is the surface they all sit on.
 
 See ``docs/workflow-runner.md`` for the full design and
@@ -72,9 +77,18 @@ from tigerharness.workflow_runner.sessions import (
     InvocationResult,
     SessionManager,
 )
-
-# TODO(anzai): re-export trailer types once Mitsui's parser branch
-# merges (deferred per Akagi review / Anzai adjudication).
+from tigerharness.workflow_runner.trailer import (
+    Approve,
+    Block,
+    ParseError,
+    Revise,
+    Verdict,
+    parse_trailer,
+)
+from tigerharness.workflow_runner.cli import (
+    build_parser,
+    main,
+)
 
 __all__ = [
     # paths
@@ -114,4 +128,14 @@ __all__ = [
     "InvocationResult",
     "SessionManager",
     "TIMEOUT_EXIT_CODE",
+    # trailer
+    "Approve",
+    "Block",
+    "ParseError",
+    "Revise",
+    "Verdict",
+    "parse_trailer",
+    # cli
+    "build_parser",
+    "main",
 ]

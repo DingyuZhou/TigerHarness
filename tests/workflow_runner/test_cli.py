@@ -280,7 +280,9 @@ def test_start_rejects_unsafe_step_id(
     rc = cli.main(["start", "--team", "T", "--steps", str(d)])
     assert rc == 2
     err = capsys.readouterr().err
-    assert "filename-safe" in err
+    # Miyagi's shared step-id sanitizer is authoritative post-merge; it
+    # rejects with "not path-safe (need 1-64 chars, starts with ...)".
+    assert "path-safe" in err
 
 
 def test_start_rejects_non_yaml_mapping_frontmatter(
