@@ -33,8 +33,10 @@ processes). Two files keep each primitive single-purpose.
 
 from __future__ import annotations
 
+import datetime as _dt
 import errno
 import os
+import time as _time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -182,10 +184,14 @@ def write_pid(
     Returns the :class:`PidInfo` that was persisted -- useful for
     tests and for the executor to log "I'm task X, pid Y".
     """
+    # Cache the timestamp so started_at and last_heartbeat are equal
+    # even if the clock ticks across the second boundary between the
+    # two reads.
+    ts = now if now is not None else now_iso()
     info = PidInfo(
         pid=os.getpid() if pid is None else int(pid),
-        started_at=now if now is not None else now_iso(),
-        last_heartbeat=now if now is not None else now_iso(),
+        started_at=ts,
+        last_heartbeat=ts,
     )
     write_json_atomic(_pid_path(task_dir), info.to_dict())
     return info
@@ -222,9 +228,10 @@ def read_pid_info(task_dir: Path | str) -> PidInfo | None:
     bug worth surfacing, not a "no lock holder" situation.
     """
     pid_p = _pid_path(task_dir)
-    if not pid_p.exists():
+    try:
+        raw = read_json(pid_p)
+    except FileNotFoundError:
         return None
-    raw = read_json(pid_p)
     if not isinstance(raw, dict):
         raise ValueError(f"pid file {pid_p} is not a JSON object")
     return PidInfo.from_dict(raw)
@@ -281,21 +288,17 @@ def is_stale(
     now_epoch:
         Override "current time" for tests. Defaults to ``time.time()``.
     """
-    import time as _time
-
     if max_silence_sec <= 0:
         raise ValueError("max_silence_sec must be > 0")
 
-    pid_p = _pid_path(task_dir)
-    if not pid_p.exists():
-        return False
     try:
         info = read_pid_info(task_dir)
     except ValueError:
         # Corrupt pid file. Treat as stale so the next start can take
         # over cleanly.
         return True
-    if info is None:  # pragma: no cover - covered by pid_p.exists() branch
+    if info is None:
+        # No pid file -- no one ever claimed the lock; not stale.
         return False
 
     if not _pid_alive(info.pid):
@@ -316,8 +319,6 @@ def _iso_to_epoch(ts: str) -> float | None:
     produces. Returns ``None`` on anything else so the caller can
     flag it as stale rather than crashing.
     """
-    import datetime as _dt
-
     try:
         # Python's ``fromisoformat`` is forgiving from 3.11 onwards
         # and handles the Z suffix as +00:00.

@@ -334,6 +334,15 @@ class WorkflowConfig:
         self.human_gate_approvers = _require_list_of_str(
             self.human_gate_approvers, "human_gate_approvers"
         )
+        # Spec invariant (docs/workflow-runner.md, "Human gate"):
+        # the allowlist is mandatory when human_gate=True. Compile must
+        # fail loudly rather than silently produce a config that the
+        # runtime would later refuse to honour.
+        if self.human_gate and not self.human_gate_approvers:
+            raise WorkflowModelError(
+                "'human_gate_approvers' must be non-empty when "
+                "'human_gate' is True"
+            )
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "WorkflowConfig":

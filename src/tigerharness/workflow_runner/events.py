@@ -32,7 +32,11 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
-from tigerharness.workflow_runner.models import Event, now_iso
+from tigerharness.workflow_runner.models import (
+    Event,
+    WorkflowModelError,
+    now_iso,
+)
 
 
 def append_event(
@@ -122,9 +126,11 @@ def tail_events(
 
 def _iter_events(events_path: Path | str) -> Iterable[Event]:
     p = Path(events_path)
-    if not p.exists():
+    try:
+        fh = open(p, "r", encoding="utf-8")
+    except FileNotFoundError:
         return
-    with open(p, "r", encoding="utf-8") as fh:
+    with fh:
         for raw_line in fh:
             line = raw_line.strip()
             if not line:
@@ -139,8 +145,8 @@ def _iter_events(events_path: Path | str) -> Iterable[Event]:
                 continue
             try:
                 yield Event.from_dict(data)
-            except Exception:
-                # Any model-level validation failure: skip the row.
-                # Better to keep the diagnose tool working on a
-                # mostly-intact log than crash on one bad event.
+            except WorkflowModelError:
+                # Model-level validation failure: skip the row. Better
+                # to keep the diagnose tool working on a mostly-intact
+                # log than crash on one bad event.
                 continue

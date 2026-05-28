@@ -181,7 +181,10 @@ def test_step_edges_rejects_bad_string():
 
 
 def test_workflow_config_defaults():
-    wc = WorkflowConfig()
+    # human_gate defaults to True, which makes human_gate_approvers
+    # mandatory -- so the "all defaults" config must supply an
+    # approver. Everything else is the spec default.
+    wc = WorkflowConfig(human_gate_approvers=["U1"])
     assert wc.human_gate is True
     assert wc.max_compile_iters == 8
     assert wc.max_cost_usd == 10.0
@@ -189,11 +192,35 @@ def test_workflow_config_defaults():
     assert wc.step_timeout_sec == 1800
     assert wc.max_task_wall_sec == 86400
     assert wc.allow_parallel is False
+    assert wc.human_gate_approvers == ["U1"]
+
+
+def test_workflow_config_from_dict_none_raises_without_approvers():
+    # Spec: human_gate=True (default) requires a non-empty approver
+    # list. Compile must fail loudly when the playbook omits it.
+    with pytest.raises(WorkflowModelError):
+        WorkflowConfig.from_dict(None)
+
+
+def test_workflow_config_human_gate_true_requires_approvers():
+    with pytest.raises(WorkflowModelError) as exc:
+        WorkflowConfig(human_gate=True, human_gate_approvers=[])
+    assert "human_gate_approvers" in str(exc.value)
+
+
+def test_workflow_config_human_gate_false_allows_empty_approvers():
+    wc = WorkflowConfig(human_gate=False)
+    assert wc.human_gate is False
     assert wc.human_gate_approvers == []
 
 
-def test_workflow_config_from_dict_none_yields_defaults():
-    assert WorkflowConfig.from_dict(None).to_dict() == WorkflowConfig().to_dict()
+def test_workflow_config_from_dict_without_approvers_key_when_gate_off():
+    # Exercises the `human_gate_approvers not in raw` branch of
+    # from_dict together with the human_gate=False path that bypasses
+    # the non-empty-allowlist invariant.
+    wc = WorkflowConfig.from_dict({"human_gate": False})
+    assert wc.human_gate is False
+    assert wc.human_gate_approvers == []
 
 
 def test_workflow_config_round_trip():
@@ -212,7 +239,9 @@ def test_workflow_config_round_trip():
 
 
 def test_workflow_config_partial_overrides_keep_defaults():
-    wc = WorkflowConfig.from_dict({"max_loop_iters": 9})
+    wc = WorkflowConfig.from_dict(
+        {"max_loop_iters": 9, "human_gate_approvers": ["U1"]}
+    )
     assert wc.max_loop_iters == 9
     assert wc.step_timeout_sec == 1800  # default preserved
 
@@ -294,7 +323,9 @@ def _good_orchestration(**overrides):
                 "on_block": "__escalate__",
             },
         },
-        "workflow_config": None,
+        # human_gate defaults to True; supply an approver so the
+        # WorkflowConfig invariant is satisfied.
+        "workflow_config": {"human_gate_approvers": ["U1"]},
         "compile_critique_iters": 3,
     }
     base.update(overrides)
@@ -310,6 +341,7 @@ def test_orchestration_round_trip():
     assert redumped["edges"]["01-plan"] == raw["edges"]["01-plan"]
     # workflow_config default expands to a full dict
     assert redumped["workflow_config"]["human_gate"] is True
+    assert redumped["workflow_config"]["human_gate_approvers"] == ["U1"]
 
 
 def test_orchestration_rejects_non_dict():
@@ -412,6 +444,7 @@ def test_orchestration_edges_dict_must_be_dict_direct_ctor():
             compiled_at=o.compiled_at,
             compiled_by=o.compiled_by,
             edges="nope",  # type: ignore[arg-type]
+            workflow_config=o.workflow_config,
         )
 
 
