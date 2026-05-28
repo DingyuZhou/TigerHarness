@@ -286,7 +286,7 @@ class SessionManager:
         prompt: str,
         envelope: dict[str, Any],
         stdout_text: str,
-        timeout_stdout: bytes = b"",
+        timeout_stdout: bytes | str | None = b"",
     ) -> None:
         """Write the three per-iteration log files.
 
@@ -296,8 +296,12 @@ class SessionManager:
         else, so on timeout we drop any partial stdout into
         ``stdout.txt`` to aid debugging).
         ``stdout.txt`` — the assistant's textual response (the
-        ``result`` field of the envelope), or the raw partial bytes on
-        timeout.
+        ``result`` field of the envelope), or the raw partial output
+        on timeout. ``timeout_stdout`` is typed permissively because
+        ``TimeoutExpired.stdout`` is bytes on CPython today (the
+        timeout fires before stdout is decoded) but the docs only
+        promise "whatever was captured", so we defensively handle str
+        too.
         """
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -305,14 +309,7 @@ class SessionManager:
         if stdout_text:
             (log_dir / "stdout.txt").write_text(stdout_text, encoding="utf-8")
         else:
-            # On timeout we may still have a partial stdout the user
-            # wants to see; surface it verbatim. Decoding errors are
-            # replaced so we never crash on log capture.
-            partial = (
-                timeout_stdout.decode("utf-8", errors="replace")
-                if timeout_stdout
-                else ""
-            )
+            partial = _decode_partial(timeout_stdout)
             (log_dir / "stdout.txt").write_text(partial, encoding="utf-8")
 
 
@@ -351,6 +348,20 @@ def _safe_str(value: Any) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def _decode_partial(value: bytes | str | None) -> str:
+    """Coerce ``TimeoutExpired.stdout`` to ``str``.
+
+    Bytes -> utf-8 decode with ``errors="replace"`` so a half-written
+    multi-byte char never crashes log capture. Str -> passthrough.
+    ``None`` / empty -> ``""``.
+    """
+    if not value:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def _safe_float(value: Any) -> float:

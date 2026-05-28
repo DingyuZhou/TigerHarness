@@ -21,6 +21,7 @@ from tigerharness.workflow_runner.sessions import (
     TIMEOUT_EXIT_CODE,
     InvocationResult,
     SessionManager,
+    _decode_partial,
     _parse_envelope,
     _safe_float,
     _safe_str,
@@ -78,6 +79,14 @@ _FAKE_SCRIPT = textwrap.dedent(
         _dump('FAKE_ARGV_DUMP', json.dumps(sys.argv))
         stdin_data = sys.stdin.read()
         _dump('FAKE_STDIN_DUMP', stdin_data)
+
+        # If FAKE_PARTIAL_STDOUT is set, print it + flush before
+        # sleeping. Used to exercise the partial-stdout capture path
+        # on timeout.
+        partial = os.environ.get('FAKE_PARTIAL_STDOUT', '')
+        if partial:
+            sys.stdout.write(partial)
+            sys.stdout.flush()
 
         sleep_for = float(os.environ.get('FAKE_SLEEP_SEC', '0') or '0')
         if sleep_for > 0:
@@ -488,6 +497,25 @@ def test_log_dir_capture_on_timeout(
     assert (log_dir / "stdout.txt").exists()
 
 
+def test_log_dir_capture_preserves_partial_stdout_on_timeout(
+    fake_claude, task_dir, personas_dir, tmp_path, monkeypatch
+):
+    """When the fake emits a chunk then hangs, the partial stdout
+    survives in ``stdout.txt`` so we can debug timeouts."""
+    log_dir = tmp_path / "logs" / "step-01" / "iter-01"
+    monkeypatch.setenv("FAKE_PARTIAL_STDOUT", "half-an-envelope-here\n")
+    monkeypatch.setenv("FAKE_SLEEP_SEC", "5")
+
+    mgr = SessionManager(task_dir)
+    result = mgr.invoke(
+        "rukawa", "p", timeout_sec=1, log_dir=log_dir
+    )
+
+    assert result.exit_code == TIMEOUT_EXIT_CODE
+    captured = (log_dir / "stdout.txt").read_text()
+    assert "half-an-envelope-here" in captured
+
+
 def test_log_dir_creates_missing_parents(
     fake_claude, task_dir, personas_dir, tmp_path
 ):
@@ -602,3 +630,15 @@ def test_safe_float_handles_bad_inputs():
     assert _safe_float(0.5) == 0.5
     assert _safe_float("nope") == 0.0
     assert _safe_float(object()) == 0.0
+
+
+def test_decode_partial_handles_bytes_str_and_none():
+    """``TimeoutExpired.stdout`` is bytes on current CPython, but the
+    docs only promise "whatever was captured" -- be permissive."""
+    assert _decode_partial(None) == ""
+    assert _decode_partial(b"") == ""
+    assert _decode_partial("") == ""
+    assert _decode_partial(b"hello") == "hello"
+    assert _decode_partial("already-decoded") == "already-decoded"
+    # Half-written multi-byte UTF-8 sequence: replace, don't crash.
+    assert "\ufffd" in _decode_partial(b"caf\xc3")
