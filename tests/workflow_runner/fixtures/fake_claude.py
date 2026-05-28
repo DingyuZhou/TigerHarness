@@ -24,6 +24,9 @@ Behaviour is steered by env vars set in the test:
 * ``FAKE_PARTIAL_STDOUT``   if non-empty, print + flush this **before**
                             sleeping (exercises partial-stdout capture
                             on timeout).
+* ``FAKE_PARTIAL_STDERR``   if non-empty, write + flush this to stderr
+                            **before** sleeping (exercises partial-
+                            stderr capture on timeout).
 * ``FAKE_ARGV_DUMP``        if set, write received argv (JSON) here.
 * ``FAKE_STDIN_DUMP``       if set, write stdin (raw) here.
 * ``FAKE_FORK_HANG_FILE``   if set, ``fork()`` a hanging grandchild
@@ -60,6 +63,11 @@ def main() -> int:
     if partial:
         sys.stdout.write(partial)
         sys.stdout.flush()
+
+    partial_err = os.environ.get("FAKE_PARTIAL_STDERR", "")
+    if partial_err:
+        sys.stderr.write(partial_err)
+        sys.stderr.flush()
 
     fork_hang_file = os.environ.get("FAKE_FORK_HANG_FILE", "").strip()
     if fork_hang_file:

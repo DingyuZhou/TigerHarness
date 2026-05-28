@@ -440,12 +440,13 @@ def test_unparseable_cost_field_defaults_to_zero(
 # --------------------------------------------------------------------------- #
 
 
-def test_log_dir_capture_writes_three_files(
+def test_log_dir_capture_writes_four_files(
     fake_claude, task_dir, personas_dir, tmp_path, monkeypatch
 ):
     log_dir = tmp_path / "logs" / "step-01" / "iter-01"
     monkeypatch.setenv("FAKE_SESSION_ID", "sid-captured")
     monkeypatch.setenv("FAKE_RESULT_TEXT", "captured assistant text")
+    monkeypatch.setenv("FAKE_STDERR", "warn: deprecation X\n")
 
     mgr = SessionManager(task_dir)
     mgr.invoke(
@@ -455,6 +456,8 @@ def test_log_dir_capture_writes_three_files(
     assert log_dir.is_dir()
     assert (log_dir / "prompt.txt").read_text() == "prompt-payload"
     assert (log_dir / "stdout.txt").read_text() == "captured assistant text"
+    # stderr.txt carries claude-side warnings even on a clean run.
+    assert (log_dir / "stderr.txt").read_text() == "warn: deprecation X\n"
 
     envelope = json.loads((log_dir / "envelope.json").read_text())
     assert envelope["session_id"] == "sid-captured"
@@ -475,8 +478,10 @@ def test_log_dir_capture_on_timeout(
     assert result.exit_code == TIMEOUT_EXIT_CODE
     assert (log_dir / "prompt.txt").read_text() == "will-timeout"
     assert json.loads((log_dir / "envelope.json").read_text()) == {}
-    # stdout.txt exists (may be empty); the file is the captured shape.
+    # stdout.txt and stderr.txt both exist (may be empty); the shape
+    # is the same as the success path so consumers stay simple.
     assert (log_dir / "stdout.txt").exists()
+    assert (log_dir / "stderr.txt").exists()
 
 
 def test_log_dir_capture_preserves_partial_stdout_on_timeout(
@@ -496,6 +501,31 @@ def test_log_dir_capture_preserves_partial_stdout_on_timeout(
     assert result.exit_code == TIMEOUT_EXIT_CODE
     captured = (log_dir / "stdout.txt").read_text()
     assert "half-an-envelope-here" in captured
+
+
+def test_log_dir_capture_preserves_partial_stderr_on_timeout(
+    fake_claude, task_dir, personas_dir, tmp_path, monkeypatch
+):
+    """Partial stderr survives in ``stderr.txt`` on timeout.
+
+    Wedged tool subprocesses are most likely to spit a diagnostic to
+    stderr before hanging; without this capture the executor's debug
+    trail goes dark exactly when we most need it.
+    """
+    log_dir = tmp_path / "logs" / "step-01" / "iter-01"
+    monkeypatch.setenv(
+        "FAKE_PARTIAL_STDERR", "tool: connecting to mcp server...\n"
+    )
+    monkeypatch.setenv("FAKE_SLEEP_SEC", "5")
+
+    mgr = SessionManager(task_dir)
+    result = mgr.invoke(
+        "rukawa", "p", timeout_sec=1, log_dir=log_dir
+    )
+
+    assert result.exit_code == TIMEOUT_EXIT_CODE
+    captured = (log_dir / "stderr.txt").read_text()
+    assert "connecting to mcp server" in captured
 
 
 def test_log_dir_creates_missing_parents(

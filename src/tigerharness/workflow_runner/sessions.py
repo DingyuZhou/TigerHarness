@@ -181,8 +181,8 @@ class SessionManager:
             we do **not** raise.
         log_dir:
             If provided, ``prompt.txt`` / ``envelope.json`` /
-            ``stdout.txt`` are written here. Caller owns directory
-            creation; we make it if absent.
+            ``stdout.txt`` / ``stderr.txt`` are written here. Caller
+            owns directory creation; we make it if absent.
         """
         if timeout_sec <= 0:
             raise ValueError(
@@ -217,10 +217,15 @@ class SessionManager:
             )
             returncode = proc.returncode
         except TimeoutExpired as exc:
-            partial = _decode_partial(exc.stdout) + self._reap_subtree(proc)
+            drain_out, drain_err = self._reap_subtree(proc)
+            partial_stdout = _decode_partial(exc.stdout) + drain_out
+            partial_stderr = _decode_partial(exc.stderr) + drain_err
             if log_dir is not None:
                 self._capture_timeout(
-                    log_dir, prompt=prompt, partial_stdout=partial
+                    log_dir,
+                    prompt=prompt,
+                    partial_stdout=partial_stdout,
+                    partial_stderr=partial_stderr,
                 )
             return InvocationResult(
                 stdout="",
@@ -282,6 +287,7 @@ class SessionManager:
                 prompt=prompt,
                 envelope=envelope,
                 stdout_text=stdout_text,
+                stderr_text=stderr or "",
             )
 
         return InvocationResult(
@@ -322,21 +328,25 @@ class SessionManager:
         return argv
 
     @staticmethod
-    def _reap_subtree(proc: Popen) -> str:
-        """SIGKILL the subtree and drain buffered stdout via ``communicate``.
+    def _reap_subtree(proc: Popen) -> tuple[str, str]:
+        """SIGKILL the subtree and drain buffered stdout/stderr via ``communicate``.
 
         Shared by the timeout and BaseException paths so both reap the
         same way and close stdin/stdout/stderr FDs on the way out
-        (``wait`` would only reap the zombie). Returns whatever stdout
-        the drain captured — the timeout path prepends pre-kill bytes
-        to it for ``stdout.txt``; the interrupt path discards it.
+        (``wait`` would only reap the zombie). Returns
+        ``(drained_stdout, drained_stderr)`` — the timeout path
+        prepends pre-kill bytes to each for ``stdout.txt`` /
+        ``stderr.txt``; the interrupt path discards the tuple.
         """
         SessionManager._kill_process_group(proc)
         try:
-            leftover, _ = proc.communicate(timeout=_DRAIN_TIMEOUT_SEC)
+            leftover_stdout, leftover_stderr = proc.communicate(
+                timeout=_DRAIN_TIMEOUT_SEC
+            )
         except TimeoutExpired:
-            leftover = ""
-        return _decode_partial(leftover)
+            leftover_stdout = ""
+            leftover_stderr = ""
+        return _decode_partial(leftover_stdout), _decode_partial(leftover_stderr)
 
     @staticmethod
     def _kill_process_group(proc: Popen) -> None:
@@ -370,29 +380,42 @@ class SessionManager:
         prompt: str,
         envelope: dict[str, Any],
         stdout_text: str,
+        stderr_text: str,
     ) -> None:
-        """Write ``prompt.txt`` / ``envelope.json`` / ``stdout.txt`` for
-        a completed turn."""
+        """Write ``prompt.txt`` / ``envelope.json`` / ``stdout.txt`` /
+        ``stderr.txt`` for a completed turn.
+
+        ``stderr.txt`` is usually empty on a clean run but can carry
+        claude-side warnings (deprecations, MCP server diagnostics)
+        worth keeping next to the envelope.
+        """
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         write_json_atomic(log_dir / "envelope.json", envelope)
         (log_dir / "stdout.txt").write_text(stdout_text, encoding="utf-8")
+        (log_dir / "stderr.txt").write_text(stderr_text, encoding="utf-8")
 
     @staticmethod
     def _capture_timeout(
-        log_dir: Path, *, prompt: str, partial_stdout: str
+        log_dir: Path,
+        *,
+        prompt: str,
+        partial_stdout: str,
+        partial_stderr: str,
     ) -> None:
-        """Write the three log files when ``claude`` timed out.
+        """Write the four log files when ``claude`` timed out.
 
-        ``envelope.json`` is the empty object (no envelope was parsed)
-        and ``stdout.txt`` holds whatever bytes the subprocess managed
-        to flush before we killed it — invaluable when debugging a
-        wedged turn.
+        ``envelope.json`` is the empty object (no envelope was parsed);
+        ``stdout.txt`` holds whatever the subprocess flushed before we
+        killed it; ``stderr.txt`` is the parallel diagnostic stream —
+        usually where a wedged tool's last words appear, which is
+        exactly what we want when debugging a hung turn.
         """
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         write_json_atomic(log_dir / "envelope.json", {})
         (log_dir / "stdout.txt").write_text(partial_stdout, encoding="utf-8")
+        (log_dir / "stderr.txt").write_text(partial_stderr, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
