@@ -9,7 +9,9 @@ entirely in the scripted fake-claude responses.
 Each scenario pins three families of contract:
 
   * **Terminal phase** -- ``status.phase`` is ``done`` / ``escalated``
-    / ``cancelled`` as the spec requires for that path.
+    / ``cancelled`` as the spec requires for that path. All three
+    terminal phases are exercised by at least one scenario in this
+    module (done: 1, 2, 5; escalated: 3, 4; cancelled: 6).
   * **Cost accumulation** -- ``status.cost_usd_total`` equals the
     sum of the fake's per-call ``cost_usd`` values. This catches
     a regression where the executor drops cost between dispatch
@@ -379,3 +381,82 @@ def test_parse_failure_reprompts_once_then_recovers(e2e_driver) -> None:
     assert parse_failed[0]["step"] == "01-plan"
 
     assert bundle.fake_claude.counter() == 4
+
+
+# --------------------------------------------------------------------------- #
+# Scenario 6 -- .cancel flag short-circuits to cancelled
+# --------------------------------------------------------------------------- #
+
+
+def test_cancel_flag_short_circuits_to_cancelled(e2e_driver) -> None:
+    """A ``.cancel`` flag dropped before ``run()`` -> ``status.phase == "cancelled"``.
+
+    The ``workflow cancel`` CLI writes a ``.cancel`` sentinel into
+    the task dir; the executor checks for it at the top of every
+    loop iteration (see ``executor._cancel_requested``). If the
+    flag is present *before* the first iteration, the executor
+    must finalise as cancelled WITHOUT dispatching to any persona.
+
+    Asserts (the cancel contract):
+      * final ``status.phase`` is ``"cancelled"`` -- the third
+        terminal phase that the module docstring promises but no
+        other scenario exercises
+      * a ``cancel_complete`` event is emitted exactly once, with
+        the right ``task_id``
+      * NO ``step_started`` / ``step_completed`` events fire --
+        cancel must short-circuit before any dispatch
+      * the fake-claude counter stays at 0 -- a regression where
+        the executor dispatched-once-then-cancelled would be a
+        cost/correctness bug, and this pin catches it
+      * ``status.cost_usd_total`` is 0.0 -- no dispatch, no cost
+      * the returned :class:`ExecutionOutcome.final_phase` agrees
+        with the on-disk status (the two writers must not disagree)
+    """
+    bundle = e2e_driver(team="ShohokuCancel")
+    # Script a single APPROVE as a tripwire: if the executor ever
+    # dispatches despite the .cancel flag, this entry would be
+    # consumed and the counter assertion below would catch it.
+    bundle.fake_claude.set_script([
+        {"trailer": "WORKFLOW: APPROVE", "cost_usd": 0.99, "persona": "anzai"},
+    ])
+
+    # Drop the cancel sentinel into the task dir BEFORE running.
+    # This is exactly the on-disk state ``workflow cancel`` leaves
+    # behind: a zero-byte ``.cancel`` file in the task root.
+    cancel_flag = bundle.paths.task_dir / ".cancel"
+    cancel_flag.touch()
+    assert cancel_flag.exists(), "test setup: .cancel flag not on disk"
+
+    outcome = bundle.run_executor()
+
+    status = bundle.read_status()
+    assert status["phase"] == "cancelled"
+    assert status["cost_usd_total"] == 0.0, (
+        "cancel short-circuit must not dispatch -- so cost must "
+        "stay at zero. A non-zero value means the executor ran "
+        "at least one persona before noticing the flag."
+    )
+
+    # The returned outcome and the on-disk status must agree on
+    # the terminal phase. Two writers, one truth.
+    assert outcome.final_phase == "cancelled"
+    assert outcome.total_cost_usd == 0.0
+
+    events = bundle.read_events()
+    kinds = [e["kind"] for e in events]
+    cancel_events = [e for e in events if e["kind"] == "cancel_complete"]
+    assert len(cancel_events) == 1, (
+        f"expected exactly one cancel_complete event; got "
+        f"kinds={kinds!r}"
+    )
+    assert cancel_events[0].get("task_id") == bundle.task_id
+
+    # No dispatch fired -- so no step_started / step_completed.
+    # If either appears, the executor is doing work it shouldn't.
+    assert not any(k in ("step_started", "step_completed") for k in kinds), (
+        "cancel must short-circuit BEFORE any step dispatches; "
+        f"got events of kinds={kinds!r}"
+    )
+
+    # And the fake's counter pins it from the other side.
+    assert bundle.fake_claude.counter() == 0
