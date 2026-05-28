@@ -52,9 +52,9 @@ import json
 import logging
 import os
 import signal
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from subprocess import PIPE, Popen, TimeoutExpired
 from typing import Any, Optional
 
 from tigerharness.workflow_runner.atomic import read_json, write_json_atomic
@@ -198,15 +198,14 @@ class SessionManager:
 
         # ``start_new_session=True`` makes ``proc.pid`` the leader of a
         # fresh session/group so we can ``killpg`` the *entire subtree*
-        # on timeout. Without it ``subprocess.run``'s timeout path only
-        # SIGKILLs the direct child, leaving claude's tool subprocesses
-        # (Bash, MCP servers, etc.) orphaned to leak FDs/CPU across the
-        # executor's loop.
-        proc = subprocess.Popen(
+        # on timeout. Without it the stdlib timeout path only SIGKILLs
+        # the direct child, leaving claude's tool subprocesses
+        # orphaned to leak FDs/CPU across the executor's loop.
+        proc = Popen(
             argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdin=PIPE,
+            stdout=PIPE,
+            stderr=PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -217,19 +216,8 @@ class SessionManager:
                 input=prompt, timeout=timeout_sec
             )
             returncode = proc.returncode
-        except subprocess.TimeoutExpired as exc:
-            self._kill_process_group(proc)
-            pre_kill = _decode_partial(exc.stdout)
-            # After group SIGKILL the pipes close fast; drain any
-            # buffered bytes so partial output survives in stdout.txt
-            # and we don't leak the FDs.
-            try:
-                leftover_stdout, _ = proc.communicate(
-                    timeout=_DRAIN_TIMEOUT_SEC
-                )
-            except subprocess.TimeoutExpired:
-                leftover_stdout = ""
-            partial = pre_kill + _decode_partial(leftover_stdout)
+        except TimeoutExpired as exc:
+            partial = _decode_partial(exc.stdout) + self._reap_subtree(proc)
             if log_dir is not None:
                 self._capture_timeout(
                     log_dir, prompt=prompt, partial_stdout=partial
@@ -243,22 +231,10 @@ class SessionManager:
                 raw_envelope={},
             )
         except BaseException:
-            # SIGINT / SIGTERM / executor shutdown mid-turn: same
-            # orphan-leak risk as a timeout. Reap the subtree *before*
-            # propagating so the surrounding cleanup can't leave
-            # claude tool subprocesses running. Re-raises the original
-            # exception (including KeyboardInterrupt / SystemExit) so
-            # callers see the failure they expected.
-            #
-            # NB: ``communicate`` (not ``wait``) so the stdin / stdout
-            # / stderr pipe FDs get closed on the way out. ``wait``
-            # only reaps the zombie; the pipes would linger until GC.
-            # Symmetric with the timeout path above.
-            self._kill_process_group(proc)
-            try:
-                proc.communicate(timeout=_DRAIN_TIMEOUT_SEC)
-            except subprocess.TimeoutExpired:
-                pass
+            # SIGINT/SIGTERM/executor shutdown mid-turn: same orphan-leak
+            # risk as timeout. Reap before propagating; bare ``raise``
+            # preserves the original exception + traceback.
+            self._reap_subtree(proc)
             raise
 
         envelope, parse_error = _parse_envelope(stdout)
@@ -346,7 +322,24 @@ class SessionManager:
         return argv
 
     @staticmethod
-    def _kill_process_group(proc: subprocess.Popen) -> None:
+    def _reap_subtree(proc: Popen) -> str:
+        """SIGKILL the subtree and drain buffered stdout via ``communicate``.
+
+        Shared by the timeout and BaseException paths so both reap the
+        same way and close stdin/stdout/stderr FDs on the way out
+        (``wait`` would only reap the zombie). Returns whatever stdout
+        the drain captured — the timeout path prepends pre-kill bytes
+        to it for ``stdout.txt``; the interrupt path discards it.
+        """
+        SessionManager._kill_process_group(proc)
+        try:
+            leftover, _ = proc.communicate(timeout=_DRAIN_TIMEOUT_SEC)
+        except TimeoutExpired:
+            leftover = ""
+        return _decode_partial(leftover)
+
+    @staticmethod
+    def _kill_process_group(proc: Popen) -> None:
         """SIGKILL the child's whole process group.
 
         ``start_new_session=True`` made ``proc.pid`` the group leader,

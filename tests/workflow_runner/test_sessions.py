@@ -18,9 +18,11 @@ import stat
 import sys
 import time
 from pathlib import Path
+from typing import Any, Callable, Optional
 
 import pytest
 
+from tigerharness.task_runner import stuck_watchdog
 from tigerharness.workflow_runner import sessions as sessions_mod
 from tigerharness.workflow_runner.sessions import (
     TIMEOUT_EXIT_CODE,
@@ -31,6 +33,48 @@ from tigerharness.workflow_runner.sessions import (
     _safe_float,
     _safe_str,
 )
+
+
+# --------------------------------------------------------------------------- #
+# Popen spy factory (shared by the reap-path tests below)
+# --------------------------------------------------------------------------- #
+
+
+CommunicateHook = Callable[[Any, Optional[str], Optional[float], int], Any]
+
+
+def _make_spy_popen(
+    *,
+    capture_kwargs: Optional[dict] = None,
+    communicate_hook: Optional[CommunicateHook] = None,
+):
+    """Build a ``Popen`` subclass that captures kwargs and/or scripts
+    ``communicate`` per-call.
+
+    One ``# type: ignore`` lives here; tests stay flat. ``capture_kwargs``
+    (if given) is updated with the kwargs passed to ``__init__``.
+    ``communicate_hook`` receives ``(self, input, timeout, call_index)``
+    where ``call_index`` starts at 1; return its value or raise. When
+    ``None``, ``communicate`` passes through to the real implementation.
+    """
+    real_popen = sessions_mod.Popen
+
+    class _SpyPopen(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            self._spy_communicate_calls = 0
+            if capture_kwargs is not None:
+                capture_kwargs.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+        def communicate(self, input=None, timeout=None):  # type: ignore[override]
+            self._spy_communicate_calls += 1
+            if communicate_hook is None:
+                return super().communicate(input=input, timeout=timeout)
+            return communicate_hook(
+                self, input, timeout, self._spy_communicate_calls
+            )
+
+    return _SpyPopen
 
 
 # --------------------------------------------------------------------------- #
@@ -596,14 +640,9 @@ def test_subprocess_starts_new_session_for_group_kill(
     FDs / CPU. Pin the seam so a future refactor can't quietly drop it.
     """
     captured: dict = {}
-    real_popen = sessions_mod.subprocess.Popen
-
-    class SpyPopen(real_popen):  # type: ignore[misc, valid-type]
-        def __init__(self, *args, **kwargs):
-            captured.update(kwargs)
-            super().__init__(*args, **kwargs)
-
-    monkeypatch.setattr(sessions_mod.subprocess, "Popen", SpyPopen)
+    monkeypatch.setattr(
+        sessions_mod, "Popen", _make_spy_popen(capture_kwargs=captured)
+    )
 
     mgr = SessionManager(task_dir)
     mgr.invoke("rukawa", "p", timeout_sec=10)
@@ -612,24 +651,26 @@ def test_subprocess_starts_new_session_for_group_kill(
 
 
 def _proc_is_live(pid: int) -> bool:
-    """Linux-only liveness probe via /proc.
+    """Linux-only liveness probe.
 
-    Returns False if the process is gone OR has been reaped to a zombie
-    that's already left the process table. We need this (not bare
-    ``os.kill(pid, 0)``) because the post-SIGKILL grandchild becomes a
-    short-lived zombie reparented to PID 1; ``kill(pid, 0)`` still
-    succeeds during that window.
+    Returns False if the process is gone OR is a zombie/exiting (``Z``
+    / ``X``). We can't use bare ``os.kill(pid, 0)`` here: a SIGKILL-ed
+    grandchild becomes a short-lived zombie reparented to PID 1 and
+    ``kill(pid, 0)`` still succeeds for it. ``stuck_watchdog.proc_state``
+    reads ``/proc/PID/stat`` and returns ``""`` once the table entry is
+    gone, ``"Z"`` / ``"X"`` while exiting -- exactly what we need.
     """
-    status_path = Path(f"/proc/{pid}/status")
-    try:
-        text = status_path.read_text()
-    except FileNotFoundError:
-        return False
-    for line in text.splitlines():
-        if line.startswith("State:"):
-            state = line.split()[1]
-            return state not in ("Z", "X")
-    return True
+    return stuck_watchdog.proc_state(pid) not in ("", "Z", "X")
+
+
+def _wait_proc_gone(pid: int, timeout: float) -> bool:
+    """Block (poll) until ``pid`` is gone or ``timeout`` elapses."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _proc_is_live(pid):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 @pytest.mark.skipif(
@@ -661,10 +702,7 @@ def test_timeout_reaps_grandchild_process_subtree(
     grandchild_pid = int(hang_file.read_text().strip())
 
     # SIGKILL delivery + init reap is fast but async; give it a budget.
-    deadline = time.time() + 5.0
-    while _proc_is_live(grandchild_pid) and time.time() < deadline:
-        time.sleep(0.05)
-    assert not _proc_is_live(grandchild_pid), (
+    assert _wait_proc_gone(grandchild_pid, timeout=5.0), (
         f"grandchild pid={grandchild_pid} survived the timeout — "
         "the process-group SIGKILL path did not reap the subtree"
     )
@@ -756,17 +794,17 @@ def test_keyboard_interrupt_reaps_subtree_then_propagates(
 
     monkeypatch.setattr(sessions_mod.os, "killpg", spy_killpg)
 
-    real_popen = sessions_mod.subprocess.Popen
+    def _raise_interrupt(_self, _input, _timeout, _call):
+        # Pretend the user hit Ctrl-C while we were blocked on claude's
+        # reply. Intentionally never calls super(): whether the prompt
+        # reached the child isn't what this test pins down.
+        raise KeyboardInterrupt("user pressed ctrl-c")
 
-    class InterruptedPopen(real_popen):  # type: ignore[misc, valid-type]
-        def communicate(self, input=None, timeout=None):  # type: ignore[override]
-            # Pretend the user hit Ctrl-C while we were blocked on
-            # claude's reply. We intentionally never call super() —
-            # the prompt may or may not have reached the child, that's
-            # not what this test pins down.
-            raise KeyboardInterrupt("user pressed ctrl-c")
-
-    monkeypatch.setattr(sessions_mod.subprocess, "Popen", InterruptedPopen)
+    monkeypatch.setattr(
+        sessions_mod,
+        "Popen",
+        _make_spy_popen(communicate_hook=_raise_interrupt),
+    )
 
     mgr = SessionManager(task_dir)
     with pytest.raises(KeyboardInterrupt):
@@ -793,26 +831,21 @@ def test_interrupt_path_swallows_drain_timeout(
     """
     monkeypatch.setenv("FAKE_SLEEP_SEC", "10")
 
-    real_popen = sessions_mod.subprocess.Popen
-    timeout_cls = sessions_mod.subprocess.TimeoutExpired
+    timeout_cls = sessions_mod.TimeoutExpired
 
-    class StubbornInterruptedPopen(real_popen):  # type: ignore[misc, valid-type]
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._communicate_calls = 0
+    def _interrupt_then_stuck_drain(self, _input, timeout, call):
+        if call == 1:
+            # The communicate inside the try block: interrupt mid-turn.
+            raise KeyboardInterrupt("ctrl-c during turn")
+        # The drain inside BaseException: stuck zombie / pipe exercises
+        # the inner TimeoutExpired swallow.
+        raise timeout_cls(cmd=self.args, timeout=timeout)
 
-        def communicate(self, input=None, timeout=None):  # type: ignore[override]
-            self._communicate_calls += 1
-            if self._communicate_calls == 1:
-                # First call: the one inside the try block. Simulate
-                # an interrupt mid-turn.
-                raise KeyboardInterrupt("ctrl-c during turn")
-            # Second call: the drain in the BaseException handler.
-            # Simulate a stuck zombie / pipe so we exercise the inner
-            # TimeoutExpired swallow.
-            raise timeout_cls(cmd=self.args, timeout=timeout)
-
-    monkeypatch.setattr(sessions_mod.subprocess, "Popen", StubbornInterruptedPopen)
+    monkeypatch.setattr(
+        sessions_mod,
+        "Popen",
+        _make_spy_popen(communicate_hook=_interrupt_then_stuck_drain),
+    )
 
     mgr = SessionManager(task_dir)
     with pytest.raises(KeyboardInterrupt):
@@ -831,23 +864,21 @@ def test_drain_after_kill_timeout_does_not_propagate(
 
     # Force the second communicate() to also raise TimeoutExpired so we
     # exercise the inner ``except`` branch deterministically.
-    real_popen = sessions_mod.subprocess.Popen
-    timeout_cls = sessions_mod.subprocess.TimeoutExpired
+    timeout_cls = sessions_mod.TimeoutExpired
+    real_popen = sessions_mod.Popen
 
-    class StubbornDrainPopen(real_popen):  # type: ignore[misc, valid-type]
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._communicate_calls = 0
+    def _real_first_then_stuck(self, input, timeout, call):
+        if call == 1:
+            # Mirror the real first-call timeout behaviour.
+            return real_popen.communicate(self, input=input, timeout=timeout)
+        # Second call: force TimeoutExpired so the drain's except fires.
+        raise timeout_cls(cmd=self.args, timeout=timeout)
 
-        def communicate(self, input=None, timeout=None):  # type: ignore[override]
-            self._communicate_calls += 1
-            if self._communicate_calls == 1:
-                # Mirror the real first-call timeout behaviour.
-                return super().communicate(input=input, timeout=timeout)
-            # Second call: force TimeoutExpired.
-            raise timeout_cls(cmd=self.args, timeout=timeout)
-
-    monkeypatch.setattr(sessions_mod.subprocess, "Popen", StubbornDrainPopen)
+    monkeypatch.setattr(
+        sessions_mod,
+        "Popen",
+        _make_spy_popen(communicate_hook=_real_first_then_stuck),
+    )
 
     mgr = SessionManager(task_dir)
     result = mgr.invoke("rukawa", "p", timeout_sec=1)
