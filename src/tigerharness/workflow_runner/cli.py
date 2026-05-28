@@ -4,12 +4,14 @@ Driven via::
 
     python -m tigerharness.workflow_runner <subcommand> [args]
 
-This is the Phase 1 CLI for the workflow-runner. It is deliberately
-thin: the heavy lifting (compile phase, executor loop, session
-manager) lands in later sub-steps. For now ``start`` accepts
-**pre-compiled** step files only -- it initialises the task folder
-and prints a clear "executor not yet wired" notice, but does not
-spawn anything.
+This is the Phase 1 CLI for the workflow-runner. ``start`` accepts
+**pre-compiled** step files: it initialises the task folder, then
+drives :class:`WorkflowExecutor` to a terminal phase (``done`` /
+``escalated`` / ``cancelled``) and maps that to the process exit code.
+Pass ``--no-run`` to initialise the journal without starting the loop
+(used by tests and for inspecting a task before running it). The
+compile phase that turns a freestyle playbook into pre-compiled step
+files lands in Phase 2.
 
 Design picks:
 
@@ -54,6 +56,11 @@ from tigerharness.workflow_runner.atomic import (
     read_json,
     write_json_atomic,
 )
+from tigerharness.workflow_runner.executor import (
+    ExecutionOutcome,
+    ExecutorError,
+    WorkflowExecutor,
+)
 from tigerharness.workflow_runner.models import now_iso
 from tigerharness.workflow_runner.paths import (
     TaskPaths,
@@ -75,6 +82,13 @@ _TERMINAL_PHASES = frozenset({"done", "escalated", "cancelled"})
 
 # Exit code for "cancel called on an already-terminal task".
 _EXIT_TERMINAL = 3
+
+# Exit codes for ``start`` once the executor has run to a terminal
+# phase. ``done`` is success; ``escalated`` / ``cancelled`` are
+# non-zero so the wrapping skill (and shell scripts) can branch on the
+# outcome. An :class:`ExecutorError` (lock held / corrupt journal) maps
+# to 1.
+_RUN_EXIT_CODES = {"done": 0, "escalated": 3, "cancelled": 4}
 
 # Frontmatter fence delimiter.
 _FM_DELIM = "---"
@@ -388,9 +402,26 @@ def cmd_start(args: argparse.Namespace) -> int:
     print(f"  entrypoint: {orch.entrypoint}")
     print(f"  path:       {paths.task_dir}")
     print()
-    print("note: executor not yet wired (Phase 1 #4); "
-          "task initialized but not running.")
-    return 0
+
+    if args.no_run:
+        print("note: --no-run set; task initialized but not started.")
+        return 0
+
+    return _run_task(paths, task_id)
+
+
+def _run_task(paths: TaskPaths, task_id: str) -> int:
+    """Drive the executor to a terminal phase and map it to an exit code."""
+    try:
+        outcome: ExecutionOutcome = WorkflowExecutor(paths).run()
+    except ExecutorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Task {outcome.final_phase}: {task_id}")
+    print(f"  reason: {outcome.reason}")
+    print(f"  cost:   ${outcome.total_cost_usd:.4f}")
+    return _RUN_EXIT_CODES.get(outcome.final_phase, 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -736,6 +767,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Team name (e.g. Shohoku).")
     s.add_argument("--steps", required=True,
                    help="Directory containing pre-compiled step .md files.")
+    s.add_argument("--no-run", action="store_true",
+                   help="initialise the task folder but do not start the "
+                        "executor loop")
     s.add_argument("--task-id", default="",
                    help="Optional task-id; minted if omitted.")
     s.set_defaults(func=cmd_start)

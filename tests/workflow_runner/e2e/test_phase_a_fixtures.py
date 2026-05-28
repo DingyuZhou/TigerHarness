@@ -104,7 +104,8 @@ def test_cli_start_initialises_journal(
     the CLI internals refactor as long as the on-disk contract holds.
     """
     rc = wf_cli.main(
-        ["start", "--team", "ShohokuE2E", "--steps", str(e2e_steps_dir)]
+        ["start", "--team", "ShohokuE2E", "--steps", str(e2e_steps_dir),
+         "--no-run"]
     )
     assert rc == 0
 

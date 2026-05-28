@@ -85,9 +85,9 @@ def _basic_steps() -> list[dict[str, str]]:
 
 def _start_task(journal_root: Path, base: Path, *,
                 team: str = "Shohoku", task_id: str = "") -> str:
-    """Run ``start`` and return the task-id (only one task in root)."""
+    """Run ``start --no-run`` and return the task-id (only one task in root)."""
     steps_dir = _make_step_dir(base, _basic_steps())
-    argv = ["start", "--team", team, "--steps", str(steps_dir)]
+    argv = ["start", "--team", team, "--steps", str(steps_dir), "--no-run"]
     if task_id:
         argv.extend(["--task-id", task_id])
     rc = cli.main(argv)
@@ -108,12 +108,13 @@ def test_start_happy_path(
     journal_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     steps_dir = _make_step_dir(tmp_path, _basic_steps())
-    rc = cli.main(["start", "--team", "Shohoku", "--steps", str(steps_dir)])
+    rc = cli.main(["start", "--team", "Shohoku", "--steps", str(steps_dir),
+                   "--no-run"])
     assert rc == 0
 
     out = capsys.readouterr().out
     assert "Task initialised:" in out
-    assert "executor not yet wired" in out
+    assert "--no-run set" in out
 
     dirs = [p for p in journal_root.iterdir() if p.is_dir()]
     assert len(dirs) == 1
@@ -246,7 +247,7 @@ def test_start_rejects_existing_task_folder(
     steps_dir = _make_step_dir(tmp_path, _basic_steps())
     rc1 = cli.main([
         "start", "--team", "T", "--steps", str(steps_dir),
-        "--task-id", "dup",
+        "--task-id", "dup", "--no-run",
     ])
     assert rc1 == 0
     capsys.readouterr()
@@ -296,6 +297,77 @@ def test_start_rejects_non_yaml_mapping_frontmatter(
     assert rc == 2
     err = capsys.readouterr().err
     assert "no YAML frontmatter" in err
+
+
+# --------------------------------------------------------------------------- #
+# start --> executor run path
+# --------------------------------------------------------------------------- #
+
+
+def _patch_executor(monkeypatch, *, outcome=None, error=None):
+    """Replace ``cli.WorkflowExecutor`` with a fake (no ``claude`` spawn)."""
+    class _FakeExecutor:
+        def __init__(self, paths, **kwargs):
+            self.paths = paths
+
+        def run(self):
+            if error is not None:
+                raise error
+            return outcome
+
+    monkeypatch.setattr(cli, "WorkflowExecutor", _FakeExecutor)
+
+
+@pytest.mark.parametrize(
+    "phase, expected_rc",
+    [("done", 0), ("escalated", 3), ("cancelled", 4)],
+)
+def test_start_runs_executor_maps_exit_code(
+    journal_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], phase: str, expected_rc: int,
+) -> None:
+    from tigerharness.workflow_runner.executor import ExecutionOutcome
+    _patch_executor(
+        monkeypatch,
+        outcome=ExecutionOutcome(
+            final_phase=phase, reason=f"{phase} reason", total_cost_usd=1.25,
+        ),
+    )
+    steps_dir = _make_step_dir(tmp_path, _basic_steps())
+    rc = cli.main(["start", "--team", "T", "--steps", str(steps_dir)])
+    assert rc == expected_rc
+    out = capsys.readouterr().out
+    assert f"Task {phase}:" in out
+    assert "$1.2500" in out
+
+
+def test_start_run_executor_error_returns_1(
+    journal_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tigerharness.workflow_runner.executor import ExecutorError
+    _patch_executor(monkeypatch, error=ExecutorError("already running"))
+    steps_dir = _make_step_dir(tmp_path, _basic_steps())
+    rc = cli.main(["start", "--team", "T", "--steps", str(steps_dir)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "already running" in err
+
+
+def test_start_unknown_terminal_phase_returns_1(
+    journal_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A phase outside the exit-code map falls back to rc 1."""
+    from tigerharness.workflow_runner.executor import ExecutionOutcome
+    _patch_executor(
+        monkeypatch,
+        outcome=ExecutionOutcome(
+            final_phase="weird", reason="?", total_cost_usd=0.0,
+        ),
+    )
+    steps_dir = _make_step_dir(tmp_path, _basic_steps())
+    rc = cli.main(["start", "--team", "T", "--steps", str(steps_dir)])
+    assert rc == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -373,7 +445,7 @@ def test_show_ambiguous_prefix(
     # Build a second task in a fresh source dir.
     steps_dir = _make_step_dir(tmp_path / "src2", _basic_steps())
     cli.main(["start", "--team", "T", "--steps", str(steps_dir),
-              "--task-id", "amb-bbb"])
+              "--task-id", "amb-bbb", "--no-run"])
     capsys.readouterr()
 
     rc = cli.main(["show", "amb"])
@@ -486,9 +558,9 @@ def test_list_filter_by_team(
     a = _make_step_dir(tmp_path / "a", _basic_steps())
     b = _make_step_dir(tmp_path / "b", _basic_steps())
     cli.main(["start", "--team", "Shohoku",
-              "--steps", str(a), "--task-id", "team-a"])
+              "--steps", str(a), "--task-id", "team-a", "--no-run"])
     cli.main(["start", "--team", "Sannoh",
-              "--steps", str(b), "--task-id", "team-b"])
+              "--steps", str(b), "--task-id", "team-b", "--no-run"])
     capsys.readouterr()
 
     rc = cli.main(["list", "--team", "shohoku"])

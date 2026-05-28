@@ -410,7 +410,11 @@ def e2e_driver(
         team: str = "ShohokuE2E",
         task_id: str = "",
     ) -> E2EBundle:
-        argv = ["start", "--team", team, "--steps", str(e2e_steps_dir)]
+        # ``--no-run`` lays out the journal without starting the loop, so
+        # the scenario can configure the fake-claude script before driving
+        # the executor explicitly via ``bundle.run_executor()``.
+        argv = ["start", "--team", team, "--steps", str(e2e_steps_dir),
+                "--no-run"]
         if task_id:
             argv += ["--task-id", task_id]
         rc = wf_cli.main(argv)

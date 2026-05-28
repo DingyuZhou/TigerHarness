@@ -62,6 +62,7 @@ all = [
 [project.scripts]
 tigerharness = "tigerharness.cli:main"
 tiger-memory = "tigerharness.tiger_memory.cli:main"
+workflow = "tigerharness.workflow_runner.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/DingyuZhou/TigerHarness"
