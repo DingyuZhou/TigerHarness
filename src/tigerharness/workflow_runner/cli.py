@@ -753,7 +753,7 @@ def cmd_cancel(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="tigerharness-workflow",
+        prog="workflow",
         description="Workflow orchestration CLI (Phase 1).",
     )
     sub = p.add_subparsers(dest="cmd", required=True)

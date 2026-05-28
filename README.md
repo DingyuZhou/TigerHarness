@@ -15,6 +15,7 @@ integration, and persistent memory management.
 | `tigerharness.task_runner` | Fire-and-forget iterative task execution. Drives a persona through N Claude turns with periodic `/compact`. |
 | `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to a `claude -p` backend and posts replies back to the thread. |
 | `tigerharness.tiger_memory` | Persistent agent memory: archive, journal, briefing with lazy rebuild, kind-decay must-memorize, and drill-down. |
+| `tigerharness.workflow_runner` | Multi-persona workflow orchestration. Drives a graph of personas through a playbook (plan → critique → develop → QA → doc) with approval gates, loop caps, and cost ceilings. CLI: `workflow`. See [docs/workflow-runner.md](docs/workflow-runner.md). |
 
 ## Installation
 
