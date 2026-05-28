@@ -302,8 +302,14 @@ End your reply with exactly one of:
 
 **Parser rules:**
 
-1. Scan the last 20 non-empty lines of the persona's stdout.
+1. Scan **all** lines of the persona's stdout. (Earlier drafts capped
+   the scan at the last 20 non-empty lines; that window added no
+   safety once rule 2 became "last `WORKFLOW:` line wins, malformed
+   fails closed" and was dropped.)
 2. The trailer is the *last* line matching `^WORKFLOW: (APPROVE|REVISE|BLOCK)( *: *.+)?$`.
+   If a later line starts with `WORKFLOW:` but is malformed, the
+   verdict is a parse failure — do **not** silently fall back to an
+   earlier well-formed line.
 3. On match: record verdict + reason in `status.step_history`, route.
 4. On no match: re-prompt **once** with `"I couldn't find your
    WORKFLOW: trailer. Please end your next reply with one of

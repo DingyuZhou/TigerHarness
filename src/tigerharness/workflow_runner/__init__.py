@@ -4,6 +4,8 @@ Phase 1 sub-step #1: the foundation module. Provides:
 
 * Path-layout helpers for the per-task journal
   (`paths.TaskPaths`, `paths.default_journal_root`, `paths.new_task_id`).
+* Step-id sanitizer shared by models + paths
+  (`ids.validate_step_id`, `ids.STEP_ID_PATTERN`).
 * Typed data models for the on-disk JSON files
   (`models.StepFrontmatter`, `models.Orchestration`, `models.Status`,
   `models.SessionMap`, `models.Event`, ...).
@@ -33,6 +35,10 @@ from tigerharness.workflow_runner.events import (
     read_events,
     tail_events,
 )
+from tigerharness.workflow_runner.ids import (
+    STEP_ID_PATTERN,
+    validate_step_id,
+)
 from tigerharness.workflow_runner.locks import (
     LockHeldError,
     PidInfo,
@@ -59,11 +65,22 @@ from tigerharness.workflow_runner.paths import (
     new_task_id,
 )
 
+# TODO(anzai): re-export trailer types (Approve, Block, ParseError,
+# Revise, Verdict, parse_trailer) once Mitsui's
+# work/2026-05-28-workflow-runner-trailer-parser branch merges.
+# Importing trailer here pre-merge would fail local tests because
+# trailer.py lives on a parallel branch. Per Akagi's review and
+# Anzai's adjudication, this is a small follow-up commit on the
+# merged tip, not part of either Phase 1 #1 branch.
+
 __all__ = [
     # paths
     "TaskPaths",
     "default_journal_root",
     "new_task_id",
+    # ids
+    "STEP_ID_PATTERN",
+    "validate_step_id",
     # models
     "Event",
     "Orchestration",
