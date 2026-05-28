@@ -53,6 +53,7 @@ from tigerharness.workflow_runner.atomic import (
     read_json,
     write_json_atomic,
 )
+from tigerharness.workflow_runner.events import append_event
 from tigerharness.workflow_runner.models import now_iso
 from tigerharness.workflow_runner.paths import (
     TaskPaths,
@@ -368,6 +369,19 @@ def cmd_start(args: argparse.Namespace) -> int:
     write_json_atomic(paths.sessions_json, {})
     paths.events_jsonl.touch()
 
+    # Open the machine-truth event log with the spec-mandated
+    # ``task_started`` record so the audit trail is honest from
+    # the moment the task folder exists -- not just from when
+    # the executor (Phase 1 #4) first picks it up.
+    append_event(
+        paths.events_jsonl,
+        "task_started",
+        task_id=task_id,
+        team=args.team,
+        steps=len(orch.steps),
+        entrypoint=orch.entrypoint,
+    )
+
     print(f"Task initialised: {task_id}")
     print(f"  team:       {args.team}")
     print(f"  steps:      {len(orch.steps)}")
@@ -681,6 +695,19 @@ def cmd_cancel(args: argparse.Namespace) -> int:
 
     raw["phase"] = "cancelling"
     write_json_atomic(paths.status_json, raw)
+
+    # Record the decision in the machine-truth event stream so the
+    # diagnose/audit tooling sees *who* requested the cancel and
+    # *from what phase* -- info that the bare ``.cancel`` flag can't
+    # carry. The flag is still authoritative; this is the audit
+    # trail counterpart.
+    append_event(
+        paths.events_jsonl,
+        "cancel_requested",
+        task_id=task_id,
+        prior_phase=phase,
+    )
+
     print(
         f"Cancel requested for {task_id} "
         f"(was {phase}). Executor will exit at the next iteration boundary."

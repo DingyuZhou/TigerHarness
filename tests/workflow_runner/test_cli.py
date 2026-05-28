@@ -614,6 +614,9 @@ def test_tail_empty_says_so(
     journal_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     task_id = _start_task(journal_root, tmp_path, task_id="empty-evt")
+    # ``start`` now writes a ``task_started`` opener; truncate to test
+    # the "no events yet" branch in isolation.
+    (journal_root / task_id / "events.jsonl").write_text("")
     capsys.readouterr()
     rc = cli.main(["tail", task_id])
     assert rc == 0
@@ -992,3 +995,96 @@ def test_dunder_main_module_imports() -> None:
     """
     from tigerharness.workflow_runner import __main__ as wf_main
     assert wf_main.main is cli.main
+
+
+# --------------------------------------------------------------------------- #
+# Iteration 2: event-log emissions
+# --------------------------------------------------------------------------- #
+
+
+def _read_events(events_path: Path) -> list[dict]:
+    """Parse ``events.jsonl`` into a list of dicts (one per line)."""
+    out: list[dict] = []
+    for line in events_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        out.append(json.loads(line))
+    return out
+
+
+def test_start_emits_task_started_event(
+    journal_root: Path, tmp_path: Path,
+) -> None:
+    """``start`` writes the spec-mandated ``task_started`` opener.
+
+    The executor (Phase 1 #4) and the diagnose CLI both treat
+    ``events.jsonl`` as the machine-truth log; the audit trail must
+    begin at task initialisation, not at first executor iteration.
+    """
+    task_id = _start_task(journal_root, tmp_path, team="Shohoku")
+    events = _read_events(journal_root / task_id / "events.jsonl")
+    assert len(events) == 1
+    evt = events[0]
+    assert evt["kind"] == "task_started"
+    # Payload carries the bookkeeping a downstream replayer needs to
+    # reconstruct context without re-reading orchestration.json.
+    assert evt["task_id"] == task_id
+    assert evt["team"] == "Shohoku"
+    assert evt["steps"] == 2
+    assert evt["entrypoint"] == "01-anzai-plan"
+    # And the timestamp is ISO-8601-ish (begins with a 4-digit year).
+    assert evt["ts"][:4].isdigit()
+
+
+def test_cancel_emits_cancel_requested_event(
+    journal_root: Path, tmp_path: Path,
+) -> None:
+    """``cancel`` appends a ``cancel_requested`` event after writing status."""
+    task_id = _start_task(journal_root, tmp_path)
+    events_p = journal_root / task_id / "events.jsonl"
+    before = _read_events(events_p)
+    assert before[-1]["kind"] == "task_started"
+
+    rc = cli.main(["cancel", task_id])
+    assert rc == 0
+
+    after = _read_events(events_p)
+    # task_started is preserved; cancel_requested is appended last.
+    assert len(after) == len(before) + 1
+    assert [e["kind"] for e in after[: len(before)]] == [
+        e["kind"] for e in before
+    ]
+    evt = after[-1]
+    assert evt["kind"] == "cancel_requested"
+    assert evt["task_id"] == task_id
+    # We capture the *prior* phase so the audit log shows what state
+    # the task was in when the cancel landed.
+    assert evt["prior_phase"] == "execute"
+
+
+def test_cancel_idempotent_does_not_duplicate_event(
+    journal_root: Path, tmp_path: Path,
+) -> None:
+    """Re-running ``cancel`` on a cancelling task must not append again.
+
+    The flag-and-status path is idempotent; the audit trail must
+    match: one cancel decision -> one ``cancel_requested`` record.
+    """
+    task_id = _start_task(journal_root, tmp_path)
+    events_p = journal_root / task_id / "events.jsonl"
+
+    assert cli.main(["cancel", task_id]) == 0
+    after_first = _read_events(events_p)
+    cancel_count_first = sum(
+        1 for e in after_first if e["kind"] == "cancel_requested"
+    )
+    assert cancel_count_first == 1
+
+    # Second invocation: status is already "cancelling" -> short-circuit.
+    assert cli.main(["cancel", task_id]) == 0
+    after_second = _read_events(events_p)
+    cancel_count_second = sum(
+        1 for e in after_second if e["kind"] == "cancel_requested"
+    )
+    assert cancel_count_second == 1
