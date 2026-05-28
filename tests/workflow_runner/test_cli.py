@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tigerharness.workflow_runner import cli
+from tigerharness.workflow_runner import cli, read_events
 
 
 # --------------------------------------------------------------------------- #
@@ -1000,17 +1000,11 @@ def test_dunder_main_module_imports() -> None:
 # --------------------------------------------------------------------------- #
 # Iteration 2: event-log emissions
 # --------------------------------------------------------------------------- #
-
-
-def _read_events(events_path: Path) -> list[dict]:
-    """Parse ``events.jsonl`` into a list of dicts (one per line)."""
-    out: list[dict] = []
-    for line in events_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        out.append(json.loads(line))
-    return out
+#
+# These tests intentionally consume events via the canonical
+# ``workflow_runner.read_events`` so the audit-log path under test
+# is the same one the diagnose CLI / executor will use in production
+# -- including ``Event.from_dict``'s reserved-key validation.
 
 
 def test_start_emits_task_started_event(
@@ -1022,65 +1016,42 @@ def test_start_emits_task_started_event(
     ``events.jsonl`` as the machine-truth log; the audit trail must
     begin at task initialisation, not at first executor iteration.
     """
-    from tigerharness.workflow_runner import events as events_mod
-
     task_id = _start_task(journal_root, tmp_path, team="Shohoku")
     events_p = journal_root / task_id / "events.jsonl"
-    events = _read_events(events_p)
-    assert len(events) == 1
-    evt = events[0]
-    assert evt["kind"] == "task_started"
+
+    parsed = read_events(events_p)
+    assert len(parsed) == 1
+    evt = parsed[0]
+    assert evt.kind == "task_started"
     # Payload carries the bookkeeping a downstream replayer needs to
     # reconstruct context without re-reading orchestration.json.
-    assert evt["task_id"] == task_id
-    assert evt["team"] == "Shohoku"
-    assert evt["steps"] == 2
-    assert evt["entrypoint"] == "01-anzai-plan"
+    assert evt.extra == {
+        "task_id": task_id,
+        "team": "Shohoku",
+        "steps": 2,
+        "entrypoint": "01-anzai-plan",
+    }
     # And the timestamp is ISO-8601-ish (begins with a 4-digit year).
-    assert evt["ts"][:4].isdigit()
-
-    # Round-trip through the canonical reader so a future tightening
-    # of Event's reserved-key validation can't silently break us.
-    parsed = events_mod.read_events(events_p)
-    assert len(parsed) == 1
-    assert parsed[0].kind == "task_started"
-    assert parsed[0].extra["task_id"] == task_id
-    assert parsed[0].extra["entrypoint"] == "01-anzai-plan"
+    assert evt.ts[:4].isdigit()
 
 
 def test_cancel_emits_cancel_requested_event(
     journal_root: Path, tmp_path: Path,
 ) -> None:
     """``cancel`` appends a ``cancel_requested`` event after writing status."""
-    from tigerharness.workflow_runner import events as events_mod
-
     task_id = _start_task(journal_root, tmp_path)
     events_p = journal_root / task_id / "events.jsonl"
-    before = _read_events(events_p)
-    assert before[-1]["kind"] == "task_started"
+    before = read_events(events_p)
+    assert [e.kind for e in before] == ["task_started"]
 
     rc = cli.main(["cancel", task_id])
     assert rc == 0
 
-    after = _read_events(events_p)
+    after = read_events(events_p)
     # task_started is preserved; cancel_requested is appended last.
-    assert len(after) == len(before) + 1
-    assert [e["kind"] for e in after[: len(before)]] == [
-        e["kind"] for e in before
-    ]
+    assert [e.kind for e in after] == ["task_started", "cancel_requested"]
     evt = after[-1]
-    assert evt["kind"] == "cancel_requested"
-    assert evt["task_id"] == task_id
-    # We capture the *prior* phase so the audit log shows what state
-    # the task was in when the cancel landed.
-    assert evt["prior_phase"] == "execute"
-
-    # Round-trip both events through Event.from_dict to verify
-    # reserved-key validation (ts/kind) doesn't reject our payloads.
-    parsed = events_mod.read_events(events_p)
-    kinds = [e.kind for e in parsed]
-    assert kinds == ["task_started", "cancel_requested"]
-    assert parsed[-1].extra["prior_phase"] == "execute"
+    assert evt.extra == {"task_id": task_id, "prior_phase": "execute"}
 
 
 def test_cancel_idempotent_does_not_duplicate_event(
@@ -1095,16 +1066,9 @@ def test_cancel_idempotent_does_not_duplicate_event(
     events_p = journal_root / task_id / "events.jsonl"
 
     assert cli.main(["cancel", task_id]) == 0
-    after_first = _read_events(events_p)
-    cancel_count_first = sum(
-        1 for e in after_first if e["kind"] == "cancel_requested"
-    )
-    assert cancel_count_first == 1
-
-    # Second invocation: status is already "cancelling" -> short-circuit.
+    # Second invocation: status is already "cancelling" -> short-circuit
+    # before reaching the event append.
     assert cli.main(["cancel", task_id]) == 0
-    after_second = _read_events(events_p)
-    cancel_count_second = sum(
-        1 for e in after_second if e["kind"] == "cancel_requested"
-    )
-    assert cancel_count_second == 1
+
+    kinds = [e.kind for e in read_events(events_p)]
+    assert kinds.count("cancel_requested") == 1

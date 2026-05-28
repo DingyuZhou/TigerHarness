@@ -48,12 +48,12 @@ from tigerharness.workflow_runner import (
     Status,
     WorkflowConfig,
     WorkflowModelError,
+    append_event,
 )
 from tigerharness.workflow_runner.atomic import (
     read_json,
     write_json_atomic,
 )
-from tigerharness.workflow_runner.events import append_event
 from tigerharness.workflow_runner.models import now_iso
 from tigerharness.workflow_runner.paths import (
     TaskPaths,
@@ -363,16 +363,16 @@ def cmd_start(args: argparse.Namespace) -> int:
     status = _initial_status(task_id=task_id, entrypoint=orch.entrypoint)
     write_json_atomic(paths.status_json, status.to_dict())
 
-    # Empty sessions.json + touch events.jsonl so the executor can
-    # find both files on first iteration without special-casing
-    # "missing".
+    # Empty sessions.json so the executor can find it on first
+    # iteration without special-casing "missing".
     write_json_atomic(paths.sessions_json, {})
-    paths.events_jsonl.touch()
 
     # Open the machine-truth event log with the spec-mandated
     # ``task_started`` record so the audit trail is honest from
     # the moment the task folder exists -- not just from when
-    # the executor (Phase 1 #4) first picks it up.
+    # the executor (Phase 1 #4) first picks it up. ``append_event``
+    # creates ``events.jsonl`` on first write, so no separate touch
+    # is needed.
     append_event(
         paths.events_jsonl,
         "task_started",
