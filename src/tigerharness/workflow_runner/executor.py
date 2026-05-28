@@ -47,10 +47,8 @@ calling out:
 from __future__ import annotations
 
 import datetime as _dt
-import logging
 import time as _time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 import yaml
@@ -87,8 +85,6 @@ from tigerharness.workflow_runner.trailer import (
     Verdict,
     parse_trailer,
 )
-
-log = logging.getLogger("tigerharness.workflow_runner.executor")
 
 
 __all__ = [
@@ -239,14 +235,9 @@ class WorkflowExecutor:
         status: Status,
         wall_start: float,
     ) -> Optional[ExecutionOutcome]:
-        # 1. Cancel check -- the .cancel flag (set by `workflow cancel`)
-        #    or a prior "cancelling" phase both terminate cleanly here.
         if self._cancel_requested(status):
             return self._finalize_cancel(status)
 
-        # 2. Constraint check (cost, wall clock, per-step iters). We
-        #    only check wall + cost here; per-step iter cap is checked
-        #    after we know the next step (Step 4 below).
         breach = self._check_global_constraints(
             orch=orch, status=status, wall_start=wall_start
         )
@@ -255,20 +246,19 @@ class WorkflowExecutor:
                 status, reason=breach, kind="constraint_breached"
             )
 
-        # 3. Resolve current step.
         step_id = status.current_step
         if step_id is None:
-            # Spec rule: the CLI initialises ``current_step`` to the
-            # entrypoint; reaching here means external code corrupted
-            # the pointer. Escalate rather than crash so the journal
-            # stays inspectable.
+            # The CLI initialises ``current_step`` to the entrypoint;
+            # reaching here means external code corrupted the pointer.
+            # Escalate rather than crash so the journal stays
+            # inspectable.
             return self._finalize_escalate(
                 status,
                 reason="current_step_missing",
                 kind="constraint_breached",
             )
         try:
-            step = self._load_step_frontmatter(step_id)
+            step, body = self._load_step(step_id)
         except (FileNotFoundError, WorkflowModelError) as exc:
             return self._finalize_escalate(
                 status,
@@ -276,9 +266,8 @@ class WorkflowExecutor:
                 kind="constraint_breached",
             )
 
-        # 4. Per-step iter cap. Bumping happens AFTER dispatch; the
-        #    cap check uses the would-be-next value so we never start
-        #    an iter that's already over budget.
+        # Per-step cap is checked on the would-be-next value so we
+        # never start an iter that's already over budget.
         next_iter = status.iter_counts.get(step_id, 0) + 1
         cap = self._effective_iter_cap(step, orch)
         if next_iter > cap:
@@ -288,23 +277,11 @@ class WorkflowExecutor:
                 kind="constraint_breached",
             )
 
-        # 5. Build prompt: body + optional REVISE feedback prologue.
-        try:
-            body = self._load_step_body(step_id)
-        except FileNotFoundError as exc:  # pragma: no cover - defensive
-            # Step file would have to vanish between
-            # _load_step_frontmatter (~3 lines above) and here.
-            return self._finalize_escalate(
-                status,
-                reason=f"step_body_missing:{step_id}:{exc}",
-                kind="constraint_breached",
-            )
         prologue = self._feedback_prologue(status, step_id, next_iter)
         prompt = prologue + body if prologue else body
 
-        # 6. Record "iter started" -- bumps current_iter / step_started_at
-        #    so a `workflow show` mid-flight reports something honest,
-        #    and emits the structured event the diagnose CLI keys off.
+        # Bump current_iter + step_started_at so `workflow show`
+        # mid-flight reports something honest.
         status.current_iter = next_iter
         status.step_started_at = self._now_iso()
         self._write_status(status)
@@ -317,12 +294,10 @@ class WorkflowExecutor:
             persona=step.persona,
         )
 
-        # 7. Ensure the log dir exists *before* dispatch -- the
-        #    SessionManager will write into it; if mkdir fails we want
-        #    to know now, not after the claude call returns.
+        # ensure_iter_dir before dispatch: mkdir failures should
+        # surface now, not after the claude call returns.
         log_dir = self._paths.ensure_iter_dir(step_id, next_iter)
 
-        # 8. Dispatch.
         result = self._sessions.invoke(
             step.persona,
             prompt,
@@ -330,34 +305,27 @@ class WorkflowExecutor:
             log_dir=log_dir,
         )
 
-        # 9. Brief step 6: bump cost + heartbeat to status atomically
-        #    BEFORE the trailer is parsed. If we crash here, the cost
-        #    is durable; on resume the iter re-runs (a duplicate
-        #    cost-rare; cap is still bounded).
-        status.cost_usd_total = float(
-            status.cost_usd_total + (result.cost_usd or 0.0)
+        # Brief step 6: persist cost + iter_counts BEFORE trailer
+        # parse. Crash here leaves cost durable; resume re-runs the
+        # iter (bounded by max_loop_iters). Counting dispatches
+        # (success or parse failure) is what makes that cap bound
+        # parse-failure storms; without the bump a malformed-trailer
+        # loop could spin forever inside one iter number.
+        cost_delta = result.cost_usd or 0.0
+        status.cost_usd_total += cost_delta
+        status.cost_usd_per_step[step_id] = (
+            status.cost_usd_per_step.get(step_id, 0.0) + cost_delta
         )
-        status.cost_usd_per_step[step_id] = float(
-            status.cost_usd_per_step.get(step_id, 0.0)
-            + (result.cost_usd or 0.0)
-        )
-        # iter_counts is bumped here too: each dispatch (success or
-        # parse failure) consumes one iter slot. Without this a
-        # parse-failure storm could loop forever inside one iter
-        # number while max_loop_iters never fires.
         status.iter_counts[step_id] = next_iter
         self._write_status(status)
 
-        # 10. Parse the trailer.
         verdict = parse_trailer(result.stdout)
-
-        # 11. Branch.
         return self._apply_verdict(
             status=status,
             step=step,
             iter_n=next_iter,
             iter_started_at=iter_started_at,
-            cost_usd=result.cost_usd or 0.0,
+            cost_usd=cost_delta,
             verdict=verdict,
             invocation_error=result.error,
         )
@@ -379,83 +347,39 @@ class WorkflowExecutor:
     ) -> Optional[ExecutionOutcome]:
         step_id = step.id
 
-        if isinstance(verdict, Approve):
-            self._append_history(
+        if isinstance(verdict, (Approve, Revise, Block)):
+            reason = (
+                verdict.summary
+                if isinstance(verdict, (Revise, Block))
+                else None
+            )
+            self._record_verdict(
                 status,
                 step=step,
                 iter_n=iter_n,
                 iter_started_at=iter_started_at,
-                verdict_tag="APPROVE",
-                reason=None,
+                verdict=verdict,
+                reason=reason,
                 cost_usd=cost_usd,
             )
-            self._reset_parse_failures(status)
-            self._emit_step_completed(step_id, iter_n, "APPROVE", cost_usd)
-            target = step.edges.on_approve
-            if target == _SENTINEL_DONE:
-                return self._finalize_done(
-                    status, reason=f"approve to __done__ on {step_id}"
-                )
-            if target == _SENTINEL_ESCALATE:
+            if isinstance(verdict, Block):
                 return self._finalize_escalate(
                     status,
-                    reason=f"approve_to_escalate:{step_id}",
-                    kind="constraint_breached",
+                    reason=f"block:{verdict.summary}",
+                    kind="block",
                 )
-            self._advance_pointer(status, target)
-            return None
+            if isinstance(verdict, Approve):
+                target = step.edges.on_approve
+                source = "approve"
+            else:
+                target = verdict.target or step.edges.on_revise
+                source = "revise"
+            return self._route(status, step_id, target, source=source)
 
-        if isinstance(verdict, Revise):
-            target = verdict.target or step.edges.on_revise
-            self._append_history(
-                status,
-                step=step,
-                iter_n=iter_n,
-                iter_started_at=iter_started_at,
-                verdict_tag="REVISE",
-                reason=verdict.summary,
-                cost_usd=cost_usd,
-            )
-            self._reset_parse_failures(status)
-            self._emit_step_completed(step_id, iter_n, "REVISE", cost_usd)
-            if target == _SENTINEL_DONE:
-                # A REVISE pointing at __done__ is nonsensical -- the
-                # whole point of REVISE is to loop. Escalate.
-                return self._finalize_escalate(
-                    status,
-                    reason=f"revise_to_done:{step_id}",
-                    kind="constraint_breached",
-                )
-            if target == _SENTINEL_ESCALATE:
-                return self._finalize_escalate(
-                    status,
-                    reason=f"revise_to_escalate:{step_id}",
-                    kind="constraint_breached",
-                )
-            self._advance_pointer(status, target)
-            return None
-
-        if isinstance(verdict, Block):
-            self._append_history(
-                status,
-                step=step,
-                iter_n=iter_n,
-                iter_started_at=iter_started_at,
-                verdict_tag="BLOCK",
-                reason=verdict.summary,
-                cost_usd=cost_usd,
-            )
-            self._reset_parse_failures(status)
-            self._emit_step_completed(step_id, iter_n, "BLOCK", cost_usd)
-            return self._finalize_escalate(
-                status,
-                reason=f"block:{verdict.summary}",
-                kind="block",
-            )
-
-        # ParseError: do NOT write a history entry; the verdict
-        # didn't actually happen. Bump the counter, emit the event,
-        # and let the next loop iteration re-dispatch the same step.
+        # ParseError: no history entry (the verdict didn't actually
+        # happen). Bump the counter, emit the event, re-dispatch on
+        # the next loop iteration -- or escalate if the contract is
+        # broken three times running.
         assert isinstance(verdict, ParseError)
         new_count = int(
             status.phase_state.get("parse_failure_count", 0)
@@ -477,7 +401,66 @@ class WorkflowExecutor:
                 reason="parse_failure_loop",
                 kind="constraint_breached",
             )
-        return None  # Re-run same step at next loop iteration.
+        return None
+
+    def _record_verdict(
+        self,
+        status: Status,
+        *,
+        step: StepFrontmatter,
+        iter_n: int,
+        iter_started_at: str,
+        verdict: Verdict,
+        reason: Optional[str],
+        cost_usd: float,
+    ) -> None:
+        """Three shared post-dispatch actions: history append, reset
+        the parse-failure counter (a clean verdict means the contract
+        is back on the rails), emit ``step_completed``.
+        """
+        self._append_history(
+            status,
+            step=step,
+            iter_n=iter_n,
+            iter_started_at=iter_started_at,
+            verdict_tag=verdict.kind,
+            reason=reason,
+            cost_usd=cost_usd,
+        )
+        self._reset_parse_failures(status)
+        self._emit_step_completed(step.id, iter_n, verdict.kind, cost_usd)
+
+    def _route(
+        self,
+        status: Status,
+        step_id: str,
+        target: str,
+        *,
+        source: str,
+    ) -> Optional[ExecutionOutcome]:
+        """Apply edge target: real step, ``__done__``, or
+        ``__escalate__``. REVISE -> __done__ escalates because looping
+        back to done is nonsensical; APPROVE -> __escalate__ honors a
+        graph that wants approval-as-termination.
+        """
+        if target == _SENTINEL_DONE:
+            if source == "revise":
+                return self._finalize_escalate(
+                    status,
+                    reason=f"revise_to_done:{step_id}",
+                    kind="constraint_breached",
+                )
+            return self._finalize_done(
+                status, reason=f"approve to __done__ on {step_id}"
+            )
+        if target == _SENTINEL_ESCALATE:
+            return self._finalize_escalate(
+                status,
+                reason=f"{source}_to_escalate:{step_id}",
+                kind="constraint_breached",
+            )
+        self._advance_pointer(status, target)
+        return None
 
     # ------------------------------------------------------------------ #
     # Status helpers
@@ -539,14 +522,10 @@ class WorkflowExecutor:
         self._write_status(status)
 
     def _reset_parse_failures(self, status: Status) -> None:
-        """Clear the parse-failure counter once a verdict lands.
-
-        Only consecutive parse failures count toward the loop; a
-        successful verdict (Approve / Revise / Block) means the
-        persona-trailer contract is back on the rails.
+        """Clear the parse-failure counter -- only *consecutive*
+        parse failures count toward the loop.
         """
-        if "parse_failure_count" in status.phase_state:
-            status.phase_state.pop("parse_failure_count", None)
+        status.phase_state.pop("parse_failure_count", None)
 
     # ------------------------------------------------------------------ #
     # Cancellation
@@ -554,11 +533,7 @@ class WorkflowExecutor:
 
     def _cancel_requested(self, status: Status) -> bool:
         flag = self._paths.task_dir / _CANCEL_FLAG
-        if flag.exists():
-            return True
-        if status.phase == "cancelling":
-            return True
-        return False
+        return flag.exists() or status.phase == "cancelling"
 
     # ------------------------------------------------------------------ #
     # Constraint checks
@@ -712,18 +687,19 @@ class WorkflowExecutor:
                 f"status.json invalid: {exc}"
             ) from exc
 
-    def _load_step_frontmatter(self, step_id: str) -> StepFrontmatter:
+    def _load_step(self, step_id: str) -> tuple[StepFrontmatter, str]:
+        """Read the step file once, return (frontmatter, body).
+
+        Single I/O + single fence-scan per dispatch; both halves stay
+        consistent with the file as it was at this instant.
+        """
         text = self._paths.step_file(step_id).read_text(encoding="utf-8")
         fm = _parse_frontmatter(text)
         if not fm:
             raise WorkflowModelError(
                 f"step file {step_id}.md has no YAML frontmatter"
             )
-        return StepFrontmatter.from_dict(fm)
-
-    def _load_step_body(self, step_id: str) -> str:
-        text = self._paths.step_file(step_id).read_text(encoding="utf-8")
-        return _extract_body(text)
+        return StepFrontmatter.from_dict(fm), _extract_body(text)
 
     # ------------------------------------------------------------------ #
     # Feedback prologue (REVISE rewinds)
