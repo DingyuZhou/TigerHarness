@@ -111,6 +111,30 @@ def test_write_pid_default_uses_current_pid(tmp_path):
     assert info.pid == os.getpid()
 
 
+def test_write_pid_caches_now_iso_so_both_timestamps_match(
+    tmp_path, monkeypatch
+):
+    # Regression: when ``now`` is not supplied, write_pid should call
+    # ``now_iso()`` exactly once so that ``started_at`` and
+    # ``last_heartbeat`` agree even if the clock ticks across the
+    # second boundary between two reads.
+    seq = iter(["2026-05-28T12:00:00Z", "2026-05-28T12:00:01Z"])
+    calls = {"n": 0}
+
+    def fake_now_iso():
+        calls["n"] += 1
+        return next(seq)
+
+    # locks.py does ``from ... import now_iso``, so we patch the
+    # imported name on the locks module itself.
+    monkeypatch.setattr(
+        "tigerharness.workflow_runner.locks.now_iso", fake_now_iso
+    )
+    info = write_pid(tmp_path, pid=42)
+    assert calls["n"] == 1
+    assert info.started_at == info.last_heartbeat == "2026-05-28T12:00:00Z"
+
+
 def test_heartbeat_updates_only_last_heartbeat(tmp_path):
     write_pid(tmp_path, pid=999, now="2026-05-28T12:00:00Z")
     updated = heartbeat(tmp_path, now="2026-05-28T12:05:00Z")
