@@ -1,6 +1,6 @@
 """tigerharness.workflow_runner -- multi-persona workflow orchestration.
 
-Phase 1 sub-step #1: the foundation module. Provides:
+Phase 1 sub-steps shipped so far provide:
 
 * Path-layout helpers for the per-task journal
   (`paths.TaskPaths`, `paths.default_journal_root`, `paths.new_task_id`).
@@ -15,9 +15,12 @@ Phase 1 sub-step #1: the foundation module. Provides:
   `locks.read_pid_info`, `locks.is_stale`).
 * `events.jsonl` append-only writer + tail reader
   (`events.append_event`, `events.read_events`, `events.tail_events`).
+* Per-persona Claude session manager
+  (`sessions.SessionManager`, `sessions.InvocationResult`,
+  `sessions.TIMEOUT_EXIT_CODE`).
 
-The compile phase, executor, trailer parser, session manager, and CLI
-land in later sub-steps; this module is the surface they all sit on.
+The compile phase, executor, trailer parser, and CLI land in later
+sub-steps; this module is the surface they all sit on.
 
 See ``docs/workflow-runner.md`` for the full design and
 ``docs/adr/0001-workflow-runner.md`` for the decision log.
@@ -58,6 +61,11 @@ from tigerharness.workflow_runner.paths import (
     default_journal_root,
     new_task_id,
 )
+from tigerharness.workflow_runner.sessions import (
+    TIMEOUT_EXIT_CODE,
+    InvocationResult,
+    SessionManager,
+)
 
 __all__ = [
     # paths
@@ -90,4 +98,8 @@ __all__ = [
     "append_event",
     "read_events",
     "tail_events",
+    # sessions
+    "InvocationResult",
+    "SessionManager",
+    "TIMEOUT_EXIT_CODE",
 ]

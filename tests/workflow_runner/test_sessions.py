@@ -578,3 +578,25 @@ def test_decode_partial_handles_bytes_str_and_none():
     assert _decode_partial("already-decoded") == "already-decoded"
     # Half-written multi-byte UTF-8 sequence: replace, don't crash.
     assert "\ufffd" in _decode_partial(b"caf\xc3")
+
+
+# --------------------------------------------------------------------------- #
+# Public API surface
+# --------------------------------------------------------------------------- #
+
+
+def test_public_api_reexport_from_package():
+    """The three public names are reachable from the package root.
+
+    The executor (and any future consumer) should be able to write
+    ``from tigerharness.workflow_runner import SessionManager`` the
+    same way it imports the other Phase 1 primitives. Pinned so a
+    future refactor can't silently drop the re-export.
+    """
+    import tigerharness.workflow_runner as wr
+
+    assert wr.SessionManager is SessionManager
+    assert wr.InvocationResult is InvocationResult
+    assert wr.TIMEOUT_EXIT_CODE == TIMEOUT_EXIT_CODE
+    for name in ("SessionManager", "InvocationResult", "TIMEOUT_EXIT_CODE"):
+        assert name in wr.__all__, f"{name} missing from workflow_runner.__all__"
