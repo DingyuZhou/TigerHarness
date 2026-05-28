@@ -31,6 +31,7 @@ whole e2e suite.
 from __future__ import annotations
 
 import importlib.util
+import json
 
 import pytest
 
@@ -178,8 +179,7 @@ def test_single_revise_rewinds_to_plan(e2e_driver) -> None:
         "sessions.json must exist after a successful run -- the "
         "SessionManager writes it on every invoke."
     )
-    import json as _json
-    sessions = _json.loads(sessions_path.read_text(encoding="utf-8"))
+    sessions = json.loads(sessions_path.read_text(encoding="utf-8"))
     assert set(sessions.keys()) == {"anzai", "akagi", "rukawa"}, (
         f"expected one entry per persona; got {sorted(sessions)!r}"
     )

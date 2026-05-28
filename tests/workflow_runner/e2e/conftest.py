@@ -248,14 +248,14 @@ class FakeClaude:
         payload = {"responses": list(responses)}
         path = self._scratch / "fake_claude_script.json"
         path.write_text(json.dumps(payload, indent=2))
-        # Reset the counter on every set_script call so a test that
-        # rewrites the script mid-run starts from response #0 of the
-        # new list (rare; mostly useful for debugging).
-        counter = Path(str(path) + ".counter")
-        if counter.exists():
-            counter.unlink()
-        self._mp.setenv("FAKE_CLAUDE_SCRIPT", str(path))
         self._script_path = path
+        # Reset the sidecar counter so a mid-run script rewrite starts
+        # at response #0 of the new list.
+        try:
+            self._counter_path().unlink()
+        except FileNotFoundError:
+            pass
+        self._mp.setenv("FAKE_CLAUDE_SCRIPT", str(path))
         return path
 
     def counter(self) -> int:
@@ -266,13 +266,22 @@ class FakeClaude:
         """
         if self._script_path is None:
             return 0
-        counter = Path(str(self._script_path) + ".counter")
-        if not counter.exists():
-            return 0
         try:
-            return int(counter.read_text().strip() or "0")
+            return int(self._counter_path().read_text().strip() or "0")
         except (OSError, ValueError):
             return 0
+
+    def _counter_path(self) -> Path:
+        """Sidecar counter path used by ``fake_claude.py`` invocations.
+
+        The fake writes its consumed-response count to ``<script>.counter``;
+        both :meth:`set_script` (which clears it) and :meth:`counter` (which
+        reads it) route through this single derivation.
+        """
+        assert self._script_path is not None, (
+            "_counter_path() requires set_script() to have been called first"
+        )
+        return self._script_path.with_suffix(self._script_path.suffix + ".counter")
 
 
 @pytest.fixture
@@ -296,8 +305,7 @@ def e2e_fake_claude(
     # Defence in depth: scrub the env of any inherited FAKE_*
     # configuration so the scripted branch is the only thing driving
     # the fake's behaviour.
-    import os
-    for key in list(os.environ):
+    for key in list(_os.environ):
         if key.startswith("FAKE_"):
             monkeypatch.delenv(key, raising=False)
 
@@ -332,11 +340,12 @@ class E2EBundle:
 
     def read_events(self) -> list[dict[str, Any]]:
         """Return parsed records from ``events.jsonl`` (empty list if absent)."""
-        path = self.paths.events_jsonl
-        if not path.exists():
+        try:
+            text = self.paths.events_jsonl.read_text(encoding="utf-8")
+        except FileNotFoundError:
             return []
         out: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -387,7 +396,7 @@ def e2e_driver(
         def test_scenario(e2e_driver):
             bundle = e2e_driver(team="Shohoku")
             bundle.fake_claude.set_script([{...}, {...}, {...}])
-            bundle.run_executor()           # placeholder until executor lands
+            bundle.run_executor()
             events = bundle.read_events()
             status = bundle.read_status()
             assert status["phase"] == "done"

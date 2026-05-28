@@ -1,18 +1,19 @@
 """Phase A smoke tests -- exercise the e2e fixtures themselves.
 
-These tests do **not** drive the executor (Rukawa's #4 is not yet
-in this branch). Their job is to verify that the fixtures we will
-lean on for Phase B are well-behaved:
+These tests sit one layer below the Phase B scenarios. Their job is
+to verify that the fixtures we lean on for Phase B are well-behaved:
 
 * the canonical 3-step playbook validates against the live
-  ``StepFrontmatter`` contract, so the executor (when it lands) is
-  guaranteed a sane plan;
+  ``StepFrontmatter`` contract, so the executor is guaranteed a
+  sane plan to walk;
 * ``cli.main(["start", ...])`` against the canonical playbook
   initialises a complete journal tree under the test's private
   ``TIGERHARNESS_WORKFLOW_JOURNAL`` root;
 * the scripted fake-claude binary, invoked directly, advances its
   counter, emits the right trailer, echoes ``--resume <sid>``, and
-  gracefully degrades on over-run.
+  gracefully degrades on over-run;
+* the ``e2e_driver`` fixture's ``run_executor`` closure actually
+  drives :class:`WorkflowExecutor.run` to a terminal phase.
 
 If any of these tests fail, every Phase B scenario built on top of
 them would be untrustworthy -- so we catch the regression here at
@@ -29,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from tigerharness.workflow_runner import cli as wf_cli
+from tigerharness.workflow_runner.executor import ExecutionOutcome
 from tigerharness.workflow_runner.models import StepFrontmatter
 from tigerharness.workflow_runner.trailer import parse_trailer
 
@@ -163,7 +165,9 @@ def test_e2e_driver_factory_returns_bundle(e2e_driver) -> None:
     """
     bundle = e2e_driver(team="ShohokuDriverTest")
     assert bundle.team == "ShohokuDriverTest"
-    assert bundle.task_id.startswith("")  # any non-empty mint is fine
+    assert bundle.task_id, (
+        "factory must mint a non-empty task-id when --task-id is omitted"
+    )
     assert bundle.paths.task_dir.is_dir()
     assert bundle.read_status()["phase"] == "execute"
 
@@ -174,18 +178,14 @@ def test_e2e_driver_factory_returns_bundle(e2e_driver) -> None:
 def test_e2e_driver_run_executor_returns_outcome(e2e_driver) -> None:
     """``run_executor`` drives the real :class:`WorkflowExecutor`.
 
-    This test used to assert a TODO(haruko) placeholder error; now
-    that Rukawa's executor has landed and conftest's wrapper drives
-    the real loop, we instead pin the new contract: ``run_executor()``
-    returns an :class:`ExecutionOutcome` with a terminal phase in
+    Pins the wire-up contract: ``run_executor()`` returns an
+    :class:`ExecutionOutcome` with a terminal phase in
     ``{"done", "escalated", "cancelled"}`` and a non-negative cost.
 
     Driver-level smoke test only -- the per-scenario assertions live
     in ``test_phase_b_scenarios.py``. Here we just confirm the wire
     is intact end-to-end.
     """
-    from tigerharness.workflow_runner.executor import ExecutionOutcome
-
     bundle = e2e_driver(team="ShohokuWireSmoke")
     bundle.fake_claude.set_script([
         {"trailer": "WORKFLOW: APPROVE", "cost_usd": 0.01},
