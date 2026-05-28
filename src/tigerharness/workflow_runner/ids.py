@@ -16,6 +16,12 @@ from __future__ import annotations
 
 import re
 
+# Mitsui's trailer parser carries a parallel ``[A-Za-z0-9_-]+`` regex
+# for the ``target=<id>:`` field (``trailer.py``); intentionally
+# unanchored and without the leading-alphanumeric rule because it
+# runs at parse-time inside a bracketed match. Keep both in sync on
+# the shared charset; do not merge -- they enforce different contracts
+# (mint vs parse).
 STEP_ID_PATTERN: str = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 _STEP_ID_RE = re.compile(STEP_ID_PATTERN)
 
