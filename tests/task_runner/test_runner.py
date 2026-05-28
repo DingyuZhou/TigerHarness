@@ -96,7 +96,7 @@ class TestIterLogPath:
         meta.name = "my task"
         meta.job_id = "abcd1234"
         path = _iter_log_path(meta)
-        assert path == Path("/proj/lab_notebooks/tasks/my-task--abcd1234.md")
+        assert path == Path("/proj/task_journal/my-task--abcd1234.md")
 
     def test_without_name(self):
         meta = MagicMock()
@@ -104,7 +104,7 @@ class TestIterLogPath:
         meta.name = ""
         meta.job_id = "abcd1234"
         path = _iter_log_path(meta)
-        assert path == Path("/proj/lab_notebooks/tasks/abcd1234.md")
+        assert path == Path("/proj/task_journal/abcd1234.md")
 
 
 class TestRunJob:

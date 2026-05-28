@@ -245,6 +245,14 @@ class TestCreateTeam:
         assert (team / "configs" / "personas.yaml").exists()
         assert (team / "configs" / ".env").exists()
         assert (team / "skills" / "README.md").exists()
+        # charter + knowledge: the team's entry point + curated base.
+        assert (team / "charter" / "README.md").exists()
+        assert (team / "knowledge" / "README.md").exists()
+        charter_text = (team / "charter" / "README.md").read_text()
+        assert "Team charter -- tigers" in charter_text
+        assert "First-read checklist" in charter_text
+        knowledge_text = (team / "knowledge" / "README.md").read_text()
+        assert "Team knowledge -- tigers" in knowledge_text
         # .claude/ directory scaffolded
         assert (team / ".claude" / "settings.json").exists()
         settings_text = (team / ".claude" / "settings.json").read_text()
@@ -252,9 +260,11 @@ class TestCreateTeam:
         # Skills copied from package
         assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
         assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
-        # gitignore excludes secrets but NOT archive/journal (those are git-tracked)
+        # gitignore excludes secrets and the runner's working journal,
+        # but NOT archive/journal (those are git-tracked memory summaries).
         gi_text = (team / ".gitignore").read_text()
         assert "configs/.env" in gi_text
+        assert "task_journal/" in gi_text
         assert "memories/*/archive/" not in gi_text
         assert "memories/*/journal/" not in gi_text
         # personas.yaml header references team name
@@ -264,14 +274,79 @@ class TestCreateTeam:
         defaults_text = (team / "configs" / "tiger-memory.defaults.yaml").read_text()
         assert "summarizer:" in defaults_text
         assert "claude-sonnet-4-6" in defaults_text
-        # Base paths (5) + settings.json + 2 skills = 8
-        assert len(created) >= 8
+        # Base paths (7: gitignore, personas.yaml, mem defaults, .env,
+        # skills README, charter README, knowledge README) +
+        # settings.json + 2 skills = 10.
+        assert len(created) >= 10
 
     def test_skip_slack(self, tmp_path: Path):
         team = tmp_path / "tigers"
         create_team(team, include_slack=False)
         assert not (team / "configs" / ".env").exists()
         assert (team / "configs" / "personas.yaml").exists()
+        # charter + knowledge: scaffolded regardless of slack opt-in
+        assert (team / "charter" / "README.md").exists()
+        assert (team / "knowledge" / "README.md").exists()
+
+    def test_charter_and_knowledge_seeded_for_team_name(self, tmp_path: Path):
+        """Charter and knowledge READMEs interpolate the team name in
+        their headers -- so the team isn't reading a generic doc."""
+        team = tmp_path / "shohoku"
+        create_team(team, include_slack=False)
+        assert (
+            "Team charter -- shohoku"
+            in (team / "charter" / "README.md").read_text()
+        )
+        assert (
+            "Team knowledge -- shohoku"
+            in (team / "knowledge" / "README.md").read_text()
+        )
+
+    def test_charter_links_to_knowledge_index(self, tmp_path: Path):
+        """The charter's 'Using team knowledge' section must point at
+        ../knowledge/ so personas know where the reference base lives.
+        Without this, the team's entry-point doc is incoherent."""
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        charter = (team / "charter" / "README.md").read_text()
+        assert "../knowledge/" in charter
+        assert "INDEX.md" in charter
+
+    def test_knowledge_readme_excludes_governance_and_journal(
+        self, tmp_path: Path,
+    ):
+        """The knowledge README's 'doesn't belong here' list must
+        explicitly mention `../charter/` (governance lives there, not
+        here) and `../task_journal/` (runtime artifact). Without these
+        pointers, the knowledge folder becomes a dumping ground."""
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        kb = (team / "knowledge" / "README.md").read_text()
+        assert "../charter/" in kb
+        assert "../task_journal/" in kb
+
+    def test_first_read_order_project_before_briefing(
+        self, tmp_path: Path,
+    ):
+        """The charter's first-read checklist puts the project's own
+        README before the persona's tiger-memory briefing. A new
+        persona needs to orient on the project first; briefings are
+        most useful once that context is established."""
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        charter = (team / "charter" / "README.md").read_text()
+        # Anchor on a substring unique to each step so the test pins
+        # the ORDER, not just the existence of each line.
+        project_idx = charter.find("project repo's top-level `README.md`")
+        briefing_idx = charter.find(
+            "briefing at `../memories/<persona>/briefing/README.md`"
+        )
+        assert project_idx > 0, "project README step missing from charter"
+        assert briefing_idx > 0, "briefing step missing from charter"
+        assert project_idx < briefing_idx, (
+            "first-read checklist has briefing before project README "
+            "-- new personas should orient on the project first"
+        )
 
     def test_idempotent(self, tmp_path: Path):
         team = tmp_path / "tigers"
@@ -436,6 +511,30 @@ class TestAddPersona:
         add_persona(team, "scout", include_memory=False)
         assert not (team / "memories" / "scout" / "tiger-memory.config.yaml").exists()
         assert (team / "personas" / "scout" / "prompt.md").exists()
+
+    def test_prompt_wires_charter_and_knowledge(self, tmp_path: Path):
+        """The generated persona prompt must wire in the team's
+        charter + knowledge as the first thing a persona reads. This
+        is the contract that makes those folders load-bearing rather
+        than decorative -- if a future edit drops the references,
+        every new persona starts disconnected from team governance."""
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        add_persona(team, "chief", include_memory=False)
+        prompt = (team / "personas" / "chief" / "prompt.md").read_text()
+        # Section header + both pointers + briefing pointer.
+        assert "Before you start work" in prompt
+        assert "../charter/README.md" in prompt
+        # INDEX.md is the primary entry; README is the fallback.
+        idx_pos = prompt.find("../knowledge/INDEX.md")
+        readme_pos = prompt.find("../knowledge/README.md")
+        assert idx_pos > 0, "persona prompt missing knowledge INDEX pointer"
+        assert readme_pos > 0, "persona prompt missing knowledge README fallback"
+        assert idx_pos < readme_pos, (
+            "knowledge INDEX should be listed before README -- INDEX "
+            "is the primary entry, README is a fallback for new teams"
+        )
+        assert "../memories/chief/briefing/README.md" in prompt
 
     def test_raises_when_persona_exists(self, tmp_path: Path):
         team = tmp_path / "tigers"
@@ -1182,6 +1281,10 @@ class TestMain:
         out = capsys.readouterr().out
         assert "Next steps" in out
         assert "tigers/personas/chief/prompt.md" in out
+        # Charter customization gets a nudge on first scaffold -- the
+        # seeded charter ships with TODO markers users often forget.
+        assert "tigers/charter/README.md" in out
+        assert "Mission" in out
         assert "tigers/configs/.env" in out
         # Memory config gets the auto-init treatment now -- "review",
         # not "set sources.project_path" or "Initialize memory".
@@ -1191,6 +1294,37 @@ class TestMain:
         assert "tiger-memory --config" not in out
         assert "TIGERHARNESS_PERSONAS_CONFIG=tigers/configs/personas.yaml" in out
         assert "task-runner assign --to chief" in out
+
+    def test_next_steps_charter_nudge_only_on_first_scaffold(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ):
+        """The charter-customization step appears the first time a team
+        is scaffolded (the TODOs are fresh), but NOT on re-runs (the
+        team may have already filled in the charter). Tying the nudge
+        to ``charter in created`` prevents nagging existing teams."""
+        # First run: charter step should appear.
+        main([
+            "--dir", str(tmp_path),
+            "--persona", "chief",
+            "--team", "tigers",
+            "--yes",
+        ])
+        first_out = capsys.readouterr().out
+        assert "tigers/charter/README.md" in first_out
+
+        # Second run: add another persona to the same team. Charter
+        # already exists, so the nudge must NOT fire again.
+        main([
+            "--dir", str(tmp_path),
+            "--persona", "scout",
+            "--team", "tigers",
+            "--yes",
+        ])
+        second_out = capsys.readouterr().out
+        assert "tigers/charter/README.md" not in second_out
+        # Confirm the run actually did something else (sanity check
+        # the re-run wasn't a no-op that would trivially pass).
+        assert "tigers/personas/scout/prompt.md" in second_out
 
     def test_next_steps_uses_uv_run_prefix_when_off_path(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
@@ -1259,20 +1393,25 @@ class TestMain:
             "--yes",
         ])
         out = capsys.readouterr().out
-        # With slack + multi-team skipped, memory still on, we expect:
+        # With slack + multi-team skipped, memory still on, and the
+        # team freshly scaffolded (so the charter customization nudge
+        # fires), we expect:
         #   1. Edit prompt
-        #   2. (Optional) review memory config
-        # No "3." and no missing "2.".
+        #   2. Customize charter
+        #   3. (Optional) review memory config
+        # No "4." and no missing slot.
         assert "  1. Edit" in out
-        assert "  2. (Optional)" in out
-        assert "  3." not in out
+        assert "  2. Customize" in out
+        assert "  3. (Optional)" in out
+        assert "  4." not in out
         # And no .env step (it was skipped)
         assert "Fill in" not in out
 
     def test_next_steps_minimal_when_no_memory_no_slack(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ):
-        """All toggles off -- single step: edit the persona prompt."""
+        """Memory + Slack off, on a fresh team scaffold -- two steps:
+        edit the persona prompt, customize the seeded charter."""
         main([
             "--dir", str(tmp_path),
             "--persona", "chief",
@@ -1282,7 +1421,7 @@ class TestMain:
         ])
         out = capsys.readouterr().out
         assert "  1. Edit" in out
-        assert "  2." not in out
+        assert "  2. Customize" in out
         assert "  3." not in out
 
     def test_nothing_to_do_branch(

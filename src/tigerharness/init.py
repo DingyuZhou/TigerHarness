@@ -51,6 +51,25 @@ You are {persona}, part of team {team}.
 Your job is to help the user accomplish their goals thoroughly and
 present clear results.
 
+## Before you start work (read these first)
+
+These files set the team's mission, allowed write zones, and working
+conventions. Skip them and you'll drift, repeat work, or step
+outside scope. Read them before any substantive task:
+
+1. `../charter/README.md` -- the team's charter: mission, project
+   scope, permissions, working conventions, and how to use team
+   knowledge. This is the single entry point.
+2. `../knowledge/INDEX.md` (or `../knowledge/README.md` until an
+   INDEX exists) -- the team's curated reference base. Drill into
+   the specific topic you need; don't load the whole base eagerly.
+
+If you have a tiger-memory briefing at
+`../memories/{persona}/briefing/README.md`, read that too -- it's
+your persistent cross-session memory. The briefing is most useful
+once you've already oriented on the team's charter and the project
+the team owns.
+
 ## Working style
 
 - Start each task by clarifying the request.
@@ -185,12 +204,128 @@ uncomment it (per persona, or for the whole team) to expose this
 folder to that agent.
 """
 
+# Charter: the team's operating manual -- mission, scope, permissions,
+# conventions, and how to use the knowledge base. Seeded with TODOs so
+# the team fills in the team-specific bits, but the structure is fixed.
+# This is the single entry point every persona reads before any work.
+_CHARTER_README = """\
+# Team charter -- {team}
+
+The single entry point for everyone (human and persona) joining this
+team. Read this first; everything else follows from here.
+
+## Mission
+
+> TODO: One paragraph -- why this team exists and what success looks like.
+
+## Project and scope
+
+- Primary project this team owns: TODO (path, repo, or product).
+- What this team does NOT own: TODO (so we don't drift).
+
+## Permissions and boundaries
+
+- Allowed write zones for every persona on this team:
+  - This team folder (your own configs, knowledge, charter, memories,
+    prompts, skills).
+  - TODO: the project repo this team owns.
+- Everything else is read-only unless the CEO explicitly authorizes
+  it in a session.
+
+## Working conventions
+
+- Branch naming: `work/YYYY-MM-DD-<slug>`
+- Commit prefix: `<persona>:` (e.g. `chief:`, `scout:`)
+- Self-critique 2x on every non-trivial change: round 1 for
+  correctness/completeness, round 2 for safety/edge cases. Document
+  what each round caught in the commit body under a
+  `Self-critique 2x applied:` block.
+- Never `git push --force`, never amend after push, never
+  `git add -A`, never `--no-verify`.
+
+## Using team knowledge
+
+The `../knowledge/` folder is the team's curated reference base.
+Start at `../knowledge/INDEX.md` (or `../knowledge/README.md` if no
+index exists yet) and drill into the topic you need -- don't load
+the whole base eagerly.
+
+If tiger-memory is set up for this team, each persona also has its
+own persistent memory under `../memories/<persona>/briefing/`.
+
+## First-read checklist for new personas
+
+Before any substantive work, every persona reads (in order):
+
+1. This charter (you are here).
+2. `../knowledge/INDEX.md` (or `../knowledge/README.md`).
+3. The owned project repo's top-level `README.md` for context on
+   the work the team actually does.
+4. Their own briefing at `../memories/<persona>/briefing/README.md`
+   if tiger-memory is enabled. The briefing is most useful once you
+   already know what the team is and what it works on.
+
+## Updating this charter
+
+When team scope, permissions, or conventions change, update this
+file in the same commit as the change. A stale charter is worse
+than no charter.
+"""
+
+# Knowledge: the team's curated reference base entry point. Seeded as
+# a README so the dir is committable; replaced/augmented with INDEX.md
+# once the team has more than a handful of topics.
+_KNOWLEDGE_README = """\
+# Team knowledge -- {team}
+
+This folder is the team's curated, lazy-loaded reference base.
+Personas read from here on demand -- not eagerly -- so the corpus
+stays cheap to keep open.
+
+## How to organize
+
+Top-down, with a clear entry point:
+
+- `INDEX.md` -- one-paragraph header, one line per topic. Personas
+  read INDEX first, then drill into the topic they need.
+- `<topic>.md` -- one file per topic. Keep each under ~200 lines;
+  if it grows, split it and add a topic-local TOC.
+
+## How to use
+
+1. Start at `INDEX.md`. Until you have one, this `README.md` is the
+   entry point -- replace with `INDEX.md` once topics accumulate.
+2. Read only the topic file you need.
+3. When the underlying code or process changes, update the matching
+   topic file in the same commit.
+
+## What belongs here
+
+- Curated, evergreen reference the team needs repeatedly.
+- Per-module deep dives, architecture maps, working agreements.
+- Convention guides specific to this team's project.
+
+## What does NOT belong here
+
+- Team governance -- mission, scope, permissions, and conventions
+  live in `../charter/`, not here. Knowledge is reference material;
+  the charter is the operating manual.
+- Task working notes -- the task-runner writes those to
+  `../task_journal/` automatically (gitignored runtime artifact).
+- Personal memory -- use `../memories/<persona>/`.
+- Source code -- use the project repo.
+- Stale content -- prune aggressively.
+"""
+
 _GITIGNORE = """\
 # Tigerharness team -- secrets and runtime state
 configs/.env
 memories/*/briefing/
 memories/*/cache/
 memories/*/state.json
+# task_journal/ is the task-runner's per-task working folder
+# (one markdown file per assigned task). Runtime artifact, not source.
+task_journal/
 # archive/ and journal/ are version-controlled (memory summaries).
 # .gitkeep files inside them ensure the empty dirs are tracked.
 """
@@ -439,6 +574,18 @@ def create_team(
     skills = team_dir / "skills" / "README.md"
     if _write_if_missing(skills, _SKILLS_README):
         created.append(skills)
+
+    # Charter + knowledge: every team scaffolds these so personas have
+    # a single entry point (charter) and a curated knowledge base
+    # (knowledge) wired in from day one. Seeded with TODO markers; the
+    # team fills in the specifics during onboarding.
+    charter = team_dir / "charter" / "README.md"
+    if _write_if_missing(charter, _CHARTER_README.format(team=team_dir.name)):
+        created.append(charter)
+
+    knowledge = team_dir / "knowledge" / "README.md"
+    if _write_if_missing(knowledge, _KNOWLEDGE_README.format(team=team_dir.name)):
+        created.append(knowledge)
 
     # .claude/ directory: settings.json + skills from the package.
     created.extend(_scaffold_claude_dir(team_dir))
@@ -1094,6 +1241,18 @@ def main(argv: list[str] | None = None) -> int:
     steps: list[str] = [
         f"Edit {_format_path(team_dir / 'personas' / persona / 'prompt.md', search_root)}"
     ]
+    # Charter customization. The seeded charter ships with TODOs for
+    # mission + project repo; without a nudge users often don't realize
+    # they need to fill these in and the team's entry-point doc stays
+    # half-empty. Only mention the charter when this run actually
+    # created it (`charter` in `created`) -- on subsequent re-runs the
+    # team's charter is already there and presumably edited.
+    charter_path = team_dir / "charter" / "README.md"
+    if charter_path in created:
+        steps.append(
+            f"Customize {_format_path(charter_path, search_root)} -- "
+            f"fill in the Mission and 'Primary project this team owns' TODOs"
+        )
     env_path = team_dir / "configs" / ".env"
     if env_path.exists():
         steps.append(f"Fill in {_format_path(env_path, search_root)} (Slack tokens)")

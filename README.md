@@ -92,13 +92,26 @@ persistent memory and the official SDK backend.
 The memory store is auto-initialized for each new persona and the
 Claude Code transcripts path is auto-detected from the team root, so
 the user never has to come back and edit placeholders. Every persona
-always belongs to a team, and a team is a self-contained directory:
+always belongs to a team, and a team is a self-contained directory.
+
+Every team gets two governance folders alongside the runtime config:
+`charter/` holds the team's operating manual (mission, scope, allowed
+write zones, working conventions, first-read checklist for new
+personas) and `knowledge/` holds the team's curated, lazy-loaded
+reference base. The generated persona prompt wires both into each
+persona's first-read flow, so they're load-bearing from day one
+rather than decorative.
 
 ```
 tigers/
 ├── configs/
 │   ├── personas.yaml              # team registry (auto-updated)
 │   └── .env                       # Slack tokens (gitignored)
+├── charter/
+│   └── README.md                  # team's mission, scope, conventions
+│                                  # (single entry point for personas)
+├── knowledge/
+│   └── README.md                  # curated, lazy-loaded reference base
 ├── skills/
 │   └── README.md                  # drop team-shared skills here
 ├── personas/

@@ -21,7 +21,7 @@ uv run pytest --cov=tigerharness --cov-report=term-missing
 uv run pytest tests/tiger_memory/test_lifecycle_full.py -v
 ```
 
-Coverage threshold: **98.5%** (enforced in `pyproject.toml`). Current: **98.60%** (1088 tests).
+Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[tool.coverage.report] fail_under = 100`). Current: **100.00%** (1700+ tests).
 
 ## Project structure
 

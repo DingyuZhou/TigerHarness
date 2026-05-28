@@ -323,11 +323,17 @@ def _append_log(path: Path, entry: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Iteration log -- persistent, git-trackable markdown in the project dir
+# Iteration log -- per-task working journal under the team's task_journal/
 # ---------------------------------------------------------------------------
 
 def _iter_log_path(meta) -> Path:
-    """Compute the iteration log path: <cwd>/lab_notebooks/tasks/<slug>.md."""
+    """Compute the iteration log path: <cwd>/task_journal/<slug>.md.
+
+    The task-runner writes one markdown file per task into the team's
+    ``task_journal/`` working folder. This is a runtime artifact, not
+    a git-tracked source -- the team's ``.gitignore`` (scaffolded by
+    ``tigerharness init``) excludes the whole directory.
+    """
     cwd = Path(meta.cwd)
     name = (meta.name or "").strip()
     if name:
@@ -335,7 +341,7 @@ def _iter_log_path(meta) -> Path:
         slug = f"{safe_name}--{meta.job_id}"
     else:
         slug = meta.job_id
-    return cwd / "lab_notebooks" / "tasks" / f"{slug}.md"
+    return cwd / "task_journal" / f"{slug}.md"
 
 
 def _write_iter_header(path: Path, meta) -> None:

@@ -351,7 +351,7 @@ class TestStuckIterLogMarkdown:
                    mock_dispatch_turn):
             await run_job("deadbeef", state_dir=tmp_path)
 
-        iter_log = tmp_path / "lab_notebooks" / "tasks" / "md-balance--deadbeef.md"
+        iter_log = tmp_path / "task_journal" / "md-balance--deadbeef.md"
         assert iter_log.exists()
         content = iter_log.read_text()
 
