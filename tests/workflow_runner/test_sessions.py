@@ -4,6 +4,10 @@ Strategy: stand up a small Python script as a fake ``claude`` CLI and
 point :class:`SessionManager` at it via ``TIGERHARNESS_CLAUDE_BIN``.
 The fake's behaviour is steered through env vars so we exercise the
 full matrix without monkey-patching ``subprocess``.
+
+The fake's source lives at ``fixtures/fake_claude.py`` so it's a
+normal Python module the editor / linter can see — no escaped triple
+quotes.
 """
 
 from __future__ import annotations
@@ -12,7 +16,6 @@ import json
 import os
 import stat
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -33,97 +36,9 @@ from tigerharness.workflow_runner.sessions import (
 # --------------------------------------------------------------------------- #
 
 
-_FAKE_SCRIPT = textwrap.dedent(
-    """\
-    #!__PYTHON__
-    \"\"\"Fake claude CLI for SessionManager tests.
-
-    Behaviour is steered by env vars set in the test:
-
-    * FAKE_SLEEP_SEC      -- sleep this many seconds before printing.
-    * FAKE_EXIT_CODE      -- exit with this code (default 0).
-    * FAKE_STDERR         -- print this to stderr.
-    * FAKE_STDOUT_OVERRIDE -- print this verbatim instead of an envelope.
-    * FAKE_SESSION_ID     -- session_id in the emitted envelope
-                              (default: 'fresh-sid-001').
-    * FAKE_RESULT_TEXT    -- assistant text in the envelope
-                              (default: echoes the stdin payload).
-    * FAKE_COST_USD       -- total_cost_usd in the envelope
-                              (default 0.0123). Set to '__omit__' to
-                              drop the field entirely.
-    * FAKE_ENVELOPE_RAW   -- if non-empty, emit this string verbatim
-                              (used for malformed-JSON tests).
-    * FAKE_ARGV_DUMP      -- if set, write the received argv (JSON) to
-                              this path before responding.
-    * FAKE_STDIN_DUMP     -- if set, write stdin (raw) to this path.
-
-    The fake intentionally has zero dependencies beyond the stdlib so
-    it runs under whatever interpreter the test environment uses.
-    \"\"\"
-    import json
-    import os
-    import sys
-    import time
-
-
-    def _dump(path_env, payload, *, binary=False):
-        path = os.environ.get(path_env, '').strip()
-        if not path:
-            return
-        mode = 'wb' if binary else 'w'
-        with open(path, mode) as fh:
-            fh.write(payload)
-
-
-    def main() -> int:
-        _dump('FAKE_ARGV_DUMP', json.dumps(sys.argv))
-        stdin_data = sys.stdin.read()
-        _dump('FAKE_STDIN_DUMP', stdin_data)
-
-        # If FAKE_PARTIAL_STDOUT is set, print it + flush before
-        # sleeping. Used to exercise the partial-stdout capture path
-        # on timeout.
-        partial = os.environ.get('FAKE_PARTIAL_STDOUT', '')
-        if partial:
-            sys.stdout.write(partial)
-            sys.stdout.flush()
-
-        sleep_for = float(os.environ.get('FAKE_SLEEP_SEC', '0') or '0')
-        if sleep_for > 0:
-            time.sleep(sleep_for)
-
-        stderr_text = os.environ.get('FAKE_STDERR', '')
-        if stderr_text:
-            sys.stderr.write(stderr_text)
-            sys.stderr.flush()
-
-        override = os.environ.get('FAKE_STDOUT_OVERRIDE', '')
-        raw_envelope = os.environ.get('FAKE_ENVELOPE_RAW', '')
-        if override:
-            sys.stdout.write(override)
-        elif raw_envelope:
-            sys.stdout.write(raw_envelope)
-        else:
-            envelope = {
-                'type': 'result',
-                'subtype': 'success',
-                'result': os.environ.get('FAKE_RESULT_TEXT', stdin_data),
-                'session_id': os.environ.get(
-                    'FAKE_SESSION_ID', 'fresh-sid-001'
-                ),
-            }
-            cost = os.environ.get('FAKE_COST_USD', '0.0123')
-            if cost != '__omit__':
-                envelope['total_cost_usd'] = float(cost)
-            sys.stdout.write(json.dumps(envelope))
-
-        return int(os.environ.get('FAKE_EXIT_CODE', '0') or '0')
-
-
-    if __name__ == '__main__':
-        sys.exit(main())
-    """
-)
+_FAKE_CLAUDE_SOURCE = (
+    Path(__file__).parent / "fixtures" / "fake_claude.py"
+).read_text()
 
 
 @pytest.fixture
@@ -132,9 +47,13 @@ def fake_claude(tmp_path, monkeypatch) -> Path:
 
     Returns the path to the fake so tests can inspect / tweak its
     behaviour by setting ``FAKE_*`` env vars via ``monkeypatch.setenv``.
+
+    The shebang is injected at write time so the script runs under the
+    same interpreter as the test suite — avoids ``/usr/bin/env python3``
+    pointing at a wrong / missing interpreter in CI sandboxes.
     """
     script = tmp_path / "claude-fake.py"
-    script.write_text(_FAKE_SCRIPT.replace("__PYTHON__", sys.executable))
+    script.write_text(f"#!{sys.executable}\n{_FAKE_CLAUDE_SOURCE}")
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     monkeypatch.setenv("TIGERHARNESS_CLAUDE_BIN", str(script))
     # Clear all FAKE_* env vars to keep tests independent.
@@ -203,6 +122,13 @@ def test_first_call_persists_new_sid(
     assert "rukawa" in argv[prompt_idx + 1].lower()
     assert "--resume" not in argv
 
+    # Sudo floor is always applied — sessions.py reuses
+    # ``task_runner.personas._SUDO_DENY`` so a persona can't sudo via
+    # the workflow-runner even on a fresh session.
+    assert "--disallowedTools" in argv
+    deny = argv[argv.index("--disallowedTools") + 1]
+    assert "Bash(sudo:*)" in deny and "Bash(sudo)" in deny
+
 
 # --------------------------------------------------------------------------- #
 # Resume (existing sid)
@@ -235,6 +161,8 @@ def test_resume_uses_stored_sid_and_persists_rotation(
     assert "--resume" in argv
     assert argv[argv.index("--resume") + 1] == "sid-pre-existing"
     assert "--append-system-prompt" not in argv
+    # Sudo floor still applied on the resume path.
+    assert "--disallowedTools" in argv
 
 
 def test_resume_no_rotation_keeps_sid(
@@ -276,6 +204,14 @@ def test_two_personas_share_sessions_file(
 # --------------------------------------------------------------------------- #
 # Timeout
 # --------------------------------------------------------------------------- #
+
+
+def test_timeout_sentinel_is_out_of_posix_signal_range():
+    """``returncode`` for a signal-killed process is ``-SIGNUM`` where
+    ``SIGNUM`` is in ``1..64``. Our timeout sentinel must sit outside
+    that range so callers can tell "we killed it" from "the OS killed it".
+    """
+    assert TIMEOUT_EXIT_CODE < -64
 
 
 def test_timeout_returns_sentinel_no_raise(

@@ -21,10 +21,11 @@ Design picks
     :mod:`tigerharness.workflow_runner.atomic`.
   - The typed view of ``sessions.json`` is
     :class:`tigerharness.workflow_runner.models.SessionMap`.
-  - Persona prompt lookup goes through
-    :func:`tigerharness.task_runner.personas.load_prompt`, which
-    already encodes the ``TIGERHARNESS_PERSONAS_DIR`` lookup
-    convention used everywhere else.
+  - Persona prompt lookup and the ``_SUDO_DENY`` floor come from
+    :mod:`tigerharness.task_runner.personas`. Reusing the floor is
+    not cosmetic: it keeps the workflow-runner's per-turn argv
+    consistent with the rest of the harness so a persona that can't
+    run sudo in task-runner mode can't suddenly run it here.
 
 * **Errors become data, not exceptions.** Per the brief: on timeout,
   non-zero exit, or malformed JSON, we populate :class:`InvocationResult`
@@ -59,7 +60,22 @@ log = logging.getLogger("tigerharness.workflow_runner.sessions")
 # --------------------------------------------------------------------------- #
 
 #: Returned in ``InvocationResult.exit_code`` when the subprocess timed out.
-TIMEOUT_EXIT_CODE = -1
+#: Out of band from POSIX signal-encoded returncodes (which are in
+#: ``-1..-64`` for ``-SIGNUM``) so callers can distinguish "we killed it
+#: for timing out" from "the OS killed it with SIGHUP/SIGINT/etc."
+TIMEOUT_EXIT_CODE = -1001
+
+
+# --------------------------------------------------------------------------- #
+# Argv flags (named so a grep for the flag turns up here, not a string literal)
+# --------------------------------------------------------------------------- #
+
+_FLAG_PRINT = "-p"
+_FLAG_OUTPUT_FORMAT = "--output-format"
+_OUTPUT_FORMAT_JSON = "json"
+_FLAG_RESUME = "--resume"
+_FLAG_APPEND_SYSTEM_PROMPT = "--append-system-prompt"
+_FLAG_DISALLOWED_TOOLS = "--disallowedTools"
 
 
 # --------------------------------------------------------------------------- #
@@ -160,7 +176,11 @@ class SessionManager:
                 f"timeout_sec must be > 0, got {timeout_sec!r}"
             )
 
-        existing_sid = self.get_session_id(persona)
+        # Single load per invoke: the executor's task lock guarantees
+        # we're the sole writer for this task, so the smap we read at
+        # the top is still authoritative when we go to persist below.
+        smap = self._load()
+        existing_sid = smap.get(persona)
         argv = self._build_argv(persona, existing_sid)
 
         try:
@@ -175,7 +195,10 @@ class SessionManager:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            result = InvocationResult(
+            partial = _decode_partial(exc.stdout)
+            if log_dir is not None:
+                self._capture_timeout(log_dir, prompt=prompt, partial_stdout=partial)
+            return InvocationResult(
                 stdout="",
                 session_id=existing_sid or "",
                 cost_usd=0.0,
@@ -183,15 +206,6 @@ class SessionManager:
                 error=f"timeout after {timeout_sec} seconds",
                 raw_envelope={},
             )
-            if log_dir is not None:
-                self._capture(
-                    log_dir,
-                    prompt=prompt,
-                    envelope={},
-                    stdout_text="",
-                    timeout_stdout=(exc.stdout or b""),
-                )
-            return result
 
         envelope, parse_error = _parse_envelope(completed.stdout)
 
@@ -207,13 +221,16 @@ class SessionManager:
         elif parse_error is not None:
             error = parse_error
 
-        # Pull fields from the envelope (defensively).
         envelope_sid = _safe_str(envelope.get("session_id"))
         # Prefer the envelope sid (the CLI may rotate it on resume);
         # fall back to existing on parse failure so we don't lose track.
         session_id = envelope_sid or (existing_sid or "")
 
-        if "total_cost_usd" not in envelope and completed.returncode == 0 and parse_error is None:
+        if (
+            "total_cost_usd" not in envelope
+            and completed.returncode == 0
+            and parse_error is None
+        ):
             log.warning(
                 "claude envelope for persona=%r missing 'total_cost_usd'; "
                 "defaulting cost to 0.0",
@@ -225,11 +242,19 @@ class SessionManager:
             envelope.get("result") or envelope.get("structured_output") or ""
         )
 
-        # Persist new sid back if we got one and it changed.
         if envelope_sid and envelope_sid != existing_sid:
-            self._persist_sid(persona, envelope_sid)
+            smap.set(persona, envelope_sid)
+            self._save(smap)
 
-        result = InvocationResult(
+        if log_dir is not None:
+            self._capture_success(
+                log_dir,
+                prompt=prompt,
+                envelope=envelope,
+                stdout_text=stdout_text,
+            )
+
+        return InvocationResult(
             stdout=stdout_text,
             session_id=session_id,
             cost_usd=cost_usd,
@@ -237,16 +262,6 @@ class SessionManager:
             error=error,
             raw_envelope=envelope,
         )
-
-        if log_dir is not None:
-            self._capture(
-                log_dir,
-                prompt=prompt,
-                envelope=envelope,
-                stdout_text=stdout_text,
-            )
-
-        return result
 
     # ------------------------------------------------------------------ #
     # Internals
@@ -256,61 +271,56 @@ class SessionManager:
         self, persona: str, existing_sid: Optional[str]
     ) -> list[str]:
         binary = os.environ.get("TIGERHARNESS_CLAUDE_BIN", "").strip() or "claude"
-        argv: list[str] = [binary, "-p", "--output-format", "json"]
-        if existing_sid:
-            argv += ["--resume", existing_sid]
-        else:
-            # Late import: personas.py runs an autoload side-effect at
-            # import time that depends on env vars only set in real
-            # task-runner contexts. Importing lazily keeps unrelated
-            # workflow_runner consumers light.
-            from tigerharness.task_runner.personas import load_prompt
+        argv: list[str] = [
+            binary,
+            _FLAG_PRINT,
+            _FLAG_OUTPUT_FORMAT,
+            _OUTPUT_FORMAT_JSON,
+        ]
+        # Late import: personas.py runs an autoload side-effect at
+        # import time that depends on env vars only set in real
+        # task-runner contexts. Importing lazily keeps unrelated
+        # workflow_runner consumers light.
+        from tigerharness.task_runner.personas import _SUDO_DENY, load_prompt
 
-            persona_prompt = load_prompt(persona)
-            argv += ["--append-system-prompt", persona_prompt]
+        argv += [_FLAG_DISALLOWED_TOOLS, ",".join(_SUDO_DENY)]
+
+        if existing_sid:
+            argv += [_FLAG_RESUME, existing_sid]
+        else:
+            argv += [_FLAG_APPEND_SYSTEM_PROMPT, load_prompt(persona)]
         return argv
 
-    def _persist_sid(self, persona: str, sid: str) -> None:
-        # Re-read under the assumption that this process is the sole
-        # writer for this task (the executor's task lock guarantees
-        # that); the re-read keeps us correct if other personas in the
-        # same task were updated between this invoke's start and end.
-        smap = self._load()
-        smap.set(persona, sid)
-        self._save(smap)
-
     @staticmethod
-    def _capture(
+    def _capture_success(
         log_dir: Path,
         *,
         prompt: str,
         envelope: dict[str, Any],
         stdout_text: str,
-        timeout_stdout: bytes | str | None = b"",
     ) -> None:
-        """Write the three per-iteration log files.
-
-        ``prompt.txt`` — what we sent on stdin (verbatim).
-        ``envelope.json`` — the parsed JSON envelope (empty dict on
-        timeout / parse failure; the raw text is preserved nowhere
-        else, so on timeout we drop any partial stdout into
-        ``stdout.txt`` to aid debugging).
-        ``stdout.txt`` — the assistant's textual response (the
-        ``result`` field of the envelope), or the raw partial output
-        on timeout. ``timeout_stdout`` is typed permissively because
-        ``TimeoutExpired.stdout`` is bytes on CPython today (the
-        timeout fires before stdout is decoded) but the docs only
-        promise "whatever was captured", so we defensively handle str
-        too.
-        """
+        """Write ``prompt.txt`` / ``envelope.json`` / ``stdout.txt`` for
+        a completed turn."""
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         write_json_atomic(log_dir / "envelope.json", envelope)
-        if stdout_text:
-            (log_dir / "stdout.txt").write_text(stdout_text, encoding="utf-8")
-        else:
-            partial = _decode_partial(timeout_stdout)
-            (log_dir / "stdout.txt").write_text(partial, encoding="utf-8")
+        (log_dir / "stdout.txt").write_text(stdout_text, encoding="utf-8")
+
+    @staticmethod
+    def _capture_timeout(
+        log_dir: Path, *, prompt: str, partial_stdout: str
+    ) -> None:
+        """Write the three log files when ``claude`` timed out.
+
+        ``envelope.json`` is the empty object (no envelope was parsed)
+        and ``stdout.txt`` holds whatever bytes the subprocess managed
+        to flush before we killed it — invaluable when debugging a
+        wedged turn.
+        """
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        write_json_atomic(log_dir / "envelope.json", {})
+        (log_dir / "stdout.txt").write_text(partial_stdout, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
