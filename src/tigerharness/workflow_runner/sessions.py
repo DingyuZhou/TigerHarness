@@ -249,9 +249,14 @@ class SessionManager:
             # claude tool subprocesses running. Re-raises the original
             # exception (including KeyboardInterrupt / SystemExit) so
             # callers see the failure they expected.
+            #
+            # NB: ``communicate`` (not ``wait``) so the stdin / stdout
+            # / stderr pipe FDs get closed on the way out. ``wait``
+            # only reaps the zombie; the pipes would linger until GC.
+            # Symmetric with the timeout path above.
             self._kill_process_group(proc)
             try:
-                proc.wait(timeout=_DRAIN_TIMEOUT_SEC)
+                proc.communicate(timeout=_DRAIN_TIMEOUT_SEC)
             except subprocess.TimeoutExpired:
                 pass
             raise

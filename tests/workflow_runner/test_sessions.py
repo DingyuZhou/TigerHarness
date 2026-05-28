@@ -778,13 +778,18 @@ def test_keyboard_interrupt_reaps_subtree_then_propagates(
     )
 
 
-def test_interrupt_path_swallows_wait_timeout(
+def test_interrupt_path_swallows_drain_timeout(
     fake_claude, task_dir, personas_dir, monkeypatch
 ):
-    """If ``proc.wait`` after the post-interrupt killpg itself times
-    out (defensive belt-and-braces — pipes / zombie should clear fast
-    after SIGKILL of the whole group), we must still propagate the
-    original interrupt, not the inner ``TimeoutExpired``.
+    """If the post-kill ``communicate(timeout=_DRAIN_TIMEOUT_SEC)``
+    drain itself times out (defensive belt-and-braces — pipes / zombie
+    should clear fast after SIGKILL of the whole group), we must still
+    propagate the original interrupt, not the inner ``TimeoutExpired``.
+
+    Pinning ``communicate`` (not ``wait``) here also pins the
+    FD-hygiene choice: the interrupt path drains via ``communicate``
+    so stdin/stdout/stderr FDs close on the way out, matching the
+    timeout path.
     """
     monkeypatch.setenv("FAKE_SLEEP_SEC", "10")
 
@@ -792,11 +797,19 @@ def test_interrupt_path_swallows_wait_timeout(
     timeout_cls = sessions_mod.subprocess.TimeoutExpired
 
     class StubbornInterruptedPopen(real_popen):  # type: ignore[misc, valid-type]
-        def communicate(self, input=None, timeout=None):  # type: ignore[override]
-            raise KeyboardInterrupt("ctrl-c during turn")
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._communicate_calls = 0
 
-        def wait(self, timeout=None):  # type: ignore[override]
-            # Pretend the zombie hasn't been reaped yet.
+        def communicate(self, input=None, timeout=None):  # type: ignore[override]
+            self._communicate_calls += 1
+            if self._communicate_calls == 1:
+                # First call: the one inside the try block. Simulate
+                # an interrupt mid-turn.
+                raise KeyboardInterrupt("ctrl-c during turn")
+            # Second call: the drain in the BaseException handler.
+            # Simulate a stuck zombie / pipe so we exercise the inner
+            # TimeoutExpired swallow.
             raise timeout_cls(cmd=self.args, timeout=timeout)
 
     monkeypatch.setattr(sessions_mod.subprocess, "Popen", StubbornInterruptedPopen)
