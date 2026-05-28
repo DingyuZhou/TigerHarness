@@ -1,27 +1,29 @@
-"""Phase B end-to-end scenarios (blocked on Rukawa's executor).
+"""Phase B end-to-end scenarios for the workflow-runner.
 
 These tests drive the canonical 3-step playbook to completion via
-the public ``workflow start`` + executor entry points, then assert
-on ``events.jsonl`` + ``status.json``. Every scenario uses the
-shared ``e2e_driver`` factory; differences are entirely in the
-scripted fake-claude responses.
+the public ``workflow start`` + :class:`WorkflowExecutor` entry
+points, then assert on ``events.jsonl`` + ``status.json``. Every
+scenario uses the shared ``e2e_driver`` factory; differences are
+entirely in the scripted fake-claude responses.
 
-**State today:** every test in this module is gated on a runtime
-import probe of ``tigerharness.workflow_runner.executor``. Until
-that module lands, each test is marked ``pytest.skip(...)`` with a
-clear message rather than failing — keeps CI green during Wave 3,
-and the moment the executor lands, the skips drop and the
-scenarios run for real.
+Each scenario pins three families of contract:
 
-When the executor lands, the wire-up changes in exactly two places:
-  1. ``_executor_ready()`` in this file returns True.
-  2. ``_executor_not_yet_landed()`` in ``conftest.py`` is replaced
-     by a thin wrapper around ``executor.run(task_id=...)`` (or
-     whatever the executor's public entry point ends up being).
+  * **Terminal phase** -- ``status.phase`` is ``done`` / ``escalated``
+    / ``cancelled`` as the spec requires for that path.
+  * **Cost accumulation** -- ``status.cost_usd_total`` equals the
+    sum of the fake's per-call ``cost_usd`` values. This catches
+    a regression where the executor drops cost between dispatch
+    and status write (Akagi's sweep CLI surfaces this number).
+  * **Machine-truth events** -- ``events.jsonl`` carries the
+    documented event kinds in the documented order. The exact
+    sequence is what downstream tools (``workflow show``,
+    ``workflow diagnose``) key off.
 
-The asserts in each scenario are written to the **spec contract**,
-not to executor internals. If the executor honours
-``docs/workflow-runner.md`` faithfully, every assertion holds.
+The scenarios are gated on a runtime import probe of
+``tigerharness.workflow_runner.executor``: if the module ever
+disappears (a refactor mishap, an upstream revert) the tests
+skip with a clear reason rather than ImportError-crashing the
+whole e2e suite.
 """
 
 from __future__ import annotations
@@ -54,10 +56,10 @@ def _executor_ready() -> bool:
 pytestmark = pytest.mark.skipif(
     not _executor_ready(),
     reason=(
-        "tigerharness.workflow_runner.executor is not present yet "
-        "(Wave 3 / Rukawa's #4). Phase B scenarios will run once "
-        "the executor module lands and conftest's run_executor() "
-        "placeholder is replaced with the real wire-up."
+        "tigerharness.workflow_runner.executor is unexpectedly "
+        "absent. The scenarios depend on the executor module being "
+        "importable; skip cleanly rather than ImportError-crashing "
+        "the rest of the e2e suite."
     ),
 )
 
@@ -103,7 +105,10 @@ def test_linear_path_to_done(e2e_driver) -> None:
         "03-review",
     ]
     assert all(e["verdict"] == "APPROVE" for e in step_completed)
-    assert kinds[-1] in {"task_completed", "task_done"}
+    # The executor's terminal-done event kind is ``task_completed``
+    # (see _finalize_done). Pin the exact name -- if it ever
+    # changes we want this test to flag the rename loudly.
+    assert kinds[-1] == "task_completed"
 
     assert bundle.fake_claude.counter() == 3
 
@@ -155,6 +160,32 @@ def test_single_revise_rewinds_to_plan(e2e_driver) -> None:
     assert status["iter_counts"]["01-plan"] == 2
     assert status["iter_counts"]["02-build"] == 2
     assert status["iter_counts"]["03-review"] == 1
+    # Sum of script costs: 0.10 + 0.04 + 0.09 + 0.07 + 0.05 = 0.35.
+    assert status["cost_usd_total"] == pytest.approx(0.35)
+
+    # SessionManager continuity: each persona's session id must be
+    # reused across re-dispatches of its step. The on-disk shape is
+    # ``{persona: sid_str}``; with 3 distinct personas we expect
+    # exactly 3 entries with 3 distinct sids. If anzai's iter 2
+    # minted a fresh sid we'd still see "anzai" once, but the sid
+    # the fake echoed back wouldn't match what got persisted at
+    # iter 1 -- the persona-thread persistence contract surfaces
+    # as "no churn in this map across the rewind".
+    sessions_path = bundle.paths.sessions_json
+    assert sessions_path.exists(), (
+        "sessions.json must exist after a successful run -- the "
+        "SessionManager writes it on every invoke."
+    )
+    import json as _json
+    sessions = _json.loads(sessions_path.read_text(encoding="utf-8"))
+    assert set(sessions.keys()) == {"anzai", "akagi", "rukawa"}, (
+        f"expected one entry per persona; got {sorted(sessions)!r}"
+    )
+    sids = set(sessions.values())
+    assert len(sids) == 3 and all(sids), (
+        "expected 3 distinct, non-empty session ids (one per "
+        f"persona); got {sessions!r}"
+    )
 
     history = status["step_history"]
     revise_entries = [h for h in history if h["verdict"] == "REVISE"]
@@ -213,6 +244,10 @@ def test_block_on_build_escalates(e2e_driver) -> None:
 
     status = bundle.read_status()
     assert status["phase"] == "escalated"
+    # Cost contract: 0.10 (plan APPROVE) + 0.03 (build BLOCK) = 0.13.
+    # The block-emitting dispatch's cost must still be accumulated --
+    # the spec writes cost before the trailer is parsed.
+    assert status["cost_usd_total"] == pytest.approx(0.13)
 
     # The Status model carries the escalation reason in the
     # top-level ``escalation`` field; per spec the message should
@@ -246,25 +281,31 @@ def test_max_loop_iters_self_revise_escalates(e2e_driver) -> None:
     """
     bundle = e2e_driver(team="ShohokuLoop")
     bundle.fake_claude.set_script([
-        # iter 1 REVISE -> self-rewind
+        # iter 1 REVISE -> self-rewind, iter_counts[01-plan] = 1
         {"trailer": "WORKFLOW: REVISE: needs more detail", "cost_usd": 0.05},
-        # iter 2 REVISE -> self-rewind
+        # iter 2 REVISE -> self-rewind, iter_counts[01-plan] = 2
         {"trailer": "WORKFLOW: REVISE: still too thin", "cost_usd": 0.05},
-        # iter 3 REVISE -> would breach max_iters
+        # iter 3 REVISE -> self-rewind, iter_counts[01-plan] = 3.
+        # The executor then re-enters the loop, computes
+        # next_iter = 4, sees 4 > cap (3), and finalises the
+        # constraint breach WITHOUT a fourth dispatch. So the
+        # script needs exactly 3 entries; a defensive 4th would
+        # silently hide a regression that over-dispatched.
         {"trailer": "WORKFLOW: REVISE: still not good", "cost_usd": 0.05},
-        # Defensive: one extra in case the executor counts inclusive
-        # vs exclusive differently. If the assert below shows counter=3
-        # the executor stopped after iter 3; if counter=4 it ran one
-        # more then stopped -- either is plausibly spec-correct;
-        # update the assertion when we settle on a convention.
-        {"trailer": "WORKFLOW: REVISE: defensive extra", "cost_usd": 0.05},
     ])
 
     bundle.run_executor()
 
     status = bundle.read_status()
     assert status["phase"] == "escalated"
-    assert status["iter_counts"]["01-plan"] >= 3
+    # Iter cap is 3 (from 01-plan.max_iters in the playbook); the
+    # executor consumes all 3 iter slots before escalating.
+    assert status["iter_counts"]["01-plan"] == 3
+    # Cost contract: exactly 3 dispatches at 0.05 each. If the
+    # executor ever over-dispatched, this number would be wrong.
+    assert status["cost_usd_total"] == pytest.approx(0.15)
+    # And the counter pins the dispatch count from the fake's side.
+    assert bundle.fake_claude.counter() == 3
 
     # The constraint_breached event carries the reason text the
     # executor wrote into status.escalation. For per-step iter cap
@@ -323,6 +364,11 @@ def test_parse_failure_reprompts_once_then_recovers(e2e_driver) -> None:
 
     status = bundle.read_status()
     assert status["phase"] == "done"
+    # Cost contract: 0.03 (parse-failure dispatch) + 0.08 + 0.07 + 0.05 = 0.23.
+    # The parse-failed dispatch's cost must still accumulate -- per
+    # spec the cost write happens BEFORE the trailer is parsed, so
+    # crash-after-dispatch leaves cost durable.
+    assert status["cost_usd_total"] == pytest.approx(0.23)
 
     events = bundle.read_events()
     parse_failed = [e for e in events if e["kind"] == "verdict_parse_failed"]
