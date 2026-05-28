@@ -1022,8 +1022,11 @@ def test_start_emits_task_started_event(
     ``events.jsonl`` as the machine-truth log; the audit trail must
     begin at task initialisation, not at first executor iteration.
     """
+    from tigerharness.workflow_runner import events as events_mod
+
     task_id = _start_task(journal_root, tmp_path, team="Shohoku")
-    events = _read_events(journal_root / task_id / "events.jsonl")
+    events_p = journal_root / task_id / "events.jsonl"
+    events = _read_events(events_p)
     assert len(events) == 1
     evt = events[0]
     assert evt["kind"] == "task_started"
@@ -1036,11 +1039,21 @@ def test_start_emits_task_started_event(
     # And the timestamp is ISO-8601-ish (begins with a 4-digit year).
     assert evt["ts"][:4].isdigit()
 
+    # Round-trip through the canonical reader so a future tightening
+    # of Event's reserved-key validation can't silently break us.
+    parsed = events_mod.read_events(events_p)
+    assert len(parsed) == 1
+    assert parsed[0].kind == "task_started"
+    assert parsed[0].extra["task_id"] == task_id
+    assert parsed[0].extra["entrypoint"] == "01-anzai-plan"
+
 
 def test_cancel_emits_cancel_requested_event(
     journal_root: Path, tmp_path: Path,
 ) -> None:
     """``cancel`` appends a ``cancel_requested`` event after writing status."""
+    from tigerharness.workflow_runner import events as events_mod
+
     task_id = _start_task(journal_root, tmp_path)
     events_p = journal_root / task_id / "events.jsonl"
     before = _read_events(events_p)
@@ -1061,6 +1074,13 @@ def test_cancel_emits_cancel_requested_event(
     # We capture the *prior* phase so the audit log shows what state
     # the task was in when the cancel landed.
     assert evt["prior_phase"] == "execute"
+
+    # Round-trip both events through Event.from_dict to verify
+    # reserved-key validation (ts/kind) doesn't reject our payloads.
+    parsed = events_mod.read_events(events_p)
+    kinds = [e.kind for e in parsed]
+    assert kinds == ["task_started", "cancel_requested"]
+    assert parsed[-1].extra["prior_phase"] == "execute"
 
 
 def test_cancel_idempotent_does_not_duplicate_event(
