@@ -162,11 +162,24 @@ def test_single_revise_rewinds_to_plan(e2e_driver) -> None:
     assert revise_entries[0]["step"] == "02-build"
     assert "scope too big" in (revise_entries[0]["reason"] or "")
 
+    # The executor signals a rewind not as a dedicated event kind
+    # but as the sequence: ``step_completed{verdict=REVISE}`` on the
+    # source step, then ``step_started`` on the target step with a
+    # bumped iter number. That sequence IS the rewind observable.
     events = bundle.read_events()
-    rewind_events = [e for e in events if e["kind"] == "step_rewind"]
-    assert any(
-        e.get("from") == "02-build" and e.get("to") == "01-plan"
-        for e in rewind_events
+    kinds = [(e["kind"], e.get("step"), e.get("iter"), e.get("verdict"))
+             for e in events]
+    revise_on_build_idx = next(
+        i for i, t in enumerate(kinds)
+        if t == ("step_completed", "02-build", 1, "REVISE")
+    )
+    plan_iter2_started_idx = next(
+        i for i, t in enumerate(kinds)
+        if t[0] == "step_started" and t[1] == "01-plan" and t[2] == 2
+    )
+    assert plan_iter2_started_idx > revise_on_build_idx, (
+        "01-plan iter 2 must start AFTER 02-build iter 1 emits the "
+        "REVISE -- that ordering is the rewind contract."
     )
 
     assert bundle.fake_claude.counter() == 5
@@ -253,14 +266,23 @@ def test_max_loop_iters_self_revise_escalates(e2e_driver) -> None:
     assert status["phase"] == "escalated"
     assert status["iter_counts"]["01-plan"] >= 3
 
+    # The constraint_breached event carries the reason text the
+    # executor wrote into status.escalation. For per-step iter cap
+    # breaches the reason is shaped ``max_loop_iters:<step>:<cap>``
+    # -- that string is the only mandatory machine-readable signal,
+    # and it must mention the offending step.
     events = bundle.read_events()
     breached = [e for e in events if e["kind"] == "constraint_breached"]
     assert breached, "expected a constraint_breached event"
+    reasons = [str(e.get("reason") or "") for e in breached]
     assert any(
-        "max_loop_iters" in str(e.get("kind_detail") or e.get("detail") or "")
-        or e.get("step") == "01-plan"
-        for e in breached
+        "max_loop_iters" in r and "01-plan" in r for r in reasons
+    ), (
+        "expected a constraint_breached event whose reason names "
+        f"max_loop_iters on 01-plan; got reasons={reasons!r}"
     )
+    # And the status field surfaces the same text for the Operator.
+    assert "max_loop_iters" in (status.get("escalation") or "")
 
 
 # --------------------------------------------------------------------------- #

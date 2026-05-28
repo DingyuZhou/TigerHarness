@@ -171,18 +171,34 @@ def test_e2e_driver_factory_returns_bundle(e2e_driver) -> None:
     assert len(events) == 1 and events[0]["kind"] == "task_started"
 
 
-def test_e2e_driver_run_executor_placeholder(e2e_driver) -> None:
-    """``run_executor`` must fail clearly until Rukawa's branch lands.
+def test_e2e_driver_run_executor_returns_outcome(e2e_driver) -> None:
+    """``run_executor`` drives the real :class:`WorkflowExecutor`.
 
-    Pins the contract: Phase B tests will *call* ``run_executor``;
-    until the wire-up exists, that call must raise with a message
-    the next person to look at it can act on. If a future change
-    swaps the placeholder for the real wiring, this test needs to
-    update -- and that's exactly the moment we want to notice.
+    This test used to assert a TODO(haruko) placeholder error; now
+    that Rukawa's executor has landed and conftest's wrapper drives
+    the real loop, we instead pin the new contract: ``run_executor()``
+    returns an :class:`ExecutionOutcome` with a terminal phase in
+    ``{"done", "escalated", "cancelled"}`` and a non-negative cost.
+
+    Driver-level smoke test only -- the per-scenario assertions live
+    in ``test_phase_b_scenarios.py``. Here we just confirm the wire
+    is intact end-to-end.
     """
-    bundle = e2e_driver()
-    with pytest.raises(AssertionError, match="TODO\\(haruko\\)"):
-        bundle.run_executor()
+    from tigerharness.workflow_runner.executor import ExecutionOutcome
+
+    bundle = e2e_driver(team="ShohokuWireSmoke")
+    bundle.fake_claude.set_script([
+        {"trailer": "WORKFLOW: APPROVE", "cost_usd": 0.01},
+        {"trailer": "WORKFLOW: APPROVE", "cost_usd": 0.01},
+        {"trailer": "WORKFLOW: APPROVE", "cost_usd": 0.01},
+    ])
+    outcome = bundle.run_executor()
+    assert isinstance(outcome, ExecutionOutcome)
+    assert outcome.final_phase in {"done", "escalated", "cancelled"}
+    assert outcome.total_cost_usd >= 0.0
+    # The status on disk must agree with the returned outcome --
+    # this catches a regression where _write_status is skipped.
+    assert bundle.read_status()["phase"] == outcome.final_phase
 
 
 # --------------------------------------------------------------------------- #

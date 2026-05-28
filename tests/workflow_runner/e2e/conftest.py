@@ -34,13 +34,13 @@ What these fixtures provide
     the canonical playbook, returns a small bundle (task_id, paths,
     fake_claude, journal_root) the test can use.
 
-    The ``run_executor()`` method on the bundle is a deliberate
-    placeholder: it asserts a clear ``TODO(haruko)`` message until
-    Rukawa's ``executor.py`` lands and we can wire it through. That
-    keeps Phase A green and Phase B explicitly opt-in -- a Phase B
-    test that calls ``run_executor()`` before the executor lands
-    will fail with a self-explanatory message rather than a cryptic
-    ``ImportError`` deep inside the harness.
+    The ``run_executor()`` callable on the bundle drives Rukawa's
+    :class:`WorkflowExecutor` to a terminal phase against the bundle's
+    own per-task journal. It returns the
+    :class:`ExecutionOutcome` so scenarios can sanity-check the
+    final phase / cost without re-reading ``status.json``, though
+    most scenarios prefer ``bundle.read_status()`` for the full
+    structured form.
 
 Isolation guarantees
 --------------------
@@ -62,6 +62,7 @@ from typing import Any, Callable, Iterable
 import pytest
 
 from tigerharness.workflow_runner import cli as wf_cli
+from tigerharness.workflow_runner.executor import WorkflowExecutor
 from tigerharness.workflow_runner.paths import TaskPaths
 
 
@@ -256,9 +257,9 @@ class E2EBundle:
     """What :func:`e2e_driver` returns to a test.
 
     Holds the task id, the resolved per-task paths, the fake-claude
-    handle, and the journal root. The ``run_executor`` callable is a
-    placeholder until Rukawa's executor lands (see :func:`e2e_driver`
-    for the wiring contract).
+    handle, and the journal root. ``run_executor`` invokes Rukawa's
+    :class:`WorkflowExecutor` against this task's journal and returns
+    its :class:`ExecutionOutcome` (see :func:`e2e_driver`).
     """
 
     task_id: str
@@ -266,7 +267,7 @@ class E2EBundle:
     fake_claude: FakeClaude
     journal_root: Path
     team: str
-    run_executor: Callable[[], None]
+    run_executor: Callable[[], Any]
 
     # --- convenience accessors ------------------------------------------- #
 
@@ -295,19 +296,22 @@ class E2EBundle:
         return raw
 
 
-def _executor_not_yet_landed() -> None:
-    """Placeholder until ``workflow_runner.executor`` lands.
+def _run_executor_for(paths: TaskPaths) -> Callable[[], Any]:
+    """Build the bundle's ``run_executor`` closure.
 
-    Phase B scenarios that need the executor call ``bundle.run_executor()``;
-    until Rukawa's branch is merged, that call fails with this clear
-    message rather than blowing up deep in an import.
+    Captures ``paths`` (this task's resolved :class:`TaskPaths`) and,
+    when called by a scenario, constructs a fresh
+    :class:`WorkflowExecutor` and runs it to a terminal phase.
+
+    The closure constructs the executor *lazily* (at call time, not at
+    bundle-build time) so a scenario can configure the fake's script
+    after ``e2e_driver(...)`` returns but before the loop starts.
     """
-    raise AssertionError(
-        "TODO(haruko): wire run_executor to "
-        "tigerharness.workflow_runner.executor.run() once Rukawa's "
-        "executor branch (work/2026-05-28-workflow-runner-executor) "
-        "lands in this branch. Phase B scenarios are blocked on this."
-    )
+
+    def _run() -> Any:
+        return WorkflowExecutor(paths).run()
+
+    return _run
 
 
 @pytest.fixture
@@ -377,7 +381,7 @@ def e2e_driver(
             fake_claude=e2e_fake_claude,
             journal_root=e2e_journal_root,
             team=team,
-            run_executor=_executor_not_yet_landed,
+            run_executor=_run_executor_for(paths),
         )
 
     return _factory
