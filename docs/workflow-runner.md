@@ -283,9 +283,10 @@ tail`/`show`, future `diagnose`) should code against these names:
 {"ts":"2026-05-28T14:00:00Z","kind":"task_started","task_id":"...","team":"Shohoku","steps":3,"entrypoint":"01-..."}
 {"ts":"...","kind":"step_started","step":"01-anzai-plan","iter":1,"persona":"anzai"}
 {"ts":"...","kind":"step_completed","step":"01-anzai-plan","iter":1,"verdict":"APPROVE","cost_usd":0.51}
-{"ts":"...","kind":"verdict_parse_failed","step":"02-akagi-critique","iter":1}
-{"ts":"...","kind":"constraint_breached","task_id":"...","reason":"max_loop_iters exceeded on 02-..."}
-{"ts":"...","kind":"cancel_requested","task_id":"..."}
+{"ts":"...","kind":"verdict_parse_failed","step":"02-akagi-critique","iter":1,"parse_failure_count":1,"reason":"no trailer found","invocation_error":null}
+{"ts":"...","kind":"constraint_breached","task_id":"...","reason":"max_loop_iters:02-...:5"}
+{"ts":"...","kind":"block","task_id":"...","reason":"block:rollback plan missing"}
+{"ts":"...","kind":"cancel_requested","task_id":"...","prior_phase":"execute"}
 {"ts":"...","kind":"cancel_complete","task_id":"..."}
 {"ts":"...","kind":"task_completed","task_id":"...","cost_usd_total":3.14}
 ```
@@ -295,13 +296,17 @@ Notes on the Phase 1 contract:
 - A **REVISE** rewind is not its own event. It is observable as the
   next `step_started` on the rewind target (e.g. `02-...` REVISE is
   followed by `step_started` on `01-...` at `iter` + 1).
-- **Escalation reuses `constraint_breached`** as its event `kind`
-  (with the human-readable `reason`); the terminal state is recorded
-  as `phase: "escalated"` in `status.json`. There is no separate
-  `escalated` event.
-- `cancel_requested` is written by `workflow cancel`; `cancel_complete`
-  is written by the executor when it finalises at the next iteration
-  boundary.
+- **Escalation has two event `kind`s.** Constraint-driven escalations
+  (max_loop_iters, max_cost_usd, max_task_wall_sec, parse-failure
+  loop, route corruption) emit `constraint_breached`. A persona
+  **BLOCK** verdict emits a separate `block` event. Both terminate
+  with `phase: "escalated"` in `status.json`; downstream tools that
+  want "all escalation events" must subscribe to both. There is no
+  separate `escalated` event.
+- `cancel_requested` is written by `workflow cancel` and carries the
+  `prior_phase` field (the phase the task was in when cancel was
+  requested). `cancel_complete` is written by the executor when it
+  finalises at the next iteration boundary.
 
 **Phase 2+ (planned, not yet emitted).** The compile phase and human
 gate will add:
