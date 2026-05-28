@@ -26,6 +26,11 @@ Behaviour is steered by env vars set in the test:
                             on timeout).
 * ``FAKE_ARGV_DUMP``        if set, write received argv (JSON) here.
 * ``FAKE_STDIN_DUMP``       if set, write stdin (raw) here.
+* ``FAKE_FORK_HANG_FILE``   if set, ``fork()`` a hanging grandchild
+                            (writes its own pid to this path), then
+                            the parent also hangs. Exercises the
+                            process-group reap path in
+                            :meth:`SessionManager._kill_process_group`.
 
 Zero deps beyond the stdlib so it runs under any interpreter.
 """
@@ -55,6 +60,24 @@ def main() -> int:
     if partial:
         sys.stdout.write(partial)
         sys.stdout.flush()
+
+    fork_hang_file = os.environ.get("FAKE_FORK_HANG_FILE", "").strip()
+    if fork_hang_file:
+        # Fork a grandchild that announces its pid then hangs. Parent
+        # also hangs so the test driver must time out and reap the
+        # whole group via killpg(SIGKILL).
+        pid = os.fork()
+        if pid == 0:
+            # Grandchild: detach from the parent's stdout/stderr so a
+            # killpg-induced pipe close doesn't race with our write.
+            with open(fork_hang_file, "w") as fh:
+                fh.write(str(os.getpid()))
+                fh.flush()
+                os.fsync(fh.fileno())
+            time.sleep(120)
+            sys.exit(0)
+        # Parent: hang until killed.
+        time.sleep(120)
 
     sleep_for = float(os.environ.get("FAKE_SLEEP_SEC", "0") or "0")
     if sleep_for > 0:

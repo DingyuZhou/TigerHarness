@@ -11,9 +11,16 @@ Design picks
 * **Single-shot envelope, synchronous subprocess.** The workflow-runner
   drives one persona at a time and waits for a single
   ``--output-format json`` envelope per turn. There's no need for the
-  streaming/async machinery in ``agent_sdk.backends.claude_p``;
-  ``subprocess.run`` keeps the code surface tiny and trivially
-  testable with a fake CLI on disk.
+  streaming/async machinery in ``agent_sdk.backends.claude_p``; a
+  plain :class:`subprocess.Popen` keeps the code surface tiny and
+  trivially testable with a fake CLI on disk.
+
+* **Subtree-safe timeout.** ``claude`` spawns tool subprocesses
+  (Bash, MCP servers, ...). A naive ``subprocess.run(timeout=...)``
+  only SIGKILLs the direct child, orphaning the rest. We instead
+  spawn with ``start_new_session=True`` and ``os.killpg`` the whole
+  group on timeout so the executor's loop never leaks descendant
+  processes across iterations.
 
 * **Reuse, don't reinvent.**
 
@@ -44,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,6 +72,11 @@ log = logging.getLogger("tigerharness.workflow_runner.sessions")
 #: ``-1..-64`` for ``-SIGNUM``) so callers can distinguish "we killed it
 #: for timing out" from "the OS killed it with SIGHUP/SIGINT/etc."
 TIMEOUT_EXIT_CODE = -1001
+
+#: Wall-clock cap for draining buffered stdout *after* SIGKILL-ing the
+#: child's process group. Once the group is dead, the pipes close fast;
+#: a few seconds is plenty of headroom for a stuck FS or scheduler.
+_DRAIN_TIMEOUT_SEC = 5
 
 
 # --------------------------------------------------------------------------- #
@@ -183,21 +196,44 @@ class SessionManager:
         existing_sid = smap.get(persona)
         argv = self._build_argv(persona, existing_sid)
 
+        # ``start_new_session=True`` makes ``proc.pid`` the leader of a
+        # fresh session/group so we can ``killpg`` the *entire subtree*
+        # on timeout. Without it ``subprocess.run``'s timeout path only
+        # SIGKILLs the direct child, leaving claude's tool subprocesses
+        # (Bash, MCP servers, etc.) orphaned to leak FDs/CPU across the
+        # executor's loop.
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
+        )
         try:
-            completed = subprocess.run(
-                argv,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_sec,
-                check=False,
+            stdout, stderr = proc.communicate(
+                input=prompt, timeout=timeout_sec
             )
+            returncode = proc.returncode
         except subprocess.TimeoutExpired as exc:
-            partial = _decode_partial(exc.stdout)
+            self._kill_process_group(proc)
+            pre_kill = _decode_partial(exc.stdout)
+            # After group SIGKILL the pipes close fast; drain any
+            # buffered bytes so partial output survives in stdout.txt
+            # and we don't leak the FDs.
+            try:
+                leftover_stdout, _ = proc.communicate(
+                    timeout=_DRAIN_TIMEOUT_SEC
+                )
+            except subprocess.TimeoutExpired:
+                leftover_stdout = ""
+            partial = pre_kill + _decode_partial(leftover_stdout)
             if log_dir is not None:
-                self._capture_timeout(log_dir, prompt=prompt, partial_stdout=partial)
+                self._capture_timeout(
+                    log_dir, prompt=prompt, partial_stdout=partial
+                )
             return InvocationResult(
                 stdout="",
                 session_id=existing_sid or "",
@@ -207,15 +243,15 @@ class SessionManager:
                 raw_envelope={},
             )
 
-        envelope, parse_error = _parse_envelope(completed.stdout)
+        envelope, parse_error = _parse_envelope(stdout)
 
         # Non-zero exit overrides any extractable session data; we still
         # try to parse the envelope so cost / sid (if present) survive.
         error: Optional[str] = None
-        if completed.returncode != 0:
-            stderr_excerpt = (completed.stderr or "").strip()
+        if returncode != 0:
+            stderr_excerpt = (stderr or "").strip()
             error = (
-                f"claude exited with code {completed.returncode}"
+                f"claude exited with code {returncode}"
                 + (f": {stderr_excerpt}" if stderr_excerpt else "")
             )
         elif parse_error is not None:
@@ -228,7 +264,7 @@ class SessionManager:
 
         if (
             "total_cost_usd" not in envelope
-            and completed.returncode == 0
+            and returncode == 0
             and parse_error is None
         ):
             log.warning(
@@ -258,7 +294,7 @@ class SessionManager:
             stdout=stdout_text,
             session_id=session_id,
             cost_usd=cost_usd,
-            exit_code=completed.returncode,
+            exit_code=returncode,
             error=error,
             raw_envelope=envelope,
         )
@@ -290,6 +326,31 @@ class SessionManager:
         else:
             argv += [_FLAG_APPEND_SYSTEM_PROMPT, load_prompt(persona)]
         return argv
+
+    @staticmethod
+    def _kill_process_group(proc: subprocess.Popen) -> None:
+        """SIGKILL the child's whole process group.
+
+        ``start_new_session=True`` made ``proc.pid`` the group leader,
+        so ``killpg`` reaches every descendant (claude tool subprocesses,
+        MCP servers, etc.) — not just the direct child. Falls back to a
+        plain ``proc.kill()`` if the leader is already gone or the OS
+        refuses (sandboxes, restricted CI runners, etc.); even that's
+        best-effort, hence the broad except.
+        """
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            return  # Already gone.
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
 
     @staticmethod
     def _capture_success(

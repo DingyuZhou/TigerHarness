@@ -16,10 +16,12 @@ import json
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from tigerharness.workflow_runner import sessions as sessions_mod
 from tigerharness.workflow_runner.sessions import (
     TIMEOUT_EXIT_CODE,
     InvocationResult,
@@ -578,6 +580,194 @@ def test_decode_partial_handles_bytes_str_and_none():
     assert _decode_partial("already-decoded") == "already-decoded"
     # Half-written multi-byte UTF-8 sequence: replace, don't crash.
     assert "\ufffd" in _decode_partial(b"caf\xc3")
+
+
+# --------------------------------------------------------------------------- #
+# Process-group reap on timeout
+# --------------------------------------------------------------------------- #
+
+
+def test_subprocess_starts_new_session_for_group_kill(
+    fake_claude, task_dir, personas_dir, monkeypatch
+):
+    """``start_new_session=True`` is non-negotiable: claude spawns tool
+    subprocesses, and a per-step timeout must reap the whole subtree.
+    Without it, orphans accumulate across the executor's loop and leak
+    FDs / CPU. Pin the seam so a future refactor can't quietly drop it.
+    """
+    captured: dict = {}
+    real_popen = sessions_mod.subprocess.Popen
+
+    class SpyPopen(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(sessions_mod.subprocess, "Popen", SpyPopen)
+
+    mgr = SessionManager(task_dir)
+    mgr.invoke("rukawa", "p", timeout_sec=10)
+
+    assert captured.get("start_new_session") is True
+
+
+def _proc_is_live(pid: int) -> bool:
+    """Linux-only liveness probe via /proc.
+
+    Returns False if the process is gone OR has been reaped to a zombie
+    that's already left the process table. We need this (not bare
+    ``os.kill(pid, 0)``) because the post-SIGKILL grandchild becomes a
+    short-lived zombie reparented to PID 1; ``kill(pid, 0)`` still
+    succeeds during that window.
+    """
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        text = status_path.read_text()
+    except FileNotFoundError:
+        return False
+    for line in text.splitlines():
+        if line.startswith("State:"):
+            state = line.split()[1]
+            return state not in ("Z", "X")
+    return True
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork") or not Path("/proc/self/status").exists(),
+    reason="needs POSIX fork() and Linux /proc to probe grandchild liveness",
+)
+def test_timeout_reaps_grandchild_process_subtree(
+    fake_claude, task_dir, personas_dir, tmp_path, monkeypatch
+):
+    """End-to-end proof that timeout SIGKILLs the *whole subtree*.
+
+    The fake forks a grandchild that announces its pid and hangs. After
+    ``invoke`` times out, that pid must be gone from ``/proc`` — proving
+    that ``killpg`` (not a bare ``kill``) was used.
+    """
+    hang_file = tmp_path / "grandchild.pid"
+    monkeypatch.setenv("FAKE_FORK_HANG_FILE", str(hang_file))
+
+    mgr = SessionManager(task_dir)
+    result = mgr.invoke("rukawa", "p", timeout_sec=2)
+
+    assert result.exit_code == TIMEOUT_EXIT_CODE
+
+    # The fake forks ~immediately, but be defensive about scheduling.
+    deadline = time.time() + 3.0
+    while not hang_file.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert hang_file.exists(), "fake_claude never forked the grandchild"
+    grandchild_pid = int(hang_file.read_text().strip())
+
+    # SIGKILL delivery + init reap is fast but async; give it a budget.
+    deadline = time.time() + 5.0
+    while _proc_is_live(grandchild_pid) and time.time() < deadline:
+        time.sleep(0.05)
+    assert not _proc_is_live(grandchild_pid), (
+        f"grandchild pid={grandchild_pid} survived the timeout — "
+        "the process-group SIGKILL path did not reap the subtree"
+    )
+
+
+def test_kill_process_group_handles_already_dead_leader(monkeypatch):
+    """``_kill_process_group`` must be a no-op when the leader is gone.
+
+    Race: between ``communicate`` raising ``TimeoutExpired`` and us
+    calling ``getpgid``, the child can exit on its own. We must not
+    raise — just return cleanly.
+    """
+
+    class _DeadProc:
+        pid = 999999  # very unlikely to exist
+
+    def _raise_lookup(_pid):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(sessions_mod.os, "getpgid", _raise_lookup)
+    # Should not raise.
+    SessionManager._kill_process_group(_DeadProc())  # type: ignore[arg-type]
+
+
+def test_kill_process_group_falls_back_to_direct_kill(monkeypatch):
+    """If ``killpg`` refuses (sandbox / restricted CI), fall back to a
+    plain ``proc.kill()`` so the orphan still gets stopped."""
+
+    monkeypatch.setattr(sessions_mod.os, "getpgid", lambda _pid: 42)
+
+    def _refuse_killpg(_pgid, _sig):
+        raise PermissionError("sandbox refuses killpg")
+
+    monkeypatch.setattr(sessions_mod.os, "killpg", _refuse_killpg)
+
+    direct_kill_called = {"value": False}
+
+    class _Proc:
+        pid = 12345
+
+        def kill(self):
+            direct_kill_called["value"] = True
+
+    SessionManager._kill_process_group(_Proc())  # type: ignore[arg-type]
+    assert direct_kill_called["value"] is True
+
+
+def test_kill_process_group_swallows_direct_kill_errors(monkeypatch):
+    """Even ``proc.kill()`` can race ProcessLookupError; must not raise."""
+
+    monkeypatch.setattr(sessions_mod.os, "getpgid", lambda _pid: 42)
+
+    def _refuse_killpg(_pgid, _sig):
+        raise OSError("refused")
+
+    monkeypatch.setattr(sessions_mod.os, "killpg", _refuse_killpg)
+
+    class _Proc:
+        pid = 12345
+
+        def kill(self):
+            raise ProcessLookupError()
+
+    # No assertion needed — just verify no exception escapes.
+    SessionManager._kill_process_group(_Proc())  # type: ignore[arg-type]
+
+
+def test_drain_after_kill_timeout_does_not_propagate(
+    fake_claude, task_dir, personas_dir, tmp_path, monkeypatch
+):
+    """If the post-kill drain ``communicate(timeout=_DRAIN_TIMEOUT_SEC)``
+    itself times out (highly unusual — pipes should close fast once the
+    group is dead — but defensively guarded), we still return a clean
+    ``InvocationResult``.
+    """
+    monkeypatch.setenv("FAKE_SLEEP_SEC", "5")
+
+    # Force the second communicate() to also raise TimeoutExpired so we
+    # exercise the inner ``except`` branch deterministically.
+    real_popen = sessions_mod.subprocess.Popen
+    timeout_cls = sessions_mod.subprocess.TimeoutExpired
+
+    class StubbornDrainPopen(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._communicate_calls = 0
+
+        def communicate(self, input=None, timeout=None):  # type: ignore[override]
+            self._communicate_calls += 1
+            if self._communicate_calls == 1:
+                # Mirror the real first-call timeout behaviour.
+                return super().communicate(input=input, timeout=timeout)
+            # Second call: force TimeoutExpired.
+            raise timeout_cls(cmd=self.args, timeout=timeout)
+
+    monkeypatch.setattr(sessions_mod.subprocess, "Popen", StubbornDrainPopen)
+
+    mgr = SessionManager(task_dir)
+    result = mgr.invoke("rukawa", "p", timeout_sec=1)
+
+    assert result.exit_code == TIMEOUT_EXIT_CODE
+    assert result.error is not None
+    assert "timeout" in result.error.lower()
 
 
 # --------------------------------------------------------------------------- #
