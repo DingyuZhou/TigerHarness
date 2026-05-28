@@ -27,12 +27,14 @@ from tigerharness.workflow_runner.trailer import (
 
 
 def test_approve_has_kind_tag() -> None:
-    assert Approve().kind == "approve"
+    # Uppercase to match the wire protocol verbs and
+    # ``models._VERDICTS`` (the StepHistoryEntry.verdict allowlist).
+    assert Approve().kind == "APPROVE"
 
 
 def test_revise_has_kind_tag_and_default_target_none() -> None:
     v = Revise(summary="needs work")
-    assert v.kind == "revise"
+    assert v.kind == "REVISE"
     assert v.summary == "needs work"
     assert v.target is None
 
@@ -44,13 +46,16 @@ def test_revise_carries_explicit_target() -> None:
 
 def test_block_has_kind_tag() -> None:
     v = Block(summary="cannot proceed")
-    assert v.kind == "block"
+    assert v.kind == "BLOCK"
     assert v.summary == "cannot proceed"
 
 
 def test_parse_error_has_kind_tag() -> None:
     err = ParseError(reason="why")
-    assert err.kind == "parse_error"
+    # ``PARSE_ERROR`` mirrors the spec's ``verdict_parse_failed``
+    # event terminology, kept uppercase for consistency with the
+    # other discriminator tags.
+    assert err.kind == "PARSE_ERROR"
     assert err.reason == "why"
 
 
@@ -73,7 +78,7 @@ def test_verdicts_are_frozen() -> None:
     # and the events log.
     v = Approve()
     with pytest.raises(Exception):  # FrozenInstanceError subclass of Exception
-        v.kind = "revise"  # type: ignore[misc,assignment]
+        v.kind = "REVISE"  # type: ignore[misc,assignment]
 
 
 # ---------------------------------------------------------------------------

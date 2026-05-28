@@ -66,13 +66,23 @@ __all__ = [
 # The ``kind`` Literal field gives callers a single discriminator they
 # can branch on for JSON serialisation (``status.json`` step_history
 # records) without having to ``isinstance``-walk the union.
+#
+# The discriminator values are deliberately UPPERCASE to match the
+# wire protocol (the verb tokens in the trailer itself -- ``APPROVE``
+# / ``REVISE`` / ``BLOCK``) and the on-disk shape enforced by
+# :data:`tigerharness.workflow_runner.models._VERDICTS`, which is the
+# allowlist :class:`~tigerharness.workflow_runner.models.StepHistoryEntry`
+# validates ``verdict`` against. ``PARSE_ERROR`` mirrors the spec's
+# ``verdict_parse_failed`` event terminology in uppercase form. A
+# downstream executor can therefore use ``verdict.kind`` directly as
+# the ``StepHistoryEntry.verdict`` value without re-casing.
 
 
 @dataclass(frozen=True)
 class Approve:
     """The reviewer approves; route via the step's ``on_approve``."""
 
-    kind: Literal["approve"] = "approve"
+    kind: Literal["APPROVE"] = "APPROVE"
 
 
 @dataclass(frozen=True)
@@ -87,7 +97,7 @@ class Revise:
 
     summary: str
     target: str | None = None
-    kind: Literal["revise"] = "revise"
+    kind: Literal["REVISE"] = "REVISE"
 
 
 @dataclass(frozen=True)
@@ -95,7 +105,7 @@ class Block:
     """The reviewer cannot proceed; route via the step's ``on_block``."""
 
     summary: str
-    kind: Literal["block"] = "block"
+    kind: Literal["BLOCK"] = "BLOCK"
 
 
 @dataclass(frozen=True)
@@ -109,7 +119,7 @@ class ParseError:
     """
 
     reason: str
-    kind: Literal["parse_error"] = "parse_error"
+    kind: Literal["PARSE_ERROR"] = "PARSE_ERROR"
 
 
 Verdict = Union[Approve, Revise, Block, ParseError]
