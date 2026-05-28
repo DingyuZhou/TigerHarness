@@ -30,6 +30,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+from tigerharness.workflow_runner.ids import validate_step_id
+
 # --------------------------------------------------------------------------- #
 # Exceptions
 # --------------------------------------------------------------------------- #
@@ -50,8 +52,23 @@ _SENTINELS = frozenset({"__done__", "__escalate__"})
 _VERDICTS = frozenset({"APPROVE", "REVISE", "BLOCK"})
 
 # Phase literals used in Status.
+#
+# ``cancelling`` is the *active transition* state set by
+# ``workflow cancel`` while the executor finishes its current iter and
+# releases the lock; ``cancelled`` is the terminal state. The spec's
+# Cancel/Resume section (docs/workflow-runner.md) treats these as two
+# distinct phases -- omitting ``cancelling`` would silently break any
+# executor write of ``Status(phase="cancelling", ...)``.
 _PHASES = frozenset(
-    {"compile", "execute", "paused", "done", "escalated", "cancelled"}
+    {
+        "compile",
+        "execute",
+        "paused",
+        "done",
+        "escalated",
+        "cancelling",
+        "cancelled",
+    }
 )
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +199,11 @@ class StepFrontmatter:
 
     def __post_init__(self) -> None:
         self.id = _require_str(self.id, "id")
+        # Step ids become path segments under ``logs/<id>/`` and
+        # ``steps/<id>.md``; enforce a filesystem-safe charset here so
+        # untrusted (Phase 2 AI-compiled) inputs can't escape the
+        # task root. See ``ids.py`` for the contract.
+        validate_step_id(self.id)
         self.persona = _require_str(self.persona, "persona")
         self.role = _require_str(self.role, "role")
         self.on_approve = _require_str(self.on_approve, "on_approve")

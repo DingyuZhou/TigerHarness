@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tigerharness.workflow_runner import paths as paths_mod
+from tigerharness.workflow_runner.models import WorkflowModelError
 from tigerharness.workflow_runner.paths import (
     TaskPaths,
     default_journal_root,
@@ -136,6 +137,26 @@ def test_task_paths_iter_rejects_zero(tmp_path):
         tp.iter_dir("01-foo", 0)
     with pytest.raises(ValueError):
         tp.iter_dir("01-foo", -3)
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["..", "foo/bar", "-rf", ""],
+)
+def test_task_paths_step_helpers_reject_unsafe_ids(tmp_path, bad_id):
+    """Defense in depth: even if a bad id sneaks past model validation
+    (e.g. a CLI caller bypassing ``StepFrontmatter``), the path
+    helpers themselves refuse to mint traversal-shaped paths. Full
+    charset matrix lives in ``test_ids.py``; this row just pins the
+    integration at the path layer."""
+    tp = TaskPaths(root=tmp_path, task_id="t1")
+    with pytest.raises(WorkflowModelError):
+        tp.step_log_dir(bad_id)
+    with pytest.raises(WorkflowModelError):
+        tp.step_file(bad_id)
+    # iter_dir delegates to step_log_dir so it inherits the rejection.
+    with pytest.raises(WorkflowModelError):
+        tp.iter_dir(bad_id, 1)
 
 
 def test_task_paths_ensure_is_idempotent(tmp_path):

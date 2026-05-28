@@ -148,6 +148,27 @@ def test_step_frontmatter_parallel_with_explicit_none():
     assert fm.parallel_with == []
 
 
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "..",          # path traversal
+        "foo/bar",     # embedded slash
+        "-rf",         # leading hyphen (argument smuggling shape)
+        "__done__",    # routing-sentinel collision
+        "a" * 65,      # over 64-char limit
+        " ",           # whitespace
+    ],
+)
+def test_step_frontmatter_rejects_path_unsafe_ids(bad_id):
+    """The step-id sanitizer is enforced at model boundary, not just
+    in path helpers -- so a bad id surfaces at compile time, not
+    silently at mkdir time. Coverage of the full charset matrix lives
+    in ``test_ids.py``; this row just pins the integration."""
+    raw = _good_frontmatter(id=bad_id)
+    with pytest.raises(WorkflowModelError):
+        StepFrontmatter.from_dict(raw)
+
+
 # --------------------------------------------------------------------------- #
 # StepEdges
 # --------------------------------------------------------------------------- #
@@ -581,6 +602,26 @@ def test_status_rejects_bad_phase():
     raw = _good_status(phase="exploding")
     with pytest.raises(WorkflowModelError):
         Status.from_dict(raw)
+
+
+def test_status_accepts_cancelling_phase_round_trip():
+    """``cancelling`` is the active transition state set by
+    ``workflow cancel`` while the executor finishes its current iter
+    and releases the lock; it must round-trip cleanly. Spec:
+    docs/workflow-runner.md, Cancel/Resume section."""
+    raw = _good_status(phase="cancelling")
+    s = Status.from_dict(raw)
+    assert s.phase == "cancelling"
+    assert s.to_dict()["phase"] == "cancelling"
+
+
+def test_status_accepts_cancelled_terminal_phase():
+    """Paired with ``cancelling``: the terminal ``cancelled`` phase
+    must also round-trip (regression-pin so a future refactor of
+    ``_PHASES`` doesn't drop one of the pair)."""
+    raw = _good_status(phase="cancelled")
+    s = Status.from_dict(raw)
+    assert s.phase == "cancelled"
 
 
 def test_status_rejects_non_dict():
