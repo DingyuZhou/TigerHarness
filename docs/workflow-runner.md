@@ -2,9 +2,14 @@
 
 Team workflow orchestration for multi-persona tasks.
 
-> **Status:** Phase 0 — spec / draft. No implementation yet. This
-> document is the single source of truth for what we're going to
-> build; it will be updated as decisions land.
+> **Status:** Phase 1 shipped. The sequential executor, per-persona
+> sessions, persona-trailer parser, and the
+> `start`/`show`/`list`/`tail`/`cancel` CLI are implemented and tested
+> (`workflow start` runs a pre-compiled playbook to a terminal phase).
+> The compile phase (freestyle playbook → step files), the human gate,
+> and parallelism are **Phase 2+ and remain design-only** below. This
+> document is the source of truth for the design; sections describing
+> unimplemented phases say so inline.
 
 ## What it does
 
@@ -270,20 +275,44 @@ One JSON object per line. The machine-truth event stream. Every
 orchestrator decision, every step launch, every parsed verdict,
 every cost delta, every error.
 
+**Phase 1 (emitted today).** These are the exact `kind`s and payload
+fields the shipped executor + CLI write. Downstream tools (`workflow
+tail`/`show`, future `diagnose`) should code against these names:
+
 ```json
-{"ts":"2026-05-28T14:00:00Z","kind":"task_started","task_id":"..."}
+{"ts":"2026-05-28T14:00:00Z","kind":"task_started","task_id":"...","team":"Shohoku","steps":3,"entrypoint":"01-..."}
+{"ts":"...","kind":"step_started","step":"01-anzai-plan","iter":1,"persona":"anzai"}
+{"ts":"...","kind":"step_completed","step":"01-anzai-plan","iter":1,"verdict":"APPROVE","cost_usd":0.51}
+{"ts":"...","kind":"verdict_parse_failed","step":"02-akagi-critique","iter":1}
+{"ts":"...","kind":"constraint_breached","task_id":"...","reason":"max_loop_iters exceeded on 02-..."}
+{"ts":"...","kind":"cancel_requested","task_id":"..."}
+{"ts":"...","kind":"cancel_complete","task_id":"..."}
+{"ts":"...","kind":"task_completed","task_id":"...","cost_usd_total":3.14}
+```
+
+Notes on the Phase 1 contract:
+
+- A **REVISE** rewind is not its own event. It is observable as the
+  next `step_started` on the rewind target (e.g. `02-...` REVISE is
+  followed by `step_started` on `01-...` at `iter` + 1).
+- **Escalation reuses `constraint_breached`** as its event `kind`
+  (with the human-readable `reason`); the terminal state is recorded
+  as `phase: "escalated"` in `status.json`. There is no separate
+  `escalated` event.
+- `cancel_requested` is written by `workflow cancel`; `cancel_complete`
+  is written by the executor when it finalises at the next iteration
+  boundary.
+
+**Phase 2+ (planned, not yet emitted).** The compile phase and human
+gate will add:
+
+```json
 {"ts":"...","kind":"compile_started","playbook":"default"}
 {"ts":"...","kind":"compile_tier1_passed","validators":["schema","ref","roster","cycle"]}
 {"ts":"...","kind":"compile_critique_iter","iter":1,"akagi_verdict":"REVISE","ayako_verdict":"APPROVE"}
 {"ts":"...","kind":"compile_completed","steps":12,"critique_iters":3}
 {"ts":"...","kind":"human_gate_requested","slack_thread_ts":"..."}
-{"ts":"...","kind":"human_gate_passed","by":"ceo"}
-{"ts":"...","kind":"step_started","step":"01-7f2a-anzai-plan","iter":1,"persona":"anzai"}
-{"ts":"...","kind":"step_completed","step":"01-...","iter":1,"verdict":"APPROVE","cost_usd":0.51,"duration_sec":312}
-{"ts":"...","kind":"step_rewind","from":"03-...","to":"01-...","reason":"REVISE: missing rollback plan"}
-{"ts":"...","kind":"constraint_breach","kind_detail":"max_loop_iters","step":"02-...","value":5}
-{"ts":"...","kind":"escalated","reason":"max_loop_iters exceeded","slack_thread_ts":"..."}
-{"ts":"...","kind":"task_completed","verdict":"done","cost_usd_total":3.14}
+{"ts":"...","kind":"human_gate_passed","by":"operator"}
 ```
 
 A `tigerharness workflow tail <task-id>` CLI renders this
@@ -677,21 +706,21 @@ against the validator suite before letting it loose on a real task.
 
 | Phase | Scope |
 |---|---|
-| **0** | This spec + Shohoku `default.md` playbook + ADR. **Current.** |
-| **1** | Sequential executor: step files, `status.json`, per-persona sessions, file-write helpers, `events.jsonl`, persona-trailer parser, basic CLI (`start`/`show`/`list`/`tail`/`cancel`). **No compile phase yet — Phase 1 accepts pre-compiled step files only.** |
-| **2** | Compile phase: prose-to-steps via Anzai + Tier 1 validators + `compile_and_validate` primitive. Loop rewind + feedback injection. |
+| **0** | This spec + Shohoku `default.md` playbook + ADR. **Done.** |
+| **1** | Sequential executor: step files, `status.json`, per-persona sessions, file-write helpers, `events.jsonl`, persona-trailer parser, basic CLI (`start`/`show`/`list`/`tail`/`cancel`). **No compile phase yet — Phase 1 accepts pre-compiled step files only. Done.** |
+| **2** | Compile phase: prose-to-steps via Anzai + Tier 1 validators + `compile_and_validate` primitive. Loop rewind + feedback injection. **Next.** |
 | **3** | Tier 2 critique loop + Tier 3 human gate + `workflow approve` CLI. Constraint enforcement (cost / iters / timeouts). Escalation via slack-notify. |
 | **4** | `workflow-run` skill + integration with Shohoku's default playbook end-to-end. Stuck-watchdog reuse from task-runner. `workflow sweep` + `workflow diagnose` CLIs + matching skills. |
 | **5** | `parallel_with` implementation. Scheduled `workflow sweep` (cron / systemd timer). Optional. |
 
-Each phase ends with a working demo and ≥95% line coverage on the
+Each phase ends with a working demo and 100% line coverage on the
 new code (the project's coverage floor applies).
 
 ## Cancel / resume / concurrency
 
 - **Cancel.** `workflow cancel <task-id>` sets `phase=cancelling` in
   `status.json` and SIGTERMs the current iteration's claude
-  subprocess. The orchestrator finalizes a `task_cancelled` event
+  subprocess. The orchestrator finalizes a `cancel_complete` event
   and exits. State on disk is left intact for inspection.
 - **Resume.** `workflow resume <task-id>` reads `status.json` and
   dispatches the `current_step` at `current_iter`. If the most
