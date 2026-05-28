@@ -61,9 +61,68 @@ from typing import Any, Callable, Iterable
 
 import pytest
 
+# --------------------------------------------------------------------------- #
+# Sibling-worktree PYTHONPATH leak guard (runs BEFORE executor import)
+# --------------------------------------------------------------------------- #
+#
+# A working pattern across the Shohoku team is to develop in a per-persona
+# git worktree (``tigerharness-haruko``, ``tigerharness-rukawa``, ...). When
+# the shell exports ``PYTHONPATH=/.../tigerharness/src`` (the main worktree's
+# source root) and pytest is run inside a *sibling* worktree, Python resolves
+# ``tigerharness.workflow_runner`` from the main worktree -- silently
+# shadowing whatever the sibling worktree's branch currently has.
+#
+# That hides newly-added modules: e.g. before a branch's new module is
+# merged to main, importing it from a sibling worktree raises a confusing
+# ``ModuleNotFoundError`` because the main-worktree copy on PYTHONPATH
+# wins. We detect that with the always-present ``cli`` module as a
+# canary, BEFORE we try to import anything that might only exist in one
+# worktree.
+import os as _os
+import warnings as _warnings
+
 from tigerharness.workflow_runner import cli as wf_cli
-from tigerharness.workflow_runner.executor import WorkflowExecutor
-from tigerharness.workflow_runner.paths import TaskPaths
+
+
+def _check_pythonpath_leak() -> None:
+    """Warn (don't raise) if ``tigerharness`` imports from a sibling worktree.
+
+    Uses ``cli`` as the canary because it's been in ``workflow_runner/`` since
+    the package's first commit -- a brand-new module like ``executor`` is
+    not a safe canary, since its absence from the shadowing worktree would
+    cause the import a few lines below to raise before this guard runs.
+
+    We *warn*, not raise: a test run that still works under a leaked
+    PYTHONPATH should be allowed to proceed. The warning makes the
+    misconfiguration visible so the next person to debug a stale-code
+    surprise has a head start.
+    """
+    if not _os.environ.get("PYTHONPATH"):
+        return
+    cli_file = getattr(wf_cli, "__file__", None)
+    if not cli_file:
+        return  # pragma: no cover - defensive; cli must be loaded here.
+    cli_dir = Path(cli_file).resolve().parent
+    expected_src = (Path(__file__).resolve().parents[3] / "src").resolve()
+    if cli_dir.is_relative_to(expected_src):
+        return  # importer picked the right worktree -- nothing to flag.
+    _warnings.warn(
+        "PYTHONPATH points the tigerharness package at a different "
+        "worktree than this conftest lives in.\n"
+        f"  PYTHONPATH    : {_os.environ['PYTHONPATH']}\n"
+        f"  this conftest : {Path(__file__).resolve()}\n"
+        f"  cli resolved  : {cli_dir}\n"
+        "If e2e tests fail with ModuleNotFoundError or stale-code "
+        "behaviour, unset PYTHONPATH before invoking pytest "
+        "(``unset PYTHONPATH && uv run pytest ...``).",
+        stacklevel=1,
+    )
+
+
+_check_pythonpath_leak()
+
+from tigerharness.workflow_runner.executor import WorkflowExecutor  # noqa: E402
+from tigerharness.workflow_runner.paths import TaskPaths  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
