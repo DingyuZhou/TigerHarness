@@ -107,7 +107,11 @@ def test_linear_path_to_done(e2e_driver) -> None:
         "02-build",
         "03-review",
     ]
-    assert all(e["verdict"] == "APPROVE" for e in step_completed)
+    # List-equality (not all(...)) so a wrong verdict shows which step
+    # failed instead of a bare ``assert False``.
+    assert [e["verdict"] for e in step_completed] == [
+        "APPROVE", "APPROVE", "APPROVE",
+    ]
     # The executor's terminal-done event kind is ``task_completed``
     # (see _finalize_done). Pin the exact name -- if it ever
     # changes we want this test to flag the rename loudly.
