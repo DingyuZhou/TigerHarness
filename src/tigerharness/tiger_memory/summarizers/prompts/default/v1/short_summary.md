@@ -1,7 +1,7 @@
 # Short conversation summary — prompt template
 
 You are summarizing a conversation between **{agent_name}** and a
-user (typically the CEO). Produce a short summary — 4–8 bullets,
+user (typically the Operator). Produce a short summary — 4–8 bullets,
 maximum {max_words} words. Lead with decisions and outcomes, not
 narrative. Skip greetings and small talk.
 

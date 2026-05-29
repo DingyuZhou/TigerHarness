@@ -18,8 +18,8 @@ team. Read this first; everything else follows from here.
   - This team folder (your own configs, knowledge, charter, memories,
     prompts, skills).
   - TODO: the project repo this team owns.
-- Everything else is read-only unless the CEO explicitly authorizes
-  it in a session.
+- Everything else is read-only unless the Operator explicitly
+  authorizes it in a session.
 
 ## Working conventions
 

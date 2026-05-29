@@ -172,6 +172,20 @@ class TestMultiGetPersonasErrors:
         with pytest.raises(ValueError, match="missing/empty 'name'"):
             _read_team_roster(tmp_path, "test-lane")
 
+    def test_personas_entry_with_aliases(self, tmp_path):
+        """Line 216: entry with a non-empty aliases list is captured."""
+        from tigerharness.slack_bridge.multi import _read_team_roster
+        cfg = tmp_path / "configs" / "personas.yaml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "    aliases: [Coach, Jiaolian]\n"
+        )
+        names, aliases = _read_team_roster(tmp_path, "test-lane")
+        assert names == ["Anzai"]
+        assert aliases == {"Anzai": ["Coach", "Jiaolian"]}
+
     def test_prompt_not_found(self, tmp_path):
         """Line 232: persona prompt.md not found."""
         from tigerharness.slack_bridge.multi import _build_persona_slot

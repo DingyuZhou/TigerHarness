@@ -1,15 +1,15 @@
 """Must-memorize table — scoring, decay, repeat-detection, pin, render.
 
 The on-disk format is a markdown file with a YAML frontmatter and one
-markdown table. Persistence stays markdown-readable (so a CEO can
-hand-edit if needed) while load/save go through this module.
+markdown table. Persistence stays markdown-readable (so an Operator
+can hand-edit if needed) while load/save go through this module.
 
 Schema (one row):
     score: int | "∞"
     kind: owner_explicit | preference | decision | incident
     last_bump: ISO date YYYY-MM-DD
     last_decay: ISO date YYYY-MM-DD (per-row decay clock)
-    source: free text ("CEO", "repeat", "extract", "pin")
+    source: free text ("operator", "repeat", "extract", "pin")
     memo: text ≤ memo_max_words
 
 See design doc §5.5 + §6.

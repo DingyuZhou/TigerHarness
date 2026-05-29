@@ -50,11 +50,11 @@ def _setup(tmp_path: Path):
 class TestPin:
     def test_pin_owner_explicit(self, tmp_path: Path):
         cfg, store = _setup(tmp_path)
-        ret = pin(cfg, store, memo="CEO likes 47", kind="owner_explicit")
+        ret = pin(cfg, store, memo="Operator likes 47", kind="owner_explicit")
         assert ret == 0
         rows = load(store)
         assert len(rows) == 1
-        assert rows[0].memo == "CEO likes 47"
+        assert rows[0].memo == "Operator likes 47"
         assert rows[0].locked is True
 
     def test_pin_preference(self, tmp_path: Path):

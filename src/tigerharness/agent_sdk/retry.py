@@ -19,7 +19,7 @@ Design picks
 ------------
 
 - **Three attempts, exponential backoff (1 s, 2 s, 4 s).** Total wait
-  ≤ 7 s. Anything bigger feels like a hang to a CEO on Slack. Anything
+  ≤ 7 s. Anything bigger feels like a hang to an Operator on Slack. Anything
   smaller doesn't outlast a typical rate-limit window edge.
 - **Retry every exception.** We don't have a reliable taxonomy of
   "transient vs permanent" for ``claude -p`` (errors come through as
