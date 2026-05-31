@@ -99,10 +99,20 @@ __all__ = [
 # Constants
 # --------------------------------------------------------------------------- #
 
-#: Hard cap before a parse-failure loop escalates. Three attempts is
-#: one real shot plus two re-prompts; if the persona still can't
-#: produce a clean trailer, the contract is broken and we escalate.
-MAX_PARSE_FAILURES = 3
+#: Hard cap before a parse-failure loop escalates. Per the spec's
+#: "Persona response trailer protocol" (docs/workflow-runner.md), the
+#: persona gets the original shot plus exactly one re-prompt. If the
+#: second attempt also fails to produce a clean trailer, the contract
+#: is broken and we escalate.
+MAX_PARSE_FAILURES = 2
+
+#: Spec-mandated re-prompt text injected before the step body on the
+#: second attempt (i.e., when ``parse_failure_count == 1``). Verbatim
+#: from docs/workflow-runner.md "Persona response trailer protocol".
+_PARSE_FAILURE_REPROMPT = (
+    "I couldn't find your WORKFLOW: trailer. Please end your next "
+    "reply with one of WORKFLOW: APPROVE / REVISE / BLOCK."
+)
 
 #: Sentinels recognised in step edge targets.
 _SENTINEL_DONE = "__done__"
@@ -277,8 +287,9 @@ class WorkflowExecutor:
                 kind="constraint_breached",
             )
 
-        prologue = self._feedback_prologue(status, step_id, next_iter)
-        prompt = prologue + body if prologue else body
+        parse_prologue = self._parse_failure_prologue(status)
+        feedback_prologue = self._feedback_prologue(status, step_id, next_iter)
+        prompt = parse_prologue + feedback_prologue + body
 
         # Bump current_iter + step_started_at so `workflow show`
         # mid-flight reports something honest.
@@ -700,6 +711,19 @@ class WorkflowExecutor:
                 f"step file {step_id}.md has no YAML frontmatter"
             )
         return StepFrontmatter.from_dict(fm), _extract_body(text)
+
+    # ------------------------------------------------------------------ #
+    # Parse-failure prologue (spec re-prompt on the second attempt)
+    # ------------------------------------------------------------------ #
+
+    def _parse_failure_prologue(self, status: Status) -> str:
+        """Inject the spec-mandated re-prompt text before the next
+        dispatch when the prior attempt failed to produce a clean
+        trailer. Empty otherwise.
+        """
+        if int(status.phase_state.get("parse_failure_count", 0)) <= 0:
+            return ""
+        return _PARSE_FAILURE_REPROMPT + "\n\n"
 
     # ------------------------------------------------------------------ #
     # Feedback prologue (REVISE rewinds)

@@ -671,13 +671,15 @@ def test_cancel_mid_loop_after_first_iter(task_paths: TaskPaths) -> None:
 def test_parse_error_retries_same_step_then_succeeds(
     task_paths: TaskPaths,
 ) -> None:
+    """Per spec: re-prompt exactly ONCE on parse failure. If the
+    second attempt produces a clean trailer, the loop continues.
+    """
     _seed_task(
         task_paths,
         steps=[{"step_id": "s1", "on_approve": "__done__", "max_iters": 5}],
     )
     fake = FakeSessionManager(
         [
-            {"trailer": "PARSE_ERROR", "cost_usd": 0.05},
             {"trailer": "PARSE_ERROR", "cost_usd": 0.05},
             {"trailer": "APPROVE", "cost_usd": 0.05},
         ]
@@ -687,26 +689,28 @@ def test_parse_error_retries_same_step_then_succeeds(
     status = Status.from_dict(read_json(task_paths.status_json))
     # parse_failure_count reset on successful verdict.
     assert "parse_failure_count" not in status.phase_state
-    # Three dispatches, all on s1.
-    assert [c["persona"] for c in fake.calls] == ["anzai"] * 3
-    # iter_counts shows three dispatches (parse failures count too --
+    # Two dispatches, all on s1.
+    assert [c["persona"] for c in fake.calls] == ["anzai"] * 2
+    # iter_counts shows two dispatches (parse failures count too --
     # otherwise the per-step cap couldn't bound a parse-failure loop).
-    assert status.iter_counts == {"s1": 3}
+    assert status.iter_counts == {"s1": 2}
     # History only has the one successful APPROVE.
     assert len(status.step_history) == 1
     assert status.step_history[0].verdict == "APPROVE"
 
 
-def test_parse_error_third_consecutive_escalates(
+def test_parse_error_second_consecutive_escalates(
     task_paths: TaskPaths,
 ) -> None:
+    """Per spec: original shot + exactly one re-prompt. If the second
+    attempt still fails to produce a trailer, escalate.
+    """
     _seed_task(
         task_paths,
         steps=[{"step_id": "s1", "on_approve": "__done__", "max_iters": 5}],
     )
     fake = FakeSessionManager(
         [
-            {"trailer": "PARSE_ERROR", "cost_usd": 0.05},
             {"trailer": "PARSE_ERROR", "cost_usd": 0.05},
             {"trailer": "PARSE_ERROR", "cost_usd": 0.05},
         ]
@@ -717,6 +721,32 @@ def test_parse_error_third_consecutive_escalates(
     status = Status.from_dict(read_json(task_paths.status_json))
     assert status.escalation == "parse_failure_loop"
     assert len(fake.calls) == MAX_PARSE_FAILURES
+    assert MAX_PARSE_FAILURES == 2  # spec contract
+
+
+def test_parse_failure_reprompt_text_injected(
+    task_paths: TaskPaths,
+) -> None:
+    """Per spec: the second dispatch (after a parse failure) must be
+    prefixed with the canonical re-prompt message so the persona knows
+    why it's being asked again.
+    """
+    _seed_task(
+        task_paths,
+        steps=[{"step_id": "s1", "on_approve": "__done__", "max_iters": 5}],
+    )
+    fake = FakeSessionManager(
+        [
+            {"trailer": "PARSE_ERROR", "cost_usd": 0.05},
+            {"trailer": "APPROVE", "cost_usd": 0.05},
+        ]
+    )
+    WorkflowExecutor(task_paths, session_manager=fake).run()
+    # First dispatch: no re-prompt prefix.
+    assert "I couldn't find your WORKFLOW: trailer" not in fake.calls[0]["prompt"]
+    # Second dispatch: spec-mandated re-prompt prefix.
+    assert "I couldn't find your WORKFLOW: trailer" in fake.calls[1]["prompt"]
+    assert "WORKFLOW: APPROVE / REVISE / BLOCK" in fake.calls[1]["prompt"]
 
 
 # --------------------------------------------------------------------------- #
