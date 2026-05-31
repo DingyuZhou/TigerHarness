@@ -62,6 +62,68 @@ class StuckWatchdogEscalation(Exception):
         self.reason = reason
 
 
+class SessionCorruptedError(Exception):
+    """Raised by ``_dispatch_one`` when the API surfaces the
+    extended-thinking-block 400 (``'thinking' or 'redacted_thinking' blocks
+    in the latest assistant message cannot be modified``).
+
+    This is an upstream bug in the ``claude`` CLI / Anthropic API tool-loop
+    handling — the thinking-block signatures get out of sync across
+    multi-tool-call turns, and once the session has produced a poisoned
+    assistant turn every ``--resume`` of that session re-trips the error
+    instantly. The only effective recovery is to abandon the session and
+    start fresh.
+
+    The runner's main loop catches this, closes the poisoned session,
+    opens a brand-new one with no ``--resume`` (so the next iteration
+    falls back through the ``is_first_iter`` path and re-sends the
+    original task prompt), and bails with ``status=error`` only if the
+    same corruption fires twice in a row (so a persistently-broken
+    upstream doesn't burn the whole iteration budget)."""
+    def __init__(self, iter_num: int, preview: str = "") -> None:
+        super().__init__(
+            f"session corrupted by upstream thinking-block 400 at iter "
+            f"{iter_num}" + (f": {preview[:160]}" if preview else "")
+        )
+        self.iter_num = iter_num
+        self.preview = preview
+
+
+# Phrase-only match (resilient to backend-side wording tweaks: tightens
+# match against the structural fragment Anthropic returns in this 400
+# rather than the whole sentence). Kept lower-case for case-insensitive
+# comparison; see ``_is_thinking_block_corruption``.
+_THINKING_BLOCK_CORRUPTION_PHRASE = (
+    "blocks in the latest assistant message cannot be modified"
+)
+
+# How many consecutive corruptions to tolerate before failing the job.
+# One = "retry once". Two consecutive failures after recovery means the
+# upstream is stuck broken and the team needs a human look — no point
+# burning the rest of the iteration budget on it.
+SESSION_CORRUPTION_RETRY_BUDGET = 2
+
+
+def _is_thinking_block_corruption(
+    text: str, stop_reason: str | None
+) -> bool:
+    """Detect the extended-thinking-block 400 in a backend response.
+
+    Returns True only when both conditions hold:
+      - ``stop_reason`` is ``"error"`` (the backend signalled a failure
+        rather than a real assistant turn), AND
+      - ``text`` contains the canonical 400 fragment.
+
+    This deliberately ignores cases where the user's prompt happens to
+    *mention* the phrase — only the error-result shape triggers recovery.
+    """
+    if stop_reason != "error":
+        return False
+    if not text:
+        return False
+    return _THINKING_BLOCK_CORRUPTION_PHRASE in text.lower()
+
+
 # ---------------------------------------------------------------------------
 # Default prompt components
 # ---------------------------------------------------------------------------
@@ -298,6 +360,7 @@ async def _dispatch_one(
 
     text = (result.final_output or "") if isinstance(result.final_output, str) \
         else str(result.final_output or "")
+    stop_reason = getattr(result, "stop_reason", None)
     _append_log(
         log_path,
         {
@@ -309,10 +372,24 @@ async def _dispatch_one(
             "cost_usd": result.cost_usd,
             "chars_in": len(prompt),
             "chars_out": len(text),
-            "stop_reason": getattr(result, "stop_reason", None),
+            "stop_reason": stop_reason,
             "preview": text[:200],
         },
     )
+    if _is_thinking_block_corruption(text, stop_reason):
+        # Log structured event so observability captures the recovery
+        # boundary (the turn entry above already captures the surface
+        # error; this one labels it as the specific upstream-bug class).
+        _append_log(
+            log_path,
+            {
+                "t": time.time(),
+                "kind": "session_corruption_detected",
+                "iter": iter_num,
+                "session": session.id,
+            },
+        )
+        raise SessionCorruptedError(iter_num, preview=text)
     return text, result.cost_usd
 
 
@@ -781,6 +858,7 @@ async def run_job(
         session = await backend.open_session()
     consecutive_stale = 0
     consecutive_error = 0
+    consecutive_corruption = 0
     prev_text = ""
 
     try:
@@ -888,9 +966,98 @@ async def run_job(
                     )
                     break
                 continue
+            except SessionCorruptedError as corrupt:
+                # Upstream thinking-block 400. The session is dead -- any
+                # --resume of it will instantly re-trip the same error.
+                # Abandon it, open a fresh one, let the next iteration
+                # fall back through the is_first_iter path. Bail only if
+                # the recovery itself fails the same way (upstream really
+                # is stuck broken).
+                consecutive_corruption += 1
+                consecutive_stale = 0
+                consecutive_error = 0
+                meta.current_iter = i
+                meta.last_update = time.time()
+                store.set(meta)
+                _append_log(log_path, {
+                    "t": time.time(),
+                    "kind": "session_corruption_recovery",
+                    "iter": i,
+                    "consecutive": consecutive_corruption,
+                    "action": (
+                        "aborting"
+                        if consecutive_corruption >= SESSION_CORRUPTION_RETRY_BUDGET
+                        else "fresh-session-restart"
+                    ),
+                })
+                tail = (
+                    "Hit the retry budget -- aborting job as error."
+                    if consecutive_corruption >= SESSION_CORRUPTION_RETRY_BUDGET
+                    else (
+                        "Abandoning the poisoned session; iteration "
+                        f"{i + 1} will start from a fresh session "
+                        "(prior in-session context is lost; on-disk work "
+                        "in this task_journal remains)."
+                    )
+                )
+                _append_iteration(
+                    iter_log, i,
+                    "_[Iteration aborted: upstream API returned the "
+                    "extended-thinking-block 400 (assistant message "
+                    "thinking blocks cannot be modified). " + tail + "]_",
+                )
+                result_path.write_text(
+                    f"[Iteration {i} aborted: session corrupted by "
+                    "upstream thinking-block 400.]\n"
+                )
+
+                if consecutive_corruption >= SESSION_CORRUPTION_RETRY_BUDGET:
+                    meta.status = "error"
+                    meta.error = (
+                        f"iter {i}: upstream thinking-block 400 persisted "
+                        f"across {consecutive_corruption} consecutive "
+                        f"iterations; gave up"
+                    )
+                    break
+
+                # Open a fresh session. Clearing meta.session_id is the
+                # observable signal that the prior conversation is gone;
+                # `is_first_iter` next round sees session.id == "" and
+                # `not resume_session_id` (we don't reset that — it would
+                # also drop the legitimate user-supplied resume), so the
+                # original task prompt is re-sent.
+                try:
+                    await session.close()
+                except Exception:
+                    log.exception("session.close failed after corruption")
+                try:
+                    session = await backend.open_session()
+                except Exception as exc:
+                    log.exception(
+                        "failed to open fresh session after corruption"
+                    )
+                    meta.status = "error"
+                    meta.error = (
+                        f"iter {i} session corrupted; could not open "
+                        f"replacement session: {exc!r}"
+                    )
+                    break
+                meta.session_id = ""
+                # Force re-send of the original prompt on the next iter:
+                # the `is_first_iter` predicate checks both
+                # ``not session.id`` AND ``not resume_session_id``. A
+                # user-supplied resume_session_id is now stale (we just
+                # threw it away), so clear it too -- otherwise the next
+                # iter would treat itself as a continuation of a session
+                # we no longer have.
+                resume_session_id = ""
+                continue
 
             if cost:
                 total_cost += cost
+
+            # Successful turn -- corruption is not "consecutive" anymore.
+            consecutive_corruption = 0
 
             meta.current_iter = i
             meta.session_id = session.id
