@@ -48,14 +48,29 @@ from tigerharness.workflow_runner.ids import validate_step_id
 _STATE_DIR_NAME = "tigerharness-workflows"
 
 
+def _is_team_dir(p: Path) -> bool:
+    """Heuristic: a directory is a tigerharness team root iff it has
+    ``configs/personas.yaml``. Matches what :mod:`tigerharness.init`
+    scaffolds and what :mod:`tigerharness.slack_bridge.multi` reads.
+    """
+    try:
+        return (p / "configs" / "personas.yaml").is_file()
+    except OSError:
+        return False
+
+
 def default_journal_root() -> Path:
     """Return the default per-task journal root.
 
     Resolution order:
 
     1. ``$TIGERHARNESS_WORKFLOW_JOURNAL`` if set and non-empty.
-    2. ``$XDG_STATE_HOME/tigerharness-workflows`` if ``XDG_STATE_HOME`` set.
-    3. ``~/.local/state/tigerharness-workflows`` otherwise.
+    2. ``<cwd>/workflow_journal`` if the current directory is a team
+       root (``configs/personas.yaml`` present). Honours the original
+       design intent that a task folder lives under the team.
+    3. ``$XDG_STATE_HOME/tigerharness-workflows`` if ``XDG_STATE_HOME``
+       is set.
+    4. ``~/.local/state/tigerharness-workflows`` otherwise.
 
     The directory is not created here; call :meth:`TaskPaths.ensure` on
     the derived task directory when you are ready to write.
@@ -63,6 +78,9 @@ def default_journal_root() -> Path:
     override = os.environ.get("TIGERHARNESS_WORKFLOW_JOURNAL", "").strip()
     if override:
         return Path(override)
+    cwd = Path.cwd()
+    if _is_team_dir(cwd):
+        return cwd / "workflow_journal"
     base = os.environ.get("XDG_STATE_HOME") or str(
         Path.home() / ".local" / "state"
     )

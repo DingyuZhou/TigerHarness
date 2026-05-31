@@ -49,6 +49,67 @@ def test_default_journal_root_ignores_blank_override(monkeypatch, tmp_path):
     assert default_journal_root() == tmp_path / "tigerharness-workflows"
 
 
+def _make_team_dir(p: Path) -> Path:
+    (p / "configs").mkdir(parents=True, exist_ok=True)
+    (p / "configs" / "personas.yaml").write_text("personas: []\n")
+    return p
+
+
+def test_default_journal_root_prefers_team_folder_when_cwd_is_team(
+    monkeypatch, tmp_path
+):
+    """When cwd looks like a team root (configs/personas.yaml present),
+    default to ``<cwd>/workflow_journal`` per the original design."""
+    monkeypatch.delenv("TIGERHARNESS_WORKFLOW_JOURNAL", raising=False)
+    _make_team_dir(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert default_journal_root() == tmp_path / "workflow_journal"
+
+
+def test_default_journal_root_explicit_override_beats_team_folder(
+    monkeypatch, tmp_path
+):
+    """Explicit env override still wins over the team-folder default."""
+    team = tmp_path / "team"
+    override = tmp_path / "override"
+    _make_team_dir(team)
+    monkeypatch.chdir(team)
+    monkeypatch.setenv("TIGERHARNESS_WORKFLOW_JOURNAL", str(override))
+    assert default_journal_root() == override
+
+
+def test_default_journal_root_team_folder_beats_xdg(monkeypatch, tmp_path):
+    """Team-folder default beats XDG fallback."""
+    team = tmp_path / "team"
+    xdg = tmp_path / "xdg"
+    _make_team_dir(team)
+    monkeypatch.chdir(team)
+    monkeypatch.delenv("TIGERHARNESS_WORKFLOW_JOURNAL", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    assert default_journal_root() == team / "workflow_journal"
+
+
+def test_default_journal_root_non_team_cwd_falls_back_to_xdg(
+    monkeypatch, tmp_path
+):
+    """A directory without configs/personas.yaml is NOT a team dir."""
+    monkeypatch.delenv("TIGERHARNESS_WORKFLOW_JOURNAL", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    not_team = tmp_path / "not-team"
+    not_team.mkdir()
+    monkeypatch.chdir(not_team)
+    assert default_journal_root() == tmp_path / "tigerharness-workflows"
+
+
+def test_is_team_dir_returns_false_on_oserror(monkeypatch, tmp_path):
+    """OSError from ``is_file()`` (e.g. permission denied on an odd
+    filesystem) is swallowed -- the dir is treated as not-a-team."""
+    def _raise(self):
+        raise OSError("simulated permission denied")
+    monkeypatch.setattr(Path, "is_file", _raise)
+    assert paths_mod._is_team_dir(tmp_path) is False
+
+
 # --------------------------------------------------------------------------- #
 # new_task_id
 # --------------------------------------------------------------------------- #
