@@ -89,6 +89,14 @@ class JobMeta:
     # claude. The job auto-continues with the next iter unless this was
     # the final iteration. See stuck_watchdog.py for full details.
     stuck_timeout: int = 1200
+    # Absolute path to a git repo. When set, the runner creates an
+    # isolated worktree at ``<worktree_repo>/.worktrees/<job_id>/`` on
+    # startup, tells the persona to ``cd`` into it for git operations,
+    # and removes the worktree on job exit (best-effort). Lets multiple
+    # background jobs operate on the same project concurrently without
+    # racing on HEAD/index/working tree. Empty = legacy behaviour
+    # (no worktree, persona shares whatever tree the cwd resolves to).
+    worktree_repo: str = ""
 
 
 def new_job_id() -> str:

@@ -214,6 +214,55 @@ class TestCmdAssign:
         assert "Assigned:" in out
         assert "helper" in out
 
+    def test_assign_with_worktree_repo_records_path(
+        self, store, monkeypatch, capsys, tmp_path,
+    ):
+        """``--worktree-repo`` on a valid git repo records the resolved
+        absolute path in JobMeta and surfaces the planned worktree
+        location in the assign output."""
+        import subprocess as _sp
+        register_persona("helper", prompt="You help.", cwd="/tmp")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _sp.run(["git", "init", "-q", str(repo)], check=True)
+        with patch("tigerharness.task_runner.cli.subprocess.Popen") as mock_popen:
+            mock_popen.return_value.pid = 12345
+            ret = main([
+                "assign", "--to", "helper", "--prompt", "do stuff",
+                "--worktree-repo", str(repo),
+            ])
+        assert ret == 0
+        out = capsys.readouterr().out
+        # The output names the worktree path so the operator can tail it.
+        assert "worktree:" in out
+        assert ".worktrees" in out
+
+        # And the resolved absolute path is in JobMeta.
+        jobs = list(store.all().values())
+        assert any(
+            m.worktree_repo == str(repo.resolve()) for m in jobs
+        ), f"no job has worktree_repo set; jobs={jobs}"
+
+    def test_assign_worktree_repo_not_a_git_repo_errors(
+        self, store, monkeypatch, capsys, tmp_path,
+    ):
+        """A path that isn't a git repo must error at CLI time -- the
+        detached runner shouldn't get a chance to crash on this."""
+        register_persona("helper", prompt="You help.", cwd="/tmp")
+        bogus = tmp_path / "not-a-repo"
+        bogus.mkdir()
+        with patch("tigerharness.task_runner.cli.subprocess.Popen") as mock_popen:
+            mock_popen.return_value.pid = 12345
+            ret = main([
+                "assign", "--to", "helper", "--prompt", "do stuff",
+                "--worktree-repo", str(bogus),
+            ])
+        assert ret == 2
+        err = capsys.readouterr().err
+        assert "not a git repository" in err
+        # No Popen happened.
+        mock_popen.assert_not_called()
+
 
 class TestCmdContinue:
     def test_continue_running_fails(self, store, monkeypatch, capsys):
