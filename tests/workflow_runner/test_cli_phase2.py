@@ -24,7 +24,6 @@ from pathlib import Path
 import pytest
 
 from tigerharness.workflow_runner import cli, read_events
-from tigerharness.workflow_runner.atomic import write_json_atomic
 from tigerharness.workflow_runner.compile.errors import (
     CompileTier1Error,
     CompileTier2Error,
@@ -114,8 +113,11 @@ def _make_fake_compile(
             workflow_config=wf,
             compile_critique_iters=critique_iters,
         )
-        # Side of the contract the pipeline owns: compiled artifacts.
-        write_json_atomic(task_paths.orchestration_json, orch.to_dict())
+        # The pipeline owns the step .md *bodies* (CompileResult.steps is
+        # frontmatter-only, so the CLI cannot reconstruct them). It does
+        # NOT write orchestration.json here -- the CLI persists that (and
+        # the trace/transcript) from the returned result via
+        # _write_compile_artifacts.
         for sid in step_ids:
             task_paths.step_file(sid).write_text(
                 f"# {sid}\n", encoding="utf-8"
@@ -124,6 +126,8 @@ def _make_fake_compile(
             steps=list(step_ids),
             critique_iters=critique_iters,
             orchestration=orch,
+            trace="happy path: 01-plan -> 02-review -> __done__\n",
+            transcript="# Critique transcript\nround 1: APPROVE / APPROVE\n",
         )
 
     return _compile
@@ -252,6 +256,20 @@ def test_happy_path_playbook_compiles_and_runs(
 
     completed = _only(events_p, "compile_completed")
     assert completed.extra == {"steps": 2, "critique_iters": 3}
+
+    # The CLI -- not the fake pipeline -- persists the compiled plan and
+    # diagnostics from the returned CompileResult. The fake deliberately
+    # does NOT write orchestration.json/trace/transcript, so these prove
+    # _write_compile_artifacts fired before compile_completed.
+    task_dir = _task_dir(journal_root)
+    orch = json.loads((task_dir / "orchestration.json").read_text())
+    assert orch["steps"] == ["01-plan", "02-review"]
+    assert (task_dir / "compile_trace.txt").read_text() == (
+        "happy path: 01-plan -> 02-review -> __done__\n"
+    )
+    assert (task_dir / "compile_critique.md").read_text() == (
+        "# Critique transcript\nround 1: APPROVE / APPROVE\n"
+    )
 
 
 # --------------------------------------------------------------------------- #

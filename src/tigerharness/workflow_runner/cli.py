@@ -548,6 +548,32 @@ def _resolve_compile_entrypoint() -> Any:
     return compile_fn
 
 
+def _write_compile_artifacts(paths: TaskPaths, result: Any) -> None:
+    """Persist the compiled plan + diagnostics from a ``CompileResult``.
+
+    ``docs/workflow-runner-phase2.md`` is internally split on who writes
+    what: the pipeline "High-level flow" lists persisting steps/ +
+    orchestration.json + traces, while the ``cmd_start`` flow has the CLI
+    call ``write_artifacts(task_paths, result)`` and describes the returned
+    ``Orchestration`` as "ready to persist". We resolve that by having the
+    CLI write the artifacts it *can* reconstruct from ``result`` --
+    ``orchestration.json`` and the compile ``trace`` / ``transcript``
+    diagnostics. The write is idempotent: if the pipeline already wrote
+    the same content the CLI simply rewrites it; if it did not, the CLI
+    fills the gap so the executor always finds a valid
+    ``orchestration.json``.
+
+    Step ``.md`` *bodies* and ``sessions.json`` stay the pipeline's job:
+    ``CompileResult.steps`` carries only :class:`StepFrontmatter`, so the
+    prompt bodies cannot be reconstructed here.
+    """
+    write_json_atomic(
+        paths.orchestration_json, result.orchestration.to_dict()
+    )
+    paths.compile_trace.write_text(result.trace, encoding="utf-8")
+    paths.compile_critique.write_text(result.transcript, encoding="utf-8")
+
+
 def _resolve_team_root(team: str) -> Path:
     """Resolve the on-disk team root for ``team``.
 
@@ -666,6 +692,10 @@ def _cmd_start_compile(args: argparse.Namespace) -> int:
         )
         print(f"error: compile failed (tier 2): {exc}", file=sys.stderr)
         return 2
+
+    # Persist the compiled plan before logging success so any reader that
+    # sees ``compile_completed`` can trust ``orchestration.json`` exists.
+    _write_compile_artifacts(paths, result)
 
     append_event(
         paths.events_jsonl,
