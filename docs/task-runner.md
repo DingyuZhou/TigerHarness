@@ -171,6 +171,47 @@ short Opus call costs. Heuristic `STUCK`/`WORKING` verdicts cost
 nothing -- the agent only fires on `UNCLEAR`. If this becomes a budget
 concern, disable with `--stuck-timeout 0`.
 
+## Per-job worktree isolation (`--worktree-repo`)
+
+When multiple background jobs target the same project repo
+simultaneously, the default cwd-shared behaviour causes
+HEAD/index/working-tree contention: one persona's `git checkout`
+moves HEAD under another's feet, an `untracked` file from one job
+cross-contaminates another's `git status`, and a bare `git add` can
+stage teammates' files onto the wrong branch.
+
+Opt in to isolation via `--worktree-repo PATH` on `assign`:
+
+```
+python -m tigerharness.task_runner assign \
+    --to Miyagi \
+    --prompt-file brief.md \
+    --iters 10 \
+    --worktree-repo /home/tigerleap/projects/tigerharness
+```
+
+The runner then:
+
+1. Creates a git worktree at `<repo>/.worktrees/<job-id>/` (detached
+   on the current `main` tip) before iter 1 starts.
+2. Injects a "your project worktree" notice into every iteration's
+   prompt, telling the persona to `cd <worktree>` for git, pytest,
+   and uv operations. The reminder rides every iteration so
+   `/compact` can't drop it.
+3. Removes the worktree on job exit (best-effort -- a cleanup
+   failure logs a warning but doesn't mask the real job outcome).
+
+`tigerharness continue` inherits the worktree from JobMeta
+automatically. Each `continue` re-creates the same worktree path
+(operations on the same job's worktree are idempotent).
+
+The persona's cwd stays at the team root so its skills, memory, and
+brief paths still work; only the project work moves to the isolated
+worktree.
+
+**Add `.worktrees/` to your repo's `.gitignore`** so the
+ephemeral worktree dirs don't pollute `git status`.
+
 **Agent-side child-process watch.** The default task preamble
 (`runner.TASK_PREAMBLE`) instructs the iteration's agent to inspect
 its own subprocesses older than 10 min via

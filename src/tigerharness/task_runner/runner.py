@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 import traceback
@@ -332,6 +333,102 @@ STOP and add it. This reminder is re-issued every iteration because \
 """
 
 
+# ---------------------------------------------------------------------------
+# Per-job worktree isolation
+# ---------------------------------------------------------------------------
+#
+# Multiple background task-runner jobs that share the same checkout race on
+# HEAD, the index, and the working tree (real incident: Wave 1 of Phase 2
+# saw three personas all editing /home/tigerleap/projects/tigerharness/
+# simultaneously; HEAD ping-ponged between branches and one persona's
+# `git add` accidentally staged another's untracked files). When the
+# operator opts in via `--worktree-repo PATH` on `assign`, the runner
+# creates a dedicated worktree at ``<repo>/.worktrees/<job-id>/``, tells
+# the persona about it via a prompt notice (so it `cd`s there for git/
+# pytest/uv ops), and removes it on job exit.
+#
+# Path is INSIDE the project so it satisfies any persona "stay inside
+# the project root" boundary; `.worktrees/` should be gitignored in
+# host repos.
+
+_WORKTREE_DIRNAME = ".worktrees"
+
+
+def _worktree_path(repo: str, job_id: str) -> Path:
+    """Stable path for a job's worktree. The same job re-running (e.g.
+    via ``tigerharness continue``) lands at the same location."""
+    return Path(repo) / _WORKTREE_DIRNAME / job_id
+
+
+def _create_worktree(repo: str, dest: Path) -> None:
+    """Create a fresh worktree of ``repo`` at ``dest``, detached on
+    the current ``main`` branch tip. The persona then creates its own
+    ``work/...`` branch via the standard git workflow.
+
+    If the worktree already exists (e.g. ``tigerharness continue``
+    reusing a prior worktree), this is a no-op. Raises CalledProcessError
+    if ``git worktree add`` fails for any other reason (e.g. repo is
+    not a git repo, dest is non-empty, or main doesn't exist)."""
+    if dest.exists():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", repo, "worktree", "add", "--detach", str(dest), "main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _remove_worktree(repo: str, dest: Path) -> None:
+    """Best-effort worktree removal. Errors are logged but do NOT fail
+    the job -- a stale worktree is a small leak, a job-end crash is a
+    big one. Run ``git worktree prune`` periodically to clean stragglers."""
+    if not dest.exists():
+        return
+    result = subprocess.run(
+        ["git", "-C", repo, "worktree", "remove", "--force", str(dest)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log.warning(
+            "worktree remove failed for %s: %s",
+            dest, (result.stderr or result.stdout or "").strip(),
+        )
+
+
+_WORKTREE_NOTICE_TEMPLATE = """
+### Your project worktree -- CRITICAL for git operations
+
+For this task, your git operations happen in a DEDICATED WORKTREE,
+isolated from any other concurrent task-runner jobs:
+
+    {worktree_path}
+
+`cd {worktree_path}` before any `git` / `pytest` / `uv` command. The
+worktree starts detached on the current `main` tip; create a feature
+branch (`work/YYYY-MM-DD-<slug>`) for your commits using the standard
+project conventions.
+
+Do NOT operate on the main project checkout at the parent path -- other
+jobs may be editing it concurrently. Stay in your worktree.
+
+The worktree is removed automatically when your job ends, so any work
+you want to keep must be committed (and pushed via the Operator) before
+then.
+
+---
+
+"""
+
+
+def _get_worktree_notice(worktree_path: Path) -> str:
+    """Render the worktree notice with the absolute path the persona
+    must ``cd`` into for git operations."""
+    return _WORKTREE_NOTICE_TEMPLATE.format(worktree_path=str(worktree_path))
+
+
 _RECOVERY_NOTICE_TEMPLATE = """
 ### Recovery notice -- READ BEFORE STARTING
 
@@ -507,29 +604,48 @@ def _build_initial_prompt(
     *,
     thread_ts: str = "",
     recovery_notice: str = "",
+    worktree_notice: str = "",
 ) -> str:
     """Prepend the task preamble (+ optional Slack threading notice, +
-    optional post-corruption recovery notice) to the user's task prompt.
+    optional post-corruption recovery notice, + optional worktree notice)
+    to the user's task prompt.
 
-    ``recovery_notice``, when non-empty, is injected immediately before
-    the user prompt so the persona reads it FIRST -- it points at the
-    task journal where any partial work from a session that was killed
-    by the upstream thinking-block 400 still lives.
+    ``recovery_notice``, when non-empty, is injected before the user
+    prompt so the persona reads it FIRST -- it points at the task
+    journal where any partial work from a session that was killed by
+    the upstream thinking-block 400 still lives.
+
+    ``worktree_notice``, when non-empty, is injected so the persona
+    knows to ``cd`` into a dedicated git worktree for this task's
+    commits instead of operating on the shared project checkout. It
+    rides every iteration's prompt because ``/compact`` can otherwise
+    drop the worktree-path reminder from the persona's context.
     """
     parts = [TASK_PREAMBLE]
     if thread_ts:
         parts.append(_get_slack_thread_notice(thread_ts))
+    if worktree_notice:
+        parts.append(worktree_notice)
     if recovery_notice:
         parts.append(recovery_notice)
     parts.append(user_prompt)
     return "".join(parts)
 
 
-def _build_continuation(custom: str, *, thread_ts: str = "") -> str:
-    """Build the continuation prompt."""
+def _build_continuation(
+    custom: str,
+    *,
+    thread_ts: str = "",
+    worktree_notice: str = "",
+) -> str:
+    """Build the continuation prompt. ``worktree_notice`` rides every
+    iteration for the same reason ``thread_ts`` does: ``/compact``
+    drops it from the persona's working memory otherwise."""
     base = (CONTINUATION_PREAMBLE + custom) if custom else CONTINUATION_DEFAULT
     if thread_ts:
         base += _get_slack_thread_notice(thread_ts)
+    if worktree_notice:
+        base += worktree_notice
     return base
 
 
@@ -899,8 +1015,42 @@ async def run_job(
             "max_iters": meta.max_iters,
             "forever": forever,
             "compact_every": meta.compact_every,
+            "worktree_repo": meta.worktree_repo,
         },
     )
+
+    # Set up the per-job worktree (opt-in via meta.worktree_repo). On
+    # any setup failure we end the job as error rather than blunder
+    # forward into the shared tree -- the entire point of this feature
+    # is "no shared-tree contention".
+    worktree_path: Path | None = None
+    worktree_notice = ""
+    if meta.worktree_repo:
+        worktree_path = _worktree_path(meta.worktree_repo, job_id)
+        try:
+            _create_worktree(meta.worktree_repo, worktree_path)
+        except subprocess.CalledProcessError as exc:
+            meta.status = "error"
+            meta.error = (
+                f"failed to create worktree at {worktree_path}: "
+                f"{(exc.stderr or exc.stdout or repr(exc)).strip()}"
+            )
+            meta.last_update = time.time()
+            meta.pid = None
+            store.set(meta)
+            _append_log(log_path, {
+                "t": time.time(),
+                "kind": "worktree_create_failed",
+                "path": str(worktree_path),
+                "error": (exc.stderr or exc.stdout or repr(exc)).strip(),
+            })
+            return 2
+        _append_log(log_path, {
+            "t": time.time(),
+            "kind": "worktree_created",
+            "path": str(worktree_path),
+        })
+        worktree_notice = _get_worktree_notice(worktree_path)
 
     # Post a "job started" DM and capture the thread anchor ts.
     if not meta.slack_thread_ts:
@@ -970,15 +1120,19 @@ async def run_job(
                     _raw_prompt,
                     thread_ts=meta.slack_thread_ts,
                     recovery_notice=recovery_notice,
+                    worktree_notice=worktree_notice,
                 )
             else:
                 # Re-inject the Slack threading notice on EVERY continuation
                 # when slack_thread_ts is set -- /compact drops the iter-1
                 # reminder, and without re-injection the agent posts
-                # top-level DMs on later iters.
+                # top-level DMs on later iters. Same logic for the
+                # worktree notice: every iter needs to see the
+                # ``cd <worktree>`` reminder, post-/compact too.
                 prompt = _build_continuation(
                     meta.continuation,
                     thread_ts=meta.slack_thread_ts,
+                    worktree_notice=worktree_notice,
                 )
 
             # Pre-compute whether this is the last iter (the dispatch may
@@ -1358,6 +1512,19 @@ async def run_job(
             await session.close()
         except Exception:
             pass
+        # Best-effort worktree cleanup. A stale worktree is a small leak
+        # (visible via `git worktree list`); a teardown crash here would
+        # mask the real job outcome from the operator. Log + continue.
+        if worktree_path is not None:
+            try:
+                _remove_worktree(meta.worktree_repo, worktree_path)
+                _append_log(log_path, {
+                    "t": time.time(),
+                    "kind": "worktree_removed",
+                    "path": str(worktree_path),
+                })
+            except Exception:
+                log.exception("worktree cleanup raised; ignored")
         try:
             notify_job_end(meta, store)
         except Exception:

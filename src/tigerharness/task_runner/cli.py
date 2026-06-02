@@ -81,6 +81,19 @@ def cmd_assign(args: argparse.Namespace) -> int:
     job_dir = store.job_dir(job_id)
     store.prompt_path(job_id).write_text(prompt_text)
 
+    worktree_repo = (args.worktree_repo or "").strip()
+    if worktree_repo:
+        # Validate at CLI time so the user gets an immediate, clear
+        # error rather than the detached runner crashing on startup.
+        worktree_repo = str(Path(worktree_repo).expanduser().resolve())
+        if not (Path(worktree_repo) / ".git").exists():
+            print(
+                f"error: --worktree-repo {worktree_repo!r} is not a git "
+                f"repository (no .git/ found).",
+                file=sys.stderr,
+            )
+            return 2
+
     meta = registry.JobMeta(
         job_id=job_id,
         persona=persona.name,
@@ -93,6 +106,7 @@ def cmd_assign(args: argparse.Namespace) -> int:
         slack_thread_ts=(args.thread or "").strip(),
         early_exit=args.early_exit,
         stuck_timeout=max(0, int(args.stuck_timeout)),
+        worktree_repo=worktree_repo,
         cwd=str(persona.cwd),
         started_at=time.time(),
         status="pending",
@@ -140,6 +154,9 @@ def cmd_assign(args: argparse.Namespace) -> int:
     print(f"  compact_every:  {compact_every}")
     print(f"  stuck_timeout:  {stuck_label}")
     print(f"  cwd:            {persona.cwd}")
+    if meta.worktree_repo:
+        wt_path = Path(meta.worktree_repo) / ".worktrees" / job_id
+        print(f"  worktree:       {wt_path}")
     print(f"  pid:            {proc.pid}")
     print(f"  log:            {store.run_log(job_id)}")
     print()
@@ -512,6 +529,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "On STUCK it cancels the iteration; the runner "
                         "then continues with the next iter unless this "
                         "was the last. Pass 0 to disable.")
+    a.add_argument("--worktree-repo", default="",
+                   help="Absolute path to a git repo. When set, the "
+                        "runner creates an isolated worktree at "
+                        "<repo>/.worktrees/<job-id>/ on startup, tells "
+                        "the persona to cd into it for git operations "
+                        "via a prompt notice, and removes the worktree "
+                        "on job exit. Lets multiple background jobs "
+                        "operate on the same project concurrently "
+                        "without racing on HEAD / index / working tree.")
     a.set_defaults(func=cmd_assign)
 
     # list
