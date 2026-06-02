@@ -73,14 +73,37 @@ human stops it — then writes its state back.
    *stale* `in_progress` task can be rescued by a future invocation.
 
 Single-persona work (the task-runner's niche) and multi-persona work
-(the workflow-runner's niche) both live here. The distinction between
-the two is not steps-vs-no-steps — both can take many steps. It is
-**orchestration**: a task-runner job is a single persona working a PRD
-freely, with no pre-defined step graph; a workflow-runner job is a
-pre-compiled multi-persona graph where each node names the persona and
-contract for that step. The interactive session adopts whichever
-persona is in play; for a workflow it follows the graph, for a task
-it just stays in one persona and drives the PRD to completion.
+(the workflow-runner's niche) both belong here in principle. The
+distinction between the two is not steps-vs-no-steps — both can take
+many steps. It is **orchestration**: a task-runner job is a single
+persona working a PRD freely, with no pre-defined step graph; a
+workflow-runner job is a pre-compiled multi-persona graph where each
+node names the persona and contract for that step.
+
+**Phase 1 scope:** `kind=task` only. `kind=workflow` is reserved as a
+forward-compatible extension — the field is in the schema, but the
+scaffolder and driver only validate and run `kind=task` in v1. A
+workflow task would additionally need a `graph.json` (or similar) in
+the task directory and a driver step that adopts a per-node persona;
+that work is queued for after Phase 1 lands. The journal layout
+itself imposes no obstacle to adding it later.
+
+### What goes in `task.md`
+
+`task.md` is a free-form markdown brief — there is no required
+schema. At minimum it should answer:
+
+- **Goal** — one paragraph on what "done" looks like.
+- **Acceptance criteria** — a short list of checks the driver can
+  use to recognise completion. (For a code task, "the gate is green
+  at 100% coverage and ..."; for a research task, "a memo at
+  `artifacts/findings.md` with sections X, Y, Z.")
+- **Constraints** — any hard boundaries (e.g., "stay inside
+  `src/tigerharness/journal/`", "don't touch the api backend").
+
+A one-paragraph idea is fine; PRD is used loosely here. If you have
+attachments, references, or sub-tasks, drop them into `artifacts/`
+and reference them from `task.md`.
 
 ## Architecture
 
@@ -158,17 +181,40 @@ keep `journal/OPERATING.md`.
 }
 ```
 
-| Field | Purpose |
-|---|---|
-| `state` | `pending` → `in_progress` → (`blocked`) → `done` / `failed`. The next `drive-journal` sweep reads it to decide archive vs. flag. |
-| `sessions` / `max_sessions` | How many driver invocations (interactive sessions) the task has consumed, and a soft ceiling on how many it may consume before a human reviews it. Each `drive-journal` invocation counts as one session, regardless of how much work happens inside it. |
-| `updated_at` | **Heartbeat.** The driver bumps it periodically while working — not once per session — so a wedged session inside `drive-journal` shows up as stale. The next invocation's sweep flags an `in_progress` task whose heartbeat is older than `stuck_timeout`. |
-| `next_action` | The handoff note. Lets a *fresh* session resume without re-reasoning the whole `progress.md` — this is what makes the journal the memory, not the vendor's session. |
-| `session_ref` | Optional Claude session id, so the human can `--resume` the same conversation cheaply. Null is fine; `next_action` + `progress.md` are enough to resume from files alone. |
+| Field | Type | Set by | Purpose |
+|---|---|---|---|
+| `id` | string | scaffolder | `<YYYYMMDD>-<slug>-<uuid8>`. `slug` = ASCII-lowercase-hyphen slugified `--title` (or first H1 of the PRD), max 40 chars. `uuid8` = 8 hex chars from `secrets.token_hex(4)`. On collision the scaffolder regenerates the uuid once then hard-errors. Path-safety enforced (no `/`, no `..`, no hidden-file prefix). |
+| `title` | string, required | scaffolder | Human label. Source: `--title` arg, else first H1 of the PRD, else `"task"`. |
+| `kind` | enum: `"task"` (Phase 1 only) | scaffolder | Workflow tasks (`"workflow"`) are a forward-compatible extension reserved for a later phase; Phase 1 ships task only. |
+| `persona` | string, required for `kind=task` | scaffolder | The persona this task is assigned to (must exist in the team's persona registry). |
+| `state` | enum: `pending` / `in_progress` / `blocked` / `done` | driver / sweep | See state-transition table below. |
+| `sessions` / `max_sessions` | int / int (default `5`) | driver / scaffolder | How many `drive-journal` invocations the task has consumed, and a soft ceiling. Each invocation counts as one session regardless of how much work happens inside it. When `sessions == max_sessions`, the driver moves the task to `blocked` with a `next_action` explaining why, and the human must raise the cap or close the task. |
+| `created_at` | ISO 8601 UTC | scaffolder | Set once at creation, never updated. Used by the sweep summary for the "age" display. |
+| `updated_at` | ISO 8601 UTC | driver | **Heartbeat.** Bumped on every `progress.md` append; OPERATING.md requires the driver to append progress at least every 10 minutes of wall-clock active work. A wedged session shows up stale once `updated_at` is older than `stuck_timeout` (default 1800s = 30 min). |
+| `next_action` | string | driver | The handoff note. Lets a *fresh* session resume without re-reasoning the whole `progress.md` — this is what makes the journal the memory, not the vendor's session. |
+| `session_ref` | string \| null | driver | Optional Claude session id, so the human can `--resume` the same conversation cheaply. Null is fine; `next_action` + `progress.md` are enough to resume from files alone. |
 
-Two fields carry the design: `updated_at` (stuck detection) and
-`next_action` (resume-from-files). `session_ref` is a convenience, not
-a dependency — losing it costs nothing but a re-read.
+Two fields carry the design: `updated_at` (heartbeat, doubles as soft
+lease) and `next_action` (resume-from-files). `session_ref` is a
+convenience, not a dependency — losing it costs nothing but a re-read.
+The other fields are bookkeeping or human-facing labels.
+
+### State transitions
+
+| From | To | Who | Trigger | Side effects |
+|---|---|---|---|---|
+| (none) | `pending` | scaffolder | `tigerharness journal new --prd ...` succeeds | full status.json initialized |
+| `pending` | `in_progress` | driver | sweep step 2 picks this task | `sessions += 1`, `updated_at` bumped, `session_ref` set if cheap to capture |
+| `in_progress` | `in_progress` | driver | mid-task progress (clean stop, max_sessions not hit) | `updated_at` bumped, `next_action` rewritten |
+| `in_progress` | `done` | driver | task complete per acceptance criteria | `state=done`, `next_action` cleared, sweep will archive on next invocation |
+| `in_progress` | `blocked` | driver | real blocker (need human / another agent / external input) OR `sessions == max_sessions` | `state=blocked`, `next_action` names the blocker |
+| `blocked` | `in_progress` | human | manual edit of `status.json` to clear the blocker (a future `journal unblock` CLI is a Phase 2 nicety) | `next_action` rewritten by the human to point the next session at the resolution |
+
+Phase 1 deliberately does **not** model a `failed` terminal state.
+"Failed" in v1 means "the human gave up" — they edit `state=done`
+with a `next_action` recording the postmortem and move on. A real
+unrecoverable-error state can land in a later phase if the journal
+grows to need it.
 
 Writes to `status.json` must be **atomic** (write to a temp file, then
 rename) so an interrupted session never leaves a half-written state
