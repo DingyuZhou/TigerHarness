@@ -4,6 +4,7 @@ Dispatches to sub-package CLIs:
     tigerharness task-runner <subcommand>
     tigerharness slack-bridge <subcommand>
     tigerharness tiger-memory <subcommand>
+    tigerharness journal <subcommand>
 """
 
 from __future__ import annotations
@@ -33,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     elif cmd in ("tiger-memory", "tiger_memory", "tm"):
         from .tiger_memory.cli import main as tm_main
         return tm_main(rest)
+    elif cmd in ("journal", "j"):
+        from .journal.cli import main as journal_main
+        return journal_main(rest)
     elif cmd in ("slack-bridge", "slack_bridge", "sb"):
         # Sub-dispatch:
         #   slack-bridge gen-service ...  -> render a systemd user unit
@@ -60,6 +64,7 @@ def _usage() -> None:
     print("  task-runner (tr)   Iterative task execution")
     print("  tiger-memory (tm)  Persistent memory management")
     print("  slack-bridge (sb)  Slack notify CLI")
+    print("  journal (j)        File-based subscription backend (Phase 1)")
     print()
     print("Usage: tigerharness <sub-command> [args...]")
 

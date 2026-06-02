@@ -15,6 +15,7 @@ def test_help(capsys):
     out = capsys.readouterr().out
     assert "task-runner" in out
     assert "tiger-memory" in out
+    assert "journal" in out
 
 
 def test_unknown_command(capsys):
@@ -75,3 +76,15 @@ def test_slack_bridge_gen_service_dispatch(monkeypatch, tmp_path, capsys):
 def test_help_alias(capsys):
     ret = main(["help"])
     assert ret == 0
+
+
+def test_journal_dispatch():
+    """`tigerharness journal` dispatches to the journal sub-CLI which
+    requires a subcommand."""
+    with pytest.raises(SystemExit):
+        main(["journal"])
+
+
+def test_journal_alias():
+    with pytest.raises(SystemExit):
+        main(["j"])
