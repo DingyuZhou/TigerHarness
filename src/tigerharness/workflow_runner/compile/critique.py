@@ -37,6 +37,9 @@ Seams and the lines we do **not** cross:
   critic verdict is APPROVE or REVISE only; a ``BLOCK`` or an
   unparseable trailer is a contract violation surfaced as
   :class:`CritiqueParseError` (the pipeline owns any re-prompt policy).
+  A failed *invocation* (``invoke`` returns a result with ``error`` set
+  rather than raising, on timeout / non-zero exit) is rejected the same
+  way, before parsing -- an errored reply carries no trustworthy verdict.
 * Per-invocation ``cost_usd`` is summed into
   :attr:`CritiqueResult.cost_usd` so the pipeline can roll it into
   ``status.cost_usd_total`` (ADR 0002, D10).
@@ -48,7 +51,7 @@ from dataclasses import dataclass
 from typing import Callable, Literal
 
 from tigerharness.workflow_runner.models import StepFrontmatter
-from tigerharness.workflow_runner.sessions import SessionManager
+from tigerharness.workflow_runner.sessions import InvocationResult, SessionManager
 from tigerharness.workflow_runner.trailer import (
     Approve,
     Revise,
@@ -132,19 +135,35 @@ class CritiqueResult:
 
 
 class CritiqueParseError(ValueError):
-    """A critic's reply could not be parsed into an APPROVE/REVISE verdict.
+    """A critic's verdict could not be obtained as an APPROVE/REVISE.
+
+    Two distinct failures collapse here because the pipeline handles them
+    identically (re-prompt or abort -- a policy that is deliberately *not*
+    this module's responsibility):
+
+    * the invocation itself failed (timeout / non-zero exit), so there is
+      no trustworthy reply to parse -- ``reason`` carries the underlying
+      ``InvocationResult.error``; or
+    * the invocation succeeded but its trailer was missing, malformed, or
+      a ``BLOCK`` (not a valid *critic* verdict) -- ``reason`` is ``None``.
 
     Carries the offending ``persona`` and the verbatim ``raw_response``
-    so the pipeline can decide whether to re-prompt or abort. Re-prompt
-    policy is deliberately *not* this module's responsibility.
+    (the critic's stdout, possibly partial on a timeout) for the event log.
     """
 
-    def __init__(self, *, persona: str, raw_response: str) -> None:
-        super().__init__(
-            f"could not parse a WORKFLOW verdict from {persona!r}'s response"
-        )
+    def __init__(
+        self, *, persona: str, raw_response: str, reason: str | None = None
+    ) -> None:
+        if reason is None:
+            message = (
+                f"could not parse a WORKFLOW verdict from {persona!r}'s response"
+            )
+        else:
+            message = f"no verdict from {persona!r}: {reason}"
+        super().__init__(message)
         self.persona = persona
         self.raw_response = raw_response
+        self.reason = reason
 
 
 class CritiqueAbortedError(RuntimeError):
@@ -317,22 +336,37 @@ def _combine_feedback(verdicts: list[CritiqueVerdict]) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _parse_verdict(persona: str, raw_response: str) -> CritiqueVerdict:
-    """Turn a critic's stdout into a typed :class:`CritiqueVerdict`.
+def _parse_verdict(persona: str, result: InvocationResult) -> CritiqueVerdict:
+    """Turn one critic's :class:`InvocationResult` into a typed verdict.
 
-    Delegates the grammar to :func:`trailer.parse_trailer` so the
-    ``WORKFLOW:`` trailer has a single authority. A critic may only
-    APPROVE or REVISE; a ``BLOCK`` or an unparseable trailer violates the
-    critique contract and raises :class:`CritiqueParseError`.
+    A failed invocation is rejected before parsing: ``invoke`` does not
+    raise on timeout/non-zero exit, it returns a result with ``error``
+    set and (at best) partial stdout, so an errored reply carries no
+    trustworthy verdict -- even if a stray trailer survived in the
+    partial output. This mirrors the sibling drafter
+    (:func:`compile.drafter.draft_steps`), which checks ``result.error``
+    before parsing for the same reason.
+
+    On a clean invocation the grammar is delegated to
+    :func:`trailer.parse_trailer` so the ``WORKFLOW:`` trailer has a
+    single authority. A critic may only APPROVE or REVISE; a ``BLOCK`` or
+    an unparseable trailer violates the critique contract. All three
+    failure modes raise :class:`CritiqueParseError`.
     """
-    verdict = parse_trailer(raw_response)
+    if result.error is not None:
+        raise CritiqueParseError(
+            persona=persona,
+            raw_response=result.stdout,
+            reason=f"invocation failed: {result.error}",
+        )
+    verdict = parse_trailer(result.stdout)
     if isinstance(verdict, Approve):
         return CritiqueVerdict(persona=persona, decision="APPROVE", reasons="")
     if isinstance(verdict, Revise):
         return CritiqueVerdict(
             persona=persona, decision="REVISE", reasons=verdict.summary
         )
-    raise CritiqueParseError(persona=persona, raw_response=raw_response)
+    raise CritiqueParseError(persona=persona, raw_response=result.stdout)
 
 
 # --------------------------------------------------------------------------- #
@@ -434,8 +468,8 @@ def run_critique_loop(
         )
         total_cost += akagi_res.cost_usd + ayako_res.cost_usd
 
-        akagi_verdict = _parse_verdict(_AKAGI_PERSONA, akagi_res.stdout)
-        ayako_verdict = _parse_verdict(_AYAKO_PERSONA, ayako_res.stdout)
+        akagi_verdict = _parse_verdict(_AKAGI_PERSONA, akagi_res)
+        ayako_verdict = _parse_verdict(_AYAKO_PERSONA, ayako_res)
         verdicts = [akagi_verdict, ayako_verdict]
         all_approve = all(v.decision == "APPROVE" for v in verdicts)
 

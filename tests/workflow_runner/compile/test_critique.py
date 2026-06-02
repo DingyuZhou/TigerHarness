@@ -18,6 +18,7 @@ Coverage map (the 7 brief-required cases + the structural branches the
 * akagi_revise_ayako_approve_round_2   -> brief #6
 * cost_summed_across_rounds            -> brief #7
 * parser_rejects_block_trailer         -> the non-APPROVE/REVISE raise branch
+* invocation_error_surfaces_real_cause -> the result.error pre-parse branch
 * invalid_floor / max_below_floor      -> the input-guard branches
 * critic_prompts_contain_context       -> prompt assembly + render branches
 * invoke_args                          -> persona order + timeout passthrough
@@ -98,6 +99,22 @@ def _invocation(stdout: str, *, cost: float = 0.0) -> InvocationResult:
         cost_usd=cost,
         exit_code=0,
         error=None,
+        raw_envelope={},
+    )
+
+
+def _errored(error: str, *, stdout: str = "", cost: float = 0.0) -> InvocationResult:
+    """A failed invocation: ``error`` set, stdout possibly partial.
+
+    Mirrors what ``SessionManager.invoke`` returns on timeout / non-zero
+    exit -- it does not raise, it reports the failure in ``error``.
+    """
+    return InvocationResult(
+        stdout=stdout,
+        session_id="sid",
+        cost_usd=cost,
+        exit_code=-1001,
+        error=error,
         raw_envelope={},
     )
 
@@ -313,6 +330,26 @@ def test_parser_rejects_malformed_response() -> None:
     err = excinfo.value
     assert err.persona == "akagi"
     assert err.raw_response == "I think this looks fine?"
+
+
+def test_invocation_error_surfaces_real_cause() -> None:
+    # A timed-out / crashed critic returns error set + (here) empty stdout.
+    # The loop must surface the real cause, not a misleading "could not
+    # parse a WORKFLOW verdict" on the empty reply.
+    sm = ScriptedSessionManager(
+        akagi=[_errored("timed out after 600s", cost=0.02)],
+        ayako=[critic("APPROVE", cost=0.01)],
+    )
+    drafter = FakeDrafter([])
+
+    with pytest.raises(CritiqueParseError) as excinfo:
+        _run(sm, drafter)
+
+    err = excinfo.value
+    assert err.persona == "akagi"
+    assert err.reason == "invocation failed: timed out after 600s"
+    assert err.raw_response == ""
+    assert "timed out after 600s" in str(err)
 
 
 def test_parser_rejects_block_trailer() -> None:
