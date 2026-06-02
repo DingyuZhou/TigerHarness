@@ -57,15 +57,20 @@ human stops it — then writes its state back.
    folder from that PRD.
 3. You open the interactive Claude Code app and invoke the **driver**
    skill (`drive-journal`). Each invocation begins with a **lazy
-   sweep** of `active/` — archive anything that finished, flag
-   anything whose heartbeat went stale, and summarize what's
-   actionable to you in-session. Then the driver picks **one**
-   actionable task and works it continuously — appending progress and
-   updating state as it goes — until the task is `done`, hits a
-   blocker, or you stop the session.
-4. If the task isn't finished (you stopped, or it blocked), resume
+   sweep** of `active/` — archive anything that finished, classify
+   each `in_progress` task as fresh-or-stale (the heartbeat doubles
+   as a soft lease), and summarize what's actionable to you
+   in-session. Then the driver picks **one** actionable task —
+   leaving any *fresh* `in_progress` task alone (another session owns
+   it) — and works it continuously, appending progress and updating
+   state as it goes, until the task is `done`, hits a blocker, or you
+   stop the session. When that task finishes, the driver
+   **cascades**: re-sweeps and picks up the next actionable task,
+   draining the queue in one sitting.
+4. If a task isn't finished (you stopped, or it blocked), resume
    later — the state is durable on disk. The next `drive-journal`
-   invocation's sweep picks up where this one left off.
+   invocation's sweep picks up where this one left off; meanwhile any
+   *stale* `in_progress` task can be rescued by a future invocation.
 
 Single-persona work (the task-runner's niche) and multi-persona work
 (the workflow-runner's niche) both live here. The distinction between
@@ -177,25 +182,36 @@ lease can be added later if concurrent drivers ever become real (see
 Non-goals).
 
 
-### Why one invocation runs the task to completion
+### Why one invocation runs the task to completion (and then cascades)
 
 The driver is **not** stepwise. One `drive-journal` invocation is
 intended to take its picked-up task as far as it can in a single
-interactive sitting — ideally all the way to `done`. The session
-stops only when (a) the task is finished, (b) a real blocker requires
-a human or another persona, (c) a guard rail like `max_sessions`
-fires, or (d) the human ends the session.
+interactive sitting — ideally all the way to `done` — and then,
+having finished that task, **cascade** by sweeping the journal again
+and picking up the next actionable task. One invocation drains as
+much of the queue as it can; it does not stop after a single task
+when more are waiting.
+
+The session stops only when (a) the picked task is finished, (b) a
+real blocker requires a human or another persona, (c) a guard rail
+like `max_sessions` fires, or (d) the human ends the session. After
+(a) or (b), the cascade decides whether to keep going on a new task;
+after (c) or (d), the invocation exits.
 
 This matters because the subscription model rewards long, productive
 interactive sessions, not many short ones. Splitting work into
-artificial "increments" with a stop-and-yield after each one would
-burn the human's attention budget for no reason and waste the
-resume-from-files dance on a task that could have just kept going.
+artificial "increments" with a stop-and-yield after each one — or
+stopping after one task when the queue still has work — would burn
+the human's attention budget for no reason and waste the
+resume-from-files dance on work that could have just kept going.
 
-`sessions` counts driver invocations, not steps of work inside a
-session. `updated_at` is a heartbeat refreshed periodically *during*
-a session so that a wedged or crashed session shows up as stale —
-not a per-increment counter.
+`sessions` counts driver invocations, not steps of work or number of
+cascaded tasks inside a single invocation. `updated_at` is a
+heartbeat refreshed periodically *during* a session so that a wedged
+or crashed session shows up as stale — and so a *fresh* heartbeat
+signals to a *later* invocation that another session owns this task
+right now and should be left alone. The heartbeat doubles as a soft
+lease without an explicit lease field.
 
 ## OPERATING.md — the protocol
 
@@ -207,20 +223,35 @@ so could a human or another vendor's agent. It specifies:
 - **Where state lives** — the journal path and folder conventions.
 - **How to read state** — the `status.json` schema and what each
   `state` value means.
-- **The decision procedure**, run once per `drive-journal`
-  invocation:
+- **The decision procedure**, run on every `drive-journal` invocation
+  and looped after each completed task until no actionable tasks
+  remain:
   1. **Lazy sweep** of `active/*/status.json` first:
      a. Move any `done` task to `journal/done/` (the *previous*
         invocation may have finished a task without archiving it).
-     b. Flag any `in_progress` task whose `updated_at` is older than
-        `stuck_timeout` — mark it stale in the in-session summary so
-        the human can decide whether to re-open it or close it.
-     c. Print the summary (count of `pending` / `in_progress` /
-        `blocked` / stale) into the session.
-  2. Pick the next actionable task — a `pending` task to start, or an
-     `in_progress` task to resume (prefer the one with the oldest
-     heartbeat). Skip `blocked` tasks and instead surface them.
-     **Pick exactly one** — never multiple tasks in parallel.
+     b. Classify every `in_progress` task by heartbeat age:
+        - **Fresh** (`updated_at` within `stuck_timeout`) — another
+          session owns this *right now*. Do **not** pick it up. The
+          heartbeat is the de-facto lease.
+        - **Stale** (`updated_at` older than `stuck_timeout`) — the
+          previous owner wedged or crashed. Flag it as stale in the
+          in-session summary; it is now reclaimable by the rescue
+          path in step 2.
+     c. Print the summary (count of `pending` / `in_progress`-fresh /
+        `in_progress`-stale / `blocked`) into the session.
+  2. Pick the next actionable task — **exactly one**, never multiple
+     in parallel:
+     - A `pending` task to start, OR
+     - A *stale* `in_progress` task to **rescue** (read its tail of
+       `progress.md` first to understand where the previous owner
+       left off, then resume from `next_action`).
+     - **Never** pick a *fresh* `in_progress` task — leaving it alone
+       is the correct behaviour. If no other task is actionable, the
+       invocation should exit cleanly, not steal someone else's
+       in-flight work.
+     - Skip `blocked` tasks; surface them in the summary so the human
+       can unblock manually.
+     - Prefer the one with the oldest heartbeat among the candidates.
   3. Read its `task.md` (PRD) + `next_action` + the tail of
      `progress.md`.
   4. **Work the task continuously** — do the real work, append to
@@ -234,11 +265,21 @@ so could a human or another vendor's agent. It specifies:
      `updated_at` one last time, rewrite `next_action` (or clear it
      if `done`), set `state` to `done` / `blocked` / leave as
      `in_progress` for a clean stop.
-- **Stop conditions** — exit the loop in step 4 when **any** of these
-  hold: the task is fully `done`; a real blocker is hit that needs a
-  human or another agent (`blocked`); the work has hit `max_sessions`
-  or another guard rail; or the human ends the session. Otherwise keep
-  going — do not hand the turn back to manufacture a checkpoint.
+  6. **Cascade.** If the task you just finished moved to `done` (or
+     even `blocked` — a `blocked` task is "off your plate" because
+     the human's next action is to unblock it, not to drive it),
+     loop back to step 1 (re-sweep) and pick up the next actionable
+     task. Keep cycling until step 1 reports nothing actionable
+     remains, or the human ends the session, or a session-level
+     guard rail fires. Don't manufacture a stopping point just
+     because one task finished — drain the queue while the session is
+     hot.
+- **Stop conditions** — exit the loop in step 4 (for the current
+  task) when **any** of these hold: the task is fully `done`; a real
+  blocker is hit that needs a human or another agent (`blocked`); the
+  work has hit `max_sessions` or another guard rail; or the human
+  ends the session. Step 6 then decides whether to cascade or exit
+  the whole invocation.
 
 The committed `OPERATING.md` is the contract; the driver skill is thin
 sugar that says "read `OPERATING.md` and execute it."
@@ -262,20 +303,28 @@ only happens inside an interactive session a human started.
 ## The lazy sweep (built into the driver)
 
 Every `drive-journal` invocation begins with a sweep over
-`active/*/status.json` before any task work happens. **It calls no
-model and costs nothing beyond the routine session.** Responsibilities:
+`active/*/status.json` before any task work happens, and is re-run
+between cascaded tasks. **It calls no model and costs nothing beyond
+the routine session.** Responsibilities:
 
 - Move `done` tasks to `journal/done/` to keep `active/` lean.
-- Flag stale tasks: `in_progress` with `updated_at` older than
-  `stuck_timeout` → report in-session as needing attention.
-- Summarize what's actionable: e.g. *"2 pending, 1 in_progress, 1
-  stale (no heartbeat 40m), 1 awaiting your review."* — lands in the
-  same interactive context where you're about to act on it, instead
-  of a separate Slack DM from a daemon.
+- Classify every `in_progress` task by heartbeat age:
+  - **Fresh** (`updated_at` within `stuck_timeout`): another session
+    owns this right now. Leave it alone. The heartbeat is the
+    de-facto lease.
+  - **Stale** (`updated_at` older than `stuck_timeout`): the previous
+    owner wedged or crashed. Flag it for rescue — it's reclaimable
+    by the next step-2 pick.
+- Summarize what's actionable: e.g. *"2 pending, 1 in_progress
+  (fresh — owned by another session), 1 stale (no heartbeat 40m), 1
+  blocked awaiting your review."* The summary lands in the same
+  interactive context where you're about to act on it, instead of a
+  separate Slack DM from a daemon.
 
 No cron, no systemd unit, no background process. The sweep is plain
 non-AI Python logic invoked at the start of the `drive-journal`
-skill, executing inside the human's interactive session.
+skill and at every cascade boundary, executing inside the human's
+interactive session.
 
 Note the contrast with the task-runner's `stuck_watchdog`: that
 watchdog can **kill** a wedged subprocess because the api backend owns
@@ -297,13 +346,16 @@ it.
    `journal-new` skill in the app) creates `active/<task-id>/` and
    seeds `status.json` as `pending`.
 3. **Drive.** Open Claude Code, invoke `drive-journal`. The skill
-   first runs the lazy sweep (archive any `done`, flag any stale,
-   summarize what's actionable in-session); then it picks **one**
-   actionable task and runs it continuously — appending to
-   `progress.md` and bumping the heartbeat in `status.json` as it
-   goes — until the task is `done`, hits a blocker, or you stop the
-   session. A single invocation is meant to take the task as far as
-   possible, not advance it one step.
+   first runs the lazy sweep (archive any `done`, classify
+   `in_progress` tasks as fresh-or-stale, summarize what's actionable
+   in-session); then it picks **one** actionable task — never a
+   *fresh* `in_progress` task, since that belongs to another active
+   session — and runs it continuously, appending to `progress.md` and
+   bumping the heartbeat in `status.json` as it goes, until the task
+   is `done`, hits a blocker, or you stop the session. When that task
+   finishes, the skill **cascades**: re-runs the sweep and picks up
+   the next actionable task. One invocation drains as much of the
+   queue as it can in one sitting.
 4. **Resume if needed.** If the task isn't `done` (you stopped, it
    blocked, or it hit `max_sessions`), come back later and invoke
    `drive-journal` again — same or fresh session, using `--resume` /
@@ -326,22 +378,35 @@ Serial and human-paced — by design.
 
 ### How serial execution is enforced
 
-A single `drive-journal` invocation picks exactly **one** actionable
-task per the OPERATING.md decision procedure — never multiple tasks
-in parallel. The picked task runs to its stop condition (`done`,
-`blocked`, `max_sessions`, or human stop) before the invocation
-returns. The interactive session is one human at one keyboard, so
-within a single session there is fundamentally one driver doing one
-task at a time.
+Serial means **one task at a time**, not one task per invocation.
+The decision procedure picks exactly **one** task at step 2, drives
+it to its stop condition at steps 3–5, and *then* cascades at step 6
+back to step 1 to pick up the next one. Inside an invocation, tasks
+are processed back-to-back, not concurrently.
 
-The doc deliberately omits a lease/lock (cut from the MVP) on the
-honest assumption that you, as one human, will not open two
-interactive sessions and run `drive-journal` against the same journal
-folder simultaneously. If two sessions *were* running concurrently
-they could pick different tasks safely, but might also pick the same
-task and clobber each other's `status.json` / `progress.md` writes.
-Adding a lease is a Phase 2 hardening if concurrent drivers ever
-become a real workflow.
+What prevents parallel execution within a single invocation: step 2
+of the procedure picks exactly one task and the driver doesn't move
+on until that task hits its stop condition. The interactive session
+is one human at one keyboard, so within a single session there is
+fundamentally one driver doing one task at a time.
+
+What prevents two invocations from clobbering each other on the same
+task: the **heartbeat as a soft lease**. A *fresh* `updated_at` on
+an `in_progress` task signals that another session is actively
+working it; the sweep classifies it as `in_progress`-fresh and
+step 2 declines to pick it up. Only `pending` tasks and *stale*
+`in_progress` tasks (heartbeat older than `stuck_timeout`) are
+candidates for a new owner. This makes the heartbeat double as a
+soft lease without an explicit lease field.
+
+The doc deliberately omits an explicit lease (cut from the MVP) on
+the honest assumption that two concurrent drivers is the rare case
+and the heartbeat-as-soft-lease catches it well enough. The
+remaining race window — two invocations both seeing a `pending`
+task as their best pick at the exact same moment — could clobber
+each other's `status.json` initial write. Adding an explicit lease
+(file lock, dedicated `lease.json`) is a Phase 2 hardening if
+concurrent drivers ever become a real workflow.
 
 ## Configuration (Phase 2)
 
