@@ -1,11 +1,14 @@
 """The canonical ``OPERATING.md`` content, shipped as a Python string.
 
-The scaffolder copies this to ``<journal>/OPERATING.md`` on first use.
-The driver skill instructs the interactive session to read that
-on-disk file -- so a future tigerharness upgrade can ship a new
-template here, and the next ``journal new`` will install it (provided
-the human hasn't customised the on-disk file, which the scaffolder
-respects: it never overwrites).
+The scaffolder copies this to ``<journal>/OPERATING.md`` on **first
+use only** -- if the file already exists at the journal root,
+``_ensure_operating_md`` leaves it untouched (it has no "is this the
+template we shipped vs. a human edit" detector; it just checks
+existence). That means a tigerharness upgrade that ships a new
+template here does NOT auto-update an existing journal's
+``OPERATING.md``. Operators who want the newer template must delete
+or rename the on-disk file first; the next ``journal new`` then
+installs the fresh content.
 
 Keeping the source in Python rather than in ``docs/`` lets us version
 the protocol alongside the model and import it cheaply in tests.
@@ -89,8 +92,9 @@ completed task until no actionable tasks remain.
 5. **On stop**, write a final `progress.md` entry summarising the
    session and update `status.json`:
    - Refresh `updated_at` one last time.
-   - Bump `sessions` (only on entry, not here -- driver bumps once
-     per pickup).
+   - **Do NOT bump `sessions` here.** The counter is incremented once
+     per *pickup* (when step 2 first picks the task on the current
+     invocation), not on exit. Bumping on exit too would double-count.
    - Rewrite `next_action` (or clear it if `done`).
    - Set `state` to one of:
      - `done` -- task fully complete per acceptance criteria.

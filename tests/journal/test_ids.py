@@ -139,6 +139,19 @@ class TestIsSafeTaskId:
         "foo\\bar",
         "foo..bar",
         "..bar",
+        # Tightened in response to critique: control chars + shell-
+        # hazardous chars + leading hyphen + leading/trailing space all
+        # reject too.
+        "foo\x00bar",   # NUL
+        "foo\nbar",     # newline
+        "foo\rbar",     # CR
+        "foo\tbar",     # tab
+        "\x7fbar",      # DEL
+        "foo:bar",      # colon (Windows alt stream)
+        "foo bar",      # embedded space
+        "-rf",          # leading hyphen (CLI confusion)
+        " 20260602-x-12345678",   # leading whitespace
+        "20260602-x-12345678 ",   # trailing whitespace
     ])
     def test_unsafe(self, bad):
         assert is_safe_task_id(bad) is False

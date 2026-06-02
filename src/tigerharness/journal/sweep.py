@@ -168,8 +168,21 @@ def sweep(
             continue
 
         # state is IN_PROGRESS by elimination (the enum has 4 values).
-        # Classify fresh-vs-stale via the soft lease.
-        if status.is_stale(stuck_timeout_sec=timeout, now=ts_now):
+        # Classify fresh-vs-stale via the soft lease. Wrap the
+        # heartbeat read because a malformed ``updated_at`` (naive
+        # timestamp, garbage, ...) should flag just *this* task as
+        # malformed -- never abort classification of the others.
+        try:
+            stale = status.is_stale(
+                stuck_timeout_sec=timeout, now=ts_now,
+            )
+        except JournalModelError as exc:
+            result.malformed.append(MalformedEntry(
+                task_id=task_id,
+                error=f"heartbeat unreadable: {exc}",
+            ))
+            continue
+        if stale:
             result.in_progress_stale.append(status)
         else:
             result.in_progress_fresh.append(status)

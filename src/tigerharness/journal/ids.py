@@ -105,18 +105,34 @@ def new_task_id(
 
 
 def is_safe_task_id(task_id: str) -> bool:
-    """Reject a task id as path-unsafe if it contains path separators,
-    parent-dir traversal, hidden-file prefix, or is empty / blank. Used
-    by the path layer when consuming externally-provided ids (e.g. from
-    CLI args)."""
+    """Reject a task id as path-unsafe if it contains *any* path
+    separator, control character, parent-dir traversal, hidden-file
+    prefix, or leading/trailing whitespace, or if it is empty / blank.
+
+    Used by the path layer when consuming externally-provided ids
+    (CLI args, status.json on disk). Intentionally strict: a *minted*
+    id from ``new_task_id`` only ever contains ``[a-z0-9-]`` plus
+    embedded hyphens, so this filter biases toward rejecting anything
+    a malicious or corrupted source could try.
+    """
     if not task_id or not task_id.strip():
         return False
+    if task_id != task_id.strip():
+        return False  # leading/trailing whitespace
     if task_id in _FORBIDDEN_SLUGS:
         return False
-    if task_id.startswith("."):
+    if task_id.startswith(".") or task_id.startswith("-"):
         return False
     if "/" in task_id or "\\" in task_id:
         return False
     if ".." in task_id:
         return False
+    # Reject NUL, every C0 control char, DEL, and characters that
+    # commonly cause grief on platform A or B (colon = Windows alt
+    # stream; whitespace = shell quoting hazard).
+    for ch in task_id:
+        if ord(ch) < 0x20 or ord(ch) == 0x7f:
+            return False
+        if ch in (":", " ", "\t"):
+            return False
     return True

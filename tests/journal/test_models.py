@@ -132,6 +132,36 @@ class TestJsonRoundTrip:
         with pytest.raises(JournalModelError):
             Status.from_dict(s)
 
+    def test_from_dict_rejects_unsupported_kind(self):
+        """Regression: ``Status.new`` rejects kind=workflow; ``from_dict``
+        must too, so a hand-edited or migrated-from-future status.json
+        cannot bypass the Phase 1 scope gate."""
+        s = self._make().to_dict()
+        s["kind"] = "workflow"
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(s)
+        assert "workflow" in str(exc.value)
+
+    def test_from_dict_rejects_negative_sessions(self):
+        s = self._make().to_dict()
+        s["sessions"] = -1
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(s)
+        assert "sessions" in str(exc.value)
+
+    def test_from_dict_rejects_zero_max_sessions(self):
+        s = self._make().to_dict()
+        s["max_sessions"] = 0
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(s)
+        assert "max_sessions" in str(exc.value)
+
+    def test_from_dict_rejects_non_int_sessions(self):
+        s = self._make().to_dict()
+        s["sessions"] = "many"
+        with pytest.raises(JournalModelError):
+            Status.from_dict(s)
+
 
 # ---------------------------------------------------------------------------
 # heartbeat / staleness classification
@@ -171,6 +201,18 @@ class TestHeartbeat:
         s = self._in_progress("not-a-timestamp")
         with pytest.raises(JournalModelError):
             s.heartbeat_age_seconds(now="2026-06-02T08:00:00Z")
+
+    def test_naive_timestamp_raises_journal_error_not_typeerror(self):
+        """Regression for the critique workflow's HIGH finding: a
+        hand-edited naive timestamp (no Z, no +00:00) must surface as
+        ``JournalModelError`` rather than as the silent ``TypeError``
+        from aware-vs-naive subtraction. The sweep's malformed-entry
+        handling depends on this."""
+        s = self._in_progress("2026-06-02T08:00:00")  # naive: no tz
+        with pytest.raises(JournalModelError) as exc:
+            s.heartbeat_age_seconds(now="2026-06-02T08:10:00Z")
+        # The error message names the offending timestamp.
+        assert "2026-06-02T08:00:00" in str(exc.value)
 
     def test_is_stale_only_for_in_progress(self):
         s = Status(

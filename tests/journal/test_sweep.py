@@ -202,3 +202,35 @@ class TestSweep:
         assert result.pending == []
         assert result.has_actionable() is False
         assert "0 pending" in result.to_summary()
+
+    def test_naive_timestamp_in_one_task_does_not_abort_sweep(self, paths):
+        """Regression for the critique workflow's HIGH finding: a
+        hand-edited naive ``updated_at`` on one task must not abort
+        classification of every other task. The bad task gets flagged
+        as ``malformed``; the others classify normally."""
+        # One healthy in_progress task.
+        _write_status(
+            paths, "ip-fresh",
+            state=State.IN_PROGRESS,
+            updated_at="2026-06-02T08:08:00Z",
+        )
+        # One healthy pending task.
+        _write_status(paths, "p1", state=State.PENDING)
+        # One bad task -- naive timestamp (no Z, no +00:00). Without
+        # the fix the sweep would abort here with a TypeError.
+        _write_status(
+            paths, "bad-naive",
+            state=State.IN_PROGRESS,
+            updated_at="2026-06-02T08:00:00",
+        )
+        result = sweep(
+            paths,
+            stuck_timeout_sec=300,
+            now="2026-06-02T08:10:00Z",
+        )
+        # The bad task is captured as malformed -- NOT silently dropped.
+        assert [m.task_id for m in result.malformed] == ["bad-naive"]
+        assert "heartbeat unreadable" in result.malformed[0].error
+        # The healthy tasks still classify.
+        assert [s.id for s in result.pending] == ["p1"]
+        assert [s.id for s in result.in_progress_fresh] == ["ip-fresh"]

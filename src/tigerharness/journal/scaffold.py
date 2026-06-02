@@ -163,16 +163,23 @@ def new_task(
     task_dir.mkdir(parents=True, exist_ok=True)
     paths.artifacts(task_id).mkdir(parents=True, exist_ok=True)
 
+    # Write order matters: ``status.json`` must land LAST. The sweep's
+    # visibility gate is ``status.json.is_file()`` (paths.list_active_ids),
+    # so a SIGKILL or crash between writes must not leave a half-built
+    # task visible to the driver. By the time status.json exists on
+    # disk, task.md and progress.md already exist.
     _write_atomic(paths.task_md(task_id), prd_text)
-    _write_atomic(paths.status_json(task_id), status.to_json())
-    # Seed progress.md with a single header so the driver appends to a
-    # real file. Always written: the task dir is brand new (collision-
-    # checked above), so a pre-existing progress.md is impossible. Not
-    # atomic -- it's empty enough that a torn write is harmless.
+    # progress.md is a single H1 starter; not atomic because torn write
+    # is harmless (worst case: empty file), and it lands before
+    # status.json so the driver's later append targets a real file.
     paths.progress_md(task_id).write_text(
         f"# Progress: {task_id}\n\n", encoding="utf-8",
     )
-
+    # OPERATING.md is at the journal root, not the task dir -- order
+    # vs. status.json doesn't matter for task visibility, but it should
+    # exist before any drive-journal session reads it.
     _ensure_operating_md(paths)
+    # Finally: the status.json that makes the task visible to the sweep.
+    _write_atomic(paths.status_json(task_id), status.to_json())
 
     return ScaffoldResult(task_id=task_id, task_dir=task_dir, status=status)

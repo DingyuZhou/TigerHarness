@@ -143,9 +143,15 @@ class Status:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Status":
-        """Build from a JSON-decoded dict. Validates all required fields
-        and the state enum. Forward-compat: unknown extra keys raise --
-        the schema is the contract."""
+        """Build from a JSON-decoded dict. Validates required fields,
+        the state enum, the kind enum (Phase 1 = task only), and
+        non-negativity of ``sessions`` / ``max_sessions``. Forward-
+        compat: unknown extra keys raise -- the schema is the contract.
+
+        We mirror the constructor's validations here so a hand-edited
+        or migrated-from-future status.json on disk cannot bypass the
+        same gates ``Status.new`` enforces (Phase 1 = task only, sane
+        session counts, real state enum)."""
         required = {
             "id", "title", "kind", "state", "persona",
             "sessions", "max_sessions",
@@ -168,14 +174,37 @@ class Status:
                 f"invalid state {data['state']!r}; allowed: "
                 f"{[s.value for s in State]}"
             ) from exc
+        kind = data["kind"]
+        if kind not in _SUPPORTED_KINDS_PHASE_1:
+            raise JournalModelError(
+                f"unsupported kind {kind!r} on disk; Phase 1 accepts "
+                f"only {sorted(_SUPPORTED_KINDS_PHASE_1)}. kind=workflow "
+                "is reserved for a later phase."
+            )
+        try:
+            sessions = int(data["sessions"])
+            max_sessions = int(data["max_sessions"])
+        except (TypeError, ValueError) as exc:
+            raise JournalModelError(
+                f"sessions / max_sessions must be ints; got "
+                f"{data['sessions']!r} / {data['max_sessions']!r}"
+            ) from exc
+        if sessions < 0:
+            raise JournalModelError(
+                f"sessions must be >= 0; got {sessions}"
+            )
+        if max_sessions < 1:
+            raise JournalModelError(
+                f"max_sessions must be >= 1; got {max_sessions}"
+            )
         return cls(
             id=data["id"],
             title=data["title"],
-            kind=data["kind"],
+            kind=kind,
             state=state,
             persona=data["persona"],
-            sessions=int(data["sessions"]),
-            max_sessions=int(data["max_sessions"]),
+            sessions=sessions,
+            max_sessions=max_sessions,
             created_at=data["created_at"],
             updated_at=data["updated_at"],
             next_action=data.get("next_action", "") or "",
@@ -201,16 +230,25 @@ class Status:
     def heartbeat_age_seconds(self, *, now: str | None = None) -> float:
         """Seconds elapsed since ``updated_at``. A negative value (clock
         skew, hand-edited timestamp) is clamped to 0 so the sweep does
-        not flag a task as 'stale into the future'."""
+        not flag a task as 'stale into the future'.
+
+        Wraps both ``ValueError`` (from ``_parse_iso`` on malformed
+        strings) and ``TypeError`` (naive-vs-aware subtraction) as
+        ``JournalModelError`` so the sweep's malformed-entry handling
+        is the single failure path -- one bad ``updated_at`` should
+        flag *that* task as malformed, never abort classification of
+        every other task in ``active/``.
+        """
         now_str = now or _utcnow_iso()
         try:
             now_dt = _parse_iso(now_str)
             then_dt = _parse_iso(self.updated_at)
-        except ValueError as exc:
+            delta = (now_dt - then_dt).total_seconds()
+        except (ValueError, TypeError) as exc:
             raise JournalModelError(
-                f"cannot parse timestamp: {exc}"
+                f"cannot compute heartbeat age from updated_at "
+                f"{self.updated_at!r}: {exc}"
             ) from exc
-        delta = (now_dt - then_dt).total_seconds()
         return max(0.0, delta)
 
     def is_stale(self, *, stuck_timeout_sec: int, now: str | None = None) -> bool:
@@ -233,9 +271,23 @@ class Status:
 
 
 def _parse_iso(ts: str) -> _dt.datetime:
-    """Parse an ISO 8601 string. We always emit the trailing ``Z``; this
-    helper accepts that *and* the explicit ``+00:00`` form so a
-    hand-edited timestamp doesn't crash the sweep."""
+    """Parse an ISO 8601 string into an aware datetime. We always emit
+    the trailing ``Z``; this helper accepts that *and* the explicit
+    ``+00:00`` form so a hand-edited timestamp doesn't crash the sweep.
+
+    Rejects naive timestamps (no ``Z`` and no offset) as ValueError so
+    ``heartbeat_age_seconds`` can convert the failure into a
+    ``JournalModelError`` and the sweep flags the single bad task as
+    malformed instead of aborting. The schema requires UTC ISO 8601 --
+    we don't silently treat naive input as UTC because that would mask
+    real bugs in a future writer.
+    """
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
-    return _dt.datetime.fromisoformat(ts)
+    parsed = _dt.datetime.fromisoformat(ts)
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"timestamp {ts!r} is naive (no timezone offset); "
+            "the schema requires UTC ISO 8601 with a Z or +00:00 suffix"
+        )
+    return parsed

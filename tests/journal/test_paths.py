@@ -24,6 +24,16 @@ class TestDefaultJournalRoot:
         monkeypatch.setenv("XDG_STATE_HOME", "/tmp/should-be-ignored")
         assert default_journal_root() == tmp_path
 
+    def test_env_override_expands_tilde(self, monkeypatch, tmp_path):
+        """Regression: ``TIGERHARNESS_JOURNAL_DIR=~/journal`` must
+        resolve to the user's home dir rather than create a literal
+        ``~/journal`` directory in the cwd. ``Path.expanduser`` reads
+        ``$HOME``, so we set that rather than monkeypatching
+        ``Path.home``."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TIGERHARNESS_JOURNAL_DIR", "~/jx")
+        assert default_journal_root() == tmp_path / "jx"
+
     def test_blank_env_falls_through(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TIGERHARNESS_JOURNAL_DIR", "   ")
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))

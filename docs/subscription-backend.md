@@ -205,7 +205,8 @@ The other fields are bookkeeping or human-facing labels.
 |---|---|---|---|---|
 | (none) | `pending` | scaffolder | `tigerharness journal new --prd ...` succeeds | full status.json initialized |
 | `pending` | `in_progress` | driver | sweep step 2 picks this task | `sessions += 1`, `updated_at` bumped, `session_ref` set if cheap to capture |
-| `in_progress` | `in_progress` | driver | mid-task progress (clean stop, max_sessions not hit) | `updated_at` bumped, `next_action` rewritten |
+| `in_progress`-stale | `in_progress` | driver | **rescue** -- the sweep classified the task as stale (heartbeat older than `stuck_timeout`) and step 2 picked it up; the previous owner is presumed wedged or crashed | `sessions += 1`, `updated_at` bumped, `session_ref` overwritten if newly captured. The driver reads the tail of `progress.md` to figure out where the previous owner left off |
+| `in_progress` | `in_progress` | driver | mid-task progress (clean stop, max_sessions not hit) | `updated_at` bumped, `next_action` rewritten. **No** `sessions` change -- the counter was already incremented on pickup |
 | `in_progress` | `done` | driver | task complete per acceptance criteria | `state=done`, `next_action` cleared, sweep will archive on next invocation |
 | `in_progress` | `blocked` | driver | real blocker (need human / another agent / external input) OR `sessions == max_sessions` | `state=blocked`, `next_action` names the blocker |
 | `blocked` | `in_progress` | human | manual edit of `status.json` to clear the blocker (a future `journal unblock` CLI is a Phase 2 nicety) | `next_action` rewritten by the human to point the next session at the resolution |
@@ -307,10 +308,11 @@ so could a human or another vendor's agent. It specifies:
      made; the goal is to take the task as far as possible in this
      session.
   5. On exit, write a final `progress.md` entry summarising the
-     session and update `status.json`: bump `sessions`, refresh
-     `updated_at` one last time, rewrite `next_action` (or clear it
-     if `done`), set `state` to `done` / `blocked` / leave as
-     `in_progress` for a clean stop.
+     session and update `status.json`: refresh `updated_at` one last
+     time, rewrite `next_action` (or clear it if `done`), and set
+     `state` to `done` / `blocked` / leave as `in_progress` for a
+     clean stop. The `sessions` counter was already bumped on pickup
+     (step 2) -- do **not** bump it again on exit.
   6. **Cascade.** If the task you just finished moved to `done` (or
      even `blocked` — a `blocked` task is "off your plate" because
      the human's next action is to unblock it, not to drive it),

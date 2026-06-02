@@ -43,10 +43,13 @@ def _is_team_dir(p: Path) -> bool:
 
 def default_journal_root() -> Path:
     """Resolve the journal root per the priority above. Pure function:
-    no filesystem mutation, no ``mkdir``."""
+    no filesystem mutation, no ``mkdir``. ``~`` is expanded in the env
+    override so ``TIGERHARNESS_JOURNAL_DIR=~/journal`` works as a
+    well-known shell convention rather than creating a literal ``~/``
+    directory."""
     override = os.environ.get("TIGERHARNESS_JOURNAL_DIR", "").strip()
     if override:
-        return Path(override)
+        return Path(override).expanduser()
     cwd = Path.cwd()
     if _is_team_dir(cwd):
         return cwd / "journal"
