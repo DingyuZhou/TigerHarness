@@ -347,6 +347,31 @@ def test_trace_unbounded_loop_flagged():
     assert "self-loop on 01-loop -- UNBOUNDED" in trace
 
 
+def test_trace_fan_in_to_earlier_terminal_is_a_known_soft_label():
+    # Characterization pin for the documented `_edge_line` limitation.
+    # Diamond graph, NO cycle:  01-a -> {02-b, 04-d};  02-b -> 03-c;
+    # 03-c -> 04-d;  04-d -> __done__. BFS discovers 04-d (via 01-a's
+    # on_revise) before 03-c, so the fan-in edge 03-c -> 04-d points at
+    # an earlier-discovered node. The BFS-order heuristic therefore
+    # annotates it "loop back" even though 04-d is a terminal that can
+    # never re-reach 03-c. The authoritative `loops:` section correctly
+    # reports none. This asserts BOTH, documenting that the inline
+    # annotation is a readability hint, not a cycle decision. See
+    # `_edge_line.__doc__` for why reachability is NOT the fix; if a
+    # DFS active-stack back-edge classifier ever lands, update this pin.
+    steps = [
+        _step("01-a", on_approve="02-b", on_revise="04-d", on_block="__escalate__"),
+        _step("02-b", on_approve="03-c", on_revise="__escalate__", on_block="__escalate__"),
+        _step("03-c", on_approve="04-d", on_revise="__escalate__", on_block="__escalate__"),
+        _step("04-d", on_approve="__done__", on_revise="__escalate__", on_block="__escalate__"),
+    ]
+    trace = build_dry_run_trace(steps)
+    # The heuristic mislabels the acyclic fan-in edge:
+    assert "-> 04-d (loop back; at most 5 re-entries)" in trace
+    # ...but the rigorous cycle pass sees no loop at all:
+    assert "loops:\n  (none)" in trace
+
+
 # --------------------------------------------------------------------------- #
 # validate_compile_output (orchestrator)
 # --------------------------------------------------------------------------- #
