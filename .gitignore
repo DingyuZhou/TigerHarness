@@ -11,3 +11,8 @@ build/
 .coverage
 htmlcov/
 htmlcov/
+
+# Per-job worktrees created by `tigerharness assign --worktree-repo`.
+# Ephemeral -- removed automatically on job exit; only persists if a
+# job crashed or the cleanup itself failed.
+.worktrees/
