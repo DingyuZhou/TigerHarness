@@ -602,9 +602,13 @@ def _cmd_start_compile(args: argparse.Namespace) -> int:
     Emits the Phase 2 compile events (``compile_started`` ->
     ``compile_completed`` | ``compile_failed``, plus ``human_gate_requested``
     when the compiled config enables the gate) and bootstraps the runtime
-    ``status.json`` pointer. The compile pipeline owns the compiled
-    artifacts (``steps/``, ``orchestration.json``, traces); the CLI owns
-    the verbatim input snapshots and the status pointer.
+    ``status.json`` pointer. Ownership of the on-disk artifacts splits as:
+    the CLI persists ``orchestration.json`` + the compile ``trace`` /
+    ``transcript`` from the returned ``CompileResult`` (see
+    :func:`_write_compile_artifacts`), the verbatim input snapshots
+    (``task_brief.md`` / ``playbook_snapshot.md``), and the ``status.json``
+    pointer; the pipeline owns the step ``.md`` bodies (``steps/``) and
+    ``sessions.json``, which the CLI cannot reconstruct from the result.
     """
     team = args.team
     playbook_name = args.playbook or "default"
@@ -717,12 +721,14 @@ def _cmd_start_compile(args: argparse.Namespace) -> int:
             slack_thread_ts=args.thread,
         )
 
-    # Runtime bootstrap. The pipeline wrote orchestration.json + steps/
-    # (+ sessions.json from the critique personas); the CLI writes the
-    # initial status pointer. The Slack thread is parked in ``phase_state``
-    # so it survives the executor's later status rewrites for the Phase 3
-    # gate to read back (a bare top-level key would be dropped on the
-    # first ``Status.to_dict`` round-trip).
+    # Runtime bootstrap. orchestration.json is already on disk (the CLI
+    # just wrote it via _write_compile_artifacts); the pipeline wrote the
+    # step bodies under steps/ (+ sessions.json from the critique
+    # personas). Here the CLI writes the initial status pointer. The Slack
+    # thread is parked in ``phase_state`` so it survives the executor's
+    # later status rewrites for the Phase 3 gate to read back (a bare
+    # top-level key would be dropped on the first ``Status.to_dict``
+    # round-trip).
     status = _initial_status(task_id=task_id, entrypoint=orch.entrypoint)
     if args.thread:
         status.phase_state["slack_thread_ts"] = args.thread
