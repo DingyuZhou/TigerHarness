@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import runpy
 from pathlib import Path
 from unittest.mock import patch
@@ -13,15 +14,19 @@ from tigerharness.init import (
     _append_persona_to_yaml,
     _auto_init_tiger_memory,
     _command_prefix,
+    _ensure_journal_guard_hook,
     _format_path,
     _inject_allowed_user_ids,
+    _journal_guard_command,
     _maybe_register_slack_bridge_lane,
+    _merge_journal_guard_into,
     _prompt_choice,
     _prompt_optional_text,
     _prompt_text,
     _prompt_yes_no,
     _render_memory_config,
     _scaffold_claude_dir,
+    _tigerharness_project_root,
     _validate_name,
     _write_if_missing,
     add_persona,
@@ -438,6 +443,165 @@ class TestScaffoldClaudeDir:
             # Restore
             real_skills.rename(fake_skills)
             backup.rename(real_skills)
+
+
+# ---------------------------------------------------------------------------
+# Journal write-guard PreToolUse hook wiring
+# ---------------------------------------------------------------------------
+
+_GUARD_MODULE = "tigerharness.workflow_runner.hooks.journal_write_guard"
+
+
+class TestJournalGuardHelpers:
+    """Unit coverage for the hook-merge helpers."""
+
+    def test_project_root_points_at_repo(self):
+        """The computed project root must contain pyproject.toml -- that's
+        what makes ``uv run --project <root>`` resolve tigerharness."""
+        root = _tigerharness_project_root()
+        assert (root / "pyproject.toml").is_file()
+        assert (root / "src" / "tigerharness" / "init.py").is_file()
+
+    def test_command_targets_the_guard_module(self, tmp_path: Path):
+        cmd = _journal_guard_command(tmp_path)
+        assert cmd == (
+            f"uv run --project {tmp_path} python -m {_GUARD_MODULE}"
+        )
+
+    def test_ensure_adds_hook_to_empty_settings(self, tmp_path: Path):
+        settings: dict = {}
+        assert _ensure_journal_guard_hook(settings, tmp_path) is True
+        entries = settings["hooks"]["PreToolUse"]
+        assert entries[0]["matcher"] == "Edit|Write|NotebookEdit"
+        assert _GUARD_MODULE in entries[0]["hooks"][0]["command"]
+
+    def test_ensure_is_idempotent(self, tmp_path: Path):
+        settings: dict = {}
+        assert _ensure_journal_guard_hook(settings, tmp_path) is True
+        # Second call detects the existing registration and no-ops.
+        assert _ensure_journal_guard_hook(settings, tmp_path) is False
+        assert len(settings["hooks"]["PreToolUse"]) == 1
+
+    def test_ensure_appends_beside_other_pretooluse_entry(self, tmp_path: Path):
+        settings: dict = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "echo hi"}],
+                    }
+                ]
+            }
+        }
+        assert _ensure_journal_guard_hook(settings, tmp_path) is True
+        pre = settings["hooks"]["PreToolUse"]
+        assert len(pre) == 2
+        assert pre[0]["matcher"] == "Bash"  # pre-existing entry preserved
+        assert pre[1]["matcher"] == "Edit|Write|NotebookEdit"
+
+    def test_ensure_bails_on_non_dict_hooks(self, tmp_path: Path):
+        """A hand-mangled ``hooks`` value is left untouched, not crashed."""
+        settings: dict = {"hooks": "not-a-dict"}
+        assert _ensure_journal_guard_hook(settings, tmp_path) is False
+        assert settings == {"hooks": "not-a-dict"}
+
+    def test_ensure_bails_on_non_list_pretooluse(self, tmp_path: Path):
+        settings: dict = {"hooks": {"PreToolUse": "nope"}}
+        assert _ensure_journal_guard_hook(settings, tmp_path) is False
+        assert settings == {"hooks": {"PreToolUse": "nope"}}
+
+    def test_merge_into_missing_file_returns_false(self, tmp_path: Path):
+        # Non-existent path: read raises OSError -> left untouched.
+        missing = tmp_path / "nope" / "settings.json"
+        assert _merge_journal_guard_into(missing, tmp_path) is False
+
+    def test_merge_into_malformed_json_left_untouched(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text("{ this is not json", encoding="utf-8")
+        assert _merge_journal_guard_into(path, tmp_path) is False
+        assert path.read_text() == "{ this is not json"
+
+    def test_merge_into_non_object_json_left_untouched(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert _merge_journal_guard_into(path, tmp_path) is False
+        assert path.read_text() == "[1, 2, 3]"
+
+    def test_merge_into_already_wired_returns_false(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        settings: dict = {"env": {"FOO": "bar"}}
+        _ensure_journal_guard_hook(settings, tmp_path)
+        path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        assert _merge_journal_guard_into(path, tmp_path) is False
+
+    def test_merge_into_env_only_file_adds_hook(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text(
+            json.dumps({"env": {"FOO": "bar"}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        assert _merge_journal_guard_into(path, tmp_path) is True
+        merged = json.loads(path.read_text())
+        assert merged["env"] == {"FOO": "bar"}  # pre-existing key preserved
+        assert _GUARD_MODULE in json.dumps(merged["hooks"])
+
+
+class TestScaffoldGuardHook:
+    """_scaffold_claude_dir wires the guard hook on create and on merge."""
+
+    def test_fresh_settings_includes_guard_hook(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        team.mkdir()
+        _scaffold_claude_dir(team)
+        settings = json.loads(
+            (team / ".claude" / "settings.json").read_text()
+        )
+        # env preserved as before...
+        assert "TIGERHARNESS_PERSONAS_CONFIG" in settings["env"]
+        # ...and the guard hook is registered.
+        pre = settings["hooks"]["PreToolUse"]
+        assert pre[0]["matcher"] == "Edit|Write|NotebookEdit"
+        cmd = pre[0]["hooks"][0]["command"]
+        assert cmd.startswith("uv run --project ")
+        assert cmd.endswith(f"python -m {_GUARD_MODULE}")
+
+    def test_existing_settings_merged_additively(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        (team / ".claude").mkdir(parents=True)
+        settings_path = team / ".claude" / "settings.json"
+        settings_path.write_text(
+            json.dumps({"env": {"CUSTOM": "1"}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        created = _scaffold_claude_dir(team)
+        assert settings_path in created
+        merged = json.loads(settings_path.read_text())
+        assert merged["env"] == {"CUSTOM": "1"}  # not clobbered
+        assert _GUARD_MODULE in json.dumps(merged["hooks"])
+
+    def test_existing_settings_merge_is_idempotent(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        (team / ".claude").mkdir(parents=True)
+        settings_path = team / ".claude" / "settings.json"
+        settings_path.write_text(
+            json.dumps({"env": {"CUSTOM": "1"}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _scaffold_claude_dir(team)
+        # Second scaffold over the now-wired file adds nothing.
+        created = _scaffold_claude_dir(team)
+        assert settings_path not in created
+        pre = json.loads(settings_path.read_text())["hooks"]["PreToolUse"]
+        assert len(pre) == 1
+
+    def test_malformed_existing_settings_not_in_created(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        (team / ".claude").mkdir(parents=True)
+        settings_path = team / ".claude" / "settings.json"
+        settings_path.write_text("{ broken", encoding="utf-8")
+        created = _scaffold_claude_dir(team)
+        assert settings_path not in created
+        assert settings_path.read_text() == "{ broken"
 
 
 # ---------------------------------------------------------------------------
