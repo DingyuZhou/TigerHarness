@@ -238,6 +238,49 @@ def test_playbook_and_brief_in_prompt() -> None:
     assert brief in prompt
 
 
+def test_frontmatter_contract_and_protocol_reach_prompt() -> None:
+    """The prompt must teach Anzai the contract + output format.
+
+    The prompt is the load-bearing artifact of this module: if these
+    tokens silently drop out (a careless refactor of the contract or
+    protocol constants), the LLM emits an unparseable shape and the whole
+    compile pipeline breaks with parse failures. Guard the essential,
+    stable tokens so that failure is caught here, not in production.
+    """
+    response = make_response(three_step_specs())
+    fsm = FakeSessionManager(stdout=response)
+
+    draft_steps(
+        playbook_text="PB",
+        task_brief="TB",
+        roster=["anzai"],
+        session_manager=fsm,
+    )
+
+    prompt = fsm.calls[0].prompt
+    # Every required frontmatter field (colon-suffixed -> contract-specific).
+    for field_token in (
+        "id:",
+        "persona:",
+        "role:",
+        "on_approve:",
+        "on_revise:",
+        "on_block:",
+        "max_iters:",
+        "timeout_sec:",
+        "parallel_with:",
+    ):
+        assert field_token in prompt, field_token
+    # The two routing sentinels (and nothing teaches others).
+    assert "__done__" in prompt
+    assert "__escalate__" in prompt
+    # Output protocol: the bundle fence + the per-step header sentinel.
+    assert "```steps-bundle" in prompt
+    assert "## step:" in prompt
+    # The trailer convention (brief point 7).
+    assert "WORKFLOW: APPROVE" in prompt
+
+
 # --------------------------------------------------------------------------- #
 # Brief #7 -- cost round-trips unchanged
 # --------------------------------------------------------------------------- #
