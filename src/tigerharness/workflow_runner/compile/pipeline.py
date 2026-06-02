@@ -46,16 +46,17 @@ What we deliberately do **not** do (out of scope, see the task brief):
 Cross-module seam
 -----------------
 
-``compile.critique`` does not exist on this branch yet (Rukawa builds it
-in parallel). We therefore:
+``compile.critique`` was built in parallel by Rukawa. The pipeline:
 
-* Accept ``critique_loop`` as a **required keyword argument** -- in
-  production ``cmd_start`` passes
-  ``compile.critique.run_critique_loop``; tests inject a fake.
-* Recognise the loop's "exhausted without convergence" abort by the
+* Accepts ``critique_loop`` as an **optional keyword argument** and
+  default-resolves it (lazy import) to
+  ``compile.critique.run_critique_loop`` -- so the CLI does not need to
+  pass it explicitly (matches ``docs/workflow-runner-phase2.md`` Public
+  API). Tests inject a fake.
+* Recognises the loop's "exhausted without convergence" abort by the
   exception *class name* ``"CritiqueAbortedError"`` rather than importing
-  it, so the modules stay decoupled until Anzai wires them together at
-  integration time. See :func:`_is_critique_aborted`.
+  it, so the modules stay decoupled even after integration. See
+  :func:`_is_critique_aborted`.
 
 The :class:`CritiqueResult` shape below mirrors Rukawa's spec
 (``rounds`` / ``final_steps`` / ``transcript`` / ``cost_usd``). We only
@@ -348,7 +349,7 @@ def compile_playbook(
     team_root: Path,
     task_paths: TaskPaths,
     session_manager: SessionManager,
-    critique_loop: Any,
+    critique_loop: Any = None,
     workflow_config: WorkflowConfig | None = None,
 ) -> CompileResult:
     """Compile a playbook + brief into a validated orchestration.
@@ -423,6 +424,15 @@ def compile_playbook(
             feedback=feedback,
         ).steps
 
+    if critique_loop is None:  # pragma: no cover - integration default (Anzai)
+        # Default-resolve to the real Tier 2 loop. Lazy import so the
+        # pipeline module stays importable in the parallel-build window
+        # where ``compile.critique`` hadn't landed yet. Tests inject a
+        # fake via the ``critique_loop=`` kwarg.
+        from tigerharness.workflow_runner.compile.critique import (
+            run_critique_loop,
+        )
+        critique_loop = run_critique_loop
     try:
         critique = critique_loop(
             initial_steps=initial.steps,

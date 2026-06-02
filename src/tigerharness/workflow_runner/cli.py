@@ -96,9 +96,12 @@ from tigerharness.workflow_runner.sessions import SessionManager
 #     test seam).
 #
 # The Tier 2 critique loop (``compile/critique.py``, Rukawa) is *not*
-# injected from here: per ``docs/workflow-runner-phase2.md`` (Public API),
-# ``compile_playbook`` owns the full compile (Tier 1 + Tier 2) internally
-# and exposes only ``session_manager`` / ``max_compile_iters`` as seams.
+# injected from here: ``compile_playbook`` accepts ``critique_loop`` as
+# an optional kwarg and default-resolves to
+# ``compile.critique.run_critique_loop`` when the CLI omits it (per
+# ``docs/workflow-runner-phase2.md`` Public API, which lists only
+# ``session_manager`` / ``max_compile_iters`` as CLI-side seams). The
+# pipeline's lazy import keeps the parallel-build window decoupled.
 #
 # ``_resolve_compile_entrypoint`` imports the real callable lazily when the
 # global is still ``None`` -- the path exercised only post-integration
