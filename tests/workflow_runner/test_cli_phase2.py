@@ -4,13 +4,15 @@ These exercise the new ``--playbook`` / ``--task-brief`` / ``--brief-file``
 / ``--thread`` flags and the compile-mode flow in
 :func:`cli._cmd_start_compile`.
 
-The compile pipeline (Sakuragi) and Tier 2 critique loop (Rukawa) land in
-parallel Phase 2 worktrees and may not exist on this branch yet. Per the
-documented integration seam, we patch the late-bound module globals
-``cli.compile_playbook`` and ``cli.run_critique_loop`` so these tests never
-depend on the real implementations. The fakes mimic the pipeline's side of
-the contract: they write ``orchestration.json`` + ``steps/`` and return an
-object exposing ``.steps`` / ``.critique_iters`` / ``.orchestration``.
+The compile pipeline (Sakuragi) lands in a parallel Phase 2 worktree and
+may not exist on this branch yet. Per the documented integration seam
+(``docs/workflow-runner-phase2.md`` Public API), we patch the late-bound
+module global ``cli.compile_playbook`` so these tests never depend on the
+real implementation. The fakes mimic the pipeline's side of the contract:
+they accept the documented signature
+(``playbook_path`` / ``task_brief`` / ``team_root`` / ``task_paths`` /
+``session_manager``), write ``orchestration.json`` + ``steps/``, and return
+an object exposing ``.steps`` / ``.critique_iters`` / ``.orchestration``.
 """
 
 from __future__ import annotations
@@ -89,7 +91,7 @@ def _make_fake_compile(
         team_root: Path,
         task_paths,
         session_manager,
-        critique_loop,
+        max_compile_iters: int = 8,
     ):
         wf = WorkflowConfig(
             human_gate=human_gate,
@@ -129,18 +131,16 @@ def _make_fake_compile(
 
 @pytest.fixture()
 def patch_compile(monkeypatch: pytest.MonkeyPatch):
-    """Patch both late-bound pipeline globals.
+    """Patch the late-bound ``compile_playbook`` global.
 
-    Both must be patched: ``_resolve_pipeline_entrypoints`` lazily imports
-    the real module only when a global is ``None``, and those modules do
-    not exist on this branch.
+    ``_resolve_compile_entrypoint`` lazily imports the real
+    ``compile.pipeline`` module only when the global is ``None``, and that
+    module does not exist on this branch -- so the patch keeps the import
+    from ever firing.
     """
 
     def _apply(compile_fn) -> None:
         monkeypatch.setattr(cli, "compile_playbook", compile_fn)
-        monkeypatch.setattr(
-            cli, "run_critique_loop", lambda *a, **k: None
-        )
 
     return _apply
 

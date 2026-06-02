@@ -87,20 +87,23 @@ from tigerharness.workflow_runner.sessions import SessionManager
 # Phase 2 compile-mode integration seams
 # --------------------------------------------------------------------------- #
 #
-# The compile pipeline (``compile/pipeline.py``, Sakuragi) and the Tier 2
-# critique loop (``compile/critique.py``, Rukawa) land in parallel Phase 2
-# worktrees and may not exist on this branch yet. We keep them as
-# late-bound module globals (default ``None``) so:
+# The compile pipeline (``compile/pipeline.py``, Sakuragi) lands in a
+# parallel Phase 2 worktree and may not exist on this branch yet. We keep
+# its public entrypoint as a late-bound module global (default ``None``) so:
 #
-#   * importing ``cli`` never hard-depends on those modules existing, and
-#   * tests can patch ``cli.compile_playbook`` / ``cli.run_critique_loop``
-#     directly (the documented test seam).
+#   * importing ``cli`` never hard-depends on that module existing, and
+#   * tests can patch ``cli.compile_playbook`` directly (the documented
+#     test seam).
 #
-# ``_resolve_pipeline_entrypoints`` imports the real callables lazily when
-# the globals are still ``None`` -- the path exercised only post-integration
-# (Anzai), hence the ``pragma: no cover`` on those branches.
+# The Tier 2 critique loop (``compile/critique.py``, Rukawa) is *not*
+# injected from here: per ``docs/workflow-runner-phase2.md`` (Public API),
+# ``compile_playbook`` owns the full compile (Tier 1 + Tier 2) internally
+# and exposes only ``session_manager`` / ``max_compile_iters`` as seams.
+#
+# ``_resolve_compile_entrypoint`` imports the real callable lazily when the
+# global is still ``None`` -- the path exercised only post-integration
+# (Anzai), hence the ``pragma: no cover`` on that branch.
 compile_playbook = None
-run_critique_loop = None
 
 
 # Step ids land on disk as ``steps/<id>.md`` -- keep them strictly
@@ -530,24 +533,19 @@ def _validate_start_args(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _resolve_pipeline_entrypoints() -> tuple[Any, Any]:
-    """Return ``(compile_playbook, run_critique_loop)`` callables.
+def _resolve_compile_entrypoint() -> Any:
+    """Return the ``compile_playbook`` callable.
 
-    Prefers the module globals -- patched by tests, wired by integration
-    (Anzai) -- and falls back to importing the real implementations
-    lazily. See the integration-seam note at the top of the module.
+    Prefers the module global -- patched by tests, wired by integration
+    (Anzai) -- and falls back to importing the real implementation lazily.
+    See the integration-seam note at the top of the module.
     """
     compile_fn = compile_playbook
-    critique_fn = run_critique_loop
     if compile_fn is None:  # pragma: no cover - integration seam (Sakuragi)
         from tigerharness.workflow_runner.compile.pipeline import (
             compile_playbook as compile_fn,
         )
-    if critique_fn is None:  # pragma: no cover - integration seam (Rukawa)
-        from tigerharness.workflow_runner.compile.critique import (
-            run_critique_loop as critique_fn,
-        )
-    return compile_fn, critique_fn
+    return compile_fn
 
 
 def _resolve_team_root(team: str) -> Path:
@@ -636,16 +634,19 @@ def _cmd_start_compile(args: argparse.Namespace) -> int:
         task_brief_sha256=brief_sha,
     )
 
-    compile_fn, critique_fn = _resolve_pipeline_entrypoints()
+    compile_fn = _resolve_compile_entrypoint()
     session_manager = SessionManager(paths.task_dir)
     try:
+        # Signature per docs/workflow-runner-phase2.md "Public API".
+        # ``max_compile_iters`` is intentionally omitted: the pipeline
+        # derives it from the playbook's own workflow_config (the CLI has
+        # not parsed that yet at this point), falling back to its default.
         result = compile_fn(
             playbook_path=playbook_path,
             task_brief=brief,
             team_root=team_root,
             task_paths=paths,
             session_manager=session_manager,
-            critique_loop=critique_fn,
         )
     except CompileTier1Error as exc:
         append_event(
