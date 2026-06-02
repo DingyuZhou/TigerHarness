@@ -417,7 +417,8 @@ def run_critique_loop(
         If the iteration bounds are inconsistent (caught up front so a
         misconfiguration fails loud rather than looping to the ceiling).
     CritiqueParseError
-        If a critic's reply has no parseable APPROVE/REVISE trailer.
+        If a critic's invocation failed (timeout / non-zero exit) or its
+        reply has no parseable APPROVE/REVISE trailer.
     CritiqueAbortedError
         If the ceiling is reached without dual-APPROVE convergence.
     """

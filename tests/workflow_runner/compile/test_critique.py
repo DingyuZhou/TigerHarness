@@ -19,6 +19,7 @@ Coverage map (the 7 brief-required cases + the structural branches the
 * cost_summed_across_rounds            -> brief #7
 * parser_rejects_block_trailer         -> the non-APPROVE/REVISE raise branch
 * invocation_error_surfaces_real_cause -> the result.error pre-parse branch
+* invocation_error_rejects_..._trailer  -> reject errored turn despite trailer
 * invalid_floor / max_below_floor      -> the input-guard branches
 * critic_prompts_contain_context       -> prompt assembly + render branches
 * invoke_args                          -> persona order + timeout passthrough
@@ -39,7 +40,7 @@ from tigerharness.workflow_runner.compile.critique import (
     run_critique_loop,
 )
 from tigerharness.workflow_runner.models import StepFrontmatter
-from tigerharness.workflow_runner.sessions import InvocationResult
+from tigerharness.workflow_runner.sessions import TIMEOUT_EXIT_CODE, InvocationResult
 
 from tests.workflow_runner.compile.conftest import RecordedCall
 
@@ -113,7 +114,7 @@ def _errored(error: str, *, stdout: str = "", cost: float = 0.0) -> InvocationRe
         stdout=stdout,
         session_id="sid",
         cost_usd=cost,
-        exit_code=-1001,
+        exit_code=TIMEOUT_EXIT_CODE,
         error=error,
         raw_envelope={},
     )
@@ -350,6 +351,28 @@ def test_invocation_error_surfaces_real_cause() -> None:
     assert err.reason == "invocation failed: timed out after 600s"
     assert err.raw_response == ""
     assert "timed out after 600s" in str(err)
+
+
+def test_invocation_error_rejects_even_with_surviving_trailer() -> None:
+    # A timed-out turn can leave a *valid* trailer in partial stdout
+    # (invoke preserves _decode_partial(exc.stdout)). The verdict is still
+    # untrustworthy -- the turn did not complete -- so the loop must reject
+    # it on error, NOT trust the stray trailer. This locks in the
+    # deliberate reject-anyway behavior documented on _parse_verdict.
+    sm = ScriptedSessionManager(
+        akagi=[_errored("timed out after 600s", stdout="WORKFLOW: APPROVE")],
+        ayako=[critic("APPROVE")],
+    )
+    drafter = FakeDrafter([])
+
+    with pytest.raises(CritiqueParseError) as excinfo:
+        _run(sm, drafter)
+
+    err = excinfo.value
+    assert err.persona == "akagi"
+    assert err.reason == "invocation failed: timed out after 600s"
+    # raw_response keeps the partial stdout for the event log.
+    assert err.raw_response == "WORKFLOW: APPROVE"
 
 
 def test_parser_rejects_block_trailer() -> None:
