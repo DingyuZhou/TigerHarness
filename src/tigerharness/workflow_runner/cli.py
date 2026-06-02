@@ -4,14 +4,22 @@ Driven via::
 
     python -m tigerharness.workflow_runner <subcommand> [args]
 
-This is the Phase 1 CLI for the workflow-runner. ``start`` accepts
-**pre-compiled** step files: it initialises the task folder, then
-drives :class:`WorkflowExecutor` to a terminal phase (``done`` /
-``escalated`` / ``cancelled``) and maps that to the process exit code.
+``start`` has two modes:
+
+* **Compile mode (Phase 2, recommended).** ``--playbook <name>`` +
+  ``--task-brief <text>`` / ``--brief-file <path>`` compiles a freestyle
+  playbook + brief into validated step files (Tier 1 validators + Tier 2
+  critique loop), then runs the result. ``--thread <ts>`` records the
+  Slack thread for the Phase 3 human gate.
+* **Escape hatch (Phase 1).** ``--steps <dir>`` skips compile and uses
+  **pre-compiled** step files as-is: it initialises the task folder, then
+  drives :class:`WorkflowExecutor`. ``--steps`` is mutually exclusive with
+  the compile-mode flags.
+
+Either mode drives :class:`WorkflowExecutor` to a terminal phase (``done``
+/ ``escalated`` / ``cancelled``) and maps that to the process exit code.
 Pass ``--no-run`` to initialise the journal without starting the loop
-(used by tests and for inspecting a task before running it). The
-compile phase that turns a freestyle playbook into pre-compiled step
-files lands in Phase 2.
+(used by tests and for inspecting a task before running it).
 
 Design picks:
 
@@ -32,7 +40,9 @@ Design picks:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -56,6 +66,10 @@ from tigerharness.workflow_runner.atomic import (
     read_json,
     write_json_atomic,
 )
+from tigerharness.workflow_runner.compile.errors import (
+    CompileTier1Error,
+    CompileTier2Error,
+)
 from tigerharness.workflow_runner.executor import (
     ExecutionOutcome,
     ExecutorError,
@@ -67,12 +81,42 @@ from tigerharness.workflow_runner.paths import (
     default_journal_root,
     new_task_id,
 )
+from tigerharness.workflow_runner.sessions import SessionManager
+
+# --------------------------------------------------------------------------- #
+# Phase 2 compile-mode integration seams
+# --------------------------------------------------------------------------- #
+#
+# The compile pipeline (``compile/pipeline.py``, Sakuragi) lands in a
+# parallel Phase 2 worktree and may not exist on this branch yet. We keep
+# its public entrypoint as a late-bound module global (default ``None``) so:
+#
+#   * importing ``cli`` never hard-depends on that module existing, and
+#   * tests can patch ``cli.compile_playbook`` directly (the documented
+#     test seam).
+#
+# The Tier 2 critique loop (``compile/critique.py``, Rukawa) is *not*
+# injected from here: per ``docs/workflow-runner-phase2.md`` (Public API),
+# ``compile_playbook`` owns the full compile (Tier 1 + Tier 2) internally
+# and exposes only ``session_manager`` / ``max_compile_iters`` as seams.
+#
+# ``_resolve_compile_entrypoint`` imports the real callable lazily when the
+# global is still ``None`` -- the path exercised only post-integration
+# (Anzai), hence the ``pragma: no cover`` on that branch.
+compile_playbook = None
 
 
 # Step ids land on disk as ``steps/<id>.md`` -- keep them strictly
 # filename-safe. Spec examples use ``[a-z0-9-]``; we additionally
 # permit ``_`` so Phase 2's compile phase has wiggle room.
 _STEP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]*$")
+
+# ``--playbook`` is a *name*, not a path: it is interpolated directly into
+# ``teams/<Team>/workflow/<name>.md``. Reject anything with a path
+# separator or a leading ``.`` so a stray ``../`` or hidden-file name can't
+# escape the workflow directory. First char alphanumeric; thereafter
+# ``[A-Za-z0-9._-]`` so versioned names like ``v1.2`` are fine.
+_PLAYBOOK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]*$")
 
 # Phases that mean "the task is finished, no more work will happen".
 # "cancelling" is intentionally *not* terminal: it's the transitional
@@ -297,8 +341,6 @@ def _playbook_sha256(step_paths: Iterable[Path]) -> str:
     sorted order. Stable and good enough for Phase 1's "did the input
     change" sanity check; Phase 2 replaces it with the playbook hash.
     """
-    import hashlib
-
     h = hashlib.sha256()
     for p in step_paths:
         h.update(p.name.encode("utf-8"))
@@ -308,7 +350,47 @@ def _playbook_sha256(step_paths: Iterable[Path]) -> str:
     return h.hexdigest()
 
 
-def cmd_start(args: argparse.Namespace) -> int:
+def _mint_task_paths(
+    args: argparse.Namespace,
+) -> tuple[TaskPaths | None, str | None]:
+    """Resolve + create the per-task journal folder.
+
+    Shared by both ``start`` modes (escape hatch + compile). Returns
+    ``(paths, task_id)`` on success, or ``(None, None)`` after printing a
+    user-facing error (caller maps that to exit code 2). Centralised so
+    the ``--task-id`` charset check and the "folder already exists" guard
+    behave identically across modes.
+    """
+    if args.task_id:
+        task_id = args.task_id.strip()
+        if not _STEP_ID_RE.match(task_id):
+            print(
+                f"error: --task-id {task_id!r} must match "
+                f"{_STEP_ID_RE.pattern}",
+                file=sys.stderr,
+            )
+            return None, None
+    else:
+        task_id = new_task_id(slug=args.team)
+
+    root = default_journal_root()
+    paths = TaskPaths(root=root, task_id=task_id)
+    if paths.task_dir.exists():
+        print(
+            f"error: task folder already exists: {paths.task_dir}",
+            file=sys.stderr,
+        )
+        return None, None
+    paths.ensure()
+    return paths, task_id
+
+
+def _cmd_start_precompiled(args: argparse.Namespace) -> int:
+    """Escape hatch: initialise from pre-compiled ``--steps`` files.
+
+    This is the unchanged Phase 1 behaviour; ``cmd_start`` routes here
+    whenever ``--steps`` is given.
+    """
     steps_src = Path(args.steps).expanduser()
     try:
         loaded = _load_step_files(steps_src)
@@ -332,27 +414,9 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     sha = _playbook_sha256(src_paths)
 
-    if args.task_id:
-        task_id = args.task_id.strip()
-        if not _STEP_ID_RE.match(task_id):
-            print(
-                f"error: --task-id {task_id!r} must match "
-                f"{_STEP_ID_RE.pattern}",
-                file=sys.stderr,
-            )
-            return 2
-    else:
-        task_id = new_task_id(slug=args.team)
-
-    root = default_journal_root()
-    paths = TaskPaths(root=root, task_id=task_id)
-    if paths.task_dir.exists():
-        print(
-            f"error: task folder already exists: {paths.task_dir}",
-            file=sys.stderr,
-        )
+    paths, task_id = _mint_task_paths(args)
+    if paths is None:
         return 2
-    paths.ensure()
 
     # Copy step files verbatim. Each compiled file becomes
     # ``steps/<id>.md`` so the executor can address it by id.
@@ -401,6 +465,291 @@ def cmd_start(args: argparse.Namespace) -> int:
     print(f"  steps:      {len(orch.steps)}")
     print(f"  entrypoint: {orch.entrypoint}")
     print(f"  path:       {paths.task_dir}")
+    print()
+
+    if args.no_run:
+        print("note: --no-run set; task initialized but not started.")
+        return 0
+
+    return _run_task(paths, task_id)
+
+
+# --------------------------------------------------------------------------- #
+# `start` -- dispatcher + Phase 2 compile mode
+# --------------------------------------------------------------------------- #
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    """Route ``workflow start`` to compile mode or the escape hatch.
+
+    ``--steps`` selects the Phase 1 pre-compiled path; otherwise we
+    compile ``--playbook`` + a brief (Phase 2). Flag-combination
+    validation runs first so an incompatible invocation fails fast with
+    a clear message (exit 2) rather than half-initialising a task.
+    """
+    err = _validate_start_args(args)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    if args.steps:
+        return _cmd_start_precompiled(args)
+    return _cmd_start_compile(args)
+
+
+def _validate_start_args(args: argparse.Namespace) -> str | None:
+    """Enforce the Phase 2 flag-combination rules (ADR 0002 D7).
+
+    Returns ``None`` when the combination is legal, else a
+    human-readable error naming the conflicting flags. The mutual
+    exclusion is: ``--steps`` (escape hatch) cannot be combined with any
+    compile-mode flag, and the two brief sources are exclusive.
+    """
+    compile_flags: list[str] = []
+    if args.playbook is not None:
+        compile_flags.append("--playbook")
+    if args.task_brief is not None:
+        compile_flags.append("--task-brief")
+    if args.brief_file is not None:
+        compile_flags.append("--brief-file")
+
+    if args.steps:
+        if compile_flags:
+            joined = " / ".join(compile_flags)
+            return (
+                f"--steps is mutually exclusive with {joined} "
+                f"(the escape hatch uses pre-compiled files; there is no "
+                f"compile phase to consume a brief)"
+            )
+        return None
+
+    # Compile mode (no --steps).
+    if args.task_brief is not None and args.brief_file is not None:
+        return "--task-brief and --brief-file are mutually exclusive"
+    if args.task_brief is None and args.brief_file is None:
+        return (
+            "compile mode requires a brief: pass --task-brief or "
+            "--brief-file (or --steps <dir> for pre-compiled steps)"
+        )
+    return None
+
+
+def _resolve_compile_entrypoint() -> Any:
+    """Return the ``compile_playbook`` callable.
+
+    Prefers the module global -- patched by tests, wired by integration
+    (Anzai) -- and falls back to importing the real implementation lazily.
+    See the integration-seam note at the top of the module.
+    """
+    compile_fn = compile_playbook
+    if compile_fn is None:  # pragma: no cover - integration seam (Sakuragi)
+        from tigerharness.workflow_runner.compile.pipeline import (
+            compile_playbook as compile_fn,
+        )
+    return compile_fn
+
+
+def _write_compile_artifacts(paths: TaskPaths, result: Any) -> None:
+    """Persist the compiled plan + diagnostics from a ``CompileResult``.
+
+    ``docs/workflow-runner-phase2.md`` is internally split on who writes
+    what: the pipeline "High-level flow" lists persisting steps/ +
+    orchestration.json + traces, while the ``cmd_start`` flow has the CLI
+    call ``write_artifacts(task_paths, result)`` and describes the returned
+    ``Orchestration`` as "ready to persist". We resolve that by having the
+    CLI write the artifacts it *can* reconstruct from ``result`` --
+    ``orchestration.json`` and the compile ``trace`` / ``transcript``
+    diagnostics. The write is idempotent: if the pipeline already wrote
+    the same content the CLI simply rewrites it; if it did not, the CLI
+    fills the gap so the executor always finds a valid
+    ``orchestration.json``.
+
+    Step ``.md`` *bodies* and ``sessions.json`` stay the pipeline's job:
+    ``CompileResult.steps`` carries only :class:`StepFrontmatter`, so the
+    prompt bodies cannot be reconstructed here.
+    """
+    write_json_atomic(
+        paths.orchestration_json, result.orchestration.to_dict()
+    )
+    paths.compile_trace.write_text(result.trace, encoding="utf-8")
+    paths.compile_critique.write_text(result.transcript, encoding="utf-8")
+
+
+def _resolve_team_root(team: str) -> Path:
+    """Resolve the on-disk team root for ``team``.
+
+    Resolution order:
+
+    1. ``$TIGERHARNESS_TEAMS_DIR/<team>`` if the env var is set -- the
+       explicit override (and the test seam).
+    2. ``<cwd>`` if cwd is itself a team root (``configs/personas.yaml``
+       present): the "run from inside the team folder" convention, the
+       same heuristic :func:`paths.default_journal_root` uses.
+    3. ``<cwd>/teams/<team>`` otherwise -- the documented layout
+       (``teams/<Team>/workflow/<name>.md``).
+    """
+    override = os.environ.get("TIGERHARNESS_TEAMS_DIR", "").strip()
+    if override:
+        return Path(override) / team
+    cwd = Path.cwd()
+    if (cwd / "configs" / "personas.yaml").is_file():
+        return cwd
+    return cwd / "teams" / team
+
+
+def _cmd_start_compile(args: argparse.Namespace) -> int:
+    """Compile ``--playbook`` + a brief into steps, then (optionally) run.
+
+    Emits the Phase 2 compile events (``compile_started`` ->
+    ``compile_completed`` | ``compile_failed``, plus ``human_gate_requested``
+    when the compiled config enables the gate) and bootstraps the runtime
+    ``status.json`` pointer. Ownership of the on-disk artifacts splits as:
+    the CLI persists ``orchestration.json`` + the compile ``trace`` /
+    ``transcript`` from the returned ``CompileResult`` (see
+    :func:`_write_compile_artifacts`), the verbatim input snapshots
+    (``task_brief.md`` / ``playbook_snapshot.md``), and the ``status.json``
+    pointer; the pipeline owns the step ``.md`` bodies (``steps/``) and
+    ``sessions.json``, which the CLI cannot reconstruct from the result.
+    """
+    team = args.team
+    playbook_name = args.playbook or "default"
+    if not _PLAYBOOK_NAME_RE.match(playbook_name):
+        print(
+            f"error: --playbook {playbook_name!r} must be a bare name "
+            f"(start with [A-Za-z0-9], then [A-Za-z0-9._-]); no path "
+            f"separators",
+            file=sys.stderr,
+        )
+        return 2
+    team_root = _resolve_team_root(team)
+    playbook_path = team_root / "workflow" / f"{playbook_name}.md"
+    if not playbook_path.is_file():
+        print(
+            f"error: playbook {playbook_name}.md not found under "
+            f"{team_root / 'workflow'}/ (looked for {playbook_path})",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Resolve the brief. ``_validate_start_args`` guarantees exactly one
+    # of --task-brief / --brief-file is set in compile mode.
+    if args.task_brief is not None:
+        brief = args.task_brief
+    else:
+        brief_path = Path(args.brief_file).expanduser()
+        try:
+            brief = brief_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(
+                f"error: cannot read brief file {brief_path}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
+    paths, task_id = _mint_task_paths(args)
+    if paths is None:
+        return 2
+
+    # Snapshot the verbatim inputs up front so the pipeline can read them
+    # off disk and the journal records exactly what was compiled.
+    paths.task_brief.write_text(brief, encoding="utf-8")
+    paths.playbook_snapshot.write_text(
+        playbook_path.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    brief_sha = hashlib.sha256(brief.encode("utf-8")).hexdigest()
+    append_event(
+        paths.events_jsonl,
+        "compile_started",
+        playbook=playbook_name,
+        task_brief_sha256=brief_sha,
+    )
+
+    compile_fn = _resolve_compile_entrypoint()
+    session_manager = SessionManager(paths.task_dir)
+    try:
+        # Signature per docs/workflow-runner-phase2.md "Public API".
+        # ``max_compile_iters`` is intentionally omitted: the pipeline
+        # derives it from the playbook's own workflow_config (the CLI has
+        # not parsed that yet at this point), falling back to its default.
+        result = compile_fn(
+            playbook_path=playbook_path,
+            task_brief=brief,
+            team_root=team_root,
+            task_paths=paths,
+            session_manager=session_manager,
+        )
+    except CompileTier1Error as exc:
+        append_event(
+            paths.events_jsonl,
+            "compile_failed",
+            tier=1,
+            errors=exc.errors,
+        )
+        print(f"error: compile failed (tier 1): {exc}", file=sys.stderr)
+        return 2
+    except CompileTier2Error as exc:
+        append_event(
+            paths.events_jsonl,
+            "compile_failed",
+            tier=2,
+            last_verdicts=exc.last_verdicts,
+        )
+        print(f"error: compile failed (tier 2): {exc}", file=sys.stderr)
+        return 2
+
+    # Persist the compiled plan before logging success so any reader that
+    # sees ``compile_completed`` can trust ``orchestration.json`` exists.
+    _write_compile_artifacts(paths, result)
+
+    append_event(
+        paths.events_jsonl,
+        "compile_completed",
+        steps=len(result.steps),
+        critique_iters=result.critique_iters,
+    )
+
+    orch = result.orchestration
+    wf_config = orch.workflow_config
+    if wf_config.human_gate:
+        # Phase 3 hand-off (ADR 0002 D9): announce the gate request with
+        # the would-be approvers + the Slack thread to route the ask to.
+        # Phase 2 does NOT wait -- compilation proceeds straight to run.
+        append_event(
+            paths.events_jsonl,
+            "human_gate_requested",
+            approvers=list(wf_config.human_gate_approvers),
+            slack_thread_ts=args.thread,
+        )
+
+    # Runtime bootstrap. orchestration.json is already on disk (the CLI
+    # just wrote it via _write_compile_artifacts); the pipeline wrote the
+    # step bodies under steps/ (+ sessions.json from the critique
+    # personas). Here the CLI writes the initial status pointer. The Slack
+    # thread is parked in ``phase_state`` so it survives the executor's
+    # later status rewrites for the Phase 3 gate to read back (a bare
+    # top-level key would be dropped on the first ``Status.to_dict``
+    # round-trip).
+    status = _initial_status(task_id=task_id, entrypoint=orch.entrypoint)
+    if args.thread:
+        status.phase_state["slack_thread_ts"] = args.thread
+    write_json_atomic(paths.status_json, status.to_dict())
+
+    append_event(
+        paths.events_jsonl,
+        "task_started",
+        task_id=task_id,
+        team=team,
+        steps=len(orch.steps),
+        entrypoint=orch.entrypoint,
+    )
+
+    print(f"Task initialised (compiled): {task_id}")
+    print(f"  team:           {team}")
+    print(f"  playbook:       {playbook_name}")
+    print(f"  steps:          {len(orch.steps)}")
+    print(f"  critique_iters: {result.critique_iters}")
+    print(f"  entrypoint:     {orch.entrypoint}")
+    print(f"  path:           {paths.task_dir}")
     print()
 
     if args.no_run:
@@ -754,19 +1103,41 @@ def cmd_cancel(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="workflow",
-        description="Workflow orchestration CLI (Phase 1).",
+        description="Workflow orchestration CLI.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # start
     s = sub.add_parser(
         "start",
-        help="Initialise a new task from pre-compiled steps.",
+        help="Compile a playbook + brief into a task (or use --steps).",
+        description=(
+            "Initialise a new task. Compile mode (--playbook + "
+            "--task-brief/--brief-file) compiles a freestyle playbook into "
+            "validated steps and runs them. The --steps escape hatch skips "
+            "compile and consumes pre-compiled step files as-is. The two "
+            "modes are mutually exclusive."
+        ),
     )
     s.add_argument("--team", required=True,
                    help="Team name (e.g. Shohoku).")
-    s.add_argument("--steps", required=True,
-                   help="Directory containing pre-compiled step .md files.")
+    s.add_argument("--playbook", default=None,
+                   help="Playbook name to compile (resolves to "
+                        "teams/<Team>/workflow/<name>.md; default 'default'). "
+                        "Requires --task-brief or --brief-file.")
+    s.add_argument("--task-brief", default=None,
+                   help="Inline task brief text (compile mode). Mutually "
+                        "exclusive with --brief-file.")
+    s.add_argument("--brief-file", default=None,
+                   help="Path to a file containing the task brief (compile "
+                        "mode). Mutually exclusive with --task-brief.")
+    s.add_argument("--thread", default=None,
+                   help="Slack thread ts to route the Phase 3 human gate to; "
+                        "persisted to status.json.")
+    s.add_argument("--steps", default=None,
+                   help="Escape hatch: directory of pre-compiled step .md "
+                        "files. Mutually exclusive with the compile-mode "
+                        "flags (--playbook/--task-brief/--brief-file).")
     s.add_argument("--no-run", action="store_true",
                    help="initialise the task folder but do not start the "
                         "executor loop")
