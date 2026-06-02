@@ -262,8 +262,16 @@ def test_revise_then_approve() -> None:
 
 def test_ceiling_aborts_with_clear_error() -> None:
     sm = ScriptedSessionManager(
-        akagi=[critic("REVISE", "a"), critic("REVISE", "b"), critic("REVISE", "c")],
-        ayako=[critic("REVISE", "x"), critic("REVISE", "y"), critic("REVISE", "z")],
+        akagi=[
+            critic("REVISE", "a", cost=0.01),
+            critic("REVISE", "b", cost=0.01),
+            critic("REVISE", "c", cost=0.01),
+        ],
+        ayako=[
+            critic("REVISE", "x", cost=0.01),
+            critic("REVISE", "y", cost=0.01),
+            critic("REVISE", "z", cost=0.01),
+        ],
     )
     # Round 1 + round 2 re-draft; round 3 aborts before any re-draft.
     drafter = FakeDrafter([_plan("d1"), _plan("d2")])
@@ -278,6 +286,13 @@ def test_ceiling_aborts_with_clear_error() -> None:
     assert all(v.decision == "REVISE" for v in err.last_verdicts)
     # Re-drafted only after rounds 1 and 2.
     assert len(drafter.feedbacks) == 2
+    # Failure path carries the same artifacts the success path returns:
+    # the full transcript (so compile_critique.md lands on abort) and the
+    # real spend (so the pipeline can decide ceiling accounting).
+    assert err.cost_usd == pytest.approx(0.06)
+    for n in (1, 2, 3):
+        assert f"## Round {n}" in err.transcript
+    assert "compile critique aborted" in err.transcript
 
 
 # --------------------------------------------------------------------------- #

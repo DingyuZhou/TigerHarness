@@ -153,6 +153,15 @@ class CritiqueAbortedError(RuntimeError):
     ``rounds`` is every :class:`CritiqueRound` run; ``last_verdicts`` is
     the final round's verdicts, so the pipeline can emit a
     ``compile_failed{tier:2, last_verdicts:{...}}`` event.
+
+    The failure path also carries the same artifacts the success path
+    returns: ``transcript`` (so ``compile_critique.md`` lands even on a
+    tier-2 abort -- the Operator debugging the failure wants the rounds
+    the critics kept rejecting) and ``cost_usd`` (the spend is real
+    whether or not it converged; the pipeline owns the policy decision
+    of whether to count it against the ceiling, but it needs the number
+    to make it). Both default so a handler test can still construct the
+    error with just ``rounds`` + ``last_verdicts`` per the brief.
     """
 
     def __init__(
@@ -160,12 +169,16 @@ class CritiqueAbortedError(RuntimeError):
         *,
         rounds: list[CritiqueRound],
         last_verdicts: list[CritiqueVerdict],
+        transcript: str = "",
+        cost_usd: float = 0.0,
     ) -> None:
         super().__init__(
             f"compile critique did not converge after {len(rounds)} rounds"
         )
         self.rounds = rounds
         self.last_verdicts = last_verdicts
+        self.transcript = transcript
+        self.cost_usd = cost_usd
 
 
 # --------------------------------------------------------------------------- #
@@ -392,6 +405,8 @@ def run_critique_loop(
 
     while True:
         round_num += 1
+        # Render the step set once; both critics see the same set, only
+        # their persona lens (the template) differs.
         rendered = _render_steps(steps)
         akagi_prompt = _build_critic_prompt(
             AKAGI_CRITIC_PROMPT_TEMPLATE,
@@ -453,7 +468,17 @@ def run_critique_loop(
             )
 
         if round_num >= max_compile_iters:
-            raise CritiqueAbortedError(rounds=rounds, last_verdicts=verdicts)
+            transcript_lines.append(
+                f"_Ceiling of {max_compile_iters} rounds reached without "
+                "dual-APPROVE convergence; compile critique aborted._"
+            )
+            transcript_lines.append("")
+            raise CritiqueAbortedError(
+                rounds=rounds,
+                last_verdicts=verdicts,
+                transcript="\n".join(transcript_lines),
+                cost_usd=total_cost,
+            )
 
         if all_approve:
             # Floor not yet met: force another look, same steps (there is
