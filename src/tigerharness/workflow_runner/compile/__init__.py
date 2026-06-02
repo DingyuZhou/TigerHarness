@@ -2,17 +2,33 @@
 
 Turns a freestyle playbook + a task brief into validated step files.
 Wave 1 ships the step drafter (Mitsui) and the Tier 1 mechanical
-validators (schema, ref, roster, cycle, dry-run trace -- Miyagi); the
-Tier 2 critique loop and the ``compile_playbook`` entrypoint land in
-adjacent waves (see ``docs/workflow-runner-phase2.md``).
+validators (schema, ref, roster, cycle, dry-run trace -- Miyagi); Wave 2
+adds the Tier 2 forced critique loop (Rukawa) and the
+``compile_playbook`` pipeline entrypoint (Sakuragi). See
+``docs/workflow-runner-phase2.md``.
 """
 
 from __future__ import annotations
 
+from tigerharness.workflow_runner.compile.critique import (
+    CritiqueAbortedError,
+    CritiqueParseError,
+    CritiqueResult,
+    CritiqueRound,
+    CritiqueVerdict,
+    run_critique_loop,
+)
 from tigerharness.workflow_runner.compile.drafter import (
     DrafterParseError,
     DrafterResult,
     draft_steps,
+)
+from tigerharness.workflow_runner.compile.pipeline import (
+    CompileConfigError,
+    CompileResult,
+    CompileTier1Error,
+    CompileTier2Error,
+    compile_playbook,
 )
 from tigerharness.workflow_runner.compile.validators import (
     SENTINELS,
@@ -27,6 +43,13 @@ from tigerharness.workflow_runner.compile.validators import (
 )
 
 __all__ = [
+    # Tier 2 critique loop (Wave 2, Rukawa)
+    "CritiqueAbortedError",
+    "CritiqueParseError",
+    "CritiqueResult",
+    "CritiqueRound",
+    "CritiqueVerdict",
+    "run_critique_loop",
     # Step drafter (Wave 1, Mitsui)
     "DrafterParseError",
     "DrafterResult",
@@ -41,4 +64,10 @@ __all__ = [
     "validate_refs",
     "validate_roster",
     "validate_schema",
+    # Pipeline (Wave 2, Sakuragi)
+    "CompileConfigError",
+    "CompileResult",
+    "CompileTier1Error",
+    "CompileTier2Error",
+    "compile_playbook",
 ]

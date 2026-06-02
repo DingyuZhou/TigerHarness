@@ -308,15 +308,48 @@ Notes on the Phase 1 contract:
   requested). `cancel_complete` is written by the executor when it
   finalises at the next iteration boundary.
 
-**Phase 2+ (planned, not yet emitted).** The compile phase and human
-gate will add:
+**Phase 2 (emitted).** Compile mode (`workflow start --playbook ...`)
+emits the compile lifecycle around the pipeline call. The CLI owns
+these events; the compile pipeline may emit additional internal
+records (see "Planned" below):
 
 ```json
-{"ts":"...","kind":"compile_started","playbook":"default"}
+{"ts":"...","kind":"compile_started","playbook":"default","task_brief_sha256":"<64 hex>"}
+{"ts":"...","kind":"compile_completed","steps":12,"critique_iters":3}
+{"ts":"...","kind":"human_gate_requested","approvers":["@coach-anzai"],"slack_thread_ts":"1780389332.940649"}
+{"ts":"...","kind":"task_started","task_id":"...","team":"Shohoku","steps":12,"entrypoint":"01-..."}
+```
+
+A failed compile emits `compile_failed` *instead of* `compile_completed`
+and terminates with a non-zero exit code; no `task_started` follows:
+
+```json
+{"ts":"...","kind":"compile_failed","tier":1,"errors":[{"validator":"ref","step":"02-...","msg":"dangling edge"}]}
+{"ts":"...","kind":"compile_failed","tier":2,"last_verdicts":[{"critic":"akagi","verdict":"REVISE","reason":"..."}]}
+```
+
+Contract notes:
+
+- `compile_started.task_brief_sha256` is the SHA-256 of the resolved
+  brief (whether inline `--task-brief` or `--brief-file`), so the
+  audit log records *which* brief was compiled without storing it
+  twice (the verbatim copy lives in `task_brief.md`).
+- `compile_failed.tier` is `1` for mechanical-validation failures
+  (carries `errors`) and `2` for a critique loop that never reached
+  dual-APPROVE (carries `last_verdicts`).
+- `human_gate_requested` is emitted only when the compiled
+  `workflow_config.human_gate` is true. In Phase 2 it is **announced,
+  not enforced** -- compilation proceeds straight to run. `--thread`
+  is recorded both here (`slack_thread_ts`) and durably in
+  `status.json` (`phase_state.slack_thread_ts`) so the Phase 3 gate
+  can route the approval ask back to the right Slack thread.
+
+**Planned (not yet emitted).** The compile pipeline's per-tier
+internals and the Phase 3 human-gate resolution will add:
+
+```json
 {"ts":"...","kind":"compile_tier1_passed","validators":["schema","ref","roster","cycle"]}
 {"ts":"...","kind":"compile_critique_iter","iter":1,"akagi_verdict":"REVISE","ayako_verdict":"APPROVE"}
-{"ts":"...","kind":"compile_completed","steps":12,"critique_iters":3}
-{"ts":"...","kind":"human_gate_requested","slack_thread_ts":"..."}
 {"ts":"...","kind":"human_gate_passed","by":"operator"}
 ```
 
@@ -682,7 +715,8 @@ TODO for Phase 1.
 ## CLI surface (`tigerharness workflow ...`)
 
 ```
-workflow start    --team <T> --playbook <name> [--task-brief <text>|--brief-file <p>] [--thread <ts>]
+workflow start    --team <T> --playbook <name> (--task-brief <text> | --brief-file <p>) [--thread <ts>] [--no-run]
+workflow start    --team <T> --steps <dir> [--no-run]   # escape hatch: pre-compiled steps
 workflow list     [--team <T>] [--status <s>]
 workflow show     <task-id-or-prefix>
 workflow tail     <task-id-or-prefix> [-f]
@@ -698,6 +732,43 @@ workflow diagnose <task-id-or-prefix> [--json] [--llm-fallback]
 against the validator suite before letting it loose on a real task.
 `workflow sweep` and `workflow diagnose` back the eponymous skills
 (see "Sweep & diagnose" above).
+
+### Operating: `--playbook` + `--task-brief`
+
+The recommended way to start a task is compile mode: point at a
+playbook and hand it a brief.
+
+```
+workflow start --team Shohoku --playbook default --task-brief "Add retry/backoff to the slack-bridge dispatcher."
+```
+
+- `--playbook <name>` resolves to `teams/<Team>/workflow/<name>.md`
+  (default: `default`). The team root is found via
+  `$TIGERHARNESS_TEAMS_DIR/<Team>`, else the current directory if it is
+  itself a team root (`configs/personas.yaml` present), else
+  `<cwd>/teams/<Team>`.
+- Exactly one brief source is required: `--task-brief <text>` (inline)
+  **or** `--brief-file <path>` (read from disk). They are mutually
+  exclusive.
+- `--thread <slack_thread_ts>` records the Slack thread that a Phase 3
+  human gate should post its approval ask into. It is persisted to
+  `status.json` under `phase_state.slack_thread_ts` and echoed on the
+  `human_gate_requested` event.
+- `--no-run` initialises and compiles the task but does not start the
+  executor loop (useful for inspecting the compiled plan first).
+
+On success the CLI snapshots the verbatim inputs into the journal
+(`task_brief.md`, `playbook_snapshot.md`), compiles the playbook into
+validated step files, emits the Phase 2 compile events (above), writes
+the initial `status.json` pointer, and — unless `--no-run` — drives the
+executor to a terminal phase.
+
+**Pre-compiled `--steps` workflows continue unchanged.** The Phase 1
+escape hatch (`--steps <dir>`) still initialises a task directly from
+pre-compiled step `.md` files with no compile phase, and is mutually
+exclusive with the compile-mode flags
+(`--playbook` / `--task-brief` / `--brief-file`). Existing tooling that
+drives `--steps` is unaffected by Phase 2.
 
 ## Relationship to existing modules
 
