@@ -8,9 +8,10 @@ subscription instead of token-billed API usage.
 > **Status:** Design-only. Nothing in this document is implemented
 > yet. It is the source of truth for the design; sections describing
 > unbuilt pieces are the plan, not a description of shipped behaviour.
-> Phases 1 and 2 are the agreed first build; Phase 3 (wiring this in
-> behind a runner config switch and unifying the journal folders) is
-> deferred.
+> Phase 1 (journal + scaffolder + `drive-journal` skill with the
+> lazy sweep built in) is the agreed first build; Phase 2 (wiring
+> this in behind a runner config switch and unifying the journal
+> folders) is deferred.
 
 ## Why this exists
 
@@ -30,7 +31,7 @@ It does **not** remove the existing API-based runners. They remain
 available as an opt-in mode for users who want autonomous, parallel
 throughput and are willing to pay per token — and for a future where
 token prices may fall. The two coexist behind a config switch whose
-default is `subscription` (Phase 3).
+default is `subscription` (Phase 2).
 
 ## Push vs pull
 
@@ -54,18 +55,17 @@ human stops it — then writes its state back.
 1. You write a PRD describing the task.
 2. You run a command (or invoke a skill) that **scaffolds** a journal
    folder from that PRD.
-3. A non-AI **watcher** notices the new task and surfaces it to you on
-   Slack, alongside the status of everything else in the journal.
-4. You open the interactive Claude Code app and invoke the **driver**
-   skill, which reads the protocol and processes the journal: pick up
-   a task and work it continuously — appending progress and updating
-   state as it goes — until the task is `done`, hits a blocker, or you
-   stop the session.
-5. If the task isn't finished (you stopped, or it blocked), resume in
-   the same or a fresh session later — the state is durable on disk
-   either way.
-6. When a task reaches `done`, the watcher archives it so the active
-   set stays lean.
+3. You open the interactive Claude Code app and invoke the **driver**
+   skill (`drive-journal`). Each invocation begins with a **lazy
+   sweep** of `active/` — archive anything that finished, flag
+   anything whose heartbeat went stale, and summarize what's
+   actionable to you in-session. Then the driver picks **one**
+   actionable task and works it continuously — appending progress and
+   updating state as it goes — until the task is `done`, hits a
+   blocker, or you stop the session.
+4. If the task isn't finished (you stopped, or it blocked), resume
+   later — the state is durable on disk. The next `drive-journal`
+   invocation's sweep picks up where this one left off.
 
 Single-persona work (the task-runner's niche) and multi-persona work
 (the workflow-runner's niche) both live here. The distinction between
@@ -86,21 +86,25 @@ You: write a PRD
 Scaffolder (CLI `journal new` / skill)
     |-- creates journal/active/<task-id>/ from the PRD
     v
-journal/ (passive file-based state machine)            <-- source of truth
-    ^                                   |
-    |                                   v
-Watcher (CLI `journal watch`)      Driver (interactive session + skill)
-  - no AI, costs nothing             - reads OPERATING.md
-  - scans active/, detects stuck     - picks a task, runs it to done/blocked/stop
-  - archives done/ tasks             - appends progress.md as it goes
-  - Slack digest to you              - updates status.json (state, heartbeat,
-                                       next_action)
+journal/ (passive file-based state machine)        <-- source of truth
+    ^
+    |
+    v
+Driver (interactive session + `drive-journal` skill)
+  1. Lazy sweep of active/ (no AI, no cron, no daemon)
+       - archive done/ tasks
+       - flag stale in_progress tasks (heartbeat aged out)
+       - summarize what's actionable, in-session
+  2. Pick ONE actionable task, run it to done / blocked / stop
+       - reads OPERATING.md
+       - appends progress.md as it goes
+       - updates status.json (state, heartbeat, sessions, next_action)
 ```
 
-The watcher and the driver are decoupled: the watcher is cheap Python
-bookkeeping that never calls a model; the driver is the only piece
-that consumes the subscription, and it only runs when a human starts
-it.
+The driver is the only piece that consumes the subscription, and it
+only runs when a human starts it. The sweep is plain non-AI Python
+bookkeeping executed *inside* the driver's invocation — there is no
+separate process, cron job, or systemd unit.
 
 ## Folder layout
 
@@ -114,7 +118,7 @@ teams/<Team>/journal/
             progress.md       # append-only log, human + AI readable
             artifacts/        # whatever the task produces or references
     done/
-        <task-id>/            # finished tasks moved here by the watcher
+        <task-id>/            # finished tasks moved here by the next drive-journal sweep
 ```
 
 `<task-id>` format mirrors the workflow-runner:
@@ -151,9 +155,9 @@ keep `journal/OPERATING.md`.
 
 | Field | Purpose |
 |---|---|
-| `state` | `pending` → `in_progress` → (`blocked`) → `done` / `failed`. The watcher reads it to decide archive vs. flag. |
+| `state` | `pending` → `in_progress` → (`blocked`) → `done` / `failed`. The next `drive-journal` sweep reads it to decide archive vs. flag. |
 | `sessions` / `max_sessions` | How many driver invocations (interactive sessions) the task has consumed, and a soft ceiling on how many it may consume before a human reviews it. Each `drive-journal` invocation counts as one session, regardless of how much work happens inside it. |
-| `updated_at` | **Heartbeat.** The driver bumps it periodically while working — not once per session — so a wedged session inside `drive-journal` shows up as stale. The watcher flags an `in_progress` task whose heartbeat is older than a threshold. |
+| `updated_at` | **Heartbeat.** The driver bumps it periodically while working — not once per session — so a wedged session inside `drive-journal` shows up as stale. The next invocation's sweep flags an `in_progress` task whose heartbeat is older than `stuck_timeout`. |
 | `next_action` | The handoff note. Lets a *fresh* session resume without re-reasoning the whole `progress.md` — this is what makes the journal the memory, not the vendor's session. |
 | `session_ref` | Optional Claude session id, so the human can `--resume` the same conversation cheaply. Null is fine; `next_action` + `progress.md` are enough to resume from files alone. |
 
@@ -205,10 +209,18 @@ so could a human or another vendor's agent. It specifies:
   `state` value means.
 - **The decision procedure**, run once per `drive-journal`
   invocation:
-  1. List `active/*/status.json`.
+  1. **Lazy sweep** of `active/*/status.json` first:
+     a. Move any `done` task to `journal/done/` (the *previous*
+        invocation may have finished a task without archiving it).
+     b. Flag any `in_progress` task whose `updated_at` is older than
+        `stuck_timeout` — mark it stale in the in-session summary so
+        the human can decide whether to re-open it or close it.
+     c. Print the summary (count of `pending` / `in_progress` /
+        `blocked` / stale) into the session.
   2. Pick the next actionable task — a `pending` task to start, or an
      `in_progress` task to resume (prefer the one with the oldest
      heartbeat). Skip `blocked` tasks and instead surface them.
+     **Pick exactly one** — never multiple tasks in parallel.
   3. Read its `task.md` (PRD) + `next_action` + the tail of
      `progress.md`.
   4. **Work the task continuously** — do the real work, append to
@@ -240,39 +252,42 @@ work entirely inside Claude Code if you prefer.
 | Surface | CLI | Skill | What it does |
 |---|---|---|---|
 | Scaffold | `tigerharness journal new --prd <file> [--title ...] [--persona ...]` | `journal-new` | Ingest a PRD, create `active/<task-id>/` with `task.md`, a seeded `status.json`, an empty `progress.md`, and `artifacts/`. |
-| Drive | — (human-driven only) | `drive-journal` | Read `OPERATING.md` and process the journal per the decision procedure above. |
-| Watch | `tigerharness journal watch` | — | Non-AI bookkeeping loop (see below). |
-| Inspect | `tigerharness journal list` / `status` | — | Print the journal state as a table / JSON. |
+| Drive | — (human-driven only) | `drive-journal` | Lazy-sweep `active/`, then read `OPERATING.md` and work one task per the decision procedure above. |
+| Inspect | `tigerharness journal list` / `status` | — | Print the journal state as a table / JSON. Read-only; the sweep that *acts* (archive, flag) happens only inside `drive-journal`. |
 
 The driver has no CLI form on purpose: a CLI driver would be a
 programmatic entry point and defeat the subscription model. Driving
 only happens inside an interactive session a human started.
 
-## The watcher
+## The lazy sweep (built into the driver)
 
-`tigerharness journal watch` is a plain Python loop (run via cron, a
-systemd timer, or foregrounded). **It calls no model and costs
-nothing.** Responsibilities:
+Every `drive-journal` invocation begins with a sweep over
+`active/*/status.json` before any task work happens. **It calls no
+model and costs nothing beyond the routine session.** Responsibilities:
 
-- Scan `active/*/status.json`.
 - Move `done` tasks to `journal/done/` to keep `active/` lean.
 - Flag stale tasks: `in_progress` with `updated_at` older than
-  `stuck_timeout` → report as needing attention.
-- Send a Slack digest (reusing the existing slack-bridge / notify CLI),
-  e.g. *"2 pending, 1 in_progress, 1 stale (no heartbeat 40m), 1
-  awaiting your review."*
+  `stuck_timeout` → report in-session as needing attention.
+- Summarize what's actionable: e.g. *"2 pending, 1 in_progress, 1
+  stale (no heartbeat 40m), 1 awaiting your review."* — lands in the
+  same interactive context where you're about to act on it, instead
+  of a separate Slack DM from a daemon.
+
+No cron, no systemd unit, no background process. The sweep is plain
+non-AI Python logic invoked at the start of the `drive-journal`
+skill, executing inside the human's interactive session.
 
 Note the contrast with the task-runner's `stuck_watchdog`: that
-watchdog can **kill** a wedged subprocess because the API backend owns
-one. The subscription watcher owns no process — there is nothing to
-kill. Its "stuck" handling is purely **advisory**: it notifies you, and
-you decide whether to re-open a session and nudge the task. This keeps
-the watcher AI-free and side-effect-light.
+watchdog can **kill** a wedged subprocess because the api backend owns
+one. The subscription backend owns no process — there is nothing to
+kill. Stale handling is purely **advisory**: the sweep names the
+stale task in-session and you decide whether to re-open it or close
+it.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `TIGERHARNESS_JOURNAL_DIR` | `<team>/journal/` | Journal root the scaffolder, driver, and watcher operate on. |
-| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which the watcher flags a task as stale. |
+| `TIGERHARNESS_JOURNAL_DIR` | `<team>/journal/` | Journal root the scaffolder and driver operate on. |
+| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which the sweep flags an `in_progress` task as stale. |
 
 ## The work loop
 
@@ -281,21 +296,20 @@ the watcher AI-free and side-effect-light.
 2. **Scaffold.** `tigerharness journal new --prd brief.md` (or the
    `journal-new` skill in the app) creates `active/<task-id>/` and
    seeds `status.json` as `pending`.
-3. **Get nudged.** The watcher's next Slack digest includes the new
-   task.
-4. **Drive.** Open Claude Code, invoke `drive-journal`. The session
-   picks up the task and runs it continuously — appending to
-   `progress.md` and bumping the heartbeat in `status.json` as it goes
-   — until the task is `done`, hits a blocker, or you stop the
+3. **Drive.** Open Claude Code, invoke `drive-journal`. The skill
+   first runs the lazy sweep (archive any `done`, flag any stale,
+   summarize what's actionable in-session); then it picks **one**
+   actionable task and runs it continuously — appending to
+   `progress.md` and bumping the heartbeat in `status.json` as it
+   goes — until the task is `done`, hits a blocker, or you stop the
    session. A single invocation is meant to take the task as far as
    possible, not advance it one step.
-5. **Resume if needed.** If the task isn't `done` (you stopped, it
+4. **Resume if needed.** If the task isn't `done` (you stopped, it
    blocked, or it hit `max_sessions`), come back later and invoke
    `drive-journal` again — same or fresh session, using `--resume` /
-   `session_ref` for cheap continuity. State is durable on disk
+   `session_ref` for cheap continuity. The next invocation's sweep
+   picks up where this one left off; state is durable on disk
    regardless.
-6. **Archive.** Once a task is `done`, the watcher moves it to
-   `done/`.
 
 For multi-persona work — i.e. a pre-defined workflow graph — the
 session adopts the persona named by the current node, works that node
@@ -310,7 +324,26 @@ handoff is a natural stop condition; everything short of one (or the
 other stop conditions above) is run-through, not stop-and-yield.
 Serial and human-paced — by design.
 
-## Configuration (Phase 3)
+### How serial execution is enforced
+
+A single `drive-journal` invocation picks exactly **one** actionable
+task per the OPERATING.md decision procedure — never multiple tasks
+in parallel. The picked task runs to its stop condition (`done`,
+`blocked`, `max_sessions`, or human stop) before the invocation
+returns. The interactive session is one human at one keyboard, so
+within a single session there is fundamentally one driver doing one
+task at a time.
+
+The doc deliberately omits a lease/lock (cut from the MVP) on the
+honest assumption that you, as one human, will not open two
+interactive sessions and run `drive-journal` against the same journal
+folder simultaneously. If two sessions *were* running concurrently
+they could pick different tasks safely, but might also pick the same
+task and clobber each other's `status.json` / `progress.md` writes.
+Adding a lease is a Phase 2 hardening if concurrent drivers ever
+become a real workflow.
+
+## Configuration (Phase 2)
 
 The intended switch follows tigerharness's env-var-driven config
 model:
@@ -326,23 +359,27 @@ legacy behaviour, where the runner spawns and supervises agents as it
 does today.
 
 This integration — and unifying `task_journal/` and `workflow_journal/`
-under `journal/` — is Phase 3 and intentionally deferred so it doesn't
+under `journal/` — is Phase 2 and intentionally deferred so it doesn't
 churn the existing runners while the model is still settling.
 
 ## Phasing
 
-- **Phase 1 — core (first build).** Journal convention + `status.json`
+- **Phase 1 — MVP (first build).** Journal convention + `status.json`
   schema + `OPERATING.md` + the scaffolder (CLI + skill) +
-  `drive-journal` skill. This alone makes subscription-driven work
-  usable end to end, with no watcher.
-- **Phase 2 — watcher (first build).** `journal watch`: stale
-  detection, auto-archive, Slack digest, plus `journal list` / `status`.
-- **Phase 3 — integration (deferred).** Wire the backend behind
+  `drive-journal` skill (with the lazy sweep — archive, flag stale,
+  in-session summary — built in) + read-only `journal list` /
+  `status` commands. This alone makes subscription-driven work usable
+  end to end. The previous draft split scaffolder/driver/journal from
+  the watcher across two phases; collapsing the watcher into
+  `drive-journal` collapses the split.
+- **Phase 2 — integration (deferred).** Wire the backend behind
   `TIGERHARNESS_RUNNER_BACKEND` (defaulting to `subscription`, with
   `api` as the opt-in legacy mode); unify the journal folders;
   optional lease/locking if concurrent drivers ever become a goal.
 
-Phases 1 and 2 are the agreed scope for the first build.
+Phase 1 is the agreed scope for the first build — lazy-triggering the
+sweep folded what was previously a separate phase into the driver
+skill, so the MVP is one chunk.
 
 ## Non-goals
 
