@@ -1,8 +1,9 @@
 # subscription backend
 
-A file-based, human-driven execution model that runs multi-step agent
-work through the **interactive** Claude Code app, so the work counts
-against a monthly subscription instead of token-billed API usage.
+A file-based, human-driven execution model that runs agent work —
+single-persona tasks and multi-persona workflows alike — through the
+**interactive** Claude Code app, so the work counts against a monthly
+subscription instead of token-billed API usage.
 
 > **Status:** Design-only. Nothing in this document is implemented
 > yet. It is the source of truth for the design; sections describing
@@ -25,10 +26,11 @@ interactive session, while a file-based journal holds durable,
 resume-able state so the work can be driven in bursts and picked up by
 any future session (or any other vendor's agent).
 
-It does **not** replace the existing API-based runners. Those stay for
-users who want autonomous, parallel throughput and are willing to pay
-per token — and for a future where token prices may fall. The two
-coexist behind a config switch (Phase 3).
+It does **not** remove the existing API-based runners. They remain
+available as an opt-in mode for users who want autonomous, parallel
+throughput and are willing to pay per token — and for a future where
+token prices may fall. The two coexist behind a config switch whose
+default is `subscription` (Phase 3).
 
 ## Push vs pull
 
@@ -43,7 +45,9 @@ coexist behind a config switch (Phase 3).
 The defining inversion: **nothing autonomous runs the work.** The
 backend is a passive file-based state machine plus a written protocol.
 A human opens an interactive session, points it at the protocol, and
-the session does one increment of work and writes its state back.
+the session drives the task as far as it can in one go — running
+continuously until the task is `done`, hits a real blocker, or the
+human stops it — then writes its state back.
 
 ## What it does
 
@@ -54,16 +58,24 @@ the session does one increment of work and writes its state back.
    Slack, alongside the status of everything else in the journal.
 4. You open the interactive Claude Code app and invoke the **driver**
    skill, which reads the protocol and processes the journal: pick up
-   a task, do one increment, append progress, update state.
-5. Continue the same session for more increments, or stop — the state
-   is durable on disk either way.
+   a task and work it continuously — appending progress and updating
+   state as it goes — until the task is `done`, hits a blocker, or you
+   stop the session.
+5. If the task isn't finished (you stopped, or it blocked), resume in
+   the same or a fresh session later — the state is durable on disk
+   either way.
 6. When a task reaches `done`, the watcher archives it so the active
    set stays lean.
 
 Single-persona work (the task-runner's niche) and multi-persona work
-(the workflow-runner's niche) both live here: a single-persona task is
-just a workflow of one step. The interactive session adopts whichever
-persona a step calls for.
+(the workflow-runner's niche) both live here. The distinction between
+the two is not steps-vs-no-steps — both can take many steps. It is
+**orchestration**: a task-runner job is a single persona working a PRD
+freely, with no pre-defined step graph; a workflow-runner job is a
+pre-compiled multi-persona graph where each node names the persona and
+contract for that step. The interactive session adopts whichever
+persona is in play; for a workflow it follows the graph, for a task
+it just stays in one persona and drives the PRD to completion.
 
 ## Architecture
 
@@ -79,8 +91,8 @@ journal/ (passive file-based state machine)            <-- source of truth
     |                                   v
 Watcher (CLI `journal watch`)      Driver (interactive session + skill)
   - no AI, costs nothing             - reads OPERATING.md
-  - scans active/, detects stuck     - picks a task, does ONE increment
-  - archives done/ tasks             - appends progress.md
+  - scans active/, detects stuck     - picks a task, runs it to done/blocked/stop
+  - archives done/ tasks             - appends progress.md as it goes
   - Slack digest to you              - updates status.json (state, heartbeat,
                                        next_action)
 ```
@@ -128,8 +140,8 @@ keep `journal/OPERATING.md`.
   "kind": "task",
   "state": "in_progress",
   "persona": "Mitsui",
-  "iteration": 3,
-  "max_iterations": 10,
+  "sessions": 2,
+  "max_sessions": 5,
   "created_at": "2026-06-02T08:00:00Z",
   "updated_at": "2026-06-02T09:15:00Z",
   "next_action": "Resume step 2; last blocker was the missing schema",
@@ -140,8 +152,8 @@ keep `journal/OPERATING.md`.
 | Field | Purpose |
 |---|---|
 | `state` | `pending` → `in_progress` → (`blocked`) → `done` / `failed`. The watcher reads it to decide archive vs. flag. |
-| `iteration` / `max_iterations` | Progress counter and a soft ceiling the driver respects. |
-| `updated_at` | **Heartbeat.** Every increment bumps it. The watcher flags an `in_progress` task whose heartbeat is older than a threshold as stale. |
+| `sessions` / `max_sessions` | How many driver invocations (interactive sessions) the task has consumed, and a soft ceiling on how many it may consume before a human reviews it. Each `drive-journal` invocation counts as one session, regardless of how much work happens inside it. |
+| `updated_at` | **Heartbeat.** The driver bumps it periodically while working — not once per session — so a wedged session inside `drive-journal` shows up as stale. The watcher flags an `in_progress` task whose heartbeat is older than a threshold. |
 | `next_action` | The handoff note. Lets a *fresh* session resume without re-reasoning the whole `progress.md` — this is what makes the journal the memory, not the vendor's session. |
 | `session_ref` | Optional Claude session id, so the human can `--resume` the same conversation cheaply. Null is fine; `next_action` + `progress.md` are enough to resume from files alone. |
 
@@ -160,6 +172,27 @@ a non-goal here and a single human drives serially. `state` +
 lease can be added later if concurrent drivers ever become real (see
 Non-goals).
 
+
+### Why one invocation runs the task to completion
+
+The driver is **not** stepwise. One `drive-journal` invocation is
+intended to take its picked-up task as far as it can in a single
+interactive sitting — ideally all the way to `done`. The session
+stops only when (a) the task is finished, (b) a real blocker requires
+a human or another persona, (c) a guard rail like `max_sessions`
+fires, or (d) the human ends the session.
+
+This matters because the subscription model rewards long, productive
+interactive sessions, not many short ones. Splitting work into
+artificial "increments" with a stop-and-yield after each one would
+burn the human's attention budget for no reason and waste the
+resume-from-files dance on a task that could have just kept going.
+
+`sessions` counts driver invocations, not steps of work inside a
+session. `updated_at` is a heartbeat refreshed periodically *during*
+a session so that a wedged or crashed session shows up as stale —
+not a per-increment counter.
+
 ## OPERATING.md — the protocol
 
 `OPERATING.md` is the instruction file: a vendor-neutral markdown
@@ -170,20 +203,30 @@ so could a human or another vendor's agent. It specifies:
 - **Where state lives** — the journal path and folder conventions.
 - **How to read state** — the `status.json` schema and what each
   `state` value means.
-- **The decision procedure**, run on every sweep:
+- **The decision procedure**, run once per `drive-journal`
+  invocation:
   1. List `active/*/status.json`.
   2. Pick the next actionable task — a `pending` task to start, or an
      `in_progress` task to resume (prefer the one with the oldest
      heartbeat). Skip `blocked` tasks and instead surface them.
   3. Read its `task.md` (PRD) + `next_action` + the tail of
      `progress.md`.
-  4. Do **one increment** of real work.
-  5. Append what happened to `progress.md`.
-  6. Update `status.json`: bump `iteration`, refresh `updated_at`,
-     rewrite `next_action`, set `state` if it changed.
-- **Stop conditions** — when to mark `done`, when to mark `blocked`
-  (and what to write so a human knows what's needed), when to hand the
-  turn back rather than manufacture busywork.
+  4. **Work the task continuously** — do the real work, append to
+     `progress.md`, and refresh `updated_at` as a heartbeat as you go.
+     Keep going until **one** of the stop conditions below fires.
+     Do **not** stop after a single step just because progress was
+     made; the goal is to take the task as far as possible in this
+     session.
+  5. On exit, write a final `progress.md` entry summarising the
+     session and update `status.json`: bump `sessions`, refresh
+     `updated_at` one last time, rewrite `next_action` (or clear it
+     if `done`), set `state` to `done` / `blocked` / leave as
+     `in_progress` for a clean stop.
+- **Stop conditions** — exit the loop in step 4 when **any** of these
+  hold: the task is fully `done`; a real blocker is hit that needs a
+  human or another agent (`blocked`); the work has hit `max_sessions`
+  or another guard rail; or the human ends the session. Otherwise keep
+  going — do not hand the turn back to manufacture a checkpoint.
 
 The committed `OPERATING.md` is the contract; the driver skill is thin
 sugar that says "read `OPERATING.md` and execute it."
@@ -241,17 +284,30 @@ the watcher AI-free and side-effect-light.
 3. **Get nudged.** The watcher's next Slack digest includes the new
    task.
 4. **Drive.** Open Claude Code, invoke `drive-journal`. The session
-   picks up the task, does one increment, appends to `progress.md`,
-   and updates `status.json` (heartbeat + `next_action`).
-5. **Continue or stop.** Keep going in the same session (use
-   `--resume` / `session_ref` for cheap continuity) or close it. State
-   is durable on disk regardless.
+   picks up the task and runs it continuously — appending to
+   `progress.md` and bumping the heartbeat in `status.json` as it goes
+   — until the task is `done`, hits a blocker, or you stop the
+   session. A single invocation is meant to take the task as far as
+   possible, not advance it one step.
+5. **Resume if needed.** If the task isn't `done` (you stopped, it
+   blocked, or it hit `max_sessions`), come back later and invoke
+   `drive-journal` again — same or fresh session, using `--resume` /
+   `session_ref` for cheap continuity. State is durable on disk
+   regardless.
 6. **Archive.** Once a task is `done`, the watcher moves it to
    `done/`.
 
-For multi-persona work the session adopts a persona per step, works
-that step to its stop condition, records the handoff in `next_action`,
-and the next sweep (same or fresh session) picks up the next step.
+For multi-persona work — i.e. a pre-defined workflow graph — the
+session adopts the persona named by the current node, works that node
+continuously until its stop condition (typically: handoff needed to a
+different persona), records the handoff in `next_action`, and either
+continues in-session under the new persona or hands off to the next
+`drive-journal` invocation. For single-persona work — a task with no
+pre-orchestration — the session just stays in one persona and drives
+the PRD forward across however many steps the task takes, again
+running continuously until `done`, blocked, or stopped. Persona
+handoff is a natural stop condition; everything short of one (or the
+other stop conditions above) is run-through, not stop-and-yield.
 Serial and human-paced — by design.
 
 ## Configuration (Phase 3)
@@ -261,12 +317,13 @@ model:
 
 | Env var | Values | Meaning |
 |---|---|---|
-| `TIGERHARNESS_RUNNER_BACKEND` | `api` (default) / `subscription` | Which backend the task/workflow runner uses. |
+| `TIGERHARNESS_RUNNER_BACKEND` | `subscription` (default) / `api` | Which backend the task/workflow runner uses. |
 
-In `subscription` mode the runner CLI does **not** execute anything —
-`assign` / `start` simply scaffold a journal entry and notify. The
-human is the engine. In `api` mode the behaviour is unchanged from
-today.
+By default (in `subscription` mode) the runner CLI does **not**
+execute anything — `assign` / `start` simply scaffold a journal entry
+and notify. The human is the engine. Opt in to `api` mode for the
+legacy behaviour, where the runner spawns and supervises agents as it
+does today.
 
 This integration — and unifying `task_journal/` and `workflow_journal/`
 under `journal/` — is Phase 3 and intentionally deferred so it doesn't
@@ -281,8 +338,9 @@ churn the existing runners while the model is still settling.
 - **Phase 2 — watcher (first build).** `journal watch`: stale
   detection, auto-archive, Slack digest, plus `journal list` / `status`.
 - **Phase 3 — integration (deferred).** Wire the backend behind
-  `TIGERHARNESS_RUNNER_BACKEND`; unify the journal folders; optional
-  lease/locking if concurrent drivers ever become a goal.
+  `TIGERHARNESS_RUNNER_BACKEND` (defaulting to `subscription`, with
+  `api` as the opt-in legacy mode); unify the journal folders;
+  optional lease/locking if concurrent drivers ever become a goal.
 
 Phases 1 and 2 are the agreed scope for the first build.
 
@@ -295,13 +353,16 @@ Phases 1 and 2 are the agreed scope for the first build.
   keystroke automation (tmux/pty) to fake autonomy is brittle and runs
   against the subscription's intended use. The human trigger is the
   design, not a limitation to engineer around.
-- **Replacing the API backend.** The two coexist; you pick per task
-  whether you want cheap-and-human-paced or fast-and-paid.
+- **Replacing the API backend.** The two coexist; `subscription` is
+  the default, and you can opt into `api` per task when you want
+  fast-and-paid instead of cheap-and-human-paced.
 
 ## Related
 
-- [`task-runner.md`](task-runner.md) — the single-persona API backend.
+- [`task-runner.md`](task-runner.md) — the single-persona,
+  no-pre-orchestration API backend (one persona drives the PRD freely).
 - [`workflow-runner.md`](workflow-runner.md) — the multi-persona API
-  backend; already file-based, and the closest sibling to this design.
+  backend driven by a pre-compiled workflow graph; already file-based,
+  and the closest sibling to this design.
 - [`DESIGN.md`](DESIGN.md) — the env-var-driven configuration
   philosophy this backend follows.
