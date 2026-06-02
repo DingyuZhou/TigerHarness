@@ -364,7 +364,27 @@ def _edge_line(
     order_index: dict[str, int],
     cur_index: int,
 ) -> str:
-    """Render one routing edge with an annotation."""
+    """Render one routing edge with an annotation.
+
+    The "loop back" / "self-loop" annotation is a *readability* hint
+    based on BFS discovery order: an edge to an already-or-equally
+    discovered node (``order_index[target] <= cur_index``) is treated as
+    a rewind. This deliberately is NOT a cycle-membership test, and it
+    has a known soft edge: a fan-in edge into an earlier-discovered node
+    that is itself a terminal (e.g. two branches merging into a shared
+    finalizer that routes to ``__done__``) is labelled "loop back" even
+    though no cycle exists. The authoritative loop structure lives in
+    the ``loops:`` section (and :func:`validate_cycles`), which use
+    rigorous mutual-reachability, so the annotation never drives a
+    validation decision.
+
+    Do not "fix" this by switching to reachability
+    (``cur in reach[target]``): in REVISE-heavy graphs every step is
+    mutually reachable, so that would mislabel the *forward* happy-path
+    edge (``01 -> 02`` when ``02`` rewinds to ``01``) as a loop. The
+    only strictly-correct upgrade is a DFS active-stack back-edge
+    classifier; it is pin-compatible but out of scope for Wave 1.
+    """
     label = f"{field:<10}"
     if target in SENTINELS:
         note = "done" if target == "__done__" else "escalate"
@@ -387,9 +407,11 @@ def build_dry_run_trace(
 
     Sections: happy path (all APPROVE), per-step routing detail (with
     inline loop / escalation annotations), unreachable steps (if any),
-    and the cycle structure. Lines stay <= 80 cols with clear
-    indentation; the output is saved to ``compile_trace.txt`` and fed
-    to the Tier 2 critics.
+    and the cycle structure. Lines aim to stay within ~80 cols for
+    typical step ids (the id pattern allows up to 64 chars, so a
+    pathologically long id can still overflow; the trace is not hard
+    wrapped). The output is saved to ``compile_trace.txt`` and fed to
+    the Tier 2 critics.
     """
     lines = ["workflow dry-run trace", "======================"]
     id_to_step = {step.id: step for step in steps}
