@@ -450,11 +450,10 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
     orchestration = _build_orchestration(
         task_id=status.id,
         team=_guess_team_for_status(),
-        # NOTE: playbook_name is currently hardcoded; Phase 2 below
-        # adds a real lookup via status.json so the canonical
-        # orchestration.json reflects which playbook the task was
-        # scaffolded from. Until then, "default" is a placeholder.
-        playbook_name="default",
+        # Phase 2: read the truthful playbook_name from status.json
+        # rather than hardcoding "default". Schema gate guarantees a
+        # non-None value for kind=workflow.
+        playbook_name=status.playbook_name,
         playbook_text=_read_brief_and_playbook(paths, status.id)[1],
         final_steps=steps,
         workflow_config=WorkflowConfig(human_gate=False),

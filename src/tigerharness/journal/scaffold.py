@@ -450,6 +450,7 @@ def new_workflow_task(
         status = Status.new_workflow(
             id=task_id,
             title=effective_title,
+            playbook_name=playbook_name,
             captain=captain,
             max_sessions=max_sessions,
         )

@@ -146,6 +146,14 @@ class Status:
     # strict.
     compile_pending: bool = False
     compile_phase: CompilePhase | None = None
+    # Phase 2: the bare playbook name (e.g. ``"default"``) the workflow
+    # was scaffolded from. Stored on disk so ``cmd_land_compile`` can
+    # emit the truthful name into ``orchestration.json`` and so an
+    # operator inspecting ``status.json`` can see which playbook this
+    # task was bound to (helpful when a team ships multiple playbooks).
+    # Workflow-only; the schema gate enforces presence for
+    # ``kind=workflow`` and absence for ``kind=task``.
+    playbook_name: str | None = None
 
     # ---- construction ----
 
@@ -205,6 +213,7 @@ class Status:
         *,
         id: str,
         title: str,
+        playbook_name: str,
         captain: str | None = None,
         max_sessions: int = 10,
         next_action: str = "",
@@ -225,9 +234,19 @@ class Status:
         The design proposal called for ``len(steps) * 2 + 3`` but
         ``len(steps)`` is unknown at scaffold time (compile hasn't
         run); ``10`` is the static safe default and operators can
-        override via ``--max-sessions``."""
+        override via ``--max-sessions``.
+
+        ``playbook_name`` is the bare name of the playbook this
+        workflow was scaffolded from (e.g. ``"default"``). It is
+        required and stored on disk so ``cmd_land_compile`` can name
+        the playbook truthfully in ``orchestration.json``."""
         if not title.strip():
             raise JournalModelError("title is required and cannot be blank")
+        if not playbook_name or not playbook_name.strip():
+            raise JournalModelError(
+                "playbook_name is required for kind=workflow and "
+                "cannot be blank"
+            )
         if captain is not None and not captain.strip():
             raise JournalModelError(
                 "captain must be a non-blank string or None; "
@@ -252,6 +271,7 @@ class Status:
             session_ref=None,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
+            playbook_name=playbook_name.strip(),
         )
 
     # ---- json round-trip ----
@@ -273,6 +293,7 @@ class Status:
         else:
             d.pop("compile_pending", None)
             d.pop("compile_phase", None)
+            d.pop("playbook_name", None)
         return d
 
     def to_json(self, *, indent: int = 2) -> str:
@@ -307,7 +328,7 @@ class Status:
             )
         optional_keys = {
             "persona", "next_action", "session_ref",
-            "compile_pending", "compile_phase",
+            "compile_pending", "compile_phase", "playbook_name",
         }
         unknown = set(data) - (required | optional_keys)
         if unknown:
@@ -348,6 +369,7 @@ class Status:
         persona = data.get("persona")
         compile_pending = data.get("compile_pending")
         compile_phase_raw = data.get("compile_phase")
+        playbook_name_raw = data.get("playbook_name")
         if kind == "task":
             if persona is None or (
                 isinstance(persona, str) and not persona.strip()
@@ -369,8 +391,13 @@ class Status:
                 raise JournalModelError(
                     "compile_phase is rejected for kind=task; remove it"
                 )
+            if playbook_name_raw is not None:
+                raise JournalModelError(
+                    "playbook_name is rejected for kind=task; remove it"
+                )
             compile_phase: CompilePhase | None = None
             compile_pending_val = False
+            playbook_name: str | None = None
         else:  # kind == "workflow"
             if persona is not None and not isinstance(persona, str):
                 raise JournalModelError(
@@ -403,6 +430,24 @@ class Status:
                     f"allowed: {sorted(_COMPILE_PHASE_VALUES)}"
                 ) from exc
             compile_pending_val = compile_pending
+            # Phase 2: playbook_name is REQUIRED for kind=workflow.
+            # On-disk statuses written before Phase 2 (i.e. by a
+            # Phase 1.5 build) won't have the field; rather than
+            # silently rebuilding them with a placeholder, we reject
+            # so the operator notices and re-scaffolds. There were
+            # no production workflow statuses on disk pre-Phase-2
+            # per the Operator's note ("nothing important in them").
+            if playbook_name_raw is None:
+                raise JournalModelError(
+                    "playbook_name is required for kind=workflow"
+                )
+            if not isinstance(playbook_name_raw, str) or \
+                    not playbook_name_raw.strip():
+                raise JournalModelError(
+                    "playbook_name for kind=workflow must be a non-blank "
+                    f"string; got {playbook_name_raw!r}"
+                )
+            playbook_name = playbook_name_raw
 
         return cls(
             id=data["id"],
@@ -418,6 +463,7 @@ class Status:
             session_ref=data.get("session_ref"),
             compile_pending=compile_pending_val,
             compile_phase=compile_phase,
+            playbook_name=playbook_name,
         )
 
     @classmethod

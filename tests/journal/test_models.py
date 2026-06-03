@@ -197,6 +197,7 @@ class TestWorkflowMode:
         s = Status.new_workflow(
             id="w1",
             title="Test workflow",
+            playbook_name="default",
             captain="Akagi",
             max_sessions=12,
             now="2026-06-03T08:00:00Z",
@@ -210,7 +211,9 @@ class TestWorkflowMode:
         assert s.compile_phase is CompilePhase.PENDING
 
     def test_new_workflow_captain_none_allowed(self):
-        s = Status.new_workflow(id="w1", title="Test", captain=None)
+        s = Status.new_workflow(
+            id="w1", title="Test", captain=None, playbook_name="default",
+        )
         assert s.persona is None
         assert s.compile_pending is True
         assert s.compile_phase is CompilePhase.PENDING
@@ -218,26 +221,28 @@ class TestWorkflowMode:
     def test_new_workflow_default_max_sessions(self):
         """Default is 10 (not 5 as for tasks) so the in-session
         compile has budget."""
-        s = Status.new_workflow(id="w1", title="Test")
+        s = Status.new_workflow(
+            id="w1", title="Test", playbook_name="default",
+        )
         assert s.max_sessions == 10
 
     def test_new_workflow_rejects_blank_title(self):
         with pytest.raises(JournalModelError):
-            Status.new_workflow(id="w1", title="   ")
+            Status.new_workflow(id="w1", title="   ", playbook_name="default")
 
     def test_new_workflow_rejects_blank_captain(self):
         """``captain=""`` is wrong shape; should pass ``None`` to mean
         'no captain'. We reject blank strings so a typo doesn't
         silently produce a no-owner workflow."""
         with pytest.raises(JournalModelError):
-            Status.new_workflow(id="w1", title="t", captain="   ")
+            Status.new_workflow(id="w1", title="t", captain="   ", playbook_name="default")
 
     def test_new_workflow_rejects_zero_max_sessions(self):
         with pytest.raises(JournalModelError):
-            Status.new_workflow(id="w1", title="t", max_sessions=0)
+            Status.new_workflow(id="w1", title="t", max_sessions=0, playbook_name="default")
 
     def test_to_dict_emits_workflow_fields(self):
-        s = Status.new_workflow(id="w1", title="t", captain="Akagi")
+        s = Status.new_workflow(id="w1", title="t", captain="Akagi", playbook_name="default")
         d = s.to_dict()
         assert d["kind"] == "workflow"
         assert d["compile_pending"] is True
@@ -254,12 +259,12 @@ class TestWorkflowMode:
         assert "compile_phase" not in d
 
     def test_workflow_json_round_trip(self):
-        s = Status.new_workflow(id="w1", title="t", captain="Akagi")
+        s = Status.new_workflow(id="w1", title="t", captain="Akagi", playbook_name="default")
         s2 = Status.from_json(s.to_json())
         assert s == s2
 
     def test_workflow_null_captain_round_trip(self):
-        s = Status.new_workflow(id="w1", title="t", captain=None)
+        s = Status.new_workflow(id="w1", title="t", captain=None, playbook_name="default")
         s2 = Status.from_json(s.to_json())
         assert s == s2
         assert s2.persona is None
@@ -267,8 +272,11 @@ class TestWorkflowMode:
     # ---- from_dict gates for workflow tasks ----
 
     def _workflow_dict(self) -> dict:
-        s = Status.new_workflow(id="w1", title="t", captain="Akagi",
-                                now="2026-06-03T08:00:00Z")
+        s = Status.new_workflow(
+            id="w1", title="t", captain="Akagi",
+            playbook_name="default",
+            now="2026-06-03T08:00:00Z",
+        )
         return s.to_dict()
 
     def test_from_dict_rejects_workflow_missing_compile_pending(self):
@@ -322,6 +330,73 @@ class TestWorkflowMode:
         d["persona"] = None
         s = Status.from_dict(d)
         assert s.persona is None
+
+    # ---- Phase 2: playbook_name on Status ----
+
+    def test_new_workflow_requires_playbook_name(self):
+        with pytest.raises(JournalModelError) as exc:
+            Status.new_workflow(
+                id="w1", title="t", captain="Akagi", playbook_name="",
+            )
+        assert "playbook_name" in str(exc.value)
+
+    def test_new_workflow_rejects_whitespace_playbook_name(self):
+        with pytest.raises(JournalModelError):
+            Status.new_workflow(
+                id="w1", title="t", captain="Akagi", playbook_name="   ",
+            )
+
+    def test_new_workflow_strips_playbook_name(self):
+        s = Status.new_workflow(
+            id="w1", title="t", captain="Akagi",
+            playbook_name="  research-pass  ",
+        )
+        assert s.playbook_name == "research-pass"
+
+    def test_to_dict_emits_playbook_name_for_workflow(self):
+        s = Status.new_workflow(
+            id="w1", title="t", captain="Akagi", playbook_name="ml-eval",
+        )
+        d = s.to_dict()
+        assert d["playbook_name"] == "ml-eval"
+
+    def test_to_dict_suppresses_playbook_name_for_task(self):
+        t = Status.new(id="t1", title="t", persona="P").to_dict()
+        assert "playbook_name" not in t
+
+    def test_workflow_json_round_trip_preserves_playbook_name(self):
+        s = Status.new_workflow(
+            id="w1", title="t", captain="Akagi", playbook_name="ml-eval",
+        )
+        s2 = Status.from_json(s.to_json())
+        assert s2.playbook_name == "ml-eval"
+        assert s == s2
+
+    def test_from_dict_rejects_workflow_missing_playbook_name(self):
+        d = self._workflow_dict()
+        del d["playbook_name"]
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(d)
+        assert "playbook_name is required for kind=workflow" in str(exc.value)
+
+    def test_from_dict_rejects_blank_playbook_name_for_workflow(self):
+        d = self._workflow_dict()
+        d["playbook_name"] = "   "
+        with pytest.raises(JournalModelError):
+            Status.from_dict(d)
+
+    def test_from_dict_rejects_non_string_playbook_name_for_workflow(self):
+        d = self._workflow_dict()
+        d["playbook_name"] = 42
+        with pytest.raises(JournalModelError):
+            Status.from_dict(d)
+
+    def test_from_dict_rejects_playbook_name_for_task(self):
+        t = Status.new(id="t1", title="t", persona="P").to_dict()
+        t["playbook_name"] = "ml-eval"
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(t)
+        assert "playbook_name is rejected for kind=task" in str(exc.value)
 
     def test_from_dict_rejects_non_string_persona_for_task(self):
         """Type validation on persona for kind=task -- a non-string

@@ -274,7 +274,9 @@ class ScriptedDriver:
         return p
 
 
-def _new_driver(journal_dir: Path, team_root: Path) -> ScriptedDriver:
+def _new_driver(
+    journal_dir: Path, team_root: Path, *, playbook_name: str = "default",
+) -> ScriptedDriver:
     paths = JournalPaths(root=journal_dir)
     result = new_workflow_task(
         brief_text="# Goal\nShip the feature.\n",
@@ -282,7 +284,7 @@ def _new_driver(journal_dir: Path, team_root: Path) -> ScriptedDriver:
             "# Playbook\n\n"
             "Anzai drafts. Akagi reviews. Ayako reviews. Mitsui implements.\n"
         ),
-        playbook_name="default",
+        playbook_name=playbook_name,
         team_root=team_root,
         paths=paths,
         captain="Mitsui",
@@ -588,13 +590,21 @@ class TestKillDuringLandLeavesConsistentState:
         # gate (status.json) is the authoritative bit, and it's still
         # blocking the graph-walker. That's the invariant we care about.
 
-    def test_kill_before_orchestration_promote_leaves_no_canonical_files(
+    def test_kill_between_steps_promote_and_orchestration_promote(
         self, team_root, journal_dir, monkeypatch,
     ):
-        """A kill BEFORE the os.replace promotion finishes must leave no
-        canonical orchestration.json / steps/. The compile/final/ tree
-        may be left behind for forensics but the task dir's user-facing
-        artifacts must NOT be partially-promoted."""
+        """cmd_land_compile's promotion order is: (1) shutil.move on
+        steps/, (2) os.replace on orchestration.json, (3) os.replace on
+        compile_critique.md, (4) status.json flip via _write_atomic. A
+        kill that fires at step 2 (orchestration.json) leaves
+        canonical steps/ on disk but no canonical orchestration.json.
+
+        The invariant the code actually upholds is **not** "no partial
+        promotion ever" -- it's "the status.json flip is the visibility
+        gate, and it doesn't flip until ALL the artifact promotions
+        finish." So a graph-walker / list / status reader sees
+        compile_pending=true and never tries to read orchestration.json
+        or steps/. Pin that honestly."""
         d = _new_driver(journal_dir, team_root)
         d.begin_round()
         draft = d.write_draft(_VALID_BUNDLE)
@@ -607,20 +617,59 @@ class TestKillDuringLandLeavesConsistentState:
         import tigerharness.journal.compile_cli as mod
         real_replace = mod.os.replace
 
-        def kill_first_replace(src, dst):
+        def kill_at_orchestration(src, dst):
             if str(dst).endswith("orchestration.json"):
                 raise OSError("simulated kill during orchestration promote")
             return real_replace(src, dst)
 
-        monkeypatch.setattr(mod.os, "replace", kill_first_replace)
+        monkeypatch.setattr(mod.os, "replace", kill_at_orchestration)
         with pytest.raises(OSError):
             d.land_compile(draft, transcript, rounds=1)
 
         td = d.task_dir
+        # The orchestration.json promote never finished.
         assert not (td / "orchestration.json").exists()
-        # status.json was NOT flipped.
+        # Steps/ DID get promoted (it's the first step of the sequence).
+        # That's acceptable per the design: the visibility gate is
+        # status.json, NOT presence-of-steps/.
+        # The VISIBILITY GATE is correct: compile_pending stayed true.
         s = d.status()
         assert s.compile_pending is True
+        assert s.compile_phase == CompilePhase.PENDING
+
+    def test_kill_at_steps_move_leaves_no_canonical_artifacts(
+        self, team_root, journal_dir, monkeypatch,
+    ):
+        """A kill at the FIRST promotion step (shutil.move on steps/)
+        leaves nothing canonicalized at all -- so no graph-walker can
+        ever see a half-compiled task even via raw filesystem inspection."""
+        d = _new_driver(journal_dir, team_root)
+        d.begin_round()
+        draft = d.write_draft(_VALID_BUNDLE)
+        v = d.validate_graph(draft)
+        d.write_trace(json.loads(v.stdout)["trace"])
+        d.write_critic("akagi", "WORKFLOW: APPROVE")
+        d.write_critic("ayako", "WORKFLOW: APPROVE")
+        transcript = d.write_transcript()
+
+        import tigerharness.journal.compile_cli as mod
+        real_move = mod.shutil.move
+
+        def kill_at_steps_move(src, dst):
+            if str(dst).endswith("/steps"):
+                raise OSError("simulated kill before steps promote")
+            return real_move(src, dst)
+
+        monkeypatch.setattr(mod.shutil, "move", kill_at_steps_move)
+        with pytest.raises(OSError):
+            d.land_compile(draft, transcript, rounds=1)
+
+        td = d.task_dir
+        assert not (td / "steps").exists()
+        assert not (td / "orchestration.json").exists()
+        s = d.status()
+        assert s.compile_pending is True
+        assert s.compile_phase == CompilePhase.PENDING
 
 
 # ---------------------------------------------------------------------------
@@ -729,11 +778,17 @@ class TestParallelTasksDoNotCross:
 # Scenario 11 -- land-compile is idempotent on retry once status flipped
 # ---------------------------------------------------------------------------
 
-class TestLandIsNotRetriableAfterSuccess:
-    def test_second_land_call_no_ops_or_errors(self, team_root, journal_dir):
+class TestLandIsIdempotentOnRetry:
+    def test_second_land_call_is_idempotent(self, team_root, journal_dir):
         """Once status.compile_pending=false, a re-invocation of
-        land-compile is undefined -- we just check it doesn't corrupt
-        state. The driver protocol forbids re-landing."""
+        land-compile is **idempotent**: the function has no precondition
+        check on the compile flag, so it re-runs the whole pipeline
+        (Tier 1 re-validation, re-stage, re-promote via atomic
+        replace/move) on the same well-formed inputs. The driver
+        protocol forbids the second call, but the safety net here is
+        that nothing corrupts -- and rc is deterministically 0, not
+        ambiguous. We pin that so a regression that silently introduces
+        a non-zero return is caught."""
         d = _new_driver(journal_dir, team_root)
         d.begin_round()
         draft = d.write_draft(_VALID_BUNDLE)
@@ -748,17 +803,13 @@ class TestLandIsNotRetriableAfterSuccess:
         s1 = d.status()
         assert s1.compile_pending is False
 
-        # A second land-compile should NOT corrupt status -- whether it
-        # succeeds (re-land) or errors, the visibility bit must stay
-        # at "complete".
+        # Pin the deterministic idempotency: re-land succeeds + leaves
+        # the visibility bit at complete.
         second = d.land_compile(draft, transcript, rounds=1)
+        assert second.rc == 0, second.stderr
         s2 = d.status()
         assert s2.compile_pending is False
         assert s2.compile_phase == CompilePhase.COMPLETE
-        # `second` may have rc=0 (no-op-ish re-land) -- the design intent
-        # is "land-compile is the visibility gate", and the gate stays
-        # closed (compile_pending=false) regardless.
-        assert second.rc in (0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +864,9 @@ class TestPostLandOrchestrationIsValidJson:
         orch_path = d.task_dir / "orchestration.json"
         payload = json.loads(orch_path.read_text())
         assert payload["task_id"] == d.task_id
+        # Phase 2: orchestration.playbook reflects the truthful scaffold-
+        # time playbook name (no longer hardcoded "default").
+        assert payload["playbook"] == "default"
         # Orchestration.steps is a list of step IDs (the source-of-truth
         # frontmatter lives in steps/<id>.md). Entrypoint must reference
         # one of those IDs and the edge map must be well-formed.
@@ -821,6 +875,21 @@ class TestPostLandOrchestrationIsValidJson:
         assert "edges" in payload
         for step_id in payload["steps"]:
             assert step_id in payload["edges"]
+
+    def test_non_default_playbook_name_flows_through_to_orchestration(
+        self, team_root, journal_dir,
+    ):
+        d = _new_driver(journal_dir, team_root, playbook_name="research-pass")
+        d.begin_round()
+        draft = d.write_draft(_VALID_BUNDLE)
+        v = d.validate_graph(draft)
+        d.write_trace(json.loads(v.stdout)["trace"])
+        d.write_critic("akagi", "WORKFLOW: APPROVE")
+        d.write_critic("ayako", "WORKFLOW: APPROVE")
+        transcript = d.write_transcript()
+        d.land_compile(draft, transcript, rounds=1)
+        payload = json.loads((d.task_dir / "orchestration.json").read_text())
+        assert payload["playbook"] == "research-pass"
 
 
 # ---------------------------------------------------------------------------
