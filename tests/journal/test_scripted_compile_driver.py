@@ -45,6 +45,7 @@ import pytest
 
 from tigerharness.journal.compile_cli import (
     cmd_abort,
+    cmd_append_steps,
     cmd_compile_context,
     cmd_compile_fail,
     cmd_compile_prompts,
@@ -246,6 +247,14 @@ class ScriptedDriver:
             journal_dir=str(self.paths.root), task_id=self.task_id,
         )
         return self._invoke(cmd_compile_retry, ns)
+
+    def append_steps(self, bundle_path: Path) -> CliResult:
+        ns = argparse.Namespace(
+            journal_dir=str(self.paths.root),
+            task=self.task_id,
+            new_bundle=str(bundle_path),
+        )
+        return self._invoke(cmd_append_steps, ns)
 
     # ---- scripted-turn helpers ----
 
@@ -972,6 +981,68 @@ class TestCompileFailRetrySucceedCycle:
         # round-trip.
         assert (d.task_dir / "task_brief.md").is_file()
         assert (d.task_dir / "playbook_snapshot.md").is_file()
+
+
+class TestPhase3StepAppendEndToEnd:
+    """Phase 3: drive compile to landed, then append a new step at
+    runtime via the same drafter discipline + Tier 1 gate, and verify
+    the resulting graph is internally consistent."""
+
+    def test_compile_then_append(self, team_root, journal_dir, tmp_path):
+        d = _new_driver(journal_dir, team_root)
+        # Land the initial graph (round 1, dual APPROVE).
+        d.begin_round()
+        draft = d.write_draft(_VALID_BUNDLE)
+        v = d.validate_graph(draft)
+        d.write_trace(json.loads(v.stdout)["trace"])
+        d.write_critic("akagi", "WORKFLOW: APPROVE")
+        d.write_critic("ayako", "WORKFLOW: APPROVE")
+        transcript = d.write_transcript()
+        landed = d.land_compile(draft, transcript, rounds=1)
+        assert landed.rc == 0
+
+        # Now append-steps a follow-up QA step.
+        append_bundle = (
+            "```steps-bundle\n"
+            "## step: 03-mitsui-qa\n"
+            "---\n"
+            "id: 03-mitsui-qa\n"
+            "persona: Mitsui\n"
+            "role: qa\n"
+            "on_approve: __done__\n"
+            "on_revise: 03-mitsui-qa\n"
+            "on_block: __escalate__\n"
+            "max_iters: 5\n"
+            "timeout_sec: 1800\n"
+            "parallel_with: []\n"
+            "---\n"
+            "QA the implementation.\n"
+            "```\n"
+        )
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(append_bundle)
+        appended = d.append_steps(bundle_path)
+        assert appended.rc == 0, appended.stderr
+
+        # orchestration.json reflects all three steps.
+        orch = json.loads(
+            (d.task_dir / "orchestration.json").read_text(),
+        )
+        assert orch["steps"] == [
+            "01-anzai-plan", "02-mitsui-impl", "03-mitsui-qa",
+        ]
+        # The entrypoint stayed the same (first step never changes).
+        assert orch["entrypoint"] == "01-anzai-plan"
+        # Each step has its edges in the edge map.
+        for step_id in orch["steps"]:
+            assert step_id in orch["edges"]
+        # Step files are all on disk.
+        for sid in orch["steps"]:
+            assert (d.task_dir / "steps" / f"{sid}.md").is_file()
+        # compile_phase still complete; the append doesn't change
+        # the visibility gate.
+        s = d.status()
+        assert s.compile_phase == CompilePhase.COMPLETE
 
 
 class TestTranscriptPreservedIntoCritiqueArtifact:

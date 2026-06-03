@@ -713,6 +713,443 @@ class TestLandCompile:
 # abort
 # ---------------------------------------------------------------------------
 
+class TestAppendSteps:
+    """Phase 3: `journal append-steps` extends a landed graph at runtime."""
+
+    def _landed(self, team_root, journal_dir):
+        """Drive a workflow task to compile_phase=complete and return
+        (task_id, paths)."""
+        from tigerharness.journal.scaffold import new_workflow_task
+        paths = JournalPaths(root=journal_dir)
+        result = new_workflow_task(
+            brief_text="# Goal\nShip.\n",
+            playbook_text=(
+                "# Playbook\n\nAnzai drafts. Mitsui implements.\n"
+            ),
+            playbook_name="default",
+            team_root=team_root,
+            paths=paths,
+            captain="Mitsui",
+        )
+        task_id = result.task_id
+        # Land a minimal compile by calling cmd_land_compile directly
+        # with a valid bundle, the same way the scripted driver does.
+        bundle = (
+            "```steps-bundle\n"
+            "## step: 01-anzai-plan\n"
+            "---\n"
+            "id: 01-anzai-plan\n"
+            "persona: Anzai\n"
+            "role: planner\n"
+            "on_approve: 02-mitsui-impl\n"
+            "on_revise: 01-anzai-plan\n"
+            "on_block: __escalate__\n"
+            "max_iters: 5\n"
+            "timeout_sec: 1800\n"
+            "parallel_with: []\n"
+            "---\n"
+            "Plan.\n"
+            "## step: 02-mitsui-impl\n"
+            "---\n"
+            "id: 02-mitsui-impl\n"
+            "persona: Mitsui\n"
+            "role: developer\n"
+            "on_approve: __done__\n"
+            "on_revise: 02-mitsui-impl\n"
+            "on_block: __escalate__\n"
+            "max_iters: 5\n"
+            "timeout_sec: 1800\n"
+            "parallel_with: []\n"
+            "---\n"
+            "Implement.\n"
+            "```\n"
+        )
+        td = paths.task_dir(task_id)
+        # Write transcript + draft as files for cmd_land_compile.
+        compile_dir = td / "compile"
+        compile_dir.mkdir(parents=True, exist_ok=True)
+        draft_path = compile_dir / "round-01-draft.md"
+        draft_path.write_text(bundle, encoding="utf-8")
+        transcript_path = compile_dir / "transcript.md"
+        transcript_path.write_text("Round 1: APPROVE\n", encoding="utf-8")
+        rc = cmd_land_compile(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id,
+            draft=str(draft_path),
+            transcript=str(transcript_path),
+            rounds=1,
+        ))
+        assert rc == 0
+        return task_id, paths
+
+    def _append_bundle(
+        self, after_id: str = "02-mitsui-impl",
+        new_id: str = "03-mitsui-qa",
+    ) -> str:
+        """A drafter-format bundle with one new step that the existing
+        graph references via on_approve (we'll patch the existing
+        on_approve in some tests, but the validator doesn't enforce
+        any specific link)."""
+        return (
+            f"```steps-bundle\n"
+            f"## step: {new_id}\n"
+            f"---\n"
+            f"id: {new_id}\n"
+            f"persona: Mitsui\n"
+            f"role: qa\n"
+            f"on_approve: __done__\n"
+            f"on_revise: {new_id}\n"
+            f"on_block: __escalate__\n"
+            f"max_iters: 5\n"
+            f"timeout_sec: 1800\n"
+            f"parallel_with: []\n"
+            f"---\n"
+            f"QA the implementation.\n"
+            f"```\n"
+        )
+
+    def test_happy_path_appends_new_step(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(self._append_bundle())
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id,
+            new_bundle=str(bundle_path),
+        )
+        rc = cmd_append_steps(ns)
+        assert rc == 0, capsys.readouterr().err
+        # orchestration.json extended.
+        orch = json.loads(
+            (paths.task_dir(task_id) / "orchestration.json").read_text(),
+        )
+        assert orch["steps"] == [
+            "01-anzai-plan", "02-mitsui-impl", "03-mitsui-qa",
+        ]
+        assert "03-mitsui-qa" in orch["edges"]
+        # New step file written.
+        assert (paths.task_dir(task_id) / "steps" / "03-mitsui-qa.md").is_file()
+        # Old step files untouched.
+        assert (paths.task_dir(task_id) / "steps" / "01-anzai-plan.md").is_file()
+        assert (paths.task_dir(task_id) / "steps" / "02-mitsui-impl.md").is_file()
+        out = capsys.readouterr().out
+        assert "appended: 1 step(s)" in out
+        assert "03-mitsui-qa" in out
+
+    def test_appends_multiple_steps(
+        self, team_root, journal_dir, tmp_path,
+    ):
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        bundle = (
+            "```steps-bundle\n"
+            "## step: 03-mitsui-qa\n"
+            "---\n"
+            "id: 03-mitsui-qa\n"
+            "persona: Mitsui\n"
+            "role: qa\n"
+            "on_approve: 04-mitsui-ship\n"
+            "on_revise: 03-mitsui-qa\n"
+            "on_block: __escalate__\n"
+            "max_iters: 5\n"
+            "timeout_sec: 1800\n"
+            "parallel_with: []\n"
+            "---\n"
+            "QA.\n"
+            "## step: 04-mitsui-ship\n"
+            "---\n"
+            "id: 04-mitsui-ship\n"
+            "persona: Mitsui\n"
+            "role: shipper\n"
+            "on_approve: __done__\n"
+            "on_revise: 04-mitsui-ship\n"
+            "on_block: __escalate__\n"
+            "max_iters: 5\n"
+            "timeout_sec: 1800\n"
+            "parallel_with: []\n"
+            "---\n"
+            "Ship.\n"
+            "```\n"
+        )
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(bundle)
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id,
+            new_bundle=str(bundle_path),
+        ))
+        assert rc == 0
+        orch = json.loads(
+            (paths.task_dir(task_id) / "orchestration.json").read_text(),
+        )
+        assert orch["steps"][-2:] == ["03-mitsui-qa", "04-mitsui-ship"]
+
+    def test_refuses_on_non_complete_phase(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        """A task in compile_phase=pending (graph not landed yet) can't
+        be append-stepped -- there's no graph to extend."""
+        from tigerharness.journal.scaffold import new_workflow_task
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        paths = JournalPaths(root=journal_dir)
+        r = new_workflow_task(
+            brief_text="b\n", playbook_text="p\n",
+            playbook_name="default", team_root=team_root, paths=paths,
+        )
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(self._append_bundle())
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=r.task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 2
+        assert "only operates on a completed compile" in \
+            capsys.readouterr().err
+
+    def test_rejects_id_collision_with_existing_step(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        # Bundle uses the SAME id as an existing step.
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(
+            self._append_bundle(new_id="02-mitsui-impl"),
+        )
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "collide" in err
+        assert "02-mitsui-impl" in err
+        # Orchestration NOT modified.
+        orch = json.loads(
+            (paths.task_dir(task_id) / "orchestration.json").read_text(),
+        )
+        assert orch["steps"] == ["01-anzai-plan", "02-mitsui-impl"]
+
+    def test_unparseable_bundle_returns_json_envelope(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        capsys.readouterr()  # drain fixture's "landed:" stdout
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text("no fence here\n")
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is False
+        assert envelope["errors"][0]["validator"] == "parse"
+
+    def test_validator_failure_leaves_orchestration_untouched(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        """A new step that names a non-roster persona fails the
+        roster validator. The orchestration MUST be left unchanged."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        capsys.readouterr()  # drain fixture's "landed:" stdout
+        bad_bundle = self._append_bundle().replace(
+            "persona: Mitsui", "persona: NotInRoster",
+        )
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(bad_bundle)
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is False
+        # Orchestration NOT modified.
+        orch = json.loads(
+            (paths.task_dir(task_id) / "orchestration.json").read_text(),
+        )
+        assert orch["steps"] == ["01-anzai-plan", "02-mitsui-impl"]
+        # New step file NOT written.
+        assert not (paths.task_dir(task_id) / "steps"
+                    / "03-mitsui-qa.md").exists()
+
+    def test_unreadable_bundle_returns_2(
+        self, team_root, journal_dir, capsys,
+    ):
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id,
+            new_bundle="/no/such/file.md",
+        ))
+        assert rc == 2
+        assert "cannot read new-bundle" in capsys.readouterr().err
+
+    def test_zero_steps_returns_2(
+        self, team_root, journal_dir, tmp_path, capsys, monkeypatch,
+    ):
+        """Defense-in-depth: if the bundle parser somehow returns zero
+        steps (it currently raises instead, but the parser API could
+        change), cmd_append_steps surfaces a clear error. We mock the
+        parser to return an empty list to exercise this branch."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        capsys.readouterr()
+        bundle_path = tmp_path / "bundle.md"
+        bundle_path.write_text("```steps-bundle\n```\n")
+        import tigerharness.workflow_runner.compile.drafter as drafter_mod
+        monkeypatch.setattr(drafter_mod, "_parse_response", lambda _: [])
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 2
+        assert "zero steps" in capsys.readouterr().err
+
+    def test_unknown_task_returns_2(self, journal_dir, tmp_path, capsys):
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(self._append_bundle())
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(journal_dir),
+            task="2026-05-30-nope-mitsui-abc12",
+            new_bundle=str(bundle_path),
+        ))
+        assert rc == 2
+        assert "no active workflow task" in capsys.readouterr().err
+
+    def test_stray_orphan_step_file_blocks_overwrite(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        """If a stray steps/<new-id>.md exists on disk that the
+        orchestration doesn't reference (e.g. a manual edit), refuse
+        to clobber it -- the existing-id collision check only screens
+        ids in orchestration.json, so the file-overwrite check is the
+        defense-in-depth."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        # Plant an orphan that orchestration.json does NOT reference.
+        orphan = paths.task_dir(task_id) / "steps" / "03-mitsui-qa.md"
+        orphan.write_text("stray content\n")
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(self._append_bundle())
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 1
+        assert "refusing to overwrite" in capsys.readouterr().err
+        # Orphan preserved (no destruction).
+        assert orphan.read_text() == "stray content\n"
+        # Orchestration NOT extended.
+        orch = json.loads(
+            (paths.task_dir(task_id) / "orchestration.json").read_text(),
+        )
+        assert "03-mitsui-qa" not in orch["steps"]
+
+    def test_refreshes_heartbeat(
+        self, team_root, journal_dir, tmp_path,
+    ):
+        """append-steps bumps updated_at so the sweep doesn't reclassify
+        the task as stale while the operator works it."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        before = Status.from_json(paths.status_json(task_id).read_text())
+        before.updated_at = "2020-01-01T00:00:00Z"
+        paths.status_json(task_id).write_text(before.to_json())
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(self._append_bundle())
+        cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        after = Status.from_json(paths.status_json(task_id).read_text())
+        assert after.updated_at > before.updated_at
+
+    def test_corrupt_orchestration_returns_2(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        (paths.task_dir(task_id) / "orchestration.json").write_text("{not json")
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(self._append_bundle())
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 2
+        assert "cannot read orchestration.json" in capsys.readouterr().err
+
+    def test_missing_step_file_returns_2(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        """If a step file referenced by orchestration.json is missing
+        (e.g. someone deleted it), rehydration fails and append-steps
+        refuses to operate."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        (paths.task_dir(task_id) / "steps" / "01-anzai-plan.md").unlink()
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(self._append_bundle())
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 2
+        assert "rehydrate existing steps" in capsys.readouterr().err
+
+
+class TestReadExistingStep:
+    """The frontmatter rehydrator helper."""
+
+    def test_round_trips_a_rendered_step(self, tmp_path):
+        from tigerharness.journal.compile_cli import (
+            _read_existing_step, _render_frontmatter,
+        )
+        from tigerharness.workflow_runner.models import StepFrontmatter
+
+        s = StepFrontmatter(
+            id="x-1", persona="Anzai", role="planner",
+            on_approve="x-2", on_revise="x-1", on_block="__escalate__",
+            max_iters=5, timeout_sec=1800, parallel_with=[],
+        )
+        td = tmp_path / "task"
+        (td / "steps").mkdir(parents=True)
+        (td / "steps" / "x-1.md").write_text(
+            f"---\n{_render_frontmatter(s)}---\n",
+        )
+        loaded = _read_existing_step(td, "x-1")
+        assert loaded.id == s.id
+        assert loaded.persona == s.persona
+        assert loaded.on_approve == s.on_approve
+
+    def test_missing_leading_delimiter_raises(self, tmp_path):
+        from tigerharness.journal.compile_cli import _read_existing_step
+        td = tmp_path / "task"
+        (td / "steps").mkdir(parents=True)
+        (td / "steps" / "x-1.md").write_text("no delimiter here\n")
+        with pytest.raises(ValueError) as exc:
+            _read_existing_step(td, "x-1")
+        assert "no leading --- delimiter" in str(exc.value)
+
+    def test_missing_trailing_delimiter_raises(self, tmp_path):
+        from tigerharness.journal.compile_cli import _read_existing_step
+        td = tmp_path / "task"
+        (td / "steps").mkdir(parents=True)
+        (td / "steps" / "x-1.md").write_text("---\nid: x\n")
+        with pytest.raises(ValueError) as exc:
+            _read_existing_step(td, "x-1")
+        assert "no trailing --- delimiter" in str(exc.value)
+
+
 class TestCompileRetry:
     def _make_failed(self, scaffolded):
         """Drive a scaffolded workflow into compile_phase=failed."""
@@ -1063,20 +1500,20 @@ class TestValidatePersonas:
 # ---------------------------------------------------------------------------
 
 class TestBuildSubparsers:
-    def test_registers_all_eight(self):
+    def test_registers_all_nine(self):
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest="cmd")
         build_subparsers(sub)
         names = sorted(sub.choices.keys())
         assert names == sorted([
             "compile-context", "compile-prompts", "validate-graph",
-            "land-compile", "compile-fail", "compile-retry", "abort",
-            "validate-personas",
+            "land-compile", "compile-fail", "compile-retry",
+            "append-steps", "abort", "validate-personas",
         ])
 
     def test_each_sets_func(self):
         from tigerharness.journal.compile_cli import (
-            cmd_compile_fail, cmd_compile_retry,
+            cmd_append_steps, cmd_compile_fail, cmd_compile_retry,
         )
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest="cmd")
@@ -1088,6 +1525,7 @@ class TestBuildSubparsers:
             ("land-compile", cmd_land_compile),
             ("compile-fail", cmd_compile_fail),
             ("compile-retry", cmd_compile_retry),
+            ("append-steps", cmd_append_steps),
             ("abort", cmd_abort),
             ("validate-personas", cmd_validate_personas),
         ]:

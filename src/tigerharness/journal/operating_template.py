@@ -373,4 +373,74 @@ If a step is in `parallel_with`, the runtime may dispatch the listed
 steps concurrently; the journal driver does NOT need to thread these
 itself -- it asks each step for its trailer in document order and
 honours all `parallel_with` edges as a group barrier.
+
+## Step-append sub-protocol (kind=workflow, compile_phase=complete)
+
+Phase 3 lets a graph-walk step discover concrete follow-up work and
+**append** it to the running graph without re-scaffolding. Trigger:
+while walking the graph, a step's output identifies one or more new
+steps that need to exist before the walk can complete (e.g. Anzai's
+plan step calls for an extra QA pass that isn't in the compiled
+graph yet).
+
+Append is single-round: drafter writes a new bundle -> Tier 1
+re-validates the combined graph -> CLI atomically extends
+`orchestration.json` + writes the new step files. NO critic loop --
+the append is much smaller in scope than the original compile, and a
+Tier 1 failure (ref-resolution / roster / cycle bound) is enough to
+catch a bad append. The CLI is `journal append-steps`; the
+human-facing skill is `workflow-append-steps`.
+
+### Step-by-step
+
+1. **Adopt the drafter-role persona** (same as round 1 of the original
+   compile: the name under `drafter:` in the
+   `compile-context` bootstrap mapping). The append is a mini-compile,
+   so the same drafter discipline applies.
+
+2. **Emit a `steps-bundle`** containing ONLY the new step file(s) --
+   the same drafter format as the original compile output. The bundle
+   must NOT include any existing step ids; the CLI will reject
+   collisions.
+
+3. **Save the bundle** to a file under the task's
+   `compile/append-NN.md` (the suffix is operator-chosen; the CLI
+   doesn't care). Refresh `updated_at` as you go.
+
+4. **Run:**
+
+   ```bash
+   tigerharness journal append-steps --task <task-id> \\
+       --new-bundle <path>
+   ```
+
+   - Exit 0: graph extended. Continue the graph-walk; subsequent
+     steps can route into the new step ids.
+   - Exit 1: Tier 1 failure -- a JSON envelope
+     `{ok: false, errors: [...], trace: "..."}` is on stdout.
+     Treat the errors as drafter feedback, redraft the bundle, retry.
+     `orchestration.json` is untouched on failure.
+   - Exit 2: operator error (bad task id, wrong phase, unreadable
+     bundle). Read stderr.
+
+5. **Resume the graph walk** at whatever step you were on. The newly
+   appended steps are reachable via the `on_approve` / `on_revise` /
+   `on_block` edges of existing steps that the drafter wired up
+   (which is why the original-graph-step that triggered the append
+   needs to reference the new step id in one of its edges -- or the
+   new steps are unreachable). A future Phase 3+ enhancement may let
+   `append-steps` rewire an existing step's edge; today it only
+   *adds* nodes.
+
+### Caps + edge cases
+
+- **Append-only invariant**: the CLI enforces `existing_ids ∩
+  new_ids == ∅`. Reorders, renames, and rewrites are NOT supported.
+- **No critic loop**: append is single-round drafter -> Tier 1 ->
+  commit. If the drafter's bundle has logical problems Tier 1 won't
+  catch, the human is the gate (read it before running the CLI).
+- **Phase requirement**: refused unless
+  `status.compile_phase=complete`. A compile-in-flight task cannot
+  be appended to; a compile-failed task must be retried (or
+  re-scaffolded) first.
 """

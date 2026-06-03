@@ -586,6 +586,225 @@ def _guess_team_for_status() -> str:
 
 
 # ---------------------------------------------------------------------------
+# append-steps
+# ---------------------------------------------------------------------------
+
+def _read_existing_step(task_dir: Path, step_id: str):
+    """Re-hydrate a previously-landed step's frontmatter from
+    ``steps/<step_id>.md`` so we can re-validate the full graph when
+    append-steps extends it. Returns a ``StepFrontmatter``.
+
+    The file format mirrors what ``_render_frontmatter`` writes: a
+    YAML-ish key/value block between ``---`` delimiters, no body
+    (Phase 1.5/2 step files don't carry body text)."""
+    import yaml
+    from tigerharness.workflow_runner.models import StepFrontmatter
+
+    text = (task_dir / "steps" / f"{step_id}.md").read_text(encoding="utf-8")
+    # Pull the frontmatter block between the first two `---` lines.
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(
+            f"step file for {step_id!r} has no leading --- delimiter"
+        )
+    body_start = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            body_start = i
+            break
+    if body_start is None:
+        raise ValueError(
+            f"step file for {step_id!r} has no trailing --- delimiter"
+        )
+    fm_text = "\n".join(lines[1:body_start])
+    raw = yaml.safe_load(fm_text) or {}
+    return StepFrontmatter.from_dict(raw)
+
+
+def cmd_append_steps(args: argparse.Namespace) -> int:
+    """Phase 3: append one or more new steps to a workflow task's
+    already-compiled graph at runtime.
+
+    Inputs:
+
+    - ``--task <task-id>`` -- target workflow task; must be in
+      ``compile_phase=complete`` (graph is landed).
+    - ``--new-bundle <path>`` -- a drafter-format ``steps-bundle``
+      containing ONLY the new steps to append.
+
+    The CLI re-runs Tier 1 validators over the combined graph
+    (existing steps + new). On success it atomically:
+
+    1. Writes a step file per new step under ``steps/<id>.md``
+       (refuses if a step id collides with an existing file).
+    2. Rewrites ``orchestration.json`` with the extended ``steps`` list
+       and merged ``edges`` map, via temp + rename.
+
+    On Tier 1 failure the CLI emits the standard JSON envelope
+    ``{ok: false, errors: [...], trace: "..."}`` and exits 1; nothing
+    on disk is touched. This is the append-only invariant from the
+    workflow-runner-phase2 spec: a rejected append leaves the
+    currently-landed graph unchanged.
+    """
+    paths = _paths_from_args(args)
+    status_or_err = _load_workflow_status(paths, args.task)
+    if isinstance(status_or_err, str):
+        print(f"error: {status_or_err}", file=sys.stderr)
+        return 2
+    status = status_or_err
+
+    if status.compile_phase != CompilePhase.COMPLETE:
+        print(
+            f"error: task {status.id} is in compile_phase="
+            f"{status.compile_phase.value}; append-steps only operates "
+            "on a completed compile (compile_phase=complete).",
+            file=sys.stderr,
+        )
+        return 2
+
+    bundle_path = Path(args.new_bundle).expanduser()
+    try:
+        bundle_text = bundle_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"error: cannot read new-bundle {bundle_path}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Parse the new bundle into StepFrontmatter.
+    from tigerharness.workflow_runner.compile.drafter import (
+        DrafterParseError,
+        _parse_response,
+    )
+    try:
+        new_steps = _parse_response(bundle_text)
+    except DrafterParseError as exc:
+        envelope = {
+            "ok": False,
+            "errors": [
+                {
+                    "validator": "parse",
+                    "step_id": None,
+                    "message": str(exc),
+                }
+            ],
+            "trace": "",
+        }
+        print(json.dumps(envelope, indent=2))
+        return 1
+
+    if not new_steps:
+        print(
+            "error: new bundle parsed as zero steps; nothing to append",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Read the existing orchestration + step files.
+    task_dir = paths.task_dir(status.id)
+    orch_path = task_dir / "orchestration.json"
+    try:
+        orch_data = json.loads(orch_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            f"error: cannot read orchestration.json for {status.id}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    existing_step_ids = list(orch_data.get("steps") or [])
+    try:
+        existing_steps = [
+            _read_existing_step(task_dir, sid) for sid in existing_step_ids
+        ]
+    except Exception as exc:
+        print(
+            f"error: cannot rehydrate existing steps for re-validation: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Defensive: refuse if any new step's id collides with an existing.
+    existing_id_set = set(existing_step_ids)
+    new_id_set = {s.id for s in new_steps}
+    collisions = sorted(existing_id_set & new_id_set)
+    if collisions:
+        print(
+            f"error: new bundle has step id(s) that collide with the "
+            f"existing graph: {collisions}. append-steps is append-only; "
+            "rename the new step(s) and retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    combined = existing_steps + new_steps
+    roster = _roster_for_task(paths, status.id)
+    from tigerharness.workflow_runner.compile.validators import (
+        validate_compile_output,
+    )
+    result = validate_compile_output(combined, roster=roster)
+    if not result.ok:
+        envelope = {
+            "ok": False,
+            "errors": [
+                {
+                    "validator": e.validator,
+                    "step_id": e.step_id,
+                    "message": e.message,
+                }
+                for e in result.errors
+            ],
+            "trace": result.trace,
+        }
+        print(json.dumps(envelope, indent=2))
+        return 1
+
+    # Validation passed -- promote.
+    # 1. Write each new step file. A collision is impossible here
+    #    because we screened above; if a stray on-disk file exists
+    #    that orchestration.json doesn't reference, refuse rather
+    #    than overwrite.
+    steps_dir = task_dir / "steps"
+    for step in new_steps:
+        step_path = steps_dir / f"{step.id}.md"
+        if step_path.exists():
+            print(
+                f"error: refusing to overwrite stray step file "
+                f"{step_path} (not referenced by orchestration.json)",
+                file=sys.stderr,
+            )
+            return 1
+        front = _render_frontmatter(step)
+        step_path.write_text(f"---\n{front}---\n", encoding="utf-8")
+
+    # 2. Extend orchestration.json (atomic write).
+    new_step_ids = [s.id for s in new_steps]
+    orch_data["steps"] = existing_step_ids + new_step_ids
+    edges = orch_data.get("edges") or {}
+    for step in new_steps:
+        edges[step.id] = {
+            "on_approve": step.on_approve,
+            "on_revise": step.on_revise,
+            "on_block": step.on_block,
+        }
+    orch_data["edges"] = edges
+    _write_atomic(orch_path, json.dumps(orch_data, indent=2) + "\n")
+
+    # 3. Refresh the heartbeat so the sweep doesn't reclassify this
+    #    task as stale while the operator is using it.
+    from tigerharness.journal.models import _utcnow_iso
+    status.updated_at = _utcnow_iso()
+    _write_atomic(paths.status_json(status.id), status.to_json())
+
+    print(f"appended: {len(new_steps)} step(s) to {status.id}")
+    for step in new_steps:
+        print(f"  + {step.id}  ({step.persona} / {step.role})")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # compile-retry
 # ---------------------------------------------------------------------------
 
@@ -832,6 +1051,25 @@ def build_subparsers(sub: "argparse._SubParsersAction") -> None:
     lc.add_argument("--transcript", required=True)
     lc.add_argument("--rounds", required=True, type=int)
     lc.set_defaults(func=cmd_land_compile)
+
+    # append-steps
+    ap = sub.add_parser(
+        "append-steps",
+        help=(
+            "Append new step(s) to a workflow task's already-landed "
+            "graph. Re-runs Tier 1 validators over the combined graph; "
+            "atomic on success, leaves the graph untouched on failure."
+        ),
+    )
+    ap.add_argument("--task", required=True)
+    ap.add_argument(
+        "--new-bundle", required=True,
+        help=(
+            "Path to a drafter-format steps-bundle containing ONLY "
+            "the new steps to append."
+        ),
+    )
+    ap.set_defaults(func=cmd_append_steps)
 
     # compile-retry
     cr = sub.add_parser(

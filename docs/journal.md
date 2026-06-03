@@ -130,6 +130,7 @@ tigerharness journal validate-graph --task <id> --draft <path>
 tigerharness journal land-compile   --task <id> --draft <path> --transcript <path> --rounds <N>
 tigerharness journal compile-fail   <task-id> --reason "<postmortem>"
 tigerharness journal compile-retry  <task-id>           # Phase 2: reset a failed compile + retry
+tigerharness journal append-steps   --task <id> --new-bundle <path>  # Phase 3: extend a landed graph
 tigerharness journal abort          <task-id>
 tigerharness journal validate-personas <team>
 
@@ -171,11 +172,16 @@ in [`journal-workflow-mode.md`](journal-workflow-mode.md).
 ## Skills
 
 - `skills/journal-new/` — scaffolder skill (CLI form is the primary;
-  the skill is a thin wrapper).
+  the skill is a thin wrapper). Teaches both `kind=task` and
+  `kind=workflow` modes.
 - `skills/drive-journal/` — driver skill (skill-only, no CLI form).
+- `skills/workflow-append-steps/` — Phase 3 step-append skill for
+  extending a landed graph at runtime. Wraps `journal append-steps`.
 
 The driver skill points the interactive session at the on-disk
-`OPERATING.md` for the canonical protocol.
+`OPERATING.md` for the canonical protocol, which now includes the
+compile sub-protocol (Phase 1.5) and the step-append sub-protocol
+(Phase 3).
 
 ## OPERATING.md
 

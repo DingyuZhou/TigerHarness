@@ -493,9 +493,12 @@ documented as a one-line release-note warning.
 
 Deferred to a later phase if and when needed:
 
-- **Step-append at runtime.** The Wave 3 workflow-runner feature
-  (`workflow-append-steps` skill) lets a step add follow-up steps to
-  the graph at runtime. Phase 1.5 ships static graphs only.
+- **Step-append at runtime.** **Shipped in Phase 3** (closeout
+  branch). New `journal append-steps --task <id> --new-bundle <path>`
+  CLI + `workflow-append-steps` skill + an OPERATING.md sub-protocol
+  section. Append-only (no rewrite / reorder); Tier 1 re-validates
+  over the combined graph; atomic promotion on success, no change
+  on failure.
 - **Human gate enforcement (RETIRED, not deferred).** The api-backed
   workflow-runner's Tier 3 human gate existed to brake a process
   that was otherwise running the LLM autonomously via `claude -p`
