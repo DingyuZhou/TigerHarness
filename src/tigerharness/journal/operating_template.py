@@ -206,9 +206,17 @@ Caps (compile gives up rather than spinning forever):
   `next_action="compile failed at critiquing: <last round verdicts>"`.
 
 Both caps land the task in `state=blocked` + `compile_phase=failed`.
-The task stays in `active/` for the human to inspect; the operator
-either edits the playbook and re-scaffolds, or runs `journal abort`
-to archive.
+The task stays in `active/` for the human to inspect. The operator
+then chooses one of:
+
+- `tigerharness journal compile-retry <task-id>` -- wipes
+  `compile/`, resets the status to scaffold-time shape
+  (`state=pending`, `compile_pending=true`,
+  `compile_phase=pending`), and lets the next `drive-journal` retry
+  the compile from scratch. Brief + playbook snapshot preserved.
+- Edit the playbook and re-scaffold a fresh task.
+- `tigerharness journal abort <task-id>` -- archive to `done/`,
+  preserving `compile/` for forensics.
 
 ### Persona switching (uniform mechanic)
 

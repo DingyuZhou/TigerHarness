@@ -674,6 +674,138 @@ class TestLandCompile:
 # abort
 # ---------------------------------------------------------------------------
 
+class TestCompileRetry:
+    def _make_failed(self, scaffolded):
+        """Drive a scaffolded workflow into compile_phase=failed."""
+        from tigerharness.journal.compile_cli import cmd_compile_fail
+        task_id, paths = scaffolded
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+            reason="compile failed at critiquing: Akagi BLOCK",
+        )
+        rc = cmd_compile_fail(ns)
+        assert rc == 0
+        # Pre-seed compile/round-NN files so we can assert the wipe.
+        cd = paths.task_dir(task_id) / "compile"
+        cd.mkdir(parents=True, exist_ok=True)
+        (cd / "round-01-draft.md").write_text("attempt-1 draft")
+        (cd / "round-01-akagi.md").write_text("Akagi BLOCK")
+        (cd / "transcript.md").write_text("Round 1: BLOCK")
+        return task_id, paths
+
+    def test_happy_path_resets_state_and_wipes_compile(
+        self, scaffolded, capsys,
+    ):
+        from tigerharness.journal.compile_cli import cmd_compile_retry
+        task_id, paths = self._make_failed(scaffolded)
+        # Pre-flip sessions to a non-zero value to verify reset.
+        s = Status.from_json(paths.status_json(task_id).read_text())
+        s.sessions = 3
+        paths.status_json(task_id).write_text(s.to_json())
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        )
+        rc = cmd_compile_retry(ns)
+        assert rc == 0
+        s2 = Status.from_json(paths.status_json(task_id).read_text())
+        assert s2.state == State.PENDING
+        assert s2.compile_pending is True
+        assert s2.compile_phase == CompilePhase.PENDING
+        assert s2.sessions == 0
+        assert s2.session_ref is None
+        assert "Compile retry requested" in s2.next_action
+        # compile/ wiped.
+        assert not (paths.task_dir(task_id) / "compile").exists()
+        out = capsys.readouterr().out
+        assert "compile-retry:" in out
+
+    def test_missing_compile_dir_is_ok(self, scaffolded, capsys):
+        """If compile/ doesn't exist (failure was before any rounds
+        written), the retry still succeeds."""
+        from tigerharness.journal.compile_cli import (
+            cmd_compile_fail, cmd_compile_retry,
+        )
+        task_id, paths = scaffolded
+        # compile_fail without seeding compile/.
+        cmd_compile_fail(argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+            reason="failed at tier1_pre: no fence in drafter output",
+        ))
+        assert not (paths.task_dir(task_id) / "compile").exists()
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        )
+        rc = cmd_compile_retry(ns)
+        assert rc == 0
+        s = Status.from_json(paths.status_json(task_id).read_text())
+        assert s.compile_phase == CompilePhase.PENDING
+
+    def test_brief_and_playbook_snapshot_preserved(
+        self, scaffolded,
+    ):
+        """The task's brief + playbook snapshot must survive a retry --
+        a retry is a re-compile, not a re-scaffold."""
+        from tigerharness.journal.compile_cli import cmd_compile_retry
+        task_id, paths = self._make_failed(scaffolded)
+        td = paths.task_dir(task_id)
+        brief_before = (td / "task_brief.md").read_text()
+        playbook_before = (td / "playbook_snapshot.md").read_text()
+        cmd_compile_retry(argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        ))
+        assert (td / "task_brief.md").read_text() == brief_before
+        assert (td / "playbook_snapshot.md").read_text() == playbook_before
+
+    def test_progress_md_preserved(self, scaffolded):
+        """progress.md is the human-readable log; surviving a retry."""
+        from tigerharness.journal.compile_cli import cmd_compile_retry
+        task_id, paths = self._make_failed(scaffolded)
+        td = paths.task_dir(task_id)
+        # Append a line to progress.md to verify it survives.
+        (td / "progress.md").write_text("# progress\n\nattempt 1 failed\n")
+        cmd_compile_retry(argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        ))
+        assert "attempt 1 failed" in (td / "progress.md").read_text()
+
+    def test_rejects_non_failed_phase(self, scaffolded, capsys):
+        """A task in compile_phase=pending (i.e. never tried) cannot
+        be retried -- there's nothing to retry. Same for complete."""
+        from tigerharness.journal.compile_cli import cmd_compile_retry
+        task_id, paths = scaffolded
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        )
+        rc = cmd_compile_retry(ns)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "not in compile_phase=failed" in err
+        assert "currently pending" in err
+
+    def test_unknown_task_returns_1(self, journal_dir, capsys):
+        from tigerharness.journal.compile_cli import cmd_compile_retry
+        ns = argparse.Namespace(
+            journal_dir=str(journal_dir),
+            task_id="2026-05-30-nope-mitsui-abc12",
+        )
+        rc = cmd_compile_retry(ns)
+        assert rc == 1
+        assert "no active workflow task" in capsys.readouterr().err
+
+    def test_updated_at_refreshed(self, scaffolded):
+        from tigerharness.journal.compile_cli import cmd_compile_retry
+        task_id, paths = self._make_failed(scaffolded)
+        before = Status.from_json(paths.status_json(task_id).read_text())
+        # Force updated_at backward so we can detect the refresh.
+        before.updated_at = "2020-01-01T00:00:00Z"
+        paths.status_json(task_id).write_text(before.to_json())
+        cmd_compile_retry(argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        ))
+        after = Status.from_json(paths.status_json(task_id).read_text())
+        assert after.updated_at > before.updated_at
+
+
 class TestCompileFail:
     def test_happy(self, scaffolded, capsys):
         from tigerharness.journal.compile_cli import cmd_compile_fail
@@ -831,18 +963,21 @@ class TestValidatePersonas:
 # ---------------------------------------------------------------------------
 
 class TestBuildSubparsers:
-    def test_registers_all_seven(self):
+    def test_registers_all_eight(self):
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest="cmd")
         build_subparsers(sub)
         names = sorted(sub.choices.keys())
         assert names == sorted([
             "compile-context", "compile-prompts", "validate-graph",
-            "land-compile", "compile-fail", "abort", "validate-personas",
+            "land-compile", "compile-fail", "compile-retry", "abort",
+            "validate-personas",
         ])
 
     def test_each_sets_func(self):
-        from tigerharness.journal.compile_cli import cmd_compile_fail
+        from tigerharness.journal.compile_cli import (
+            cmd_compile_fail, cmd_compile_retry,
+        )
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest="cmd")
         build_subparsers(sub)
@@ -852,6 +987,7 @@ class TestBuildSubparsers:
             ("validate-graph", cmd_validate_graph),
             ("land-compile", cmd_land_compile),
             ("compile-fail", cmd_compile_fail),
+            ("compile-retry", cmd_compile_retry),
             ("abort", cmd_abort),
             ("validate-personas", cmd_validate_personas),
         ]:

@@ -129,6 +129,7 @@ tigerharness journal compile-prompts --task <id> --kind drafter|akagi|ayako ...
 tigerharness journal validate-graph --task <id> --draft <path>
 tigerharness journal land-compile   --task <id> --draft <path> --transcript <path> --rounds <N>
 tigerharness journal compile-fail   <task-id> --reason "<postmortem>"
+tigerharness journal compile-retry  <task-id>           # Phase 2: reset a failed compile + retry
 tigerharness journal abort          <task-id>
 tigerharness journal validate-personas <team>
 

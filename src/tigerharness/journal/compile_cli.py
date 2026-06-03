@@ -558,6 +558,74 @@ def _guess_team_for_status() -> str:
 
 
 # ---------------------------------------------------------------------------
+# compile-retry
+# ---------------------------------------------------------------------------
+
+def cmd_compile_retry(args: argparse.Namespace) -> int:
+    """Reset a compile-failed workflow task so the next ``drive-journal``
+    invocation retries the in-session compile from scratch.
+
+    Allowed on tasks in ``compile_phase=failed`` only. The operator is
+    expected to have inspected ``compile/`` first; this CLI WIPES the
+    in-flight compile workspace (round-NN-*.md, transcript.md) and
+    flips the status back to its scaffold-time shape
+    (``state=pending``, ``compile_pending=true``,
+    ``compile_phase=pending``, ``sessions=0``). The brief, playbook
+    snapshot, and progress.md are preserved -- a retry starts the
+    compile sub-protocol over but does not re-scaffold the task.
+
+    If the operator wants to keep forensic artifacts, they should
+    copy ``compile/`` out of the task dir BEFORE calling this CLI.
+    """
+    paths = _paths_from_args(args)
+    status_or_err = _load_workflow_status(paths, args.task_id)
+    if isinstance(status_or_err, str):
+        print(f"error: {status_or_err}", file=sys.stderr)
+        return 1
+    status = status_or_err
+
+    if status.compile_phase != CompilePhase.FAILED:
+        print(
+            f"error: task {status.id} is not in compile_phase=failed "
+            f"(currently {status.compile_phase.value if status.compile_phase else 'n/a'}); "
+            "compile-retry only operates on failed compiles. Use abort "
+            "to discard or wait for the in-flight compile to finish.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Wipe in-flight compile workspace -- if it exists. Missing compile/
+    # is not an error (the failure could have happened before any round
+    # files were written).
+    compile_dir = _compile_dir(paths, status.id)
+    if compile_dir.exists():
+        shutil.rmtree(compile_dir)
+
+    # Reset the status fields to scaffold-time shape. Sessions counter
+    # resets to 0 so the next pickup gets its full budget. updated_at
+    # gets a fresh timestamp so the sweep doesn't immediately reclassify
+    # this task as stale.
+    from tigerharness.journal.models import _utcnow_iso
+    status.state = State.PENDING
+    status.compile_pending = True
+    status.compile_phase = CompilePhase.PENDING
+    status.sessions = 0
+    status.session_ref = None
+    status.next_action = (
+        "Compile retry requested via `journal compile-retry`. The "
+        "next drive-journal invocation will run the in-session compile "
+        "sub-protocol from scratch (compile/ has been wiped)."
+    )
+    status.updated_at = _utcnow_iso()
+    _write_atomic(paths.status_json(status.id), status.to_json())
+
+    print(f"compile-retry: {status.id}")
+    print( "  state=pending, compile_pending=true, compile_phase=pending")
+    print(f"  next_action: {status.next_action}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # compile-fail
 # ---------------------------------------------------------------------------
 
@@ -724,6 +792,18 @@ def build_subparsers(sub: "argparse._SubParsersAction") -> None:
     lc.add_argument("--transcript", required=True)
     lc.add_argument("--rounds", required=True, type=int)
     lc.set_defaults(func=cmd_land_compile)
+
+    # compile-retry
+    cr = sub.add_parser(
+        "compile-retry",
+        help=(
+            "Reset a compile-failed workflow task so the next "
+            "drive-journal retries the in-session compile. "
+            "Wipes compile/."
+        ),
+    )
+    cr.add_argument("task_id")
+    cr.set_defaults(func=cmd_compile_retry)
 
     # compile-fail
     cf = sub.add_parser(

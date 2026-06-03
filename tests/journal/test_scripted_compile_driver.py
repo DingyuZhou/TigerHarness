@@ -48,6 +48,7 @@ from tigerharness.journal.compile_cli import (
     cmd_compile_context,
     cmd_compile_fail,
     cmd_compile_prompts,
+    cmd_compile_retry,
     cmd_land_compile,
     cmd_validate_graph,
 )
@@ -239,6 +240,12 @@ class ScriptedDriver:
             journal_dir=str(self.paths.root), task_id=self.task_id,
         )
         return self._invoke(cmd_abort, ns)
+
+    def compile_retry(self) -> CliResult:
+        ns = argparse.Namespace(
+            journal_dir=str(self.paths.root), task_id=self.task_id,
+        )
+        return self._invoke(cmd_compile_retry, ns)
 
     # ---- scripted-turn helpers ----
 
@@ -911,6 +918,61 @@ class TestCompileContextOnTaskKindIsRejected:
 # ---------------------------------------------------------------------------
 # Scenario 15 -- transcript text is preserved verbatim into compile_critique.md
 # ---------------------------------------------------------------------------
+
+class TestCompileFailRetrySucceedCycle:
+    """End-to-end: first attempt fails (Akagi BLOCK), operator runs
+    compile-retry, second attempt succeeds and lands. Round counters
+    reset, task carries the SECOND attempt's compile in compile/."""
+
+    def test_full_cycle(self, team_root, journal_dir):
+        d = _new_driver(journal_dir, team_root)
+
+        # First attempt: round 1, Akagi BLOCK -> compile-fail.
+        d.begin_round()
+        draft1 = d.write_draft(_VALID_BUNDLE)
+        v1 = d.validate_graph(draft1)
+        d.write_trace(json.loads(v1.stdout)["trace"])
+        d.write_critic("akagi", "WORKFLOW: BLOCK -- nope")
+        d.append_transcript("Attempt 1, Round 1: Akagi BLOCK")
+        d.write_transcript()
+        cf = d.compile_fail("attempt 1 failed")
+        assert cf.rc == 0
+        s = d.status()
+        assert s.state == State.BLOCKED
+        assert s.compile_phase == CompilePhase.FAILED
+
+        # Operator inspects, decides to retry.
+        retry = d.compile_retry()
+        assert retry.rc == 0
+        s = d.status()
+        assert s.state == State.PENDING
+        assert s.compile_pending is True
+        assert s.compile_phase == CompilePhase.PENDING
+        # compile/ wiped, including the round files from attempt 1.
+        assert not (d.task_dir / "compile").exists()
+
+        # Second attempt: round counter resets in the driver state.
+        d.round_n = 0
+        d.transcript_lines.clear()
+        d.begin_round()
+        draft2 = d.write_draft(_VALID_BUNDLE)
+        v2 = d.validate_graph(draft2)
+        d.write_trace(json.loads(v2.stdout)["trace"])
+        d.write_critic("akagi", "WORKFLOW: APPROVE")
+        d.write_critic("ayako", "WORKFLOW: APPROVE")
+        d.append_transcript("Attempt 2, Round 1: APPROVE / APPROVE")
+        transcript2 = d.write_transcript()
+        landed = d.land_compile(draft2, transcript2, rounds=1)
+        assert landed.rc == 0, landed.stderr
+
+        s = d.status()
+        assert s.compile_pending is False
+        assert s.compile_phase == CompilePhase.COMPLETE
+        # The brief + playbook snapshot survived the failure -> retry
+        # round-trip.
+        assert (d.task_dir / "task_brief.md").is_file()
+        assert (d.task_dir / "playbook_snapshot.md").is_file()
+
 
 class TestTranscriptPreservedIntoCritiqueArtifact:
     def test_compile_critique_md_matches_transcript_exact(
