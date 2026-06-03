@@ -439,15 +439,21 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
             )
         return 1
 
-    # Build Orchestration. The journal Phase 1.5 has no human-gate
-    # plumbing yet, so we disable that field and rely on the captain on
-    # the journal's status.json for accountability. A Phase 2 enhancement
-    # can let the playbook customise the runtime config.
+    # Build Orchestration. The journal subscription model is itself
+    # an implicit human gate (every persona turn happens inside a live
+    # interactive session a human is sitting in), so the api-backed
+    # Tier 3 human_gate mechanism does not port -- it's permanently
+    # disabled here. See docs/journal-workflow-mode.md "Out of scope"
+    # for the rationale.
     from tigerharness.workflow_runner.compile.pipeline import _build_orchestration
     from tigerharness.workflow_runner.models import WorkflowConfig
     orchestration = _build_orchestration(
         task_id=status.id,
         team=_guess_team_for_status(),
+        # NOTE: playbook_name is currently hardcoded; Phase 2 below
+        # adds a real lookup via status.json so the canonical
+        # orchestration.json reflects which playbook the task was
+        # scaffolded from. Until then, "default" is a placeholder.
         playbook_name="default",
         playbook_text=_read_brief_and_playbook(paths, status.id)[1],
         final_steps=steps,

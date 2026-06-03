@@ -5,13 +5,20 @@ single-persona tasks and multi-persona workflows alike — through the
 **interactive** Claude Code app, so the work counts against a monthly
 subscription instead of token-billed API usage.
 
-> **Status:** Design-only. Nothing in this document is implemented
-> yet. It is the source of truth for the design; sections describing
-> unbuilt pieces are the plan, not a description of shipped behaviour.
+> **Status:** Phase 1 + Phase 1.5 shipped; Phase 2 partially shipped.
 > Phase 1 (journal + scaffolder + `drive-journal` skill with the
-> lazy sweep built in) is the agreed first build; Phase 2 (wiring
-> this in behind a runner config switch and unifying the journal
-> folders) is deferred.
+> lazy sweep, `kind=task`) shipped in PR #25 (`7d6b9f8` on main).
+> Phase 1.5 (`kind=workflow` via in-session compile, the seven new
+> compile-side CLIs, the OPERATING.md compile sub-protocol) shipped
+> in PR #26 (`155128f` on main). Phase 2 add-ons -- `journal
+> compile-retry`, configurable compile-time persona roster, the
+> hardcode cleanups -- are shipping on the current closeout branch.
+> Still deferred: the TIGERHARNESS_RUNNER_BACKEND runner-config
+> switch, folder unification (`task_journal/` + `workflow_journal/`),
+> and the api-backed runner deletion sweep (see the closeout
+> follow-ups section near the end). User-facing summary lives in
+> [`docs/journal.md`](journal.md); workflow-mode details in
+> [`docs/journal-workflow-mode.md`](journal-workflow-mode.md).
 
 ## Why this exists
 
@@ -80,13 +87,14 @@ persona working a PRD freely, with no pre-defined step graph; a
 workflow-runner job is a pre-compiled multi-persona graph where each
 node names the persona and contract for that step.
 
-**Phase 1 scope:** `kind=task` only. `kind=workflow` is reserved as a
-forward-compatible extension — the field is in the schema, but the
-scaffolder and driver only validate and run `kind=task` in v1. A
-workflow task would additionally need a `graph.json` (or similar) in
-the task directory and a driver step that adopts a per-node persona;
-that work is queued for after Phase 1 lands. The journal layout
-itself imposes no obstacle to adding it later.
+**Phase 1 scope:** `kind=task` only. `kind=workflow` shipped in
+Phase 1.5 (see [`journal-workflow-mode.md`](journal-workflow-mode.md))
+-- the field is in the schema, the scaffolder pre-flights compile
+personas, and the driver runs an in-session compile (Anzai drafter +
+Akagi / Ayako critics) before walking `orchestration.json`. Task
+mode and workflow mode share the same `journal/active/` layout, the
+same sweep, and the same `OPERATING.md` protocol; the kind dispatch
+happens at step 4 of the driver loop.
 
 ### What goes in `task.md`
 
@@ -185,7 +193,7 @@ keep `journal/OPERATING.md`.
 |---|---|---|---|
 | `id` | string | scaffolder | `<YYYYMMDD>-<slug>-<uuid8>`. `slug` = ASCII-lowercase-hyphen slugified `--title` (or first H1 of the PRD), max 40 chars. `uuid8` = 8 hex chars from `secrets.token_hex(4)`. On collision the scaffolder regenerates the uuid once then hard-errors. Path-safety enforced (no `/`, no `..`, no hidden-file prefix). |
 | `title` | string, required | scaffolder | Human label. Source: `--title` arg, else first H1 of the PRD, else `"task"`. |
-| `kind` | enum: `"task"` (Phase 1 only) | scaffolder | Workflow tasks (`"workflow"`) are a forward-compatible extension reserved for a later phase; Phase 1 ships task only. |
+| `kind` | enum: `"task"` (Phase 1) or `"workflow"` (Phase 1.5+) | scaffolder | Phase 1 ships `task`; Phase 1.5 added `workflow` -- see [`journal-workflow-mode.md`](journal-workflow-mode.md). |
 | `persona` | string, required for `kind=task` | scaffolder | The persona this task is assigned to (must exist in the team's persona registry). |
 | `state` | enum: `pending` / `in_progress` / `blocked` / `done` | driver / sweep | See state-transition table below. |
 | `sessions` / `max_sessions` | int / int (default `5`) | driver / scaffolder | How many `drive-journal` invocations the task has consumed, and a soft ceiling. Each invocation counts as one session regardless of how much work happens inside it. When `sessions == max_sessions`, the driver moves the task to `blocked` with a `next_action` explaining why, and the human must raise the cap or close the task. |

@@ -2,14 +2,20 @@
 
 File-based, human-driven subscription backend (Phase 1 + Phase 1.5).
 
-> **Status:** Phase 1 + Phase 1.5 are shipped. Phase 1 covers single-
-> persona tasks (`kind=task`). Phase 1.5 adds multi-persona workflow
-> tasks (`kind=workflow`) compiled in-session from a team playbook --
-> zero API billing, the interactive session itself adopts the drafter
-> and critic personas and shells out only to pure-Python validators.
-> Both kinds share the same scaffolder, sweep, list, and `OPERATING.md`
-> protocol -- the protocol switches on `status.kind` at the work step.
-> 100% line + branch coverage across the journal package.
+> **Status:** Phase 1 + Phase 1.5 + Phase 2 (closeout) + Phase 3
+> step-append shipped. Phase 1 covers single-persona tasks
+> (`kind=task`, PR #25 / `7d6b9f8`). Phase 1.5 adds multi-persona
+> workflow tasks (`kind=workflow`, PR #26 / `155128f`) compiled
+> in-session from a team playbook -- zero API billing, the
+> interactive session itself adopts the drafter and critic personas
+> and shells out only to pure-Python validators. Phase 2 added
+> `journal compile-retry`, a configurable compile-time persona
+> roster, and an end-to-end scripted compile driver integration
+> suite. Phase 3 added `journal append-steps` for runtime graph
+> extension. Both kinds share the same scaffolder, sweep, list, and
+> `OPERATING.md` protocol -- the protocol switches on `status.kind`
+> at the work step. 100% line + branch coverage across the journal
+> package.
 
 ## What it does
 

@@ -4,19 +4,19 @@ Extending the file-based subscription backend to support multi-persona
 workflow tasks (`kind=workflow`). Single-persona task mode
 (`kind=task`) shipped in Phase 1 (PR #25, commit `7d6b9f8` on main).
 
-> **Status:** Shipped. This document is the authoritative spec for the
-> implementation that landed on branch
-> `work/2026-06-03-journal-workflow-mode-design`. The model layer,
-> scaffolder, compile CLIs, dispatcher, list/visibility surface, and
-> the OPERATING.md compile sub-protocol are all in. 100% line + branch
-> coverage on the journal package; 2668 tests pass repo-wide. The
-> commit chain on this branch:
->
-> - `918f576` Phase 1.5 model layer -- `kind=workflow` + compile sub-state
-> - `969d602` Phase 1.5 scaffolder -- `new_workflow_task` + persona pre-flight
-> - `96027f0` Phase 1.5 compile CLIs + `kind=workflow` dispatcher
-> - `d1a21be` journal list -- surface kind + compile_phase for workflows
-> - `a6cd8c2` OPERATING.md + drive-journal -- compile sub-protocol
+> **Status:** Shipped + Phase 2 closeout in progress. Phase 1.5
+> proper merged in PR #26 (`155128f` on main): model layer,
+> scaffolder, compile CLIs, kind dispatcher, list visibility surface,
+> and the OPERATING.md compile sub-protocol all landed. The current
+> closeout branch
+> (`work/2026-06-03-journal-closeout-phase2-phase3`) is shipping the
+> Phase 2 follow-ups (`journal compile-retry`, configurable
+> compile-time persona roster, the `playbook_name` hardcode
+> cleanup), the end-to-end scripted compile driver integration
+> tests, and Phase 3's step-append (`journal append-steps`).
+> Internally referenced "Phase 3 human-gate enforcement" has been
+> retired -- see the *Out of scope* + *Phasing* sections below for
+> the reasoning.
 
 ## Why this exists
 
@@ -355,13 +355,16 @@ malformed output or someone hand-edited): `state=blocked`,
 **error, don't silently default**. (The Tier 1 roster validator
 should catch this at compile time; this is defense in depth.)
 
-**Compile-failed recovery.** Documented as manual for Phase 1.5.
-Operator inspects `compile/FAILED.md` + `compile/transcript.md`,
-either edits the playbook and re-scaffolds a fresh task, or runs
-`tigerharness journal abort <task-id>` to archive. A future
-`journal compile-retry <task-id>` CLI (resets `compile_phase=pending`
-+ `compile_pending=true` + `state=pending`, deletes failed
-`compile/`) is documented but unimplemented in Phase 1.5.
+**Compile-failed recovery.** Phase 1.5 left this manual (operator
+inspects `compile/` artifacts, either edits the playbook + re-scaffolds
+or runs `journal abort`). **Phase 2 added** the
+`tigerharness journal compile-retry <task-id>` CLI: clears
+`compile/round-*` artifacts and the `failed` flags, flips
+`compile_pending=true` + `compile_phase=pending` + `state=pending`,
+and lets the next `drive-journal` invocation re-attempt the compile.
+The brief + playbook snapshot are preserved across retries so the
+human can use the audit trail to decide whether to retry vs. edit
+vs. archive.
 
 ## CLI surface (new in Phase 1.5)
 
@@ -474,13 +477,17 @@ documented as a one-line release-note warning.
 - **Phase 1.5 (this doc)** — `kind=workflow` via Option C. Compile
   in-session at first drive, graph-walk per the existing protocol,
   manual recovery from `compile_phase=failed`.
-- **Phase 2 (deferred until needed)** — `journal compile-retry` CLI
-  for one-shot recovery from `compile_phase=failed`; per-round
-  draft snapshots if forensic value warrants; configurable
-  compile-time persona roster (today hard-coded to Anzai / Akagi /
-  Ayako).
-- **Phase 3** — step-append at runtime, human-gate enforcement, the
-  Wave 3 workflow-runner feature parity items.
+- **Phase 2 (shipped on the closeout branch)** — `journal compile-retry`
+  CLI for one-shot recovery from `compile_phase=failed`; per-round
+  draft snapshots (already on disk under `compile/round-NN-*.md`);
+  configurable compile-time persona roster (via
+  `teams/<team>/configs/workflow.yaml`'s `compile_personas` key, with
+  Anzai / Akagi / Ayako as the default).
+- **Phase 3 (shipped on the closeout branch)** — step-append at
+  runtime via `journal append-steps` + the `workflow-append-steps`
+  skill. The originally-planned "human-gate enforcement" item from
+  this phase has been **retired** -- it does not port to the
+  subscription model, see *Out of scope* below.
 
 ## Out of scope for Phase 1.5
 
@@ -489,15 +496,30 @@ Deferred to a later phase if and when needed:
 - **Step-append at runtime.** The Wave 3 workflow-runner feature
   (`workflow-append-steps` skill) lets a step add follow-up steps to
   the graph at runtime. Phase 1.5 ships static graphs only.
-- **Human gate enforcement.** Wave 3 / Phase 3 of the original
-  workflow-runner spec. Phase 1.5 emits the human-gate signal via
-  `next_action` and `state=blocked` but doesn't wait for an explicit
-  approval CLI / Slack reaction.
-- **`journal compile-retry` CLI.** Recovery from
-  `compile_phase=failed` is documented as manual file surgery for
-  v1; the CLI is a Phase 2 nicety.
-- **Configurable compile persona roster.** Phase 1.5 hard-codes
-  Anzai / Akagi / Ayako. Future-proofing is Phase 2.
+- **Human gate enforcement (RETIRED, not deferred).** The api-backed
+  workflow-runner's Tier 3 human gate existed to brake a process
+  that was otherwise running the LLM autonomously via `claude -p`
+  -- a safety mechanism against unattended token burn. The
+  subscription model is *structurally* a human gate: every persona
+  turn happens inside a live interactive Claude Code session a human
+  is sitting in, and the human can stop or redirect the cascade at
+  any moment. The Slack-thread notification, the
+  `human_gate_approvers` allowlist, and the
+  `human_gate_unauthorized_attempt` events do not port -- there is
+  no orchestrator daemon to wait on a thread, no third party who can
+  race the gate, and no autonomous execution to block. The journal
+  hardcodes `WorkflowConfig(human_gate=False)` and the original
+  "Phase 3 human gate" item has been struck from the roadmap. The
+  `captain` field on `status.json` carries the accountable owner for
+  display purposes (`journal list`).
+- **`journal compile-retry` CLI.** **Shipped in Phase 2** (closeout
+  branch). Clears `compile/round-*` artifacts and resets
+  `compile_pending=true` + `compile_phase=pending` + `state=pending`
+  so the next `drive-journal` can re-attempt without a re-scaffold.
+- **Configurable compile persona roster.** **Shipped in Phase 2**
+  (closeout branch). `teams/<team>/configs/workflow.yaml` now reads
+  a `compile_personas` key; Anzai / Akagi / Ayako remain the default
+  when the key is absent.
 - **Per-step iteration caps.** Per-step `max_iters` lives in
   `StepFrontmatter` already; we honour it during graph walk, but
   enforcement is Phase 1.5's responsibility only via the existing
