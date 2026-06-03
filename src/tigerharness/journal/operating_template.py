@@ -436,6 +436,13 @@ human-facing skill is `workflow-append-steps`.
 
 - **Append-only invariant**: the CLI enforces `existing_ids ∩
   new_ids == ∅`. Reorders, renames, and rewrites are NOT supported.
+- **Reachability**: append is purely additive -- it never rewires an
+  existing step's edges. A new step is only reachable from the
+  graph-walk if some EXISTING edge already pointed at its id (a
+  "promise slot" the original compile planned for) or if a NEW
+  step routes into it from a reachable position. Otherwise the
+  appended step is documented but unreachable. Surface this to the
+  human if the original playbook didn't leave a promise slot.
 - **No critic loop**: append is single-round drafter -> Tier 1 ->
   commit. If the drafter's bundle has logical problems Tier 1 won't
   catch, the human is the gate (read it before running the CLI).

@@ -87,6 +87,36 @@ The skill **fails closed**: a new bundle that doesn't pass Tier 1
    - **Operator error** (exit 2): bad task id / wrong phase /
      unreadable bundle / etc. The error message names the cause.
 
+## Important: reachability is your responsibility
+
+`append-steps` is **purely additive**: it adds new step ids + new
+edges to `orchestration.json`, but it never **rewires** an existing
+step's `on_approve` / `on_revise` / `on_block`. That means a newly
+appended step is only reachable from the graph-walk if some EXISTING
+edge already pointed at its id (which is impossible if you just
+invented the id) OR you route into it from a NEW step that's itself
+reachable.
+
+In practice the useful pattern is:
+
+1. The existing graph-walk reaches a step whose `on_approve` points
+   at an id like `__pending_qa__` -- a "promise" the original
+   drafter left for a later append to fulfill. (You'd have planned
+   for this at compile time.)
+2. You append a new step whose id IS `__pending_qa__`, satisfying
+   the promise -- the existing step's edge now resolves to a real
+   step in the graph.
+
+If you didn't plan for a promise slot at compile time, the most
+honest move is to surface the limitation to the human: "I want to
+add step X, but the existing graph has no edge pointing at X, so the
+new step would be unreachable. Either re-scaffold from a richer
+playbook, or accept that the step is documented in the graph but not
+executed by the walk."
+
+A future Phase 3+ enhancement may add an `--after-step-id` argument
+to rewire one existing edge. Today, `append-steps` only adds nodes.
+
 ## What NOT to do
 
 - **Don't use this to fix bugs in already-executed steps.** This skill

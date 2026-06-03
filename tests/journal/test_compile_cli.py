@@ -1025,6 +1025,202 @@ class TestAppendSteps:
         assert rc == 2
         assert "no active workflow task" in capsys.readouterr().err
 
+    def test_orphan_on_second_step_rolls_back_first(
+        self, team_root, journal_dir, tmp_path, capsys,
+    ):
+        """If the orphan-block check fires after one or more step
+        files have already been written, the rollback undoes the
+        earlier writes."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        capsys.readouterr()
+        # Pre-seed an orphan for the SECOND step in the bundle.
+        orphan = paths.task_dir(task_id) / "steps" / "04-b.md"
+        orphan.write_text("stray\n")
+        bundle = (
+            "```steps-bundle\n"
+            "## step: 03-a\n"
+            "---\n"
+            "id: 03-a\npersona: Mitsui\nrole: a\n"
+            "on_approve: __done__\non_revise: 03-a\non_block: __escalate__\n"
+            "max_iters: 5\ntimeout_sec: 1800\nparallel_with: []\n"
+            "---\nstep a\n"
+            "## step: 04-b\n"
+            "---\n"
+            "id: 04-b\npersona: Mitsui\nrole: b\n"
+            "on_approve: __done__\non_revise: 04-b\non_block: __escalate__\n"
+            "max_iters: 5\ntimeout_sec: 1800\nparallel_with: []\n"
+            "---\nstep b\n"
+            "```\n"
+        )
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(bundle)
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 1
+        # The first new step's file got rolled back. The orphan stays
+        # (we only delete what THIS invocation wrote).
+        td = paths.task_dir(task_id)
+        assert not (td / "steps" / "03-a.md").exists()
+        assert orphan.read_text() == "stray\n"
+
+    def test_rollback_unlink_failure_is_swallowed(
+        self, team_root, journal_dir, tmp_path, monkeypatch, capsys,
+    ):
+        """The rollback cleanup is best-effort. If unlink itself fails
+        (e.g. perm error), we still surface the original error and
+        return 1, without crashing on the cleanup."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        capsys.readouterr()
+        bundle = (
+            "```steps-bundle\n"
+            "## step: 03-a\n"
+            "---\n"
+            "id: 03-a\npersona: Mitsui\nrole: a\n"
+            "on_approve: __done__\non_revise: 03-a\non_block: __escalate__\n"
+            "max_iters: 5\ntimeout_sec: 1800\nparallel_with: []\n"
+            "---\nstep a\n"
+            "## step: 04-b\n"
+            "---\n"
+            "id: 04-b\npersona: Mitsui\nrole: b\n"
+            "on_approve: __done__\non_revise: 04-b\non_block: __escalate__\n"
+            "max_iters: 5\ntimeout_sec: 1800\nparallel_with: []\n"
+            "---\nstep b\n"
+            "```\n"
+        )
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(bundle)
+        from pathlib import Path as _Path
+        real_write = _Path.write_text
+        counter = {"n": 0}
+
+        def flaky_write(self, *args, **kwargs):
+            if self.name.endswith(".md") and "steps" in self.parts:
+                counter["n"] += 1
+                if counter["n"] == 2:
+                    raise OSError("simulated disk full")
+            return real_write(self, *args, **kwargs)
+
+        real_unlink = _Path.unlink
+
+        def flaky_unlink(self, *args, **kwargs):
+            # First step's file (03-a.md) is what rollback tries to unlink.
+            # Force unlink to fail to exercise the swallow branch.
+            if self.name == "03-a.md":
+                raise OSError("simulated unlink failure")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(_Path, "write_text", flaky_write)
+        monkeypatch.setattr(_Path, "unlink", flaky_unlink)
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 1
+        assert "failed writing new step files" in capsys.readouterr().err
+
+    def test_orphan_rollback_unlink_failure_is_swallowed(
+        self, team_root, journal_dir, tmp_path, monkeypatch, capsys,
+    ):
+        """Same as above, but trigger via the orphan-found branch."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        capsys.readouterr()
+        orphan = paths.task_dir(task_id) / "steps" / "04-b.md"
+        orphan.write_text("stray\n")
+        bundle = (
+            "```steps-bundle\n"
+            "## step: 03-a\n"
+            "---\n"
+            "id: 03-a\npersona: Mitsui\nrole: a\n"
+            "on_approve: __done__\non_revise: 03-a\non_block: __escalate__\n"
+            "max_iters: 5\ntimeout_sec: 1800\nparallel_with: []\n"
+            "---\nstep a\n"
+            "## step: 04-b\n"
+            "---\n"
+            "id: 04-b\npersona: Mitsui\nrole: b\n"
+            "on_approve: __done__\non_revise: 04-b\non_block: __escalate__\n"
+            "max_iters: 5\ntimeout_sec: 1800\nparallel_with: []\n"
+            "---\nstep b\n"
+            "```\n"
+        )
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(bundle)
+        from pathlib import Path as _Path
+        real_unlink = _Path.unlink
+
+        def flaky_unlink(self, *args, **kwargs):
+            if self.name == "03-a.md":
+                raise OSError("simulated unlink failure")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(_Path, "unlink", flaky_unlink)
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 1
+        assert "refusing to overwrite" in capsys.readouterr().err
+
+    def test_disk_full_mid_write_rolls_back_partial_files(
+        self, team_root, journal_dir, tmp_path, monkeypatch, capsys,
+    ):
+        """If write_text fails partway through the new-step loop, the
+        cleanup undoes any earlier writes from THIS invocation so a
+        retry isn't blocked by stale stray files."""
+        from tigerharness.journal.compile_cli import cmd_append_steps
+        task_id, paths = self._landed(team_root, journal_dir)
+        capsys.readouterr()
+        # Bundle with two new steps.
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(
+            "```steps-bundle\n"
+            "## step: 03-a\n"
+            "---\n"
+            "id: 03-a\npersona: Mitsui\nrole: a\n"
+            "on_approve: __done__\non_revise: 03-a\non_block: __escalate__\n"
+            "max_iters: 5\ntimeout_sec: 1800\nparallel_with: []\n"
+            "---\n"
+            "step a\n"
+            "## step: 04-b\n"
+            "---\n"
+            "id: 04-b\npersona: Mitsui\nrole: b\n"
+            "on_approve: __done__\non_revise: 04-b\non_block: __escalate__\n"
+            "max_iters: 5\ntimeout_sec: 1800\nparallel_with: []\n"
+            "---\n"
+            "step b\n"
+            "```\n"
+        )
+        # Fail on the SECOND write_text via a counter-based patch.
+        from pathlib import Path as _Path
+        real_write = _Path.write_text
+        counter = {"n": 0}
+
+        def flaky_write(self, *args, **kwargs):
+            if self.name.endswith(".md") and "steps" in self.parts:
+                counter["n"] += 1
+                if counter["n"] == 2:
+                    raise OSError("simulated disk full")
+            return real_write(self, *args, **kwargs)
+
+        monkeypatch.setattr(_Path, "write_text", flaky_write)
+        rc = cmd_append_steps(argparse.Namespace(
+            journal_dir=str(paths.root),
+            task=task_id, new_bundle=str(bundle_path),
+        ))
+        assert rc == 1
+        assert "failed writing new step files" in capsys.readouterr().err
+        # The first step's file was rolled back, so retry isn't blocked.
+        td = paths.task_dir(task_id)
+        assert not (td / "steps" / "03-a.md").exists()
+        assert not (td / "steps" / "04-b.md").exists()
+        # orchestration.json NOT modified.
+        orch = json.loads((td / "orchestration.json").read_text())
+        assert orch["steps"] == ["01-anzai-plan", "02-mitsui-impl"]
+
     def test_stray_orphan_step_file_blocks_overwrite(
         self, team_root, journal_dir, tmp_path, capsys,
     ):

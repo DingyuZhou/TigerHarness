@@ -765,19 +765,43 @@ def cmd_append_steps(args: argparse.Namespace) -> int:
     # 1. Write each new step file. A collision is impossible here
     #    because we screened above; if a stray on-disk file exists
     #    that orchestration.json doesn't reference, refuse rather
-    #    than overwrite.
+    #    than overwrite. Track each written path so we can roll back
+    #    the partial write on a mid-loop failure (e.g. disk full),
+    #    keeping steps/ consistent with orchestration.json on retry.
     steps_dir = task_dir / "steps"
-    for step in new_steps:
-        step_path = steps_dir / f"{step.id}.md"
-        if step_path.exists():
-            print(
-                f"error: refusing to overwrite stray step file "
-                f"{step_path} (not referenced by orchestration.json)",
-                file=sys.stderr,
-            )
-            return 1
-        front = _render_frontmatter(step)
-        step_path.write_text(f"---\n{front}---\n", encoding="utf-8")
+    written_paths: list[Path] = []
+    try:
+        for step in new_steps:
+            step_path = steps_dir / f"{step.id}.md"
+            if step_path.exists():
+                # Roll back any files written so far this invocation.
+                for p in written_paths:
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass  # best-effort cleanup
+                print(
+                    f"error: refusing to overwrite stray step file "
+                    f"{step_path} (not referenced by orchestration.json)",
+                    file=sys.stderr,
+                )
+                return 1
+            front = _render_frontmatter(step)
+            step_path.write_text(f"---\n{front}---\n", encoding="utf-8")
+            written_paths.append(step_path)
+    except OSError as exc:
+        # Disk full / permission denied mid-loop. Roll back partial
+        # writes so the next invocation isn't stuck on stray files.
+        for p in written_paths:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        print(
+            f"error: failed writing new step files: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
     # 2. Extend orchestration.json (atomic write).
     new_step_ids = [s.id for s in new_steps]
