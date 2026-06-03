@@ -392,6 +392,74 @@ class TestCmdList:
         assert "20260602-a-11111111" in out
         assert "20260602-b-22222222" in out
         assert "pending" in out
+        assert "KIND" in out
+        # Task kind shown in its own column.
+        assert "task" in out
+
+    def test_renders_workflow_row(self, journal_dir, capsys):
+        """Workflow row shows kind=workflow, compile phase appended to
+        STATE, and (none) when captain is omitted."""
+        from tigerharness.journal.models import CompilePhase
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        (paths.active / "20260602-w-33333333").mkdir(exist_ok=True)
+        s = Status(
+            id="20260602-w-33333333",
+            title="WF",
+            kind="workflow",
+            persona=None,
+            state=State.PENDING,
+            sessions=0,
+            max_sessions=10,
+            created_at="2026-06-02T08:00:00Z",
+            updated_at="2026-06-02T08:00:00Z",
+            next_action="",
+            session_ref=None,
+            compile_pending=True,
+            compile_phase=CompilePhase.DRAFTING,
+        )
+        paths.status_json("20260602-w-33333333").write_text(s.to_json())
+        rc = main(["--journal-dir", str(journal_dir), "list"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "20260602-w-33333333" in out
+        assert "workflow" in out
+        assert "pending/drafting" in out
+        assert "(none)" in out
+
+    def test_json_renders_workflow_compile_fields(
+        self, journal_dir, capsys,
+    ):
+        from tigerharness.journal.models import CompilePhase
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        (paths.active / "20260602-w-44444444").mkdir(exist_ok=True)
+        s = Status(
+            id="20260602-w-44444444",
+            title="WF",
+            kind="workflow",
+            persona="Mitsui",
+            state=State.PENDING,
+            sessions=0,
+            max_sessions=10,
+            created_at="2026-06-02T08:00:00Z",
+            updated_at="2026-06-02T08:00:00Z",
+            next_action="",
+            session_ref=None,
+            compile_pending=True,
+            compile_phase=CompilePhase.PENDING,
+        )
+        paths.status_json("20260602-w-44444444").write_text(s.to_json())
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "list", "--format", "json",
+        ])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        row = payload["active"][0]
+        assert row["kind"] == "workflow"
+        assert row["compile_pending"] is True
+        assert row["compile_phase"] == "pending"
 
     def test_renders_json(self, journal_dir, capsys):
         paths = JournalPaths(root=journal_dir)

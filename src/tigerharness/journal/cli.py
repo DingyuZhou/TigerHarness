@@ -258,10 +258,26 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("No active tasks.")
         return 0
 
-    print(f"{'ID':40}  {'STATE':12}  {'PERSONA':12}  TITLE")
-    print(f"{'-'*40}  {'-'*12}  {'-'*12}  -----")
+    print(
+        f"{'ID':40}  {'STATE':12}  {'KIND':8}  "
+        f"{'PERSONA':12}  TITLE"
+    )
+    print(
+        f"{'-'*40}  {'-'*12}  {'-'*8}  "
+        f"{'-'*12}  -----"
+    )
     for s in rows:
-        print(f"{s.id:40}  {s.state.value:12}  {s.persona:12}  {s.title}")
+        state_cell = s.state.value
+        # For workflows, surface compile state inline: a workflow that's
+        # state=pending but compile_pending=True is meaningfully different
+        # from one whose graph is already compiled.
+        if s.kind == "workflow" and s.compile_phase is not None:
+            state_cell = f"{s.state.value}/{s.compile_phase.value}"
+        persona_cell = s.persona if s.persona else "(none)"
+        print(
+            f"{s.id:40}  {state_cell:12}  {s.kind:8}  "
+            f"{persona_cell:12}  {s.title}"
+        )
     if malformed:
         print()
         print(f"Malformed (status.json unreadable): {len(malformed)}")
