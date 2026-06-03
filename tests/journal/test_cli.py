@@ -471,8 +471,14 @@ class TestCmdList:
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
         assert isinstance(payload, dict)
-        assert payload["active"][0]["id"] == "20260602-a-11111111"
+        row = payload["active"][0]
+        assert row["id"] == "20260602-a-11111111"
         assert payload["malformed"] == []
+        # Phase 1.5 contract: kind=task JSON must NOT carry the
+        # workflow-only compile fields, so the row round-trips through
+        # Status.from_dict (which rejects compile_pending on task).
+        assert "compile_pending" not in row
+        assert "compile_phase" not in row
 
     def test_malformed_surfaced(self, journal_dir, capsys):
         paths = JournalPaths(root=journal_dir).ensure()
@@ -502,6 +508,44 @@ class TestCmdStatus:
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["id"] == "20260602-a-11111111"
+        # Task statuses must not leak workflow-only compile fields.
+        assert "compile_pending" not in payload
+        assert "compile_phase" not in payload
+
+    def test_json_round_trip_workflow(self, journal_dir, capsys):
+        """`journal status` output for a kind=workflow task must be
+        consumable by `Status.from_json` -- i.e. must carry both
+        compile_pending and compile_phase, and must NOT omit them."""
+        from tigerharness.journal.models import CompilePhase, Status
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        (paths.active / "20260602-w-55555555").mkdir(exist_ok=True)
+        s = Status(
+            id="20260602-w-55555555",
+            title="WF",
+            kind="workflow",
+            persona="Mitsui",
+            state=State.PENDING,
+            sessions=0,
+            max_sessions=10,
+            created_at="2026-06-02T08:00:00Z",
+            updated_at="2026-06-02T08:00:00Z",
+            next_action="",
+            session_ref=None,
+            compile_pending=True,
+            compile_phase=CompilePhase.PENDING,
+        )
+        paths.status_json("20260602-w-55555555").write_text(s.to_json())
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "status", "20260602-w-55555555",
+        ])
+        assert rc == 0
+        # Round-trip: the printed JSON parses back into an identical Status.
+        round_tripped = Status.from_json(capsys.readouterr().out)
+        assert round_tripped.kind == "workflow"
+        assert round_tripped.compile_pending is True
+        assert round_tripped.compile_phase == CompilePhase.PENDING
 
     def test_unknown_task_returns_1(self, journal_dir, capsys):
         # Ensure structure exists so missing-id is what we test, not

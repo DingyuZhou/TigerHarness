@@ -455,12 +455,18 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
         critique_iters=args.rounds,
     )
 
-    # Stage to compile/final/ first, then promote.
+    # Stage to compile/final/ first, then promote. A prior crashed
+    # land-compile (or a tier1_post recovery loop) may have left stale
+    # step files under final/steps/; nuking the directory before the
+    # mkdir guarantees only the current draft's steps make it through
+    # to the canonical steps/ promotion.
     compile_dir = _compile_dir(paths, status.id)
     final_dir = compile_dir / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
     final_steps_dir = final_dir / "steps"
-    final_steps_dir.mkdir(parents=True, exist_ok=True)
+    if final_steps_dir.exists():
+        shutil.rmtree(final_steps_dir)
+    final_steps_dir.mkdir(parents=True, exist_ok=False)
 
     # Step bodies: write each step's frontmatter to final/steps/<id>.md.
     # StepFrontmatter carries no body field (the drafter's per-step body
@@ -547,6 +553,45 @@ def _guess_team_for_status() -> str:
 
 
 # ---------------------------------------------------------------------------
+# compile-fail
+# ---------------------------------------------------------------------------
+
+def cmd_compile_fail(args: argparse.Namespace) -> int:
+    """Soft compile-failure: set ``state=blocked`` and
+    ``compile_phase=failed`` on a workflow task whose in-session
+    compile loop produced a ``WORKFLOW: BLOCK`` verdict or exhausted
+    its round / Tier 1 caps. The task stays in ``active/`` so a human
+    can inspect ``compile/`` and decide whether to edit the playbook,
+    re-scaffold, or ``journal abort``. This is the protocol-side
+    counterpart to ``abort`` (which is the human's final cleanup).
+    """
+    paths = _paths_from_args(args)
+    status_or_err = _load_workflow_status(paths, args.task_id)
+    if isinstance(status_or_err, str):
+        print(f"error: {status_or_err}", file=sys.stderr)
+        return 1
+    status = status_or_err
+
+    if status.state == State.DONE:
+        print(
+            f"task {status.id} is already done; cannot mark compile-failed",
+            file=sys.stderr,
+        )
+        return 1
+
+    status.state = State.BLOCKED
+    status.compile_phase = CompilePhase.FAILED
+    status.next_action = args.reason
+    _write_atomic(paths.status_json(status.id), status.to_json())
+
+    print(f"compile-failed: {status.id}  (state=blocked, compile_phase=failed)")
+    print(f"  reason: {args.reason}")
+    print(f"  next_action: run `journal abort {status.id}` to archive,")
+    print( "               or edit the playbook + re-scaffold a fresh task.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # abort
 # ---------------------------------------------------------------------------
 
@@ -568,19 +613,17 @@ def cmd_abort(args: argparse.Namespace) -> int:
         return 1
 
     # Mark the task done with a postmortem; preserve compile/ for
-    # forensic inspection in done/.
+    # forensic inspection in done/. The pre-flight only loads
+    # kind=workflow tasks, whose schema gate guarantees a non-None
+    # compile_phase -- so the audit string can dereference it directly.
+    prior_state = status.state.value
+    prior_phase = status.compile_phase.value
     status.state = State.DONE
     status.next_action = (
-        "Aborted by `tigerharness journal abort`. "
-        f"Was state={status_or_err.state.value} "
-        f"compile_phase={status.compile_phase.value if status.compile_phase else 'n/a'}. "
+        f"Aborted by `tigerharness journal abort`. "
+        f"Was state={prior_state} compile_phase={prior_phase}. "
         "compile/ preserved for inspection under done/."
     )
-    if status.compile_phase is not None:
-        # We don't flip compile_phase to "complete" -- aborted is not
-        # complete. Leave it at the value it had so the audit trail
-        # shows where the abort happened.
-        pass
     _write_atomic(paths.status_json(status.id), status.to_json())
 
     # Now archive via the path layer.
@@ -676,6 +719,26 @@ def build_subparsers(sub: "argparse._SubParsersAction") -> None:
     lc.add_argument("--transcript", required=True)
     lc.add_argument("--rounds", required=True, type=int)
     lc.set_defaults(func=cmd_land_compile)
+
+    # compile-fail
+    cf = sub.add_parser(
+        "compile-fail",
+        help=(
+            "Mark a workflow task's compile as failed "
+            "(state=blocked, compile_phase=failed). "
+            "Does NOT archive."
+        ),
+    )
+    cf.add_argument("task_id")
+    cf.add_argument(
+        "--reason", required=True,
+        help=(
+            "Postmortem written to status.next_action. e.g. "
+            "'compile failed at critiquing: Akagi BLOCK -- "
+            "<one-paragraph rationale>'."
+        ),
+    )
+    cf.set_defaults(func=cmd_compile_fail)
 
     # abort
     ab = sub.add_parser(

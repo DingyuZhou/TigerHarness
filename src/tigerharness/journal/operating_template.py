@@ -194,9 +194,21 @@ The compile proceeds in rounds. Each round is one drafter turn
 followed by both critics, then a Tier 1 re-validation. The drafter is
 **Anzai**, the critics are **Akagi** and **Ayako**. A round ends with
 both critics emitting `APPROVE` -> land. If either critic emits
-`BLOCK` -> abort the task (`journal abort <task-id>`). Otherwise the
-loop continues with the critics' `REVISE` feedback merged for the next
-drafter turn.
+`BLOCK` -> mark the task compile-failed (`journal compile-fail
+<task-id> --reason '...'`). Otherwise the loop continues with the
+critics' `REVISE` feedback merged for the next drafter turn.
+
+Caps (compile gives up rather than spinning forever):
+
+- **3 consecutive Tier 1 failures** on the same draft -> compile-fail
+  with `next_action="compile failed at tier1_pre: <last validator errors>"`.
+- **8 rounds total** without dual-APPROVE -> compile-fail with
+  `next_action="compile failed at critiquing: <last round verdicts>"`.
+
+Both caps land the task in `state=blocked` + `compile_phase=failed`.
+The task stays in `active/` for the human to inspect; the operator
+either edits the playbook and re-scaffolds, or runs `journal abort`
+to archive.
 
 ### Persona switching (uniform mechanic)
 
@@ -254,7 +266,7 @@ self-rejects); critics carry the real verdict.
    errors as feedback for the next drafter turn and loop back to step
    2. Do NOT proceed to critics until Tier 1 passes -- that would
    waste critic effort on a malformed graph. Cap: 3 consecutive Tier
-   1 failures -> abort.
+   1 failures -> `journal compile-fail`.
 
 4. **Akagi critique.** Run:
 
@@ -273,13 +285,16 @@ self-rejects); critics carry the real verdict.
 
 6. **Round verdict.** Combine the two critic verdicts:
 
-   - **Either BLOCK** -> `tigerharness journal abort <task-id>`. Exit
-     the compile sub-protocol; the task is archived.
+   - **Either BLOCK** -> `tigerharness journal compile-fail <task-id>
+     --reason '<one-paragraph postmortem>'`. The task moves to
+     `state=blocked` + `compile_phase=failed`; surface the failure to
+     the human and stop the cascade. The task is NOT archived -- the
+     human runs `journal abort` after inspecting `compile/`.
    - **Both APPROVE** -> proceed to step 7 (land).
    - **Anything else** -- one or both `REVISE` -- merge the critics'
      feedback into a single block (use the `--feedback` argument to
      the next drafter prompt) and loop back to step 2. Cap: 8 rounds
-     total -> abort.
+     total -> `journal compile-fail` (same shape as the BLOCK case).
 
 7. **Tier 1 (post-critique).** Defensive re-validation: a critic may
    have asked the drafter to make a change that re-broke a Tier 1

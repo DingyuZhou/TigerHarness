@@ -122,6 +122,7 @@ tigerharness journal compile-context <task-id>
 tigerharness journal compile-prompts --task <id> --kind drafter|akagi|ayako ...
 tigerharness journal validate-graph --task <id> --draft <path>
 tigerharness journal land-compile   --task <id> --draft <path> --transcript <path> --rounds <N>
+tigerharness journal compile-fail   <task-id> --reason "<postmortem>"
 tigerharness journal abort          <task-id>
 tigerharness journal validate-personas <team>
 

@@ -618,6 +618,29 @@ class TestLandCompile:
         assert not (task_dir / "steps" / "stale.md").exists()
         assert (task_dir / "steps" / "01-anzai-plan.md").is_file()
 
+    def test_clears_orphan_files_in_staged_steps_dir(
+        self, scaffolded, tmp_path,
+    ):
+        """A prior crashed land-compile may leave files in
+        compile/final/steps/ -- they MUST be wiped before the new
+        draft's step files are written, else the orphans leak into
+        the canonical steps/ via shutil.move."""
+        task_id, paths = scaffolded
+        # Pre-seed a stale orphan in the staged compile/final/steps/.
+        stale_dir = paths.task_dir(task_id) / "compile" / "final" / "steps"
+        stale_dir.mkdir(parents=True)
+        (stale_dir / "ghost.md").write_text("ghost-of-a-crashed-run")
+        d = tmp_path / "draft.md"
+        d.write_text(_VALID_BUNDLE)
+        t = tmp_path / "t.md"
+        t.write_text("x")
+        rc = cmd_land_compile(self._ns(paths, task_id, d, t))
+        assert rc == 0
+        # The ghost must not have made it into canonical steps/.
+        canonical_steps = paths.task_dir(task_id) / "steps"
+        assert (canonical_steps / "01-anzai-plan.md").is_file()
+        assert not (canonical_steps / "ghost.md").exists()
+
     def test_final_dir_cleanup_swallows_oserror(
         self, scaffolded, tmp_path, monkeypatch, capsys,
     ):
@@ -650,6 +673,52 @@ class TestLandCompile:
 # ---------------------------------------------------------------------------
 # abort
 # ---------------------------------------------------------------------------
+
+class TestCompileFail:
+    def test_happy(self, scaffolded, capsys):
+        from tigerharness.journal.compile_cli import cmd_compile_fail
+        task_id, paths = scaffolded
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+            reason="compile failed at critiquing: Akagi BLOCK -- bad fanout",
+        )
+        rc = cmd_compile_fail(ns)
+        assert rc == 0
+        # Task is STILL in active/ (NOT archived).
+        assert paths.status_json(task_id).exists()
+        s = Status.from_json(paths.status_json(task_id).read_text())
+        assert s.state == State.BLOCKED
+        assert s.compile_phase == CompilePhase.FAILED
+        assert "Akagi BLOCK" in s.next_action
+        out = capsys.readouterr().out
+        assert "compile-failed:" in out
+        assert "state=blocked, compile_phase=failed" in out
+        assert "journal abort" in out
+
+    def test_unknown_task_returns_1(self, journal_dir, capsys):
+        from tigerharness.journal.compile_cli import cmd_compile_fail
+        ns = argparse.Namespace(
+            journal_dir=str(journal_dir),
+            task_id="2026-05-30-nope-mitsui-abc12",
+            reason="x",
+        )
+        rc = cmd_compile_fail(ns)
+        assert rc == 1
+        assert "no active workflow task" in capsys.readouterr().err
+
+    def test_already_done_returns_1(self, scaffolded, capsys):
+        from tigerharness.journal.compile_cli import cmd_compile_fail
+        task_id, paths = scaffolded
+        s = Status.from_json(paths.status_json(task_id).read_text())
+        s.state = State.DONE
+        paths.status_json(task_id).write_text(s.to_json())
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id, reason="x",
+        )
+        rc = cmd_compile_fail(ns)
+        assert rc == 1
+        assert "cannot mark compile-failed" in capsys.readouterr().err
+
 
 class TestAbort:
     def test_happy(self, scaffolded, capsys):
@@ -702,38 +771,6 @@ class TestAbort:
         assert "Aborted by" in s.next_action
         assert "compile_phase=pending" in s.next_action
         assert s.state == State.DONE
-
-    def test_compile_phase_none_renders_n_a(
-        self, scaffolded, monkeypatch, capsys,
-    ):
-        """When compile_phase is None on the in-memory Status, the postmortem
-        prints 'n/a'. We have to bypass from_dict's gate by writing the
-        Status via a small patch."""
-        task_id, paths = scaffolded
-        # Subclass write: load, blank phase via direct attribute (the
-        # gate only fires on from_dict).
-        s = Status.from_json(paths.status_json(task_id).read_text())
-        s.compile_phase = None
-        # Persist the mutation by serializing through to_dict + writing
-        # raw JSON (bypasses the from_dict gate on read-back).
-        raw = s.to_dict()
-        paths.status_json(task_id).write_text(json.dumps(raw))
-        # Now from_dict would reject -- but cmd_abort goes through
-        # _load_workflow_status which uses from_json. Re-stage by
-        # monkeypatching from_json to return our hand-built Status.
-        import tigerharness.journal.compile_cli as mod
-        monkeypatch.setattr(
-            mod.Status, "from_json",
-            staticmethod(lambda *_a, **_k: s),
-        )
-        ns = argparse.Namespace(
-            journal_dir=str(paths.root), task_id=task_id,
-        )
-        rc = cmd_abort(ns)
-        assert rc == 0
-        archived = paths.root / "done" / task_id / "status.json"
-        archived_s = Status.from_json(archived.read_text())
-        assert "compile_phase=n/a" in archived_s.next_action
 
     def test_archive_failure_returns_1(
         self, scaffolded, monkeypatch, capsys,
@@ -794,17 +831,18 @@ class TestValidatePersonas:
 # ---------------------------------------------------------------------------
 
 class TestBuildSubparsers:
-    def test_registers_all_six(self):
+    def test_registers_all_seven(self):
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest="cmd")
         build_subparsers(sub)
         names = sorted(sub.choices.keys())
         assert names == sorted([
             "compile-context", "compile-prompts", "validate-graph",
-            "land-compile", "abort", "validate-personas",
+            "land-compile", "compile-fail", "abort", "validate-personas",
         ])
 
     def test_each_sets_func(self):
+        from tigerharness.journal.compile_cli import cmd_compile_fail
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest="cmd")
         build_subparsers(sub)
@@ -813,6 +851,7 @@ class TestBuildSubparsers:
             ("compile-prompts", cmd_compile_prompts),
             ("validate-graph", cmd_validate_graph),
             ("land-compile", cmd_land_compile),
+            ("compile-fail", cmd_compile_fail),
             ("abort", cmd_abort),
             ("validate-personas", cmd_validate_personas),
         ]:

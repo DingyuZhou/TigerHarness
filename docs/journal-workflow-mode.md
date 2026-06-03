@@ -375,7 +375,8 @@ shells out to them between turns:
 | `tigerharness journal compile-prompts --task <id> --kind {drafter\|akagi\|ayako} [--feedback <str>] [--draft <path>] [--trace <path>]` | Prints the assembled prompt for the requested role, pulling text from `workflow_runner.compile.{drafter,critique}` with all interpolations applied. |
 | `tigerharness journal validate-graph --task <id> --draft <path>` | Runs `validate_compile_output` on the draft; emits JSON `{ok, errors, trace}`. Exit 0/1. |
 | `tigerharness journal land-compile --task <id> --draft <path> --transcript <path> --rounds <N>` | Atomic transition: re-runs Tier 1, builds `Orchestration`, writes step files + `orchestration.json` + `compile_critique.md` to `compile/final/`, promotes via `os.replace`, flips `compile_pending=false` + `compile_phase=complete` last. |
-| `tigerharness journal abort <task-id>` | Archive a failed task to `done/` with `state=done` + postmortem `next_action`; preserves `compile/` for forensics. |
+| `tigerharness journal compile-fail <task-id> --reason <str>` | Soft compile failure: sets `state=blocked` + `compile_phase=failed`, writes `--reason` as `next_action`, leaves the task in `active/` for human inspection. The driver invokes this on a `WORKFLOW: BLOCK` critic verdict or on cap exhaustion. |
+| `tigerharness journal abort <task-id>` | Final cleanup: archives a (typically already-failed) task to `done/` with `state=done` + postmortem `next_action`; preserves `compile/` for forensics. |
 | `tigerharness journal validate-personas <team>` | Pre-flight check; exit 0 if Anzai/Akagi/Ayako prompts all exist, non-zero with missing list otherwise. |
 
 The CLI names are pinned by OPERATING.md landmark assertions so a

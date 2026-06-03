@@ -13,7 +13,6 @@ the in-session compile sub-protocol.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -96,7 +95,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             paths=paths,
             title=args.title,
             kind=args.kind,
-            max_sessions=args.max_sessions,
+            max_sessions=args.max_sessions if args.max_sessions is not None else 5,
             slug=args.slug,
         )
     except (JournalScaffoldError, JournalModelError) as exc:
@@ -189,7 +188,7 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
             paths=paths,
             title=args.title,
             captain=args.captain,
-            max_sessions=args.max_sessions if args.max_sessions != 5 else 10,
+            max_sessions=args.max_sessions if args.max_sessions is not None else 10,
             slug=args.slug,
         )
     except MissingPersonaError as exc:
@@ -244,10 +243,15 @@ def cmd_list(args: argparse.Namespace) -> int:
         rows.append(status)
 
     if args.format == "json":
+        # Use Status.to_dict() (NOT dataclasses.asdict) so the per-kind
+        # contract is preserved: task rows must NOT carry
+        # compile_pending / compile_phase, and workflow rows must.
+        # dataclasses.asdict ignores to_dict and would emit defaults
+        # for missing fields, producing JSON that cannot round-trip
+        # through Status.from_json.
         print(json.dumps(
             {
-                "active": [dataclasses.asdict(s) | {"state": s.state.value}
-                           for s in rows],
+                "active": [s.to_dict() for s in rows],
                 "malformed": malformed,
             },
             indent=2,
@@ -300,8 +304,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    payload = dataclasses.asdict(status) | {"state": status.state.value}
-    print(json.dumps(payload, indent=2))
+    print(json.dumps(status.to_dict(), indent=2))
     return 0
 
 
@@ -475,11 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     n.add_argument(
-        "--max-sessions", type=int, default=5,
+        "--max-sessions", type=int, default=None,
         help=(
             "Soft ceiling on drive-journal invocations. Default 5 for "
-            "task mode and 10 for workflow mode (the workflow default "
-            "applies when --max-sessions is left at 5)."
+            "task mode and 10 for workflow mode (kind-specific default "
+            "kicks in only when --max-sessions is unset)."
         ),
     )
     n.set_defaults(func=cmd_new)
