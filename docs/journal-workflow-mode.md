@@ -4,19 +4,24 @@ Extending the file-based subscription backend to support multi-persona
 workflow tasks (`kind=workflow`). Single-persona task mode
 (`kind=task`) shipped in Phase 1 (PR #25, commit `7d6b9f8` on main).
 
-> **Status:** Shipped + Phase 2 closeout in progress. Phase 1.5
-> proper merged in PR #26 (`155128f` on main): model layer,
-> scaffolder, compile CLIs, kind dispatcher, list visibility surface,
-> and the OPERATING.md compile sub-protocol all landed. The current
-> closeout branch
-> (`work/2026-06-03-journal-closeout-phase2-phase3`) is shipping the
-> Phase 2 follow-ups (`journal compile-retry`, configurable
-> compile-time persona roster, the `playbook_name` hardcode
-> cleanup), the end-to-end scripted compile driver integration
-> tests, and Phase 3's step-append (`journal append-steps`).
-> Internally referenced "Phase 3 human-gate enforcement" has been
-> retired -- see the *Out of scope* + *Phasing* sections below for
-> the reasoning.
+> **Status:** Phase 1.5 + Phase 2 + Phase 3 shipped on
+> `work/2026-06-03-journal-closeout-phase2-phase3`:
+>
+> - `abf4cdb` Phase 1.5 closeout -- skills, doc reconciliation,
+>   scripted compile driver, retire human-gate
+> - `8ab2f30` Phase 2 model layer -- `playbook_name` on Status
+> - `ba90ba7` Phase 2 -- `journal compile-retry` CLI
+> - `31ebbe6` Phase 2 -- configurable compile-time persona roster
+> - `fc2d2a0` Phase 3 -- `journal append-steps` + skill + OPERATING.md
+>
+> What this branch closes out: 100% line + branch coverage on the
+> journal package; an end-to-end scripted compile driver suite; CLI
+> surface = 9 commands (`new`, `compile-context`, `compile-prompts`,
+> `validate-graph`, `land-compile`, `compile-fail`, `compile-retry`,
+> `append-steps`, `abort`) + `list`/`status`/`sweep`. Internally
+> referenced "Phase 3 human-gate enforcement" has been **retired** --
+> see the *Out of scope* + *Phasing* sections below for the
+> structural reasoning.
 
 ## Why this exists
 

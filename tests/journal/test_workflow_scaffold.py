@@ -289,6 +289,34 @@ class TestResolveCompilePersonas:
             "drafter": "Anzai", "akagi": "Akagi", "ayako": "Ayako",
         }
 
+    def test_explicit_null_value_falls_back_to_default(self, tmp_path):
+        """`drafter: null` (explicit yaml null) falls back to default,
+        same as `drafter: ''` and the implicit-None form
+        (`drafter:` with no value). Belt-and-suspenders coverage."""
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: null\n"
+            "  akagi:\n"  # implicit None
+        )
+        result = resolve_compile_personas(team)
+        assert result["drafter"] == "Anzai"
+        assert result["akagi"] == "Akagi"
+        assert result["ayako"] == "Ayako"
+
+    def test_integer_value_falls_back_to_default(self, tmp_path):
+        """A non-string value (integer, bool, list) for a role falls
+        back to the default rather than being coerced. Belt-and-
+        suspenders against a yaml typo like `drafter: 42`."""
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: 42\n"
+        )
+        assert resolve_compile_personas(team)["drafter"] == "Anzai"
+
 
 class TestRequiredWorkflowPersonasUsesResolvedRoster:
     """Phase 2: _required_workflow_personas pulls from

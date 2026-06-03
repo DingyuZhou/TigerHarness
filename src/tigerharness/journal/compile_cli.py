@@ -817,12 +817,20 @@ def cmd_compile_retry(args: argparse.Namespace) -> int:
     in-flight compile workspace (round-NN-*.md, transcript.md) and
     flips the status back to its scaffold-time shape
     (``state=pending``, ``compile_pending=true``,
-    ``compile_phase=pending``, ``sessions=0``). The brief, playbook
-    snapshot, and progress.md are preserved -- a retry starts the
-    compile sub-protocol over but does not re-scaffold the task.
+    ``compile_phase=pending``, ``sessions=0``).
 
-    If the operator wants to keep forensic artifacts, they should
-    copy ``compile/`` out of the task dir BEFORE calling this CLI.
+    Preserved across the retry (the brief + playbook snapshot are the
+    source of truth for the next compile attempt; progress.md and
+    artifacts/ are kept for human audit):
+
+    - ``task_brief.md``
+    - ``playbook_snapshot.md``
+    - ``progress.md``
+    - ``artifacts/``
+
+    If the operator wants to keep forensic artifacts from the failed
+    compile, they should copy ``compile/`` out of the task dir BEFORE
+    calling this CLI.
     """
     paths = _paths_from_args(args)
     status_or_err = _load_workflow_status(paths, args.task_id)
@@ -1114,7 +1122,12 @@ def build_subparsers(sub: "argparse._SubParsersAction") -> None:
     # validate-personas
     vp = sub.add_parser(
         "validate-personas",
-        help="Pre-flight: do the compile-time personas (Anzai/Akagi/Ayako) exist for <team>?",
+        help=(
+            "Pre-flight: do the compile-time personas exist on disk "
+            "for <team>? Resolves the role -> persona mapping from "
+            "configs/workflow.yaml (defaults: Anzai/Akagi/Ayako; "
+            "configurable per team)."
+        ),
     )
     vp.add_argument("team")
     vp.set_defaults(func=cmd_validate_personas)
