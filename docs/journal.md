@@ -1,14 +1,15 @@
 # journal
 
-File-based, human-driven subscription backend (Phase 1).
+File-based, human-driven subscription backend (Phase 1 + Phase 1.5).
 
-> **Status:** Phase 1 is shipped (this module). The on-disk schema,
-> scaffolder, sweep, and CLI are implemented and tested at 100%
-> coverage. The `drive-journal` skill is shipped as the canonical
-> driver markdown; the `OPERATING.md` template ships at
-> `<journal>/OPERATING.md` on first scaffold. Phase 2 (config switch
-> to opt into the api backend; unify `task_journal/` and
-> `workflow_journal/`) is deferred.
+> **Status:** Phase 1 + Phase 1.5 are shipped. Phase 1 covers single-
+> persona tasks (`kind=task`). Phase 1.5 adds multi-persona workflow
+> tasks (`kind=workflow`) compiled in-session from a team playbook --
+> zero API billing, the interactive session itself adopts the drafter
+> and critic personas and shells out only to pure-Python validators.
+> Both kinds share the same scaffolder, sweep, list, and `OPERATING.md`
+> protocol -- the protocol switches on `status.kind` at the work step.
+> 100% line + branch coverage across the journal package.
 
 ## What it does
 
@@ -50,15 +51,26 @@ Driver (`drive-journal` skill, interactive session)
 
 ```
 <journal>/
-  OPERATING.md            # vendor-neutral protocol (installed by scaffolder)
+  OPERATING.md                # vendor-neutral protocol (installed by scaffolder)
   active/
-    <task-id>/
-      task.md             # the PRD verbatim
-      status.json         # the state machine (single source of truth)
-      progress.md         # append-only log, human + AI readable
-      artifacts/          # whatever the task produces
+    <task-id>/                # kind=task layout
+      task.md                 # the PRD verbatim
+      status.json             # the state machine (single source of truth)
+      progress.md             # append-only log, human + AI readable
+      artifacts/              # whatever the task produces
+
+    <task-id>/                # kind=workflow layout
+      task_brief.md           # the brief verbatim
+      playbook_snapshot.md    # the team playbook at scaffold time
+      status.json             # adds compile_pending + compile_phase
+      progress.md
+      artifacts/
+      compile/                # in-flight compile workspace (round files, transcript)
+      orchestration.json      # post-compile: the compiled graph (atomically promoted)
+      steps/                  # post-compile: one frontmatter file per graph step
+      compile_critique.md     # post-compile: full critic transcript
   done/
-    <task-id>/            # finished tasks moved here by the next drive-journal sweep
+    <task-id>/                # finished tasks moved here by the next drive-journal sweep
 ```
 
 Task-id format: `<YYYYMMDD>-<slug>-<uuid8>`.
@@ -89,14 +101,33 @@ Journal root resolution priority:
 ## Usage
 
 ```bash
-# Scaffold a new task from a PRD.
+# Scaffold a new task from a PRD (kind=task -- single persona).
 tigerharness journal new \
     --prd brief.md \
     --persona Mitsui \
     --max-sessions 5
 
+# Scaffold a new workflow task (kind=workflow -- multi-persona,
+# compiled from a team playbook). Either --task-brief or --brief-file
+# supplies the brief; --captain is an optional accountable owner.
+tigerharness journal new \
+    --kind workflow \
+    --playbook default \
+    --task-brief "Ship the feature" \
+    --captain Mitsui
+
+# Compile-side CLIs (called from a drive-journal session per
+# OPERATING.md's compile sub-protocol; pure Python, no API billing).
+tigerharness journal compile-context <task-id>
+tigerharness journal compile-prompts --task <id> --kind drafter|akagi|ayako ...
+tigerharness journal validate-graph --task <id> --draft <path>
+tigerharness journal land-compile   --task <id> --draft <path> --transcript <path> --rounds <N>
+tigerharness journal compile-fail   <task-id> --reason "<postmortem>"
+tigerharness journal abort          <task-id>
+tigerharness journal validate-personas <team>
+
 # Quick read-only inspect (no archives, no flags).
-tigerharness journal list           # table format
+tigerharness journal list           # table format -- new KIND column
 tigerharness journal list --format json
 tigerharness journal status <task-id>
 
@@ -117,7 +148,18 @@ Driving only happens inside an interactive Claude Code session.
 
 See the field-by-field table and state-transition rules in
 [`subscription-backend.md` — "status.json — the heart"](subscription-backend.md).
-Phase 1 ships `kind=task` only; `kind=workflow` is reserved.
+Phase 1.5 adds three workflow-only fields to that schema:
+
+| Field | Type | When | Meaning |
+|---|---|---|---|
+| `kind` | `"task"` \| `"workflow"` | always | Selects the protocol branch at step 4. |
+| `compile_pending` | `bool` | workflow only | `true` until `land-compile` flips it. The driver runs the compile sub-protocol while this is `true`. |
+| `compile_phase` | enum | workflow only | One of `pending`, `drafting`, `tier1_pre`, `critiquing`, `tier1_post`, `complete`, `failed`. |
+
+For workflows, `persona` becomes the optional `--captain` (the
+accountable owner shown in `journal list`); per-step personas come
+from the compiled `orchestration.json` graph. The full design lives
+in [`journal-workflow-mode.md`](journal-workflow-mode.md).
 
 ## Skills
 
@@ -149,8 +191,14 @@ on subsequent runs — once you've edited it, it's yours.
 
 ## Related
 
-- [`subscription-backend.md`](subscription-backend.md) — the design.
+- [`subscription-backend.md`](subscription-backend.md) — the Phase 1
+  design.
+- [`journal-workflow-mode.md`](journal-workflow-mode.md) — the
+  Phase 1.5 design: `kind=workflow`, the compile sub-protocol, the
+  persona-switching mechanic.
 - [`task-runner.md`](task-runner.md) — the api-backed single-persona
   runner the subscription backend replaces by default.
 - [`workflow-runner.md`](workflow-runner.md) — the api-backed
-  multi-persona graph runner.
+  multi-persona graph runner the subscription workflow mode mirrors
+  in shape (same `orchestration.json` / `steps/` graph; different
+  drive surface).

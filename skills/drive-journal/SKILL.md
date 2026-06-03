@@ -57,10 +57,25 @@ version, every invocation:
    - If nothing is actionable, **exit the invocation cleanly** -- the
      queue is drained.
 
-3. **Read context** -- the task's `task.md` (PRD), `status.json`'s
-   `next_action`, and the tail of `progress.md`.
+3. **Read context** -- for `kind=task`, the task's `task.md` (PRD),
+   `status.json`'s `next_action`, and the tail of `progress.md`. For
+   `kind=workflow`, the task's `task_brief.md` + `playbook_snapshot.md`
+   in place of `task.md`.
 
-4. **Work it continuously** until ONE of these stop conditions fires:
+4. **Work it continuously**, branching on `status.kind`:
+
+   - `kind=task` -- do the real work directly.
+   - `kind=workflow` with `compile_pending=true` -- run the **compile
+     sub-protocol** from OPERATING.md ("Compile sub-protocol" section)
+     FIRST: adopt Anzai/Akagi/Ayako via the four-line preamble, loop
+     drafter+critics with `tigerharness journal compile-context |
+     compile-prompts | validate-graph | land-compile`, then walk the
+     graph.
+   - `kind=workflow` with `compile_pending=false` -- walk the DAG in
+     `orchestration.json` per the **graph-walk sub-protocol** in
+     OPERATING.md.
+
+   Stop conditions (same for all kinds):
    - The task is fully `done` per its acceptance criteria.
    - A real blocker requires a human or another persona.
    - `sessions == max_sessions` -- move to `blocked` with a
@@ -69,7 +84,8 @@ version, every invocation:
 
    Append to `progress.md` and refresh `updated_at` (the heartbeat)
    periodically -- at least every 10 minutes of wall-clock active
-   work, ideally on every progress entry.
+   work, ideally on every progress entry. For workflows, refresh
+   after every compile round and after every graph-walk step.
 
 5. **On stop**, write a final `progress.md` entry summarising the
    session, then update `status.json` (bump `sessions` on the
@@ -90,9 +106,16 @@ version, every invocation:
   session owns it.
 - Don't pick multiple tasks in parallel within one invocation.
 - Don't mutate `status.json` mid-task except to refresh `updated_at`
-  and (on stop) write the exit state.
+  and (on stop) write the exit state. For workflows, also bump
+  `compile_phase` only through the compile CLIs -- never hand-edit.
 - Don't invent state values. The allowed states are `pending`,
-  `in_progress`, `blocked`, `done`.
+  `in_progress`, `blocked`, `done`. The allowed `compile_phase`
+  values are `pending`, `drafting`, `tier1_pre`, `critiquing`,
+  `tier1_post`, `complete`, `failed`.
+- Don't invoke `claude -p` from inside a compile turn. Adopt the
+  persona by reading `personas/<name>/prompt.md` and prepending the
+  four-line preamble. The compile is in-session; the API budget is
+  zero.
 
 ## If you get confused
 

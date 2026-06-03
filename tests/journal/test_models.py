@@ -7,6 +7,7 @@ import json
 import pytest
 
 from tigerharness.journal.models import (
+    CompilePhase,
     JournalModelError,
     State,
     Status,
@@ -42,15 +43,19 @@ class TestStatusNew:
         assert s.title == "Test"
         assert s.persona == "Mitsui"
 
-    def test_unsupported_kind_rejected(self):
+    def test_new_only_builds_kind_task(self):
+        """Status.new is the task-mode constructor; workflow tasks must
+        be built via Status.new_workflow (their persona / compile_pending
+        / compile_phase semantics differ enough that a shared
+        constructor would be confusing). Phase 1.5 expanded the
+        supported kinds; this asserts the per-constructor split."""
         with pytest.raises(JournalModelError) as exc:
             Status.new(
                 id="x", title="t", persona="P",
                 kind="workflow",
                 now="2026-06-02T08:00:00Z",
             )
-        assert "kind" in str(exc.value)
-        assert "workflow" in str(exc.value)
+        assert "new_workflow" in str(exc.value)
 
     def test_blank_title_rejected(self):
         with pytest.raises(JournalModelError):
@@ -133,14 +138,30 @@ class TestJsonRoundTrip:
             Status.from_dict(s)
 
     def test_from_dict_rejects_unsupported_kind(self):
-        """Regression: ``Status.new`` rejects kind=workflow; ``from_dict``
-        must too, so a hand-edited or migrated-from-future status.json
-        cannot bypass the Phase 1 scope gate."""
+        """Phase 1.5 accepts ``task`` and ``workflow`` only -- anything
+        else is rejected by ``from_dict`` so a hand-edited
+        ``status.json`` cannot bypass the scope gate."""
         s = self._make().to_dict()
-        s["kind"] = "workflow"
+        s["kind"] = "lab-notebook"  # not in {task, workflow}
         with pytest.raises(JournalModelError) as exc:
             Status.from_dict(s)
-        assert "workflow" in str(exc.value)
+        assert "lab-notebook" in str(exc.value)
+
+    def test_from_dict_rejects_kind_task_with_compile_fields(self):
+        """A task-mode status.json must not carry the workflow-only
+        ``compile_pending`` / ``compile_phase`` keys."""
+        s = self._make().to_dict()
+        s["compile_pending"] = False
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(s)
+        assert "compile_pending is rejected for kind=task" in str(exc.value)
+
+    def test_from_dict_rejects_kind_task_with_compile_phase(self):
+        s = self._make().to_dict()
+        s["compile_phase"] = "pending"
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(s)
+        assert "compile_phase is rejected for kind=task" in str(exc.value)
 
     def test_from_dict_rejects_negative_sessions(self):
         s = self._make().to_dict()
@@ -161,6 +182,173 @@ class TestJsonRoundTrip:
         s["sessions"] = "many"
         with pytest.raises(JournalModelError):
             Status.from_dict(s)
+
+
+# ---------------------------------------------------------------------------
+# kind=workflow constructor + schema gates (Phase 1.5)
+# ---------------------------------------------------------------------------
+
+class TestWorkflowMode:
+    """Phase 1.5: ``Status.new_workflow`` + per-kind enforcement of
+    ``compile_pending`` and ``compile_phase`` in ``from_dict`` /
+    ``to_dict``."""
+
+    def test_new_workflow_happy_path(self):
+        s = Status.new_workflow(
+            id="w1",
+            title="Test workflow",
+            captain="Akagi",
+            max_sessions=12,
+            now="2026-06-03T08:00:00Z",
+        )
+        assert s.kind == "workflow"
+        assert s.state is State.PENDING
+        assert s.persona == "Akagi"
+        assert s.sessions == 0
+        assert s.max_sessions == 12
+        assert s.compile_pending is True
+        assert s.compile_phase is CompilePhase.PENDING
+
+    def test_new_workflow_captain_none_allowed(self):
+        s = Status.new_workflow(id="w1", title="Test", captain=None)
+        assert s.persona is None
+        assert s.compile_pending is True
+        assert s.compile_phase is CompilePhase.PENDING
+
+    def test_new_workflow_default_max_sessions(self):
+        """Default is 10 (not 5 as for tasks) so the in-session
+        compile has budget."""
+        s = Status.new_workflow(id="w1", title="Test")
+        assert s.max_sessions == 10
+
+    def test_new_workflow_rejects_blank_title(self):
+        with pytest.raises(JournalModelError):
+            Status.new_workflow(id="w1", title="   ")
+
+    def test_new_workflow_rejects_blank_captain(self):
+        """``captain=""`` is wrong shape; should pass ``None`` to mean
+        'no captain'. We reject blank strings so a typo doesn't
+        silently produce a no-owner workflow."""
+        with pytest.raises(JournalModelError):
+            Status.new_workflow(id="w1", title="t", captain="   ")
+
+    def test_new_workflow_rejects_zero_max_sessions(self):
+        with pytest.raises(JournalModelError):
+            Status.new_workflow(id="w1", title="t", max_sessions=0)
+
+    def test_to_dict_emits_workflow_fields(self):
+        s = Status.new_workflow(id="w1", title="t", captain="Akagi")
+        d = s.to_dict()
+        assert d["kind"] == "workflow"
+        assert d["compile_pending"] is True
+        assert d["compile_phase"] == "pending"
+        assert d["persona"] == "Akagi"
+
+    def test_to_dict_suppresses_workflow_fields_for_task(self):
+        """Task-mode ``to_dict`` must NOT emit ``compile_pending`` /
+        ``compile_phase`` keys -- so a Phase 1 task status.json round-
+        trips byte-identical to its pre-Phase-1.5 shape."""
+        t = Status.new(id="t1", title="t", persona="P")
+        d = t.to_dict()
+        assert "compile_pending" not in d
+        assert "compile_phase" not in d
+
+    def test_workflow_json_round_trip(self):
+        s = Status.new_workflow(id="w1", title="t", captain="Akagi")
+        s2 = Status.from_json(s.to_json())
+        assert s == s2
+
+    def test_workflow_null_captain_round_trip(self):
+        s = Status.new_workflow(id="w1", title="t", captain=None)
+        s2 = Status.from_json(s.to_json())
+        assert s == s2
+        assert s2.persona is None
+
+    # ---- from_dict gates for workflow tasks ----
+
+    def _workflow_dict(self) -> dict:
+        s = Status.new_workflow(id="w1", title="t", captain="Akagi",
+                                now="2026-06-03T08:00:00Z")
+        return s.to_dict()
+
+    def test_from_dict_rejects_workflow_missing_compile_pending(self):
+        d = self._workflow_dict()
+        del d["compile_pending"]
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(d)
+        assert "compile_pending is required for kind=workflow" in str(
+            exc.value
+        )
+
+    def test_from_dict_rejects_workflow_missing_compile_phase(self):
+        d = self._workflow_dict()
+        del d["compile_phase"]
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(d)
+        assert "compile_phase is required for kind=workflow" in str(
+            exc.value
+        )
+
+    def test_from_dict_rejects_invalid_compile_phase(self):
+        d = self._workflow_dict()
+        d["compile_phase"] = "neverexisted"
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(d)
+        assert "invalid compile_phase" in str(exc.value)
+
+    def test_from_dict_rejects_non_bool_compile_pending(self):
+        d = self._workflow_dict()
+        d["compile_pending"] = "yes"  # string, not bool
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(d)
+        assert "compile_pending must be a bool" in str(exc.value)
+
+    def test_from_dict_rejects_blank_captain(self):
+        d = self._workflow_dict()
+        d["persona"] = "   "
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(d)
+        assert "non-blank captain" in str(exc.value)
+
+    def test_from_dict_rejects_non_string_captain(self):
+        d = self._workflow_dict()
+        d["persona"] = 42
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(d)
+        assert "must be a string or null" in str(exc.value)
+
+    def test_from_dict_accepts_workflow_with_null_persona(self):
+        d = self._workflow_dict()
+        d["persona"] = None
+        s = Status.from_dict(d)
+        assert s.persona is None
+
+    def test_from_dict_rejects_non_string_persona_for_task(self):
+        """Type validation on persona for kind=task -- a non-string
+        value (e.g. integer) is a corrupted entry, not 'use the
+        default'."""
+        s = Status.new(id="t1", title="t", persona="P").to_dict()
+        s["persona"] = 42
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(s)
+        assert "must be a string for kind=task" in str(exc.value)
+
+    def test_from_dict_rejects_null_persona_for_task(self):
+        """A null persona on a kind=task entry is rejected -- only
+        kind=workflow allows a null captain."""
+        s = Status.new(id="t1", title="t", persona="P").to_dict()
+        s["persona"] = None
+        with pytest.raises(JournalModelError) as exc:
+            Status.from_dict(s)
+        assert "blank / null" in str(exc.value)
+
+    def test_compile_phase_enum_values_are_seven(self):
+        """If anyone changes the CompilePhase enum, this test forces
+        the sub-protocol prose to be updated alongside."""
+        assert {p.value for p in CompilePhase} == {
+            "pending", "drafting", "tier1_pre", "critiquing",
+            "tier1_post", "complete", "failed",
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -1,17 +1,24 @@
 """``status.json`` data model: ``Status`` dataclass + ``State`` enum.
 
 The full schema and state-transition rules live in
-``docs/subscription-backend.md`` under "status.json -- the heart". The
+``docs/subscription-backend.md`` under "status.json -- the heart" and
+``docs/journal-workflow-mode.md`` under "status.json schema". The
 short version:
 
-- ``id`` / ``title`` / ``kind`` / ``persona`` are set once by the
-  scaffolder; ``state`` advances per the transition table; ``sessions``
-  is bumped by the driver on entry; ``updated_at`` is the heartbeat the
-  driver refreshes on every progress.md append.
-- Phase 1 only supports ``kind="task"``. ``kind="workflow"`` is a
-  forward-compatible reservation; the scaffolder rejects it for now.
-- There is no ``failed`` state in Phase 1; the human edits ``state=done``
-  with a postmortem in ``next_action`` if a task is abandoned.
+- ``id`` / ``title`` / ``kind`` are set once by the scaffolder.
+- ``persona`` is required for ``kind=task``, optional captain (may be
+  ``None``) for ``kind=workflow``; per-step personas come from the
+  compiled graph in workflow mode.
+- ``state`` advances per the transition table; ``sessions`` is bumped
+  by the driver on entry; ``updated_at`` is the heartbeat the driver
+  refreshes on every progress.md append.
+- Phase 1.5 ships ``kind="task"`` AND ``kind="workflow"``. Workflow
+  tasks carry two additional fields, ``compile_pending: bool`` and
+  ``compile_phase: CompilePhase``, that track the in-session compile
+  sub-state machine; both fields are required for workflows and
+  rejected for tasks.
+- There is no ``failed`` top-level state; a failed compile uses
+  ``state=blocked`` paired with ``compile_phase=failed``.
 
 The dataclass is *deliberately* a plain dict on disk -- the journal
 must be human- and AI-readable across vendors, so we ship plain JSON,
@@ -28,8 +35,9 @@ from typing import Any
 
 
 class State(str, enum.Enum):
-    """Allowed values for ``Status.state``. Phase 1 omits ``failed`` (see
-    module docstring)."""
+    """Allowed values for ``Status.state``. There is no ``failed`` here;
+    failed compiles use ``state=blocked`` paired with
+    ``compile_phase=failed`` (see :class:`CompilePhase`)."""
 
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
@@ -37,8 +45,51 @@ class State(str, enum.Enum):
     DONE = "done"
 
 
-# Kinds the scaffolder will accept in Phase 1. ``"workflow"`` is reserved.
-_SUPPORTED_KINDS_PHASE_1: frozenset[str] = frozenset({"task"})
+class CompilePhase(str, enum.Enum):
+    """The compile-phase sub-machine for ``kind=workflow`` tasks.
+
+    Required for ``kind=workflow``; rejected for ``kind=task``. The
+    sub-machine progresses through these values as the in-session
+    compile (Option C) runs:
+
+    - ``pending``: just scaffolded; no driver session has picked it up.
+    - ``drafting``: a session is producing / re-producing a step bundle
+      via the Anzai drafter prompt.
+    - ``tier1_pre``: the session is running Tier 1 mechanical
+      validators on the current draft before critique.
+    - ``critiquing``: the session is mid-critique (Akagi-then-Ayako
+      verdict pairs). The hard floor of 3 rounds applies here.
+    - ``tier1_post``: the session is running the final defensive Tier 1
+      pass before landing.
+    - ``complete``: orchestration.json + steps/ are trustworthy; the
+      driver may now read them.
+    - ``failed``: compile gave up; paired with ``state=blocked``.
+
+    The sweep's classifier treats all in-flight compile sub-phases
+    identically to a graph-walking ``in_progress`` task -- the
+    soft-lease heartbeat rule applies the same way.
+    """
+
+    PENDING = "pending"
+    DRAFTING = "drafting"
+    TIER1_PRE = "tier1_pre"
+    CRITIQUING = "critiquing"
+    TIER1_POST = "tier1_post"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+# Kinds the scaffolder + reader accept. Historical note: Phase 1
+# accepted only "task" via a now-renamed ``_SUPPORTED_KINDS_PHASE_1``
+# constant; Phase 1.5 added "workflow".
+_SUPPORTED_KINDS: frozenset[str] = frozenset({"task", "workflow"})
+
+# CompilePhase values are required-and-validated for workflow tasks
+# and rejected outright for task tasks. The bare strings are the
+# on-disk form (JSON enum values).
+_COMPILE_PHASE_VALUES: frozenset[str] = frozenset(
+    p.value for p in CompilePhase
+)
 
 
 class JournalModelError(ValueError):
@@ -67,20 +118,34 @@ class Status:
     Required fields are positional in the dataclass *order* but always
     set via keyword in practice -- the on-disk JSON is the canonical
     form. ``from_json`` is the only constructor you should use outside
-    tests; ``new`` is the convenience for scaffolding fresh entries.
+    tests; ``new`` and ``new_workflow`` are the conveniences for
+    scaffolding fresh entries (single-persona task vs multi-persona
+    workflow).
+
+    Workflow tasks (``kind=workflow``) carry two additional fields
+    (``compile_pending`` + ``compile_phase``) absent from task-mode
+    statuses; we store them on the dataclass with neutral defaults
+    and let ``to_dict`` / ``from_dict`` enforce presence/absence
+    based on ``kind`` so the on-disk JSON shape is strict per kind.
     """
 
     id: str
     title: str
     kind: str
     state: State
-    persona: str
+    persona: str | None  # required for kind=task; optional captain for workflow
     sessions: int
     max_sessions: int
     created_at: str
     updated_at: str
     next_action: str = ""
     session_ref: str | None = None
+    # Workflow-only sub-state. Defaults are neutral so a task-mode
+    # Status round-trips byte-identically; the JSON schema gate in
+    # ``from_dict`` / ``to_dict`` is what makes the per-kind contract
+    # strict.
+    compile_pending: bool = False
+    compile_phase: CompilePhase | None = None
 
     # ---- construction ----
 
@@ -96,12 +161,16 @@ class Status:
         next_action: str = "",
         now: str | None = None,
     ) -> "Status":
-        """Build a freshly-scaffolded Status in ``state=pending``."""
-        if kind not in _SUPPORTED_KINDS_PHASE_1:
+        """Build a freshly-scaffolded Status in ``state=pending``.
+
+        This constructor is for ``kind=task`` only. Use
+        :meth:`new_workflow` to scaffold ``kind=workflow`` tasks --
+        their persona/compile_pending/compile_phase semantics differ
+        enough that a shared constructor would be confusing."""
+        if kind != "task":
             raise JournalModelError(
-                f"unsupported kind {kind!r}; Phase 1 accepts only "
-                f"{sorted(_SUPPORTED_KINDS_PHASE_1)}. "
-                "kind=workflow is reserved for a later phase."
+                f"Status.new only builds kind=task; got {kind!r}. "
+                "Use Status.new_workflow for kind=workflow."
             )
         if not title.strip():
             raise JournalModelError("title is required and cannot be blank")
@@ -126,15 +195,84 @@ class Status:
             updated_at=ts,
             next_action=next_action,
             session_ref=None,
+            compile_pending=False,
+            compile_phase=None,
+        )
+
+    @classmethod
+    def new_workflow(
+        cls,
+        *,
+        id: str,
+        title: str,
+        captain: str | None = None,
+        max_sessions: int = 10,
+        next_action: str = "",
+        now: str | None = None,
+    ) -> "Status":
+        """Build a freshly-scaffolded ``kind=workflow`` Status.
+
+        State is ``pending``, ``compile_pending=True``,
+        ``compile_phase=PENDING`` -- the canonical scaffold-time shape
+        per ``docs/journal-workflow-mode.md``. The ``captain``
+        argument is the optional accountable owner shown by
+        ``journal list``; per-step personas come from the compiled
+        graph and are unknown at scaffold time. ``captain=None`` is
+        legitimate -- the workflow has no single owner.
+
+        ``max_sessions`` defaults to ``10`` here (not ``5`` as for
+        tasks) to give the in-session compile a reasonable budget.
+        The design proposal called for ``len(steps) * 2 + 3`` but
+        ``len(steps)`` is unknown at scaffold time (compile hasn't
+        run); ``10`` is the static safe default and operators can
+        override via ``--max-sessions``."""
+        if not title.strip():
+            raise JournalModelError("title is required and cannot be blank")
+        if captain is not None and not captain.strip():
+            raise JournalModelError(
+                "captain must be a non-blank string or None; "
+                "got an empty/whitespace string"
+            )
+        if max_sessions < 1:
+            raise JournalModelError(
+                f"max_sessions must be >= 1; got {max_sessions}"
+            )
+        ts = now or _utcnow_iso()
+        return cls(
+            id=id,
+            title=title.strip(),
+            kind="workflow",
+            state=State.PENDING,
+            persona=(captain.strip() if captain else None),
+            sessions=0,
+            max_sessions=max_sessions,
+            created_at=ts,
+            updated_at=ts,
+            next_action=next_action,
+            session_ref=None,
+            compile_pending=True,
+            compile_phase=CompilePhase.PENDING,
         )
 
     # ---- json round-trip ----
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise to a plain JSON-friendly dict. Workflow-only fields
+        are emitted iff ``kind=workflow``, so a task status's on-disk
+        JSON does not gain unknown keys."""
         d = asdict(self)
-        # State is StrEnum; emit the plain string for forward-compatibility
-        # with non-Python readers.
+        # State is a StrEnum; emit the plain string for forward-
+        # compatibility with non-Python readers.
         d["state"] = self.state.value
+        # Workflow-only fields: emit iff kind=workflow, suppress
+        # otherwise so task-mode JSON stays Phase 1 byte-shape.
+        if self.kind == "workflow":
+            d["compile_phase"] = (
+                self.compile_phase.value if self.compile_phase else None
+            )
+        else:
+            d.pop("compile_pending", None)
+            d.pop("compile_phase", None)
         return d
 
     def to_json(self, *, indent: int = 2) -> str:
@@ -144,25 +282,34 @@ class Status:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Status":
         """Build from a JSON-decoded dict. Validates required fields,
-        the state enum, the kind enum (Phase 1 = task only), and
-        non-negativity of ``sessions`` / ``max_sessions``. Forward-
-        compat: unknown extra keys raise -- the schema is the contract.
+        the state enum, the kind enum, sane session counts, and the
+        per-kind contract on the workflow-only fields
+        (``compile_pending`` + ``compile_phase`` must be present for
+        ``kind=workflow`` and absent for ``kind=task``).
 
-        We mirror the constructor's validations here so a hand-edited
-        or migrated-from-future status.json on disk cannot bypass the
-        same gates ``Status.new`` enforces (Phase 1 = task only, sane
-        session counts, real state enum)."""
+        Forward-compat: unknown extra keys raise -- the schema is the
+        contract. We mirror the constructor's validations here so a
+        hand-edited or migrated-from-future status.json on disk cannot
+        bypass the same gates ``Status.new`` / ``Status.new_workflow``
+        enforce."""
         required = {
-            "id", "title", "kind", "state", "persona",
+            "id", "title", "kind", "state",
             "sessions", "max_sessions",
             "created_at", "updated_at",
         }
+        # `persona` is required for kind=task and *optional* (may be
+        # null/absent) for kind=workflow; we check it after we know the
+        # kind.
         missing = required - set(data)
         if missing:
             raise JournalModelError(
                 f"status.json missing required keys: {sorted(missing)}"
             )
-        unknown = set(data) - (required | {"next_action", "session_ref"})
+        optional_keys = {
+            "persona", "next_action", "session_ref",
+            "compile_pending", "compile_phase",
+        }
+        unknown = set(data) - (required | optional_keys)
         if unknown:
             raise JournalModelError(
                 f"status.json has unknown keys: {sorted(unknown)}"
@@ -175,11 +322,10 @@ class Status:
                 f"{[s.value for s in State]}"
             ) from exc
         kind = data["kind"]
-        if kind not in _SUPPORTED_KINDS_PHASE_1:
+        if kind not in _SUPPORTED_KINDS:
             raise JournalModelError(
-                f"unsupported kind {kind!r} on disk; Phase 1 accepts "
-                f"only {sorted(_SUPPORTED_KINDS_PHASE_1)}. kind=workflow "
-                "is reserved for a later phase."
+                f"unsupported kind {kind!r} on disk; allowed: "
+                f"{sorted(_SUPPORTED_KINDS)}."
             )
         try:
             sessions = int(data["sessions"])
@@ -197,18 +343,81 @@ class Status:
             raise JournalModelError(
                 f"max_sessions must be >= 1; got {max_sessions}"
             )
+
+        # Per-kind validation of persona + workflow-only fields.
+        persona = data.get("persona")
+        compile_pending = data.get("compile_pending")
+        compile_phase_raw = data.get("compile_phase")
+        if kind == "task":
+            if persona is None or (
+                isinstance(persona, str) and not persona.strip()
+            ):
+                raise JournalModelError(
+                    "persona is required for kind=task and cannot be "
+                    "blank / null"
+                )
+            if not isinstance(persona, str):
+                raise JournalModelError(
+                    f"persona must be a string for kind=task; got "
+                    f"{type(persona).__name__}"
+                )
+            if compile_pending is not None:
+                raise JournalModelError(
+                    "compile_pending is rejected for kind=task; remove it"
+                )
+            if compile_phase_raw is not None:
+                raise JournalModelError(
+                    "compile_phase is rejected for kind=task; remove it"
+                )
+            compile_phase: CompilePhase | None = None
+            compile_pending_val = False
+        else:  # kind == "workflow"
+            if persona is not None and not isinstance(persona, str):
+                raise JournalModelError(
+                    f"persona must be a string or null for kind=workflow; "
+                    f"got {type(persona).__name__}"
+                )
+            if isinstance(persona, str) and not persona.strip():
+                raise JournalModelError(
+                    "persona for kind=workflow must be a non-blank "
+                    "captain name OR null; got an empty string"
+                )
+            if compile_pending is None:
+                raise JournalModelError(
+                    "compile_pending is required for kind=workflow"
+                )
+            if not isinstance(compile_pending, bool):
+                raise JournalModelError(
+                    f"compile_pending must be a bool; got "
+                    f"{type(compile_pending).__name__}"
+                )
+            if compile_phase_raw is None:
+                raise JournalModelError(
+                    "compile_phase is required for kind=workflow"
+                )
+            try:
+                compile_phase = CompilePhase(compile_phase_raw)
+            except ValueError as exc:
+                raise JournalModelError(
+                    f"invalid compile_phase {compile_phase_raw!r}; "
+                    f"allowed: {sorted(_COMPILE_PHASE_VALUES)}"
+                ) from exc
+            compile_pending_val = compile_pending
+
         return cls(
             id=data["id"],
             title=data["title"],
             kind=kind,
             state=state,
-            persona=data["persona"],
+            persona=persona,
             sessions=sessions,
             max_sessions=max_sessions,
             created_at=data["created_at"],
             updated_at=data["updated_at"],
             next_action=data.get("next_action", "") or "",
             session_ref=data.get("session_ref"),
+            compile_pending=compile_pending_val,
+            compile_phase=compile_phase,
         )
 
     @classmethod
