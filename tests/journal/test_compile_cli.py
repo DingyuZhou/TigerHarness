@@ -586,6 +586,25 @@ class TestLandCompile:
         assert f"landed: {task_id}" in out
         assert "steps: 1" in out
 
+    def test_refreshes_heartbeat(self, scaffolded, tmp_path):
+        """Final-review fix: land-compile must refresh updated_at on
+        the same atomic write that flips compile_pending/compile_phase
+        so the sweep doesn't reclassify a freshly-landed task as
+        stale. Matches the sibling CLIs (append-steps, compile-fail,
+        compile-retry)."""
+        task_id, paths = scaffolded
+        # Force updated_at backward.
+        before = Status.from_json(paths.status_json(task_id).read_text())
+        before.updated_at = "2020-01-01T00:00:00Z"
+        paths.status_json(task_id).write_text(before.to_json())
+        d = tmp_path / "draft.md"
+        d.write_text(_VALID_BUNDLE)
+        t = tmp_path / "transcript.md"
+        t.write_text("Round 1: APPROVE.\n")
+        cmd_land_compile(self._ns(paths, task_id, d, t))
+        after = Status.from_json(paths.status_json(task_id).read_text())
+        assert after.updated_at > before.updated_at
+
     def test_unknown_task_returns_1(self, journal_dir, tmp_path, capsys):
         d = tmp_path / "draft.md"
         d.write_text(_VALID_BUNDLE)
@@ -1522,6 +1541,67 @@ class TestCompileFail:
         rc = cmd_compile_fail(ns)
         assert rc == 1
         assert "cannot mark compile-failed" in capsys.readouterr().err
+
+    def test_complete_phase_rejected(self, scaffolded, capsys):
+        """Final-review fix: compile-fail must not clobber a successfully
+        landed graph. A task in compile_phase=complete is terminal for
+        the compile sub-machine; the operator should use `abort` to
+        archive it instead."""
+        from tigerharness.journal.compile_cli import cmd_compile_fail
+        task_id, paths = scaffolded
+        s = Status.from_json(paths.status_json(task_id).read_text())
+        s.compile_phase = CompilePhase.COMPLETE
+        s.compile_pending = False
+        paths.status_json(task_id).write_text(s.to_json())
+        rc = cmd_compile_fail(argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+            reason="someone fat-fingered this",
+        ))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "compile_phase=complete" in err
+        assert "clobber" in err
+        # Status NOT modified.
+        s2 = Status.from_json(paths.status_json(task_id).read_text())
+        assert s2.compile_phase == CompilePhase.COMPLETE
+        assert s2.state == State.PENDING
+
+    def test_failed_phase_rejected(self, scaffolded, capsys):
+        """A task already in compile_phase=failed should not be
+        re-marked -- doing so overwrites the original postmortem in
+        next_action without an audit trail."""
+        from tigerharness.journal.compile_cli import cmd_compile_fail
+        task_id, paths = scaffolded
+        # First put the task into FAILED state.
+        first = cmd_compile_fail(argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+            reason="original postmortem -- Akagi BLOCK",
+        ))
+        assert first == 0
+        # Now try to re-mark it.
+        rc = cmd_compile_fail(argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+            reason="second postmortem -- different reason",
+        ))
+        assert rc == 1
+        assert "already compile_phase=failed" in capsys.readouterr().err
+        # The original postmortem survives.
+        s = Status.from_json(paths.status_json(task_id).read_text())
+        assert "original postmortem -- Akagi BLOCK" in s.next_action
+
+    def test_refreshes_heartbeat(self, scaffolded):
+        """compile-fail must refresh updated_at on the same atomic
+        write that flips the state, matching the sibling CLIs."""
+        from tigerharness.journal.compile_cli import cmd_compile_fail
+        task_id, paths = scaffolded
+        before = Status.from_json(paths.status_json(task_id).read_text())
+        before.updated_at = "2020-01-01T00:00:00Z"
+        paths.status_json(task_id).write_text(before.to_json())
+        cmd_compile_fail(argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id, reason="r",
+        ))
+        after = Status.from_json(paths.status_json(task_id).read_text())
+        assert after.updated_at > before.updated_at
 
 
 class TestAbort:

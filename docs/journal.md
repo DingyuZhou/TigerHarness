@@ -1,6 +1,6 @@
 # journal
 
-File-based, human-driven subscription backend (Phase 1 + Phase 1.5).
+File-based, human-driven subscription backend (Phase 1 + Phase 1.5 + Phase 2 + Phase 3).
 
 > **Status:** Phase 1 + Phase 1.5 + Phase 2 (closeout) + Phase 3
 > step-append shipped. Phase 1 covers single-persona tasks

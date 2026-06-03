@@ -380,8 +380,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="journal",
         description=(
-            "Journal CLI for the subscription backend (Phase 1). "
-            "See docs/subscription-backend.md."
+            "Journal CLI for the subscription backend (Phase 1 + "
+            "Phase 1.5 + Phase 2 + Phase 3). "
+            "kind=task and kind=workflow; in-session compile with "
+            "drafter + critic loop; compile-retry + append-steps for "
+            "runtime extension. See docs/journal.md."
         ),
     )
     p.add_argument(

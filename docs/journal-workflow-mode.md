@@ -16,12 +16,12 @@ workflow tasks (`kind=workflow`). Single-persona task mode
 >
 > What this branch closes out: 100% line + branch coverage on the
 > journal package; an end-to-end scripted compile driver suite; CLI
-> surface = 9 commands (`new`, `compile-context`, `compile-prompts`,
+> surface = 10 commands (`new`, `compile-context`, `compile-prompts`,
 > `validate-graph`, `land-compile`, `compile-fail`, `compile-retry`,
-> `append-steps`, `abort`) + `list`/`status`/`sweep`. Internally
-> referenced "Phase 3 human-gate enforcement" has been **retired** --
-> see the *Out of scope* + *Phasing* sections below for the
-> structural reasoning.
+> `append-steps`, `abort`, `validate-personas`) +
+> `list`/`status`/`sweep`. Internally referenced "Phase 3 human-gate
+> enforcement" has been **retired** -- see the *Out of scope* +
+> *Phasing* sections below for the structural reasoning.
 
 ## Why this exists
 

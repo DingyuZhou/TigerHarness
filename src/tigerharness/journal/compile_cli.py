@@ -1,4 +1,5 @@
-"""Compile-side CLI subcommands for the workflow-mode journal (Phase 1.5).
+"""Compile-side CLI subcommands for the workflow-mode journal
+(Phase 1.5 + Phase 2 + Phase 3).
 
 These commands are the Python primitives the interactive
 ``drive-journal`` session shells out to during an in-session compile.
@@ -6,17 +7,43 @@ All are **pure Python** -- no LLM calls, no ``claude -p``. The session
 itself does the reasoning; these CLIs just stage inputs, validate
 drafts, and atomically promote the final compiled artifacts.
 
-The six subcommands (see :func:`build_subparsers`):
+The nine subcommands (see :func:`build_subparsers`):
 
 - ``compile-context <task-id>``
 - ``compile-prompts --task <id> --kind {drafter|akagi|ayako} ...``
 - ``validate-graph --task <id> --draft <path>``
 - ``land-compile --task <id> --draft <path> --transcript <path> --rounds <N>``
+- ``compile-fail <task-id> --reason <str>``
+- ``compile-retry <task-id>``
+- ``append-steps --task <id> --new-bundle <path>``
 - ``abort <task-id>``
 - ``validate-personas <team>``
 
 The contract for each is fixed by ``OPERATING.md`` so the session can
 shell out from a static protocol without reading source.
+
+**Exit-code conventions (two CLI families)**
+
+Two distinct conventions exist by design:
+
+1. **Envelope-emitting validators** (``validate-graph``,
+   ``append-steps``) emit a structured JSON envelope
+   ``{ok, errors, trace}`` on stdout when they can run at all. They
+   reserve exit ``1`` for *"validator ran and produced ok=false"* and
+   use exit ``2`` for *"could not even run"* (bad task id, wrong
+   phase, unreadable input file, etc.). The exit code tells the
+   driver session whether stdout is parseable JSON.
+2. **State-mutation / info commands** (``compile-context``,
+   ``compile-prompts``, ``land-compile``, ``compile-fail``,
+   ``compile-retry``, ``abort``, ``validate-personas``) have no
+   machine-readable envelope and uniformly return exit ``1`` for any
+   error path (bad task id, wrong phase, unreadable input,
+   irrecoverable failure, etc.).
+
+A future cross-cutting normalisation could collapse the two
+conventions into a single 0/1/2 model, but that's a deliberate
+refactor with broad test surface; the current split is documented
+and tested.
 """
 
 from __future__ import annotations
@@ -548,9 +575,15 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
         pass  # best-effort cleanup
 
     # Flip status.json last -- this is the visibility gate the
-    # graph-walker checks before reading orchestration.json.
+    # graph-walker checks before reading orchestration.json. Also
+    # refresh updated_at on the same atomic write so the sweep
+    # doesn't reclassify this task as stale right after a landing
+    # that took more than a tick. Sibling CLIs (append-steps,
+    # compile-retry, compile-fail) do the same.
+    from tigerharness.journal.models import _utcnow_iso
     status.compile_pending = False
     status.compile_phase = CompilePhase.COMPLETE
+    status.updated_at = _utcnow_iso()
     _write_atomic(paths.status_json(status.id), status.to_json())
 
     print(f"landed: {status.id}")
@@ -931,9 +964,41 @@ def cmd_compile_fail(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # COMPLETE is terminal for the compile sub-machine -- a successfully
+    # landed graph must not be clobbered back to FAILED via this CLI.
+    # Without this guard, a misfired compile-fail call could be followed
+    # by a compile-retry that wipes compile/ and resets to PENDING,
+    # destroying the trusted orchestration.json + steps/.
+    if status.compile_phase == CompilePhase.COMPLETE:
+        print(
+            f"error: task {status.id} has compile_phase=complete "
+            "(the graph is landed); compile-fail would clobber a "
+            "successfully landed compile. Use `journal abort` to "
+            "archive a landed task or `journal compile-retry` to "
+            "reset a FAILED task; compile-fail only applies to "
+            "in-flight compiles.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # FAILED is already terminal until the operator retries. Re-marking
+    # is a no-op at best and an audit-trail loss at worst (the original
+    # next_action gets overwritten).
+    if status.compile_phase == CompilePhase.FAILED:
+        print(
+            f"error: task {status.id} is already compile_phase=failed; "
+            "re-marking would overwrite the original postmortem in "
+            "next_action. Inspect compile/ and use `journal abort` or "
+            "`journal compile-retry`.",
+            file=sys.stderr,
+        )
+        return 1
+
+    from tigerharness.journal.models import _utcnow_iso
     status.state = State.BLOCKED
     status.compile_phase = CompilePhase.FAILED
     status.next_action = args.reason
+    status.updated_at = _utcnow_iso()
     _write_atomic(paths.status_json(status.id), status.to_json())
 
     print(f"compile-failed: {status.id}  (state=blocked, compile_phase=failed)")
