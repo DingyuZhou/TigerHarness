@@ -1,13 +1,22 @@
-# journal — workflow mode (Phase 1.5 design)
+# journal — workflow mode (Phase 1.5)
 
 Extending the file-based subscription backend to support multi-persona
 workflow tasks (`kind=workflow`). Single-persona task mode
 (`kind=task`) shipped in Phase 1 (PR #25, commit `7d6b9f8` on main).
 
-> **Status:** Design-only. This document is a proposal. Sections
-> describing unbuilt pieces are the plan, not a description of shipped
-> behaviour. Phase 1.5 = this doc plus the corresponding implementation,
-> targeted as one branch + PR.
+> **Status:** Shipped. This document is the authoritative spec for the
+> implementation that landed on branch
+> `work/2026-06-03-journal-workflow-mode-design`. The model layer,
+> scaffolder, compile CLIs, dispatcher, list/visibility surface, and
+> the OPERATING.md compile sub-protocol are all in. 100% line + branch
+> coverage on the journal package; 2668 tests pass repo-wide. The
+> commit chain on this branch:
+>
+> - `918f576` Phase 1.5 model layer -- `kind=workflow` + compile sub-state
+> - `969d602` Phase 1.5 scaffolder -- `new_workflow_task` + persona pre-flight
+> - `96027f0` Phase 1.5 compile CLIs + `kind=workflow` dispatcher
+> - `d1a21be` journal list -- surface kind + compile_phase for workflows
+> - `a6cd8c2` OPERATING.md + drive-journal -- compile sub-protocol
 
 ## Why this exists
 
