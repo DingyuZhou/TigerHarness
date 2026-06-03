@@ -49,9 +49,24 @@ from tigerharness.journal.paths import JournalPaths
 
 # The three personas the in-session compile sub-protocol adopts (Anzai
 # for the drafter turn, Akagi for the execution-critic lens, Ayako for
-# the QA-critic lens). Hard-coded for Phase 1.5 per Operator's Open
-# Question #6 lean ("configurable is Phase 2").
+# the QA-critic lens). Default mapping in Phase 1.5; Phase 2
+# additionally lets a team override these via
+# ``teams/<team>/configs/workflow.yaml`` (key: ``compile_personas``).
 COMPILE_PERSONAS: tuple[str, ...] = ("Anzai", "Akagi", "Ayako")
+
+# Phase 2: role -> persona-name mapping. The CLI args (``--kind
+# drafter|akagi|ayako``) and the critic prompt templates are keyed by
+# the role tokens "drafter" / "akagi" / "ayako" -- those stay constant.
+# The persona NAMES that play each role are configurable; the default
+# happens to use the role tokens as the persona names (drafter=Anzai
+# is the only non-identity mapping).
+_DEFAULT_COMPILE_PERSONAS: dict[str, str] = {
+    "drafter": "Anzai",
+    "akagi": "Akagi",
+    "ayako": "Ayako",
+}
+
+_COMPILE_ROLES: tuple[str, ...] = ("drafter", "akagi", "ayako")
 
 # Regex pattern for a playbook name (mirrors workflow_runner.cli's
 # _PLAYBOOK_NAME_RE): bare name, no path separators, conservative
@@ -324,18 +339,65 @@ def read_team_roster(team_root: Path) -> set[str]:
     return out
 
 
+def resolve_compile_personas(team_root: Path) -> dict[str, str]:
+    """Phase 2: resolve the role -> persona-name mapping for the three
+    compile-time roles (``drafter``, ``akagi``, ``ayako``).
+
+    Reads ``<team_root>/configs/workflow.yaml``'s ``compile_personas``
+    key:
+
+    .. code:: yaml
+
+        compile_personas:
+          drafter: Anzai
+          akagi:   Akagi
+          ayako:   Ayako
+
+    Each key is optional; missing keys fall back to the Phase 1.5
+    defaults (Anzai / Akagi / Ayako). Unknown role keys are silently
+    ignored -- a Phase 3 addition might add new roles, and an older
+    journal install should still load the file.
+
+    A malformed yaml or missing file returns the all-defaults mapping.
+    The scaffolder's :func:`validate_personas` gate fires on the
+    resolved persona names, so a config that points at a non-existent
+    persona surfaces at scaffold time.
+    """
+    out = dict(_DEFAULT_COMPILE_PERSONAS)
+    yaml_path = team_root / "configs" / "workflow.yaml"
+    if not yaml_path.is_file():
+        return out
+    try:
+        import yaml
+        with yaml_path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except (OSError, ImportError, Exception):  # pragma: no cover - defensive
+        return out
+    if not isinstance(data, dict):
+        return out
+    overrides = data.get("compile_personas")
+    if not isinstance(overrides, dict):
+        return out
+    for role in _COMPILE_ROLES:
+        val = overrides.get(role)
+        if isinstance(val, str) and val.strip():
+            out[role] = val.strip()
+    return out
+
+
 def _required_workflow_personas(
     playbook_text: str, team_root: Path,
 ) -> set[str]:
     """The set of personas the workflow scaffolder requires on disk:
-    the hard-coded compile trio PLUS any playbook reference that
-    matches the team's roster. Candidates the playbook mentions but
+    the team-configured compile-role personas PLUS any playbook reference
+    that matches the team's roster. Candidates the playbook mentions but
     that aren't in the roster are treated as English prose, not
     persona typos."""
     candidates = extract_persona_refs_from_playbook(playbook_text)
     roster = read_team_roster(team_root)
     real_refs = candidates & roster
-    return set(COMPILE_PERSONAS) | real_refs
+    compile_personas = set(resolve_compile_personas(team_root).values())
+    return compile_personas | real_refs
 
 
 def _persona_prompt_path(team_root: Path, persona: str) -> Path:

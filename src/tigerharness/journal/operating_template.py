@@ -191,12 +191,22 @@ Trigger: step 4 on a `kind=workflow` task where
 `status.compile_pending=true`.
 
 The compile proceeds in rounds. Each round is one drafter turn
-followed by both critics, then a Tier 1 re-validation. The drafter is
-**Anzai**, the critics are **Akagi** and **Ayako**. A round ends with
-both critics emitting `APPROVE` -> land. If either critic emits
-`BLOCK` -> mark the task compile-failed (`journal compile-fail
-<task-id> --reason '...'`). Otherwise the loop continues with the
-critics' `REVISE` feedback merged for the next drafter turn.
+followed by both critics, then a Tier 1 re-validation. Three roles
+are involved: the **drafter** writes the steps bundle, and two
+critics -- the **akagi-role** critic (execution-mechanics lens) and
+the **ayako-role** critic (QA / acceptance lens) -- review it.
+
+The persona NAME for each role comes from the team's
+`configs/workflow.yaml` (`compile_personas` key). The defaults are
+`drafter=Anzai`, `akagi=Akagi`, `ayako=Ayako`; the `compile-context`
+output prints the resolved mapping for the task at hand so you know
+which persona to adopt at each turn.
+
+A round ends with both critics emitting `APPROVE` -> land. If either
+critic emits `BLOCK` -> mark the task compile-failed (`journal
+compile-fail <task-id> --reason '...'`). Otherwise the loop
+continues with the critics' `REVISE` feedback merged for the next
+drafter turn.
 
 Caps (compile gives up rather than spinning forever):
 
@@ -255,13 +265,18 @@ self-rejects); critics carry the real verdict.
    tigerharness journal compile-context <task-id>
    ```
 
-   This prints brief + playbook + roster + the round-1 drafter prompt
-   in one block. Read it.
+   This prints brief + playbook + roster + the role->persona mapping
+   + the round-1 drafter prompt in one block. Read it. The
+   "Compile personas" section tells you which persona to adopt for
+   each role -- the default is `drafter=Anzai`, `akagi=Akagi`,
+   `ayako=Ayako`, but the team's `configs/workflow.yaml` may have
+   remapped them.
 
-2. **Drafter turn (Anzai).** Adopt the persona via the four-line
-   preamble. Emit a `steps-bundle` per the drafter contract (one fence,
-   `## step: <id>` headers, frontmatter blocks). End with
-   `WORKFLOW: APPROVE`.
+2. **Drafter turn (the drafter-role persona).** Adopt the persona
+   named in the bootstrap's "Compile personas" section under
+   `drafter:` via the four-line preamble. Emit a `steps-bundle` per
+   the drafter contract (one fence, `## step: <id>` headers,
+   frontmatter blocks). End with `WORKFLOW: APPROVE`.
 
 3. **Tier 1 (pre-critique).** Save the drafter's bundle to
    `compile/round-NN-draft.md` and run:
@@ -276,20 +291,23 @@ self-rejects); critics carry the real verdict.
    waste critic effort on a malformed graph. Cap: 3 consecutive Tier
    1 failures -> `journal compile-fail`.
 
-4. **Akagi critique.** Run:
+4. **Akagi-role critique** (execution-mechanics lens). Run:
 
    ```bash
    tigerharness journal compile-prompts --task <task-id> \\
        --kind akagi --draft <path> --trace <trace-path>
    ```
 
-   The trace from step 3 goes here. Adopt Akagi via the preamble and
-   emit a critique ending with `WORKFLOW: APPROVE` /
-   `WORKFLOW: REVISE -- ...` / `WORKFLOW: BLOCK -- ...`. Save the full
-   turn to `compile/round-NN-akagi.md`.
+   The trace from step 3 goes here. Adopt the persona named under
+   `akagi:` in the bootstrap mapping (default: Akagi) via the
+   preamble, and emit a critique ending with `WORKFLOW: APPROVE` /
+   `WORKFLOW: REVISE -- ...` / `WORKFLOW: BLOCK -- ...`. Save the
+   full turn to `compile/round-NN-akagi.md`.
 
-5. **Ayako critique.** Same as step 4 but with `--kind ayako` and save
-   to `compile/round-NN-ayako.md`.
+5. **Ayako-role critique** (QA / acceptance lens). Same as step 4
+   but with `--kind ayako` and the persona under `ayako:` in the
+   bootstrap mapping (default: Ayako). Save to
+   `compile/round-NN-ayako.md`.
 
 6. **Round verdict.** Combine the two critic verdicts:
 

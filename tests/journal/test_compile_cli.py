@@ -299,7 +299,46 @@ class TestCompileContext:
         )
         rc = cmd_compile_context(ns)
         assert rc == 0
-        assert "(roster unresolved" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "(roster unresolved" in out
+        # Even without a team root, the compile-personas mapping is
+        # surfaced -- defaults to Anzai/Akagi/Ayako.
+        assert "## Compile personas (role -> name)" in out
+        assert "drafter: Anzai" in out
+
+    def test_prints_team_overridden_compile_personas(
+        self, scaffolded, tmp_path, monkeypatch, capsys,
+    ):
+        """Phase 2: when the team's workflow.yaml overrides the role ->
+        persona mapping, compile-context surfaces the OVERRIDE so the
+        session knows which persona to adopt."""
+        task_id, paths = scaffolded
+        # `team_root` fixture chdir'd into a Shohoku team root that has
+        # Anzai/Akagi/Ayako on disk. Drop a workflow.yaml to override.
+        team_root_dir = Path.cwd()
+        (team_root_dir / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: Mitsui\n"  # use an existing roster persona
+        )
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        )
+        rc = cmd_compile_context(ns)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "## Compile personas (role -> name)" in out
+        assert "drafter: Mitsui" in out
+        assert "akagi: Akagi" in out  # still default
+
+    def test_prints_playbook_name(self, scaffolded, capsys):
+        """Phase 2: the playbook name shows up in the Task section."""
+        task_id, paths = scaffolded
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        )
+        rc = cmd_compile_context(ns)
+        assert rc == 0
+        assert "playbook: default" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +995,67 @@ class TestValidatePersonas:
         err = capsys.readouterr().err
         assert "missing prompt.md" in err
         assert "Akagi" in err
+        # The error block annotates which role mapped to the missing
+        # persona so the operator sees the structural cause.
+        assert "akagi: Akagi" in err and "MISSING" in err
+
+    def test_happy_prints_role_mapping(self, team_root, capsys):
+        ns = argparse.Namespace(team="Shohoku")
+        rc = cmd_validate_personas(ns)
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Default mapping surfaced under "ok:".
+        assert "drafter: Anzai" in out
+        assert "akagi: Akagi" in out
+        assert "ayako: Ayako" in out
+
+    def test_overridden_personas_validated(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """Phase 2: when workflow.yaml overrides the compile-time
+        personas, validate-personas checks the OVERRIDDEN names exist
+        on disk, NOT the Phase 1.5 defaults."""
+        team = _make_team(
+            tmp_path,
+            personas=["Sakuragi", "Rukawa", "Mitsui"],
+        )
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: Sakuragi\n"
+            "  akagi: Rukawa\n"
+            "  ayako: Mitsui\n"
+        )
+        monkeypatch.chdir(team)
+        ns = argparse.Namespace(team="Shohoku")
+        rc = cmd_validate_personas(ns)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "drafter: Sakuragi" in out
+        assert "akagi: Rukawa" in out
+        assert "ayako: Mitsui" in out
+
+    def test_overridden_persona_missing_fails_with_clear_mapping(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """If the team configures an override pointing at a persona
+        that doesn't exist on disk, the failure message names both the
+        missing persona AND the role it's mapped to."""
+        team = _make_team(
+            tmp_path,
+            personas=["Anzai", "Akagi", "Ayako"],  # default-named
+        )
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: Sakuragi\n"  # points at non-existent persona
+        )
+        monkeypatch.chdir(team)
+        ns = argparse.Namespace(team="Shohoku")
+        rc = cmd_validate_personas(ns)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "missing prompt.md" in err
+        assert "Sakuragi" in err
+        assert "drafter: Sakuragi" in err and "MISSING" in err
 
 
 # ---------------------------------------------------------------------------

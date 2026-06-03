@@ -45,6 +45,7 @@ from tigerharness.journal.scaffold import (
     COMPILE_PERSONAS,
     extract_persona_refs_from_playbook,
     read_team_roster,
+    resolve_compile_personas,
     resolve_team_root,
     validate_personas,
 )
@@ -151,6 +152,26 @@ def _roster_for_task(
     return []
 
 
+def _compile_personas_for_task(
+    paths: JournalPaths, task_id: str,
+) -> dict[str, str]:
+    """Phase 2: resolve the role -> persona-name mapping for the task's
+    team. Defaults to the Phase 1.5 ``{drafter: Anzai, akagi: Akagi,
+    ayako: Ayako}`` shape when cwd is not a team root.
+
+    Like :func:`_roster_for_task`, this is best-effort -- the team is
+    inferred from the cwd. A Phase 2 nicety would be to persist the
+    team on status.json at scaffold time.
+    """
+    cwd = Path.cwd()
+    if (cwd / "configs" / "personas.yaml").is_file():
+        return resolve_compile_personas(cwd)
+    # Sentinel: when we can't find the team, surface the defaults so
+    # callers always have a usable mapping.
+    from tigerharness.journal.scaffold import _DEFAULT_COMPILE_PERSONAS
+    return dict(_DEFAULT_COMPILE_PERSONAS)
+
+
 # ---------------------------------------------------------------------------
 # compile-context
 # ---------------------------------------------------------------------------
@@ -183,13 +204,20 @@ def cmd_compile_context(args: argparse.Namespace) -> int:
         feedback=None,
     )
 
+    compile_personas = _compile_personas_for_task(paths, status.id)
+
     # Plain-text section dump -- the session reads it as one block.
     print("# compile-context for task", status.id)
     print()
     print("## Task")
     print(f"id: {status.id}")
     print(f"title: {status.title}")
+    print(f"playbook: {status.playbook_name}")
     print(f"compile_phase: {status.compile_phase.value}")
+    print()
+    print("## Compile personas (role -> name)")
+    for role in ("drafter", "akagi", "ayako"):
+        print(f"- {role}: {compile_personas[role]}")
     print()
     print("## Roster")
     if roster:
@@ -715,9 +743,11 @@ def cmd_abort(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_validate_personas(args: argparse.Namespace) -> int:
-    """Pre-flight check: do Anzai/Akagi/Ayako prompts exist under the
-    named team? Exit 0 + "ok" on success; exit 1 + missing list on
-    failure.
+    """Pre-flight check: do the compile-time personas exist on disk for
+    the named team? Resolves the role -> persona mapping from
+    ``teams/<team>/configs/workflow.yaml`` (Phase 2) -- a missing
+    config falls back to the Anzai/Akagi/Ayako default. Exit 0 + "ok"
+    on success; exit 1 + missing list on failure.
 
     Used by the journal-new skill or a CI step to fail FAST before
     scaffolding a workflow that would crash mid-compile.
@@ -729,14 +759,24 @@ def cmd_validate_personas(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    missing = validate_personas(team_root, set(COMPILE_PERSONAS))
+    mapping = resolve_compile_personas(team_root)
+    required = set(mapping.values())
+    missing = validate_personas(team_root, required)
     if missing:
         print(
             f"missing prompt.md for: {sorted(missing)} (under {team_root})",
             file=sys.stderr,
         )
+        # Show the role -> persona mapping so the operator sees how
+        # the missing names map to roles (helpful when the config
+        # overrides the defaults).
+        for role, name in sorted(mapping.items()):
+            marker = " <- MISSING" if name in missing else ""
+            print(f"  {role}: {name}{marker}", file=sys.stderr)
         return 1
-    print(f"ok: {team_root} has all of {sorted(COMPILE_PERSONAS)}")
+    print(f"ok: {team_root} has all of {sorted(required)}")
+    for role, name in sorted(mapping.items()):
+        print(f"  {role}: {name}")
     return 0
 
 

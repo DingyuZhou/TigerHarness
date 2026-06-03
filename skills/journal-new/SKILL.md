@@ -111,11 +111,26 @@ Optional:
   (vs 5 for task mode).
 - `--slug` -- override the slug portion of the task id.
 
-The scaffolder pre-flights the team's compile personas (by default:
-Anzai, Akagi, Ayako -- configurable in
-`teams/<team>/configs/workflow.yaml` under `compile_personas`) AND
+The scaffolder pre-flights the team's compile-time personas AND
 every persona referenced in the playbook prose; it fails fast (exit
 code 2) with a clear error if any prompt is missing.
+
+The compile-time personas play three roles: `drafter` (writes the
+steps bundle), `akagi` (execution-mechanics critic), `ayako` (QA
+critic). The default mapping is `drafter=Anzai`, `akagi=Akagi`,
+`ayako=Ayako`. Teams can override this via
+`teams/<team>/configs/workflow.yaml`:
+
+```yaml
+compile_personas:
+  drafter: Sakuragi      # any persona from configs/personas.yaml
+  akagi:   Rukawa
+  ayako:   Mitsui
+```
+
+Partial overrides are fine -- unset roles fall back to the default.
+Run `tigerharness journal validate-personas <team>` to confirm the
+mapping resolves cleanly before scaffolding.
 
 The actual compile (drafter + critic loop) is **deferred to the
 first `drive-journal` invocation** by design -- the scaffolder does
