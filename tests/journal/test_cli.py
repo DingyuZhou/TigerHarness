@@ -80,15 +80,16 @@ class TestCmdNew:
     def test_unsupported_kind_returns_2(
         self, tmp_path, journal_dir, capsys,
     ):
-        """argparse rejects --kind=workflow because choices=[task] in
-        the parser. The error surfaces on stderr as SystemExit(2)."""
+        """argparse rejects arbitrary --kind values. Phase 1.5 accepts
+        only `task` and `workflow`; anything else exits 2 from argparse
+        with the choices-error on stderr."""
         prd = tmp_path / "b.md"
         prd.write_text("# T\nb\n")
         with pytest.raises(SystemExit) as exc:
             main([
                 "--journal-dir", str(journal_dir),
                 "new", "--prd", str(prd), "--persona", "P",
-                "--kind", "workflow",
+                "--kind", "lab-notebook",
             ])
         assert exc.value.code == 2
 
@@ -121,6 +122,234 @@ class TestCmdNew:
         ])
         assert rc == 2
         assert "persona" in capsys.readouterr().err.lower()
+
+    def test_task_mode_rejects_workflow_only_flags(
+        self, tmp_path, journal_dir, capsys,
+    ):
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd), "--persona", "P",
+            "--playbook", "default",
+        ])
+        assert rc == 2
+        assert "workflow-only" in capsys.readouterr().err
+
+    def test_task_mode_requires_prd(self, journal_dir, capsys):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--persona", "P",
+        ])
+        assert rc == 2
+        assert "--prd is required" in capsys.readouterr().err
+
+    def test_task_mode_requires_persona(self, tmp_path, journal_dir, capsys):
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 2
+        assert "--persona is required" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# new --kind workflow
+# ---------------------------------------------------------------------------
+
+class TestCmdNewWorkflow:
+    """Workflow-mode scaffolder tests. We import the helper that builds a
+    team root + persona prompts from test_workflow_scaffold to stay
+    consistent with the rest of Phase 1.5."""
+
+    @pytest.fixture
+    def team_root(self, tmp_path, monkeypatch):
+        from tests.journal.test_workflow_scaffold import _make_team
+        root = _make_team(tmp_path)
+        monkeypatch.chdir(root)
+        # Drop the playbook in the canonical location.
+        (root / "workflow").mkdir()
+        (root / "workflow" / "default.md").write_text(
+            "# default\n\nAnzai drafts. Akagi reviews. Ayako reviews.\n",
+        )
+        return root
+
+    def test_workflow_happy_path_inline_brief(
+        self, team_root, journal_dir, capsys,
+    ):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--task-brief", "Inline brief body.",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Scaffolded:" in out
+        assert "kind:         workflow" in out
+        assert "captain:      (none)" in out
+        # task_dir landed
+        paths = JournalPaths(root=journal_dir)
+        assert paths.list_active_ids()
+
+    def test_workflow_brief_file(
+        self, tmp_path, team_root, journal_dir, capsys,
+    ):
+        bf = tmp_path / "brief.md"
+        bf.write_text("# Title\nFrom file.\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--brief-file", str(bf),
+            "--captain", "Mitsui",
+        ])
+        assert rc == 0
+        assert "captain:      Mitsui" in capsys.readouterr().out
+
+    def test_workflow_rejects_prd(self, journal_dir, capsys):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--prd", "/some/prd.md",
+        ])
+        assert rc == 2
+        assert "--prd is task-only" in capsys.readouterr().err
+
+    def test_workflow_requires_playbook(self, journal_dir, capsys):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--task-brief", "B",
+        ])
+        assert rc == 2
+        assert "--playbook is required" in capsys.readouterr().err
+
+    def test_workflow_brief_mutually_exclusive(
+        self, tmp_path, journal_dir, capsys,
+    ):
+        bf = tmp_path / "b.md"
+        bf.write_text("x")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--task-brief", "B", "--brief-file", str(bf),
+        ])
+        assert rc == 2
+        assert "mutually exclusive" in capsys.readouterr().err
+
+    def test_workflow_brief_required(self, journal_dir, capsys):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+        ])
+        assert rc == 2
+        assert "--task-brief or --brief-file is required" in \
+            capsys.readouterr().err
+
+    def test_workflow_rejects_persona(self, journal_dir, capsys):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default", "--task-brief", "B",
+            "--persona", "P",
+        ])
+        assert rc == 2
+        assert "--persona is task-only" in capsys.readouterr().err
+
+    def test_workflow_brief_file_not_found(
+        self, journal_dir, team_root, capsys,
+    ):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--brief-file", "/no/such/file.md",
+        ])
+        assert rc == 2
+        assert "brief file not found" in capsys.readouterr().err
+
+    def test_workflow_playbook_not_found(
+        self, journal_dir, team_root, capsys,
+    ):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "no-such-playbook",
+            "--task-brief", "B",
+        ])
+        assert rc == 2
+        assert "playbook no-such-playbook.md not found" in \
+            capsys.readouterr().err
+
+    def test_workflow_missing_persona_returns_2(
+        self, tmp_path, monkeypatch, journal_dir, capsys,
+    ):
+        """If the team is missing one of the compile personas, the pre-flight
+        in new_workflow_task raises MissingPersonaError which the CLI
+        catches separately for a clean exit 2."""
+        from tests.journal.test_workflow_scaffold import _make_team
+        from tigerharness.journal.scaffold import COMPILE_PERSONAS
+        partial = list(COMPILE_PERSONAS)
+        partial.remove("Akagi")
+        root = _make_team(tmp_path, personas=partial)
+        monkeypatch.chdir(root)
+        (root / "workflow").mkdir()
+        (root / "workflow" / "default.md").write_text(
+            "# default\nAnzai drafts.\n",
+        )
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default", "--task-brief", "B",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "missing" in err.lower() and "Akagi" in err
+
+    def test_workflow_scaffold_error_returns_2(
+        self, team_root, journal_dir, capsys,
+    ):
+        """A blank --captain (whitespace-only) -> Status.new_workflow
+        rejects via JournalModelError, which the CLI surfaces."""
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default", "--task-brief", "B",
+            "--captain", "   ",
+        ])
+        assert rc == 2
+        assert "captain" in capsys.readouterr().err.lower()
+
+    def test_workflow_max_sessions_default_is_10(
+        self, team_root, journal_dir, capsys,
+    ):
+        """--max-sessions left at the task default of 5 is treated as
+        'unset' and bumped to 10 for workflow mode."""
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default", "--task-brief", "B",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "max_sessions: 10" in out
+
+    def test_workflow_max_sessions_explicit_passes_through(
+        self, team_root, journal_dir, capsys,
+    ):
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default", "--task-brief", "B",
+            "--max-sessions", "7",
+        ])
+        assert rc == 0
+        assert "max_sessions: 7" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

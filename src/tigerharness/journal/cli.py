@@ -1,9 +1,13 @@
-"""``tigerharness journal`` CLI: ``new`` / ``list`` / ``status`` / ``sweep``.
+"""``tigerharness journal`` CLI: ``new`` / ``list`` / ``status`` / ``sweep``
+plus the Phase 1.5 compile subcommands (``compile-context``,
+``compile-prompts``, ``validate-graph``, ``land-compile``, ``abort``,
+``validate-personas``).
 
 Wired into ``tigerharness journal`` (or ``python -m
 tigerharness.journal``). The driver skill calls ``journal sweep`` as
 its first action -- so a journal-aware non-Claude agent could shell
-out to the same command.
+out to the same command. The compile subcommands are invoked from
+the in-session compile sub-protocol.
 """
 
 from __future__ import annotations
@@ -14,13 +18,20 @@ import json
 import sys
 from pathlib import Path
 
+from tigerharness.journal.compile_cli import build_subparsers as _build_compile_subparsers
 from tigerharness.journal.models import JournalModelError, Status
 from tigerharness.journal.paths import (
     JournalPathError,
     JournalPaths,
     default_journal_root,
 )
-from tigerharness.journal.scaffold import JournalScaffoldError, new_task
+from tigerharness.journal.scaffold import (
+    JournalScaffoldError,
+    MissingPersonaError,
+    new_task,
+    new_workflow_task,
+    resolve_team_root,
+)
 from tigerharness.journal.sweep import (
     DEFAULT_STUCK_TIMEOUT_SEC,
     stuck_timeout_from_env,
@@ -42,12 +53,42 @@ def _paths_from_args(args: argparse.Namespace) -> JournalPaths:
 # ---------------------------------------------------------------------------
 
 def cmd_new(args: argparse.Namespace) -> int:
+    """Scaffold a task or workflow per ``--kind``. The two paths share
+    no logic beyond input reading -- task mode wraps ``new_task``,
+    workflow mode wraps ``new_workflow_task`` (which validates the
+    team's compile-time personas and then writes the brief + playbook
+    snapshot + status.json)."""
+    paths = _paths_from_args(args)
+    if args.kind == "workflow":
+        return _cmd_new_workflow(args, paths)
+    return _cmd_new_task(args, paths)
+
+
+def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
+    if not args.prd:
+        print(
+            "error: --prd is required for --kind task",
+            file=sys.stderr,
+        )
+        return 2
+    if args.playbook or args.task_brief or args.brief_file:
+        print(
+            "error: --playbook / --task-brief / --brief-file are "
+            "workflow-only flags; use --kind workflow",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.persona:
+        print(
+            "error: --persona is required for --kind task",
+            file=sys.stderr,
+        )
+        return 2
     prd_path = Path(args.prd).expanduser()
     if not prd_path.exists():
         print(f"error: PRD not found: {prd_path}", file=sys.stderr)
         return 2
     prd_text = prd_path.read_text(encoding="utf-8")
-    paths = _paths_from_args(args)
     try:
         result = new_task(
             prd_text=prd_text,
@@ -72,6 +113,104 @@ def cmd_new(args: argparse.Namespace) -> int:
     print(
         "Open Claude Code and invoke the `drive-journal` skill to "
         "start working it."
+    )
+    return 0
+
+
+def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
+    """Workflow-mode scaffolder. Validates flags, resolves the team
+    root + playbook path, reads the brief (inline or from file), runs
+    the persona pre-flight, and writes the workflow-mode artifacts."""
+    if args.prd:
+        print(
+            "error: --prd is task-only; for --kind workflow use "
+            "--task-brief or --brief-file",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.playbook:
+        print(
+            "error: --playbook is required for --kind workflow",
+            file=sys.stderr,
+        )
+        return 2
+    if args.task_brief and args.brief_file:
+        print(
+            "error: --task-brief and --brief-file are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.task_brief and not args.brief_file:
+        print(
+            "error: --task-brief or --brief-file is required for "
+            "--kind workflow",
+            file=sys.stderr,
+        )
+        return 2
+    if args.persona:
+        print(
+            "error: --persona is task-only; for --kind workflow use "
+            "--captain (the optional accountable owner)",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Read brief.
+    if args.task_brief:
+        brief_text = args.task_brief
+    else:
+        brief_path = Path(args.brief_file).expanduser()
+        if not brief_path.exists():
+            print(
+                f"error: brief file not found: {brief_path}",
+                file=sys.stderr,
+            )
+            return 2
+        brief_text = brief_path.read_text(encoding="utf-8")
+
+    # Resolve team + playbook.
+    team_root = resolve_team_root(args.team)
+    playbook_path = team_root / "workflow" / f"{args.playbook}.md"
+    if not playbook_path.is_file():
+        print(
+            f"error: playbook {args.playbook}.md not found under "
+            f"{team_root / 'workflow'}/ (looked for {playbook_path})",
+            file=sys.stderr,
+        )
+        return 2
+    playbook_text = playbook_path.read_text(encoding="utf-8")
+
+    try:
+        result = new_workflow_task(
+            brief_text=brief_text,
+            playbook_text=playbook_text,
+            playbook_name=args.playbook,
+            team_root=team_root,
+            paths=paths,
+            title=args.title,
+            captain=args.captain,
+            max_sessions=args.max_sessions if args.max_sessions != 5 else 10,
+            slug=args.slug,
+        )
+    except MissingPersonaError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (JournalScaffoldError, JournalModelError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Scaffolded: {result.task_id}")
+    print(f"  title:        {result.status.title}")
+    print(f"  kind:         {result.status.kind}")
+    print(f"  captain:      {result.status.persona or '(none)'}")
+    print(f"  playbook:     {args.playbook}")
+    print(f"  team_root:    {team_root}")
+    print(f"  max_sessions: {result.status.max_sessions}")
+    print(f"  task_dir:     {result.task_dir}")
+    print()
+    print(
+        "Open Claude Code and invoke the `drive-journal` skill to "
+        "start the compile + walk."
     )
     return 0
 
@@ -236,18 +375,81 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    n = sub.add_parser("new", help="Scaffold a new task from a PRD.")
-    n.add_argument(
-        "--prd", required=True,
-        help="Path to the PRD / brief markdown file.",
+    n = sub.add_parser(
+        "new",
+        help=(
+            "Scaffold a new task or workflow. Use --kind task (default) "
+            "with --prd + --persona for task mode, OR --kind workflow "
+            "with --playbook + --task-brief/--brief-file for workflow "
+            "mode."
+        ),
     )
     n.add_argument(
-        "--persona", required=True,
-        help="The persona this task is assigned to.",
+        "--kind", default="task", choices=["task", "workflow"],
+        help=(
+            "Task mode (single persona, free-form PRD) or workflow mode "
+            "(multi-persona, compiled from a team playbook). Default: "
+            "task."
+        ),
     )
+    # Task-mode flags
+    n.add_argument(
+        "--prd", default="",
+        help=(
+            "Path to the PRD / brief markdown file. Required for "
+            "--kind task; forbidden for --kind workflow."
+        ),
+    )
+    n.add_argument(
+        "--persona", default="",
+        help=(
+            "The persona this task is assigned to. Required for "
+            "--kind task; forbidden for --kind workflow (use --captain "
+            "instead)."
+        ),
+    )
+    # Workflow-mode flags
+    n.add_argument(
+        "--playbook", default="",
+        help=(
+            "Bare playbook name (resolves to "
+            "teams/<team>/workflow/<name>.md). Required for "
+            "--kind workflow."
+        ),
+    )
+    n.add_argument(
+        "--team", default="Shohoku",
+        help=(
+            "Team whose playbook + persona registry to use. Default: "
+            "Shohoku. (Workflow mode only.)"
+        ),
+    )
+    n.add_argument(
+        "--task-brief", default="",
+        help=(
+            "Inline brief text for --kind workflow; mutually exclusive "
+            "with --brief-file."
+        ),
+    )
+    n.add_argument(
+        "--brief-file", default="",
+        help=(
+            "Path to a brief markdown file for --kind workflow; "
+            "mutually exclusive with --task-brief."
+        ),
+    )
+    n.add_argument(
+        "--captain", default=None,
+        help=(
+            "Optional accountable owner shown in `journal list`. "
+            "Workflow mode only -- per-step personas come from the "
+            "compiled graph. May be omitted for a no-captain workflow."
+        ),
+    )
+    # Common flags
     n.add_argument(
         "--title", default="",
-        help="Human label. Defaults to the first H1 of the PRD.",
+        help="Human label. Defaults to the first H1 of the brief/PRD.",
     )
     n.add_argument(
         "--slug", default="",
@@ -257,12 +459,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     n.add_argument(
-        "--kind", default="task", choices=["task"],
-        help="Phase 1 only accepts kind=task.",
-    )
-    n.add_argument(
         "--max-sessions", type=int, default=5,
-        help="Soft ceiling on drive-journal invocations. Default 5.",
+        help=(
+            "Soft ceiling on drive-journal invocations. Default 5 for "
+            "task mode and 10 for workflow mode (the workflow default "
+            "applies when --max-sessions is left at 5)."
+        ),
     )
     n.set_defaults(func=cmd_new)
 
@@ -295,6 +497,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sw.set_defaults(func=cmd_sweep)
+
+    _build_compile_subparsers(sub)
 
     return p
 
