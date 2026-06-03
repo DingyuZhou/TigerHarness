@@ -1,7 +1,7 @@
-"""``new_task``: create a fresh journal task from a PRD.
+"""Scaffolders for both journal task kinds: ``new_task`` (task mode,
+Phase 1) and ``new_workflow_task`` (workflow mode, Phase 1.5).
 
-Called by the ``tigerharness journal new`` CLI and the ``journal-new``
-skill. Produces:
+Task-mode scaffolder produces:
 
 - ``active/<task-id>/task.md`` -- the PRD content verbatim.
 - ``active/<task-id>/status.json`` -- the seeded ``Status`` in
@@ -11,8 +11,26 @@ skill. Produces:
 - ``active/<task-id>/artifacts/`` -- empty subdirectory the task can
   fill at will.
 
-Also lands ``OPERATING.md`` at the journal root on first use so the
-driver can read the vendor-neutral protocol.
+Workflow-mode scaffolder additionally produces:
+
+- ``active/<task-id>/task_brief.md`` -- the brief content verbatim
+  (the workflow-runner convention; replaces task.md for workflow tasks).
+- ``active/<task-id>/playbook_snapshot.md`` -- the playbook content
+  verbatim, frozen at scaffold time so an in-flight compile is not
+  perturbed by a later edit to the team's playbook source.
+- ``active/<task-id>/status.json`` with ``kind=workflow``,
+  ``compile_pending=true``, ``compile_phase="pending"``.
+
+The workflow scaffolder does NOT call any LLM (Option C: compile is
+deferred to the first ``drive-journal`` invocation). It DOES do
+synchronous persona validation: Anzai, Akagi, Ayako must exist in
+``teams/<team>/personas/<name>/prompt.md`` (these are the three
+compile-time personas), and every persona name regex-extracted from
+the playbook must also exist. Failure exits before any journal
+artifact is written.
+
+Both scaffolders land ``OPERATING.md`` at the journal root on first
+use so the driver can read the vendor-neutral protocol.
 """
 
 from __future__ import annotations
@@ -29,10 +47,48 @@ from tigerharness.journal.operating_template import OPERATING_MD
 from tigerharness.journal.paths import JournalPaths
 
 
+# The three personas the in-session compile sub-protocol adopts (Anzai
+# for the drafter turn, Akagi for the execution-critic lens, Ayako for
+# the QA-critic lens). Hard-coded for Phase 1.5 per Operator's Open
+# Question #6 lean ("configurable is Phase 2").
+COMPILE_PERSONAS: tuple[str, ...] = ("Anzai", "Akagi", "Ayako")
+
+# Regex pattern for a playbook name (mirrors workflow_runner.cli's
+# _PLAYBOOK_NAME_RE): bare name, no path separators, conservative
+# charset. Lets us reject ``--playbook ../../etc`` at CLI time.
+_PLAYBOOK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Regex used to best-effort extract referenced persona names from a
+# playbook source. Matches a leading-capital alphabetic word that is
+# at least 3 characters long; not perfect, but catches the common
+# case (the playbook says "Mitsui will handle ..." somewhere).
+_PERSONA_REF_RE = re.compile(r"\b[A-Z][a-zA-Z]{2,}\b")
+
+
 class JournalScaffoldError(ValueError):
     """Raised when the scaffolder cannot create a task (collision after
     retry, unreadable PRD, ...). Distinct from generic ValueError so
     callers can pattern-match the journal layer specifically."""
+
+
+class MissingPersonaError(JournalScaffoldError):
+    """Raised when the workflow scaffolder cannot find one or more
+    required personas on disk. Carries the missing list so the CLI can
+    surface a clear error.
+
+    Workflow compile requires Anzai/Akagi/Ayako at minimum; the user's
+    playbook may name additional personas, all of which are validated
+    at scaffold time so a bad playbook does not consume any compile
+    budget."""
+
+    def __init__(self, team_root: Path, missing: list[str]) -> None:
+        super().__init__(
+            f"workflow compile requires personas {sorted(missing)}; "
+            f"team root {team_root} is missing prompt.md for: "
+            f"{sorted(missing)}"
+        )
+        self.team_root = team_root
+        self.missing = list(missing)
 
 
 @dataclass(frozen=True)
@@ -180,6 +236,242 @@ def new_task(
     # exist before any drive-journal session reads it.
     _ensure_operating_md(paths)
     # Finally: the status.json that makes the task visible to the sweep.
+    _write_atomic(paths.status_json(task_id), status.to_json())
+
+    return ScaffoldResult(task_id=task_id, task_dir=task_dir, status=status)
+
+
+# ---------------------------------------------------------------------------
+# Workflow-mode scaffolder (Phase 1.5)
+# ---------------------------------------------------------------------------
+
+def resolve_team_root(team: str) -> Path:
+    """Resolve the on-disk team root for ``team``.
+
+    Resolution order mirrors ``workflow_runner.cli._resolve_team_root``
+    so the two backends locate the same directory:
+
+    1. ``$TIGERHARNESS_TEAMS_DIR/<team>`` if the env var is set --
+       the explicit override (and the test seam).
+    2. ``<cwd>`` if cwd is itself a team root
+       (``configs/personas.yaml`` present): the "run from inside the
+       team folder" convention.
+    3. ``<cwd>/teams/<team>`` otherwise -- the documented layout.
+
+    Returns a Path; does NOT verify the directory exists (the caller's
+    persona validation does that).
+    """
+    override = os.environ.get("TIGERHARNESS_TEAMS_DIR", "").strip()
+    if override:
+        return Path(override) / team
+    cwd = Path.cwd()
+    if (cwd / "configs" / "personas.yaml").is_file():
+        return cwd
+    return cwd / "teams" / team
+
+
+def extract_persona_refs_from_playbook(text: str) -> set[str]:
+    """Best-effort extraction of capitalized-word candidates that
+    *might* be persona references in the playbook.
+
+    Greedy: anything matching ``[A-Z][a-zA-Z]{2,}`` is returned. The
+    actual persona-ref set is the *intersection* of this candidate set
+    with the team's roster (from ``personas.yaml``) -- a capitalized
+    word that isn't a registered persona is treated as English prose,
+    not a typo. See :func:`_required_workflow_personas` for the
+    intersection logic.
+
+    Used by the workflow scaffolder to enforce the "every persona
+    named in the playbook must exist on disk" guarantee at scaffold
+    time, so a real typo surfaces immediately rather than from a
+    Tier 1 roster error mid-compile.
+    """
+    return set(_PERSONA_REF_RE.findall(text))
+
+
+def read_team_roster(team_root: Path) -> set[str]:
+    """Read the team's persona roster from
+    ``<team_root>/configs/personas.yaml``. Returns the set of canonical
+    persona names. An unreadable or malformed config returns an empty
+    set -- the scaffolder's COMPILE_PERSONAS gate still fires.
+
+    The yaml shape is the same as ``task_runner.personas.load_personas_config``:
+    a top-level ``personas:`` list whose entries each have a ``name``
+    field.
+    """
+    yaml_path = team_root / "configs" / "personas.yaml"
+    if not yaml_path.is_file():
+        return set()
+    try:
+        import yaml
+        with yaml_path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except (OSError, ImportError, Exception):  # pragma: no cover - defensive
+        # yaml may be unavailable in a stripped install; we'd rather
+        # let the COMPILE_PERSONAS check fire on missing prompt.md
+        # than crash at scaffold time on a malformed yaml.
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    entries = data.get("personas") or []
+    out: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name.strip():
+            out.add(name.strip())
+    return out
+
+
+def _required_workflow_personas(
+    playbook_text: str, team_root: Path,
+) -> set[str]:
+    """The set of personas the workflow scaffolder requires on disk:
+    the hard-coded compile trio PLUS any playbook reference that
+    matches the team's roster. Candidates the playbook mentions but
+    that aren't in the roster are treated as English prose, not
+    persona typos."""
+    candidates = extract_persona_refs_from_playbook(playbook_text)
+    roster = read_team_roster(team_root)
+    real_refs = candidates & roster
+    return set(COMPILE_PERSONAS) | real_refs
+
+
+def _persona_prompt_path(team_root: Path, persona: str) -> Path:
+    """Path to a persona's ``prompt.md``. Used by the validator."""
+    return team_root / "personas" / persona / "prompt.md"
+
+
+def validate_personas(team_root: Path, required: set[str]) -> list[str]:
+    """Return the subset of ``required`` whose ``prompt.md`` is missing
+    or empty under ``team_root/personas/<name>/``. Empty list means
+    all are present. Does NOT raise -- the caller decides how to
+    handle the result (the scaffolder raises ``MissingPersonaError``;
+    a CLI ``validate-personas`` subcommand just prints)."""
+    missing: list[str] = []
+    for name in sorted(required):
+        prompt = _persona_prompt_path(team_root, name)
+        try:
+            if not prompt.is_file():
+                missing.append(name)
+                continue
+            if prompt.stat().st_size == 0:
+                missing.append(name)
+        except OSError:
+            missing.append(name)
+    return missing
+
+
+def new_workflow_task(
+    *,
+    brief_text: str,
+    playbook_text: str,
+    playbook_name: str,
+    team_root: Path,
+    paths: JournalPaths,
+    title: str | None = None,
+    captain: str | None = None,
+    max_sessions: int = 10,
+    slug: str | None = None,
+) -> ScaffoldResult:
+    """Scaffold a new ``kind=workflow`` task. No LLM calls -- the
+    compile pipeline is deferred to the first ``drive-journal``
+    invocation per Option C.
+
+    Workflow:
+
+    1. Validate ``playbook_name`` against ``_PLAYBOOK_NAME_RE`` (the
+       caller is expected to have already resolved + read the playbook
+       file; the name is carried separately for the
+       ``orchestration.playbook`` field a future compile will set).
+    2. Derive title from ``--title`` arg, else first H1 of the brief,
+       else fall back to ``"workflow"``.
+    3. Validate every required persona exists on disk under the team
+       root: the hard-coded compile trio (Anzai/Akagi/Ayako) plus the
+       playbook-extracted references. Raise ``MissingPersonaError``
+       on any miss -- no journal artifact is written.
+    4. Mint a task-id; collision-check both ``active/`` and ``done/``.
+    5. Build a fresh ``Status`` via ``Status.new_workflow``.
+    6. Write the task dir + ``task_brief.md`` + ``playbook_snapshot.md``
+       + ``progress.md`` + ``artifacts/`` + ``OPERATING.md`` on first
+       use. ``status.json`` lands LAST per the Phase 1 write-order
+       invariant (sweep's visibility gate is ``status.json``
+       existence).
+    """
+    if not brief_text.strip():
+        raise JournalScaffoldError(
+            "brief is empty; nothing to scaffold"
+        )
+    if not playbook_text.strip():
+        raise JournalScaffoldError(
+            "playbook is empty; nothing to scaffold"
+        )
+    if not _PLAYBOOK_NAME_RE.match(playbook_name):
+        raise JournalScaffoldError(
+            f"playbook name {playbook_name!r} must match "
+            f"[A-Za-z0-9][A-Za-z0-9._-]* (no path separators)"
+        )
+
+    # Validate personas BEFORE creating any artifact. A scaffold that
+    # mints a task dir and then fails on persona validation would
+    # leave a half-built workflow on disk -- not the contract.
+    required = _required_workflow_personas(playbook_text, team_root)
+    missing = validate_personas(team_root, required)
+    if missing:
+        raise MissingPersonaError(team_root=team_root, missing=missing)
+
+    paths.ensure()
+
+    effective_title = (
+        (title or "").strip()
+        or _first_h1(brief_text)
+        or "workflow"
+    )
+
+    def _exists(candidate: str) -> bool:
+        return (
+            paths.task_exists(candidate, archived=False)
+            or paths.task_exists(candidate, archived=True)
+        )
+
+    try:
+        task_id = new_task_id(
+            effective_title,
+            slug_overrider=(slug.strip() if slug else None),
+            exists_check=_exists,
+        )
+    except JournalIdError as exc:
+        raise JournalScaffoldError(
+            f"could not mint a task id: {exc}"
+        ) from exc
+
+    try:
+        status = Status.new_workflow(
+            id=task_id,
+            title=effective_title,
+            captain=captain,
+            max_sessions=max_sessions,
+        )
+    except JournalModelError as exc:
+        raise JournalScaffoldError(
+            f"could not build status.json: {exc}"
+        ) from exc
+
+    task_dir = paths.task_dir(task_id)
+    task_dir.mkdir(parents=True, exist_ok=True)
+    paths.artifacts(task_id).mkdir(parents=True, exist_ok=True)
+
+    # Write order: brief + playbook snapshot + progress + OPERATING
+    # all land before status.json (the visibility gate). Same invariant
+    # as Phase 1 -- a SIGKILL between writes never leaves a half-built
+    # workflow task visible to the sweep.
+    _write_atomic(task_dir / "task_brief.md", brief_text)
+    _write_atomic(task_dir / "playbook_snapshot.md", playbook_text)
+    paths.progress_md(task_id).write_text(
+        f"# Progress: {task_id}\n\n", encoding="utf-8",
+    )
+    _ensure_operating_md(paths)
     _write_atomic(paths.status_json(task_id), status.to_json())
 
     return ScaffoldResult(task_id=task_id, task_dir=task_dir, status=status)
