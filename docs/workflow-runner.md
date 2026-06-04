@@ -2,14 +2,20 @@
 
 Team workflow orchestration for multi-persona tasks.
 
-> **Status:** Phase 1 shipped. The sequential executor, per-persona
-> sessions, persona-trailer parser, and the
-> `start`/`show`/`list`/`tail`/`cancel` CLI are implemented and tested
-> (`workflow start` runs a pre-compiled playbook to a terminal phase).
-> The compile phase (freestyle playbook → step files), the human gate,
-> and parallelism are **Phase 2+ and remain design-only** below. This
-> document is the source of truth for the design; sections describing
-> unimplemented phases say so inline.
+> **Status:** Phase 1 + the Phase 2 compile pipeline shipped.
+> Implemented and tested: the sequential executor, per-persona sessions,
+> the persona-trailer parser, the compile pipeline (freestyle playbook →
+> step files, under `workflow_runner/compile/`), and the
+> `start`/`show`/`list`/`tail`/`cancel` CLI (`workflow start` compiles a
+> playbook and/or runs pre-compiled steps to a terminal phase). Two
+> caveats: the **human gate is announce-only** — it emits
+> `human_gate_requested` but does not block, and was later **retired**
+> for the subscription model (see
+> [`journal-workflow-mode.md`](journal-workflow-mode.md)); and
+> **parallelism (`parallel_with`) remains design-only.** This document is
+> the source of truth for the design; sections describing unimplemented
+> surfaces (`resume`/`approve`/`validate`/`sweep`/`diagnose`,
+> parallelism) say so inline.
 
 ## What it does
 
