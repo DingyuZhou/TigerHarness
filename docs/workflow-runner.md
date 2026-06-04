@@ -353,7 +353,7 @@ internals and the Phase 3 human-gate resolution will add:
 {"ts":"...","kind":"human_gate_passed","by":"operator"}
 ```
 
-A `tigerharness workflow tail <task-id>` CLI renders this
+A `workflow tail <task-id>` CLI renders this
 human-friendly (similar to `task_runner logs`).
 
 ## Persona response trailer protocol
@@ -571,7 +571,7 @@ phrases like:
 The skill is a thin wrapper around the CLI:
 
 ```bash
-tigerharness workflow start \
+workflow start \
     --team Shohoku \
     --playbook default \
     --task-brief "<verbatim user request>" \
@@ -581,12 +581,12 @@ tigerharness workflow start \
 Other skill commands:
 
 ```bash
-tigerharness workflow list                  # list active tasks
-tigerharness workflow show <task-id>        # current status
-tigerharness workflow tail <task-id> -f     # follow events.jsonl
-tigerharness workflow cancel <task-id>      # graceful stop
-tigerharness workflow resume <task-id>      # after a pause
-tigerharness workflow approve <task-id>     # pass the human gate
+workflow list                  # list active tasks
+workflow show <task-id>        # current status
+workflow tail <task-id> -f     # follow events.jsonl
+workflow cancel <task-id>      # graceful stop
+workflow resume <task-id>      # after a pause
+workflow approve <task-id>     # pass the human gate
 ```
 
 ## Sweep & diagnose — caring for in-flight tasks
@@ -645,7 +645,7 @@ Output structure (when `--json`):
     "diagnosis": "process_dead_no_completion",
     "details": "Step started 1h ago; no step_completed or step_failed event; no claude pid visible in process tree; stale lock from pid 12345.",
     "recommended_action": "resume",
-    "recommended_command": "tigerharness workflow resume 20260528-7f2a9c14"
+    "recommended_command": "workflow resume 20260528-7f2a9c14"
 }
 ```
 
@@ -712,7 +712,14 @@ The orchestrator owns all status / event writes. Tightening this
 with hook-based blocks on `Edit` against status/event paths is a
 TODO for Phase 1.
 
-## CLI surface (`tigerharness workflow ...`)
+## CLI surface (`workflow ...`)
+
+Invoke via the `workflow` console script (or `python -m
+tigerharness.workflow_runner`). **There is no `tigerharness workflow`
+subcommand** — `workflow` is its own entry point (see `pyproject.toml`
+`[project.scripts]`).
+
+Implemented (Phase 1 — the shipped parser):
 
 ```
 workflow start    --team <T> --playbook <name> (--task-brief <text> | --brief-file <p>) [--thread <ts>] [--no-run]
@@ -721,17 +728,24 @@ workflow list     [--team <T>] [--status <s>]
 workflow show     <task-id-or-prefix>
 workflow tail     <task-id-or-prefix> [-f]
 workflow cancel   <task-id-or-prefix>
-workflow resume   <task-id-or-prefix>
-workflow approve  <task-id-or-prefix>     # passes human gate
-workflow validate <playbook-path>         # standalone Tier 1 dry-run
+```
+
+Design-only — **not** in the shipped parser:
+
+```
+workflow resume   <task-id-or-prefix>             # Phase 3+ design
+workflow approve  <task-id-or-prefix>             # human gate (retired -- see note)
+workflow validate <playbook-path>                 # standalone Tier 1 dry-run
 workflow sweep    [--team <T>] [--stale-after DUR] [--auto-diagnose] [--auto-resume]
 workflow diagnose <task-id-or-prefix> [--json] [--llm-fallback]
 ```
 
-`workflow validate` lets a playbook author dry-run their prose
-against the validator suite before letting it loose on a real task.
-`workflow sweep` and `workflow diagnose` back the eponymous skills
-(see "Sweep & diagnose" above).
+`resume`/`approve`/`validate`/`sweep`/`diagnose` are described below as
+design but are not implemented; the shipped CLI is
+`start`/`show`/`list`/`tail`/`cancel` only. The human gate (`approve`)
+was **retired** for the subscription model — see
+[`journal-workflow-mode.md`](journal-workflow-mode.md). Tier 1
+validation is available today via `tigerharness journal validate-graph`.
 
 ### Operating: `--playbook` + `--task-brief`
 
