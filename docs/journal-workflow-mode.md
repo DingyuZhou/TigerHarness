@@ -159,10 +159,10 @@ branches into OPERATING.md's `## Compile sub-protocol` section
    session.
 3. **Drafter turn (Anzai).** Adopt Anzai per the uniform persona
    adoption preamble (see "Persona switching" below), draft the step
-   bundle into `compile/draft.json` (the working draft). Emit the
+   bundle and save it to `compile/round-NN-draft.md`. Emit the
    `WORKFLOW:` trailer; bump heartbeat.
 4. **Tier 1 gate.** Shell to `tigerharness journal validate-graph
-   --task <id> --draft compile/draft.json`. Exits 0 with the dry-run
+   --task <id> --draft compile/round-NN-draft.md`. Exits 0 with the dry-run
    trace on stdout, or 1 with a JSON error list. On error, return to
    step 3 with the errors as drafter feedback. Consecutive Tier 1
    failures count against `max_compile_iters` (default 8);
@@ -172,15 +172,15 @@ branches into OPERATING.md's `## Compile sub-protocol` section
    parallelism in the api pipeline), the session adopts each critic
    in turn, reads the critic prompt via `compile-prompts --kind
    {akagi,ayako}`, emits a `WORKFLOW: APPROVE` or `WORKFLOW: REVISE:
-   <reasons>` trailer. After both verdicts land, write
-   `compile/round-NN.json` atomically and bump heartbeat. *This is
-   the recovery primitive.*
+   <reasons>` trailer. Each critic turn is saved to
+   `compile/round-NN-akagi.md` / `compile/round-NN-ayako.md`; bump
+   heartbeat. *These per-turn files are the recovery primitive.*
 6. **Loop.** If both APPROVE *and* `round_num >= 3`, advance to
    step 7 (land). If both APPROVE but `round_num < 3`, force another
    round (matches `critique.py`'s hard-floor invariant). Otherwise
    merge REVISE feedback and return to step 3.
 7. **Land.** Shell to `tigerharness journal land-compile --task <id>
-   --draft compile/draft.json --transcript compile/transcript.md
+   --draft compile/round-NN-draft.md --transcript compile/transcript.md
    --rounds <N>`. The CLI re-runs Tier 1 as defence-in-depth, builds
    the `Orchestration` object, writes step files +
    `orchestration.json` + `compile_critique.md` to
@@ -240,11 +240,11 @@ active/<task-id>/
   progress.md             # one entry on land or failure (no per-round noise)
 
   compile/                # IN-FLIGHT scratch -- driver never reads it post-land
-    draft.json            # current working StepFrontmatter list
-                          # (overwritten each successful re-draft)
-    round-01.json         # immutable per-round audit: drafter_output,
-    round-02.json         # akagi_verdict, akagi_reasons,
-    ...                   # ayako_verdict, ayako_reasons, timestamp
+    round-01-draft.md     # drafter bundle for round 1 (StepFrontmatter list)
+    round-01-akagi.md     # Akagi critic turn for round 1
+    round-01-ayako.md     # Ayako critic turn for round 1
+    round-02-draft.md     # round 2 ...
+    ...                   # (per-turn markdown; highest round = latest)
     transcript.md         # human-readable running transcript
     final/                # staging area built just before land
       orchestration.json
@@ -305,15 +305,15 @@ Recoverable to next-round granularity. The heartbeat ages out via
 the standard Phase 1 `stuck_timeout`; the next `drive-journal` sweep
 classifies the task as stale `in_progress` and a future session
 rescues it. The rescuing session reads `compile_phase` and the
-highest-numbered `round-NN.json` to find the resume point. Per-phase
+highest-numbered `round-NN-*.md` to find the resume point. Per-phase
 resume rules:
 
 | `compile_phase` | Recovery action |
 |---|---|
-| `drafting` | Re-run drafter; `draft.json` is the prior attempt (may not exist on first interrupt). |
-| `tier1_pre` | Read `draft.json`; run `validate-graph`; continue. |
-| `critiquing` | Read `draft.json` + highest `round-NN.json`; resume at round N+1. The in-flight round (if any partial verdicts exist) is restarted from the drafter turn — critic verdicts are stateless given the same draft. |
-| `tier1_post` | Read `draft.json`; run final `validate-graph` + `land-compile`. |
+| `drafting` | Re-run drafter; the latest `round-NN-draft.md` is the prior attempt (may not exist on first interrupt). |
+| `tier1_pre` | Read the latest `round-NN-draft.md`; run `validate-graph`; continue. |
+| `critiquing` | Read the latest `round-NN-draft.md` + the highest round's `round-NN-akagi.md`/`round-NN-ayako.md`; resume at round N+1. The in-flight round (if any partial verdicts exist) is restarted from the drafter turn — critic verdicts are stateless given the same draft. |
+| `tier1_post` | Read the latest `round-NN-draft.md`; run final `validate-graph` + `land-compile`. |
 
 The hard floor (`rounds >= 3`) still applies after recovery: a
 rescuing session that finds 2 completed rounds runs at least one
@@ -374,7 +374,7 @@ The brief + playbook snapshot are preserved across retries so the
 human can use the audit trail to decide whether to retry vs. edit
 vs. archive.
 
-## CLI surface (new in Phase 1.5)
+## CLI surface (compile-side)
 
 All new CLIs are pure Python (no LLM calls). The interactive session
 shells out to them between turns:
@@ -383,12 +383,14 @@ shells out to them between turns:
 |---|---|
 | `tigerharness journal new --kind workflow --playbook <name> --task-brief <text>\|--brief-file <path>` | Scaffold-time only. Writes brief + playbook snapshot + `status.json` (`compile_pending=true`). |
 | `tigerharness journal compile-context <task-id>` | Prints playbook + brief + roster + drafter prompt. One-shot context bootstrap for the session. |
-| `tigerharness journal compile-prompts --task <id> --kind {drafter\|akagi\|ayako} [--feedback <str>] [--draft <path>] [--trace <path>]` | Prints the assembled prompt for the requested role, pulling text from `workflow_runner.compile.{drafter,critique}` with all interpolations applied. |
+| `tigerharness journal compile-prompts --task <id> --kind {drafter\|akagi\|ayako} [--feedback <str>] [--draft <path>] [--trace <path>]` | Prints the assembled prompt for the requested role, pulling text from `workflow_runner.compile.{drafter,critique}` with all interpolations applied. For `--kind {akagi,ayako}`, `--draft` and `--trace` are **required** (exit 2 otherwise); for `drafter` they're unused. |
 | `tigerharness journal validate-graph --task <id> --draft <path>` | Runs `validate_compile_output` on the draft; emits JSON `{ok, errors, trace}`. Exit 0/1. |
 | `tigerharness journal land-compile --task <id> --draft <path> --transcript <path> --rounds <N>` | Atomic transition: re-runs Tier 1, builds `Orchestration`, writes step files + `orchestration.json` + `compile_critique.md` to `compile/final/`, promotes via `os.replace`, flips `compile_pending=false` + `compile_phase=complete` last. |
 | `tigerharness journal compile-fail <task-id> --reason <str>` | Soft compile failure: sets `state=blocked` + `compile_phase=failed`, writes `--reason` as `next_action`, leaves the task in `active/` for human inspection. The driver invokes this on a `WORKFLOW: BLOCK` critic verdict or on cap exhaustion. |
 | `tigerharness journal abort <task-id>` | Final cleanup: archives a (typically already-failed) task to `done/` with `state=done` + postmortem `next_action`; preserves `compile/` for forensics. |
 | `tigerharness journal validate-personas <team>` | Pre-flight check; exit 0 if Anzai/Akagi/Ayako prompts all exist, non-zero with missing list otherwise. |
+| `tigerharness journal compile-retry <task-id>` | *(Phase 2)* Reset a compile-failed task — wipes `compile/`, sets `state=pending` + `compile_pending=true` — so the next `drive-journal` retries the compile from scratch. |
+| `tigerharness journal append-steps --task <id> --new-bundle <path>` | *(Phase 3)* Append new step(s) to an already-landed graph; re-runs Tier 1 over the combined graph, atomic on success. See the step-append sub-protocol. |
 
 The CLI names are pinned by OPERATING.md landmark assertions so a
 rename in code without updating prose is caught by CI.
@@ -418,6 +420,8 @@ compiled yet), so the static default shipped instead (see
 `journal/models.py`). Override with `--max-sessions N`.
 
 ## Test strategy
+
+> **Design history — Phase 1.5 planning; superseded by the shipped implementation.** Kept for provenance, not a description of current behavior.
 
 Phase 1.5 keeps Phase 1's discipline: 100% line+branch on new
 Python, no live LLM in CI, no `claude -p` subprocess. The Option C
@@ -457,6 +461,8 @@ the Phase 1.5 PR review (mirrors Phase 1's manual-verify discipline).
 
 ## Implementation plan (Option C)
 
+> **Design history — Phase 1.5 planning; superseded by the shipped implementation.** Kept for provenance, not a description of current behavior.
+
 | Piece | LOC est | Notes |
 |---|---|---|
 | Model layer (`models.py`) | ~50 | Relax `kind` enum; add `compile_pending` + `compile_phase` fields with strict validation. Update tests. |
@@ -475,6 +481,8 @@ recovery paths are non-obvious; the test budget is large but
 tractable because every load-bearing decision is in a Python CLI).
 
 ## Migration
+
+> **Design history — Phase 1.5 planning; superseded by the shipped implementation.** Kept for provenance, not a description of current behavior.
 
 **None.** Existing `workflow_runner` task journals under
 `~/.local/state/tigerharness-workflows/` and `task_runner` jobs under
@@ -540,6 +548,8 @@ Deferred to a later phase if and when needed:
   workflow-runner step-frontmatter validation.
 
 ## Open questions for the Operator (Phase 1.5-specific)
+
+> **Design history — these were resolved during the Phase 1.5 build (the doc shipped).** Kept for provenance; the "leans" described below were adopted unless a later doc says otherwise.
 
 Seven questions the design refinement surfaced; my lean on each
 follows. Defaults below apply unless you flip them:
