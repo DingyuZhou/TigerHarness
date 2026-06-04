@@ -1,10 +1,28 @@
 # ADR 0002 — workflow-runner Phase 2 (compile + step-append + skill + guardrail)
 
-- **Status:** Accepted (design phase; implementation pending).
+- **Status:** Accepted — implemented (see *Status update* below).
 - **Date:** 2026-05-31.
 - **Decision-makers:** Operator + Anzai.
 - **Thread:** Claude Code session 2026-05-31 (Operator ↔ Anzai), following
   the Phase 1 audit + adversarial re-verification.
+
+> **Status update — 2026-06-04.** D1–D12 shipped: the
+> `workflow_runner.compile/` sub-package, the Tier 1 / Tier 2 split, the
+> hard floor of 3 critique rounds, the two-critic loop, the
+> `--playbook`/`--steps` flag rules, and compile-cost roll-up are all in
+> the code. Two deviations from this record are worth flagging:
+> - **D9 (human gate) was retired, not deferred.** The Phase-3
+>   enforcement this decision left a clean integration point for "does
+>   not port to the subscription model" and has been struck from the
+>   roadmap — see
+>   [`docs/journal-workflow-mode.md`](../journal-workflow-mode.md). The
+>   anticipated ADR 0003 will not arrive in that form.
+> - **D5 (runtime step-append) shipped in the journal backend** as
+>   `tigerharness journal append-steps`, not as
+>   `workflow_runner.compile.append_steps`. The Tier-1-only
+>   re-validation contract is honored; only the module home changed.
+>
+> The decisions below are left intact as the original record.
 
 ## Context
 
