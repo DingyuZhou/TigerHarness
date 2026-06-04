@@ -366,7 +366,7 @@ Logs gain a `lane=<name>` field so you can grep per team:
 Each lane needs its own Slack app:
 
 1. https://api.slack.com/apps → **Create New App** → **From manifest**.
-2. Reuse the manifest at [`services/slack-bridge.manifest.yml`](../services/slack-bridge.manifest.yml) if present, or copy the structure: enable Socket Mode, subscribe to `message.im` + `app_mention`, scopes `chat:write`, `files:read`, `im:history`, `im:write`, `app_mentions:read`.
+2. Configure the app manifest: enable Socket Mode, subscribe to `message.im` + `app_mention`, scopes `chat:write`, `files:read`, `im:history`, `im:write`, `app_mentions:read`.
 3. Install to your workspace → grab `xapp-` (App-Level Token) + `xoxb-` (Bot User OAuth Token).
 4. Drop them into `teams/<team>/configs/.env`.
 5. Fill in the `allowed_user_ids` placeholder in `teams/<team>/configs/slack-bridge.yaml`.
