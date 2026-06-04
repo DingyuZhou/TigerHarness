@@ -1643,6 +1643,155 @@ class TestMain:
         assert "Nothing to do" in capsys.readouterr().out
 
 
+class TestRefreshSkills:
+    """`tigerharness init --refresh-skills` copies any
+    newly-bundled SKILL.md files into the team's `.claude/skills/`
+    without trying to create / touch personas. Idempotent: existing
+    skill files are left alone."""
+
+    def test_installs_missing_bundled_skills(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        # First scaffold a team via --yes (this copies whatever skills
+        # were bundled at that moment).
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        team_dir = tmp_path / "tigers"
+        # Remove a bundled skill from the team to simulate "team was
+        # scaffolded BEFORE this skill was added to the bundle."
+        target = team_dir / ".claude" / "skills" / "journal-new" / "SKILL.md"
+        if target.exists():
+            target.unlink()
+            target.parent.rmdir()
+        capsys.readouterr()
+        # Refresh should reinstall it.
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        assert target.is_file()
+        out = capsys.readouterr().out
+        assert "Installed" in out
+        assert "journal-new" in out
+
+    def test_idempotent_when_nothing_missing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Nothing to do" in out
+
+    def test_does_not_clobber_hand_edited_skill(self, tmp_path: Path):
+        """If the team has a hand-edited SKILL.md, refresh leaves it
+        alone -- the operator's local edit always wins."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        target = (
+            tmp_path / "tigers" / ".claude" / "skills"
+            / "journal-new" / "SKILL.md"
+        )
+        target.write_text("# hand-edited; do not overwrite\n")
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        assert "do not overwrite" in target.read_text()
+
+    def test_explicit_team_flag(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """When >1 team exists, --team disambiguates."""
+        for t in ("tigers", "shohoku"):
+            rc = main([
+                "--dir", str(tmp_path),
+                "--persona", "chief", "--team", t, "--yes",
+            ])
+            assert rc == 0
+        # Wipe a skill from one team so refresh has something to do.
+        target = (
+            tmp_path / "shohoku" / ".claude" / "skills"
+            / "journal-new" / "SKILL.md"
+        )
+        target.unlink()
+        target.parent.rmdir()
+        capsys.readouterr()
+        # --refresh-skills with no team picker -> error because
+        # multiple teams exist.
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "multiple teams" in err
+        # Disambiguate.
+        rc = main([
+            "--dir", str(tmp_path), "--refresh-skills",
+            "--team", "shohoku",
+        ])
+        assert rc == 0
+        assert target.is_file()
+
+    def test_explicit_team_dir(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        team_dir = tmp_path / "tigers"
+        target = team_dir / ".claude" / "skills" / "journal-new" / "SKILL.md"
+        target.unlink()
+        target.parent.rmdir()
+        capsys.readouterr()
+        rc = main([
+            "--refresh-skills", "--team-dir", str(team_dir),
+        ])
+        assert rc == 0
+        assert target.is_file()
+
+    def test_team_dir_not_a_team_errors(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        notateam = tmp_path / "notateam"
+        notateam.mkdir()
+        rc = main([
+            "--refresh-skills", "--team-dir", str(notateam),
+        ])
+        assert rc == 1
+        assert "not a team" in capsys.readouterr().err
+
+    def test_unknown_team_name_errors(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        capsys.readouterr()
+        rc = main([
+            "--dir", str(tmp_path), "--refresh-skills",
+            "--team", "nonexistent",
+        ])
+        assert rc == 1
+        assert "no team named 'nonexistent'" in capsys.readouterr().err
+
+    def test_no_teams_errors(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 1
+        assert "no teams found" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # Integration: generated artifacts actually work
 # ---------------------------------------------------------------------------
