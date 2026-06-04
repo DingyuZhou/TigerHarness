@@ -38,6 +38,10 @@ Reply posted to thread
 | `persistence.py` | ThreadStore: atomic JSON file for thread->session map |
 | `downloader.py` | SlackFileDownloader + prompt augmentation |
 | `notify.py` | Outbound: SlackNotifier (text DM + file upload) + CLI |
+| `multi.py` | Multi-team bridge loader (per-team lanes from a bridges config) |
+| `router.py` | One-shot LLM persona routing (sticky per thread) |
+| `migrate.py` | threads.json migration tool |
+| `gen_service.py` | systemd unit generator (Linux) |
 | `__main__.py` | Daemon entry point with graceful shutdown |
 
 ## Configuration
