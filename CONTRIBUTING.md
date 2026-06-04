@@ -30,9 +30,15 @@ src/tigerharness/
     __init__.py              Top-level package
     cli.py                   Unified CLI entry point
     init.py                  Project scaffolding (tigerharness init)
+    dismiss.py               Symmetric teardown (tigerharness dismiss)
     py.typed                 PEP 561 type stub marker
+    agent_sdk/               Backend-agnostic agent SDK (swappable runtimes)
+        types.py             AgentConfig + AgentBackend Protocol (the interface)
+        factory.py           get_backend / register_backend / list_backends
+        retry.py             run_with_retry (exponential backoff)
+        errors.py            Exception hierarchy
     task_runner/             Iterative task execution
-        cli.py               CLI subcommands (assign, list, cancel, logs)
+        cli.py               CLI subcommands (assign, list, cancel, amend, show, logs, continue, personas)
         runner.py            Core iteration loop
         notifier.py          Slack DM notifications
         personas.py          Config-driven persona registry
@@ -44,7 +50,7 @@ src/tigerharness/
         notify.py            Outbound DM/file CLI
         persistence.py       Thread -> session mapping
     tiger_memory/            Persistent memory management
-        cli.py               CLI (init, rebuild, search, drill, pin)
+        cli.py               CLI (init, bootstrap, rebuild, pin, resummarize, drill, tree, raw, search, state)
         config.py            YAML config loader
         lifecycle.py         Bootstrap / rebuild / resummarize engine
         briefing.py          Layered briefing rebuild
@@ -57,20 +63,44 @@ src/tigerharness/
         sources/             Source adapters (claude_code, docs)
         summarizers/         Summarizer backends (anthropic, mock)
         templates/           Briefing README template
+    journal/                 File-based subscription backend (kind=task + kind=workflow)
+        cli.py               new / list / status / sweep
+        compile_cli.py       Nine compile subcommands (compile-context ... append-steps)
+        models.py            status.json schema + state machine
+        scaffold.py          Task / workflow scaffolding
+        sweep.py             Lazy sweep (archive + fresh/stale classify)
+        operating_template.py  OPERATING.md contract shipped into each journal
+    workflow_runner/         Multi-persona orchestration (standalone `workflow` CLI)
+        cli.py               start / show / list / tail / cancel
+        executor.py          Sequential graph-walk executor
+        compile/             Compile pipeline (drafter, validators, critique)
+        sessions.py          Per-persona claude -p session manager
+        trailer.py           WORKFLOW: APPROVE / REVISE / BLOCK parser
+        models.py            Orchestration + step frontmatter models
 tests/
+    agent_sdk/               Agent SDK tests
     task_runner/             Task runner tests
     slack_bridge/            Slack bridge tests
     tiger_memory/            Tiger memory tests
+    journal/                 Journal backend tests
+    workflow_runner/         Workflow runner tests
     test_main_modules.py     __main__.py entrypoint tests
 examples/
     tigers/                  Sample team scaffolded by `tigerharness init`
     tiger-memory.config.yaml Standalone memory config reference
     env.example              Standalone Slack bridge env template
 docs/
-    DESIGN.md                Architecture decisions + migration notes
+    DESIGN.md                High-level design + migration notes
+    agent_sdk.md             Agent SDK reference
     task-runner.md           Task runner module README
     slack-bridge.md          Slack bridge module README
     tiger-memory.md          Tiger memory module README
+    journal.md               Journal / subscription-backend operator quickstart
+    subscription-backend.md  Subscription backend concept + status.json schema
+    journal-workflow-mode.md kind=workflow compile + graph-walk deep dive
+    workflow-runner.md       Standalone workflow_runner spec
+    workflow-runner-phase2.md  Phase-2 (compile) design detail
+    adr/                     Architecture Decision Records
 skills/                      Claude Code SKILL.md definitions
 ```
 
