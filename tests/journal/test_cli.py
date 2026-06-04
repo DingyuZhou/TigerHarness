@@ -152,6 +152,107 @@ class TestCmdNew:
             "new", "--prd", str(prd),
         ])
         assert rc == 2
+        err = capsys.readouterr().err
+        assert "--persona is required" in err
+        # Mentions the team default fallback so the operator knows
+        # where to set a default.
+        assert "default_persona" in err
+
+    def test_task_mode_uses_team_default_persona_when_omitted(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """When the cwd is a team root with `default_persona: X` in
+        personas.yaml, `journal new --kind task` omits `--persona` and
+        falls back to X."""
+        # Stand up a fake team root with default_persona and chdir to it.
+        team = tmp_path / "teams" / "Tigers"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Scout\n"
+            "personas:\n  - name: Scout\n"
+        )
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 0, capsys.readouterr().err
+        # The scaffolder used the team default.
+        paths = JournalPaths(root=journal_dir)
+        tid = paths.list_active_ids()[0]
+        s = Status.from_json(paths.status_json(tid).read_text())
+        assert s.persona == "Scout"
+
+    def test_task_mode_explicit_persona_overrides_default(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """An explicit `--persona Chief` wins over the team default."""
+        team = tmp_path / "teams" / "Tigers"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Scout\n"
+            "personas:\n  - name: Scout\n  - name: Chief\n"
+        )
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd), "--persona", "Chief",
+        ])
+        assert rc == 0
+        paths = JournalPaths(root=journal_dir)
+        tid = paths.list_active_ids()[0]
+        s = Status.from_json(paths.status_json(tid).read_text())
+        assert s.persona == "Chief"
+
+    def test_task_mode_default_persona_resolves_alias(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """If the team writes `default_persona: Mumu` and Mumu is an
+        alias of Kogure, the scaffolded task uses the canonical
+        Kogure as the assignee."""
+        team = tmp_path / "teams" / "Shohoku"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Mumu\n"
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 0, capsys.readouterr().err
+        paths = JournalPaths(root=journal_dir)
+        tid = paths.list_active_ids()[0]
+        s = Status.from_json(paths.status_json(tid).read_text())
+        assert s.persona == "Kogure"
+
+    def test_task_mode_no_persona_and_no_default_still_errors(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """A cwd that IS a team root but has no `default_persona:` key
+        still errors when --persona is omitted (same as Phase 1)."""
+        team = tmp_path / "teams" / "Plain"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n  - name: Mitsui\n"
+        )
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 2
         assert "--persona is required" in capsys.readouterr().err
 
 

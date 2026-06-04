@@ -29,6 +29,7 @@ from tigerharness.journal.scaffold import (
     MissingPersonaError,
     new_task,
     new_workflow_task,
+    resolve_default_persona,
     resolve_team_root,
 )
 from tigerharness.journal.sweep import (
@@ -77,12 +78,24 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             file=sys.stderr,
         )
         return 2
-    if not args.persona:
-        print(
-            "error: --persona is required for --kind task",
-            file=sys.stderr,
-        )
-        return 2
+    persona = args.persona
+    if not persona:
+        # Fall back to the team's default_persona from personas.yaml
+        # if available. The team root is the cwd convention (same
+        # discovery rule the workflow-mode scaffolder uses below).
+        cwd = Path.cwd()
+        if (cwd / "configs" / "personas.yaml").is_file():
+            default = resolve_default_persona(cwd)
+            if default:
+                persona = default
+        if not persona:
+            print(
+                "error: --persona is required for --kind task (no "
+                "default_persona configured in the team's "
+                "configs/personas.yaml)",
+                file=sys.stderr,
+            )
+            return 2
     prd_path = Path(args.prd).expanduser()
     if not prd_path.exists():
         print(f"error: PRD not found: {prd_path}", file=sys.stderr)
@@ -91,7 +104,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
     try:
         result = new_task(
             prd_text=prd_text,
-            persona=args.persona,
+            persona=persona,
             paths=paths,
             title=args.title,
             kind=args.kind,

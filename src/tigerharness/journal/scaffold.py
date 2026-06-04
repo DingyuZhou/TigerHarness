@@ -408,6 +408,38 @@ def canonicalize_persona(team_root: Path, given_name: str) -> str:
     )
 
 
+def resolve_default_persona(team_root: Path) -> str | None:
+    """Read ``configs/personas.yaml``'s top-level ``default_persona:``
+    key and return its canonical name (after alias resolution), or
+    ``None`` if the key is absent / blank / malformed.
+
+    The CLI uses this as a fallback when ``--persona`` is omitted for
+    ``--kind task`` scaffolds, so a team can declare "this is the
+    default helper" once and not type ``--persona`` every time.
+
+    A missing-but-readable yaml returns ``None`` rather than raising,
+    so existing teams without the key keep their explicit-``--persona``
+    flow unchanged.
+    """
+    yaml_path = team_root / "configs" / "personas.yaml"
+    if not yaml_path.is_file():
+        return None
+    try:
+        import yaml
+        with yaml_path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except (OSError, ImportError, Exception):  # pragma: no cover - defensive
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("default_persona")
+    if not (isinstance(raw, str) and raw.strip()):
+        return None
+    # Resolve through aliases so a team can write
+    # `default_persona: Mumu` even if Mumu is an alias of Kogure.
+    return canonicalize_persona(team_root, raw.strip())
+
+
 def resolve_compile_personas(team_root: Path) -> dict[str, str]:
     """Phase 2: resolve the role -> persona-name mapping for the three
     compile-time roles (``drafter``, ``akagi``, ``ayako``).

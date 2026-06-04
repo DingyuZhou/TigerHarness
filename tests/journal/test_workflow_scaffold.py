@@ -408,6 +408,80 @@ class TestPersonaAliases:
         assert "Mumu" not in required
 
 
+class TestResolveDefaultPersona:
+    """Top-level ``default_persona:`` in ``configs/personas.yaml`` is
+    the team's "if you don't say who, use this person" knob."""
+
+    def test_none_when_no_yaml(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = tmp_path / "teams" / "T"
+        team.mkdir(parents=True)
+        assert resolve_default_persona(team) is None
+
+    def test_none_when_key_absent(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        # _make_team doesn't add default_persona -- so absent.
+        assert resolve_default_persona(team) is None
+
+    def test_returns_key_value(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Mitsui\n"
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Mitsui\n"
+        )
+        assert resolve_default_persona(team) == "Mitsui"
+
+    def test_resolves_through_alias(self, tmp_path):
+        """A team can write `default_persona: Mumu` and have it resolve
+        to the canonical Kogure."""
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Mumu\n"
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        assert resolve_default_persona(team) == "Kogure"
+
+    def test_strips_whitespace(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: '  Mitsui  '\n"
+            "personas:\n  - name: Mitsui\n"
+        )
+        assert resolve_default_persona(team) == "Mitsui"
+
+    def test_blank_value_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: '   '\n"
+            "personas:\n  - name: Mitsui\n"
+        )
+        assert resolve_default_persona(team) is None
+
+    def test_non_string_value_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: 42\n"
+            "personas:\n  - name: Mitsui\n"
+        )
+        assert resolve_default_persona(team) is None
+
+    def test_non_dict_yaml_root_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text("- not a dict\n")
+        assert resolve_default_persona(team) is None
+
+
 class TestResolveCompilePersonas:
     """Phase 2: team-level override of the role -> persona-name mapping
     via ``configs/workflow.yaml``."""

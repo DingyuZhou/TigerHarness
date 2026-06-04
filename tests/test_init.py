@@ -616,6 +616,39 @@ class TestAppendPersonaToYaml:
         assert "Team: tigers" in text
         assert "- name: chief" in text
         assert 'description: "desc"' in text
+        # The first persona added becomes the team's default.
+        assert "default_persona: chief" in text
+
+    def test_appends_default_persona_when_existing_yaml_lacks_it(
+        self, tmp_path: Path,
+    ):
+        """An older personas.yaml that has no default_persona: line
+        gets one injected when the first persona is appended."""
+        yp = tmp_path / "personas.yaml"
+        yp.write_text("personas:\n  - name: scout\n")
+        _append_persona_to_yaml(yp, "chief", "desc", "tigers")
+        text = yp.read_text()
+        # Default persona seeded with the NEW persona.
+        assert "default_persona: chief" in text
+        # Both personas still in the file.
+        assert "- name: scout" in text
+        assert "- name: chief" in text
+
+    def test_does_not_clobber_existing_default_persona(
+        self, tmp_path: Path,
+    ):
+        """If the yaml already has a default_persona: line, leave it
+        alone -- the operator's choice wins over auto-seeding."""
+        yp = tmp_path / "personas.yaml"
+        yp.write_text(
+            "default_persona: scout\n"
+            "personas:\n  - name: scout\n"
+        )
+        _append_persona_to_yaml(yp, "chief", "desc", "tigers")
+        text = yp.read_text()
+        # Scout still the default; only one default_persona line.
+        assert "default_persona: scout" in text
+        assert text.count("default_persona:") == 1
 
     def test_appends_to_existing(self, tmp_path: Path):
         yp = tmp_path / "personas.yaml"
