@@ -295,6 +295,76 @@ class TestCmdNewWorkflow:
         paths = JournalPaths(root=journal_dir)
         assert paths.list_active_ids()
 
+    def test_workflow_uses_playbook_default_captain_when_omitted(
+        self, team_root, journal_dir, capsys,
+    ):
+        """If the playbook has `default_captain:` in an HTML-comment
+        YAML block and the CLI omits --captain, the playbook default
+        wins."""
+        (team_root / "workflow" / "default.md").write_text(
+            "# default\n\n"
+            "<!--\n"
+            "default_captain: Mitsui\n"
+            "-->\n\n"
+            "Anzai drafts. Akagi reviews. Ayako reviews.\n",
+        )
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--task-brief", "B",
+        ])
+        assert rc == 0, capsys.readouterr().err
+        assert "captain:      Mitsui" in capsys.readouterr().out
+
+    def test_workflow_explicit_captain_overrides_playbook_default(
+        self, team_root, journal_dir, capsys,
+    ):
+        """An explicit --captain wins over playbook default_captain."""
+        (team_root / "workflow" / "default.md").write_text(
+            "<!--\ndefault_captain: Mitsui\n-->\n\n"
+            "Anzai drafts. Akagi reviews. Ayako reviews.\n",
+        )
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--task-brief", "B",
+            "--captain", "Akagi",
+        ])
+        assert rc == 0
+        assert "captain:      Akagi" in capsys.readouterr().out
+
+    def test_workflow_playbook_default_captain_resolves_alias(
+        self, team_root, journal_dir, capsys,
+    ):
+        """If the playbook says `default_captain: Mumu` and Mumu
+        aliases Kogure, the scaffolded task carries Kogure."""
+        # Set up Kogure with Mumu alias on the team.
+        (team_root / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Ayako\n"
+            "  - name: Mitsui\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team_root / "personas" / "Kogure").mkdir(parents=True)
+        (team_root / "personas" / "Kogure" / "prompt.md").write_text("hi\n")
+        (team_root / "workflow" / "default.md").write_text(
+            "<!--\ndefault_captain: Mumu\n-->\n\n"
+            "Anzai drafts. Akagi reviews. Ayako reviews.\n",
+        )
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--task-brief", "B",
+        ])
+        assert rc == 0, capsys.readouterr().err
+        assert "captain:      Kogure" in capsys.readouterr().out
+
     def test_workflow_brief_file(
         self, tmp_path, team_root, journal_dir, capsys,
     ):

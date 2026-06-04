@@ -30,6 +30,7 @@ from tigerharness.journal.scaffold import (
     new_task,
     new_workflow_task,
     resolve_default_persona,
+    resolve_playbook_default_captain,
     resolve_team_root,
 )
 from tigerharness.journal.sweep import (
@@ -192,6 +193,13 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
         return 2
     playbook_text = playbook_path.read_text(encoding="utf-8")
 
+    # If --captain wasn't passed, fall back to the playbook's
+    # `default_captain:` (HTML-comment YAML block). Alias-resolved
+    # through the team's personas.yaml.
+    captain = args.captain
+    if captain is None:
+        captain = resolve_playbook_default_captain(playbook_text, team_root)
+
     try:
         result = new_workflow_task(
             brief_text=brief_text,
@@ -200,7 +208,7 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
             team_root=team_root,
             paths=paths,
             title=args.title,
-            captain=args.captain,
+            captain=captain,
             max_sessions=args.max_sessions if args.max_sessions is not None else 10,
             slug=args.slug,
         )

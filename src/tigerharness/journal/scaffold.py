@@ -408,6 +408,59 @@ def canonicalize_persona(team_root: Path, given_name: str) -> str:
     )
 
 
+_PLAYBOOK_META_BLOCK_RE = re.compile(
+    r"<!--\s*\n(.*?)\n\s*-->",
+    re.DOTALL,
+)
+
+
+def extract_playbook_meta(playbook_text: str) -> dict:
+    """Parse every ``<!-- ... -->`` HTML comment in the playbook as
+    YAML and merge the results into one dict.
+
+    Playbooks use HTML-comment YAML blocks for machine-readable
+    metadata (see Shohoku's ``workflow/default.md``: the
+    ``workflow_config:`` block is one example). This Phase 2 / Phase 3
+    addition gives the journal scaffolder a single entry point for any
+    such metadata.
+
+    Blocks that aren't valid YAML or don't parse to a dict are
+    skipped silently -- the playbook author can drop a stray narrative
+    HTML comment without breaking the scaffolder. Later blocks
+    override earlier ones on key collision (the same shallow-merge
+    convention task_runner's playbook reader uses).
+    """
+    out: dict = {}
+    for match in _PLAYBOOK_META_BLOCK_RE.finditer(playbook_text):
+        try:
+            import yaml
+            data = yaml.safe_load(match.group(1))
+        except (ImportError, Exception):  # pragma: no cover - defensive
+            continue
+        if isinstance(data, dict):
+            out.update(data)
+    return out
+
+
+def resolve_playbook_default_captain(
+    playbook_text: str, team_root: Path,
+) -> str | None:
+    """Read ``default_captain:`` from the playbook's metadata block(s)
+    and return the canonical persona name (alias-resolved), or
+    ``None`` if absent / blank / malformed.
+
+    The CLI uses this as a fallback when ``--captain`` is omitted on
+    ``journal new --kind workflow``, so a playbook can declare "the
+    accountable owner for this kind of work is X" once and have it
+    apply to every task scaffolded from it.
+    """
+    meta = extract_playbook_meta(playbook_text)
+    raw = meta.get("default_captain")
+    if not (isinstance(raw, str) and raw.strip()):
+        return None
+    return canonicalize_persona(team_root, raw.strip())
+
+
 def resolve_default_persona(team_root: Path) -> str | None:
     """Read ``configs/personas.yaml``'s top-level ``default_persona:``
     key and return its canonical name (after alias resolution), or

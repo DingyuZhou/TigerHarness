@@ -408,6 +408,115 @@ class TestPersonaAliases:
         assert "Mumu" not in required
 
 
+class TestExtractPlaybookMeta:
+    """Playbooks carry machine-readable metadata in HTML-comment YAML
+    blocks. extract_playbook_meta merges every such block into a
+    single dict."""
+
+    def test_no_comment_blocks_returns_empty(self):
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        assert extract_playbook_meta("# Just a heading\n") == {}
+
+    def test_single_block(self):
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "# Heading\n\n"
+            "<!--\n"
+            "default_captain: Mitsui\n"
+            "max_loop_iters: 5\n"
+            "-->\n"
+        )
+        assert extract_playbook_meta(text) == {
+            "default_captain": "Mitsui", "max_loop_iters": 5,
+        }
+
+    def test_multiple_blocks_merge_with_later_winning(self):
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "<!--\n"
+            "default_captain: Mitsui\n"
+            "max_loop_iters: 5\n"
+            "-->\n\n"
+            "<!--\n"
+            "default_captain: Akagi\n"
+            "extra: tagline\n"
+            "-->\n"
+        )
+        meta = extract_playbook_meta(text)
+        assert meta["default_captain"] == "Akagi"  # second block wins
+        assert meta["max_loop_iters"] == 5
+        assert meta["extra"] == "tagline"
+
+    def test_narrative_html_comment_is_skipped(self):
+        """A non-YAML HTML comment (just prose) is skipped without
+        crashing."""
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "<!-- This is a note from the author, not metadata. -->\n\n"
+            "<!--\n"
+            "default_captain: Mitsui\n"
+            "-->\n"
+        )
+        meta = extract_playbook_meta(text)
+        assert meta["default_captain"] == "Mitsui"
+
+    def test_non_dict_block_skipped(self):
+        """A YAML block that parses to a list / scalar is skipped --
+        only dicts merge."""
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "<!--\n- a list at root\n- not a dict\n-->\n\n"
+            "<!--\ndefault_captain: Mitsui\n-->\n"
+        )
+        assert extract_playbook_meta(text) == {"default_captain": "Mitsui"}
+
+
+class TestResolvePlaybookDefaultCaptain:
+    def test_none_when_no_block(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        assert resolve_playbook_default_captain("plain text\n", team) is None
+
+    def test_returns_canonical(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        text = "<!--\ndefault_captain: Mitsui\n-->\n"
+        assert resolve_playbook_default_captain(text, team) == "Mitsui"
+
+    def test_resolves_alias(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        text = "<!--\ndefault_captain: Mumu\n-->\n"
+        assert resolve_playbook_default_captain(text, team) == "Kogure"
+
+    def test_blank_value_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        text = "<!--\ndefault_captain: '   '\n-->\n"
+        assert resolve_playbook_default_captain(text, team) is None
+
+    def test_non_string_value_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        text = "<!--\ndefault_captain: 42\n-->\n"
+        assert resolve_playbook_default_captain(text, team) is None
+
+
 class TestResolveDefaultPersona:
     """Top-level ``default_persona:`` in ``configs/personas.yaml`` is
     the team's "if you don't say who, use this person" knob."""

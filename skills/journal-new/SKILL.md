@@ -57,7 +57,11 @@ Required args:
 
 - `--prd` -- path to the PRD markdown file.
 - `--persona` -- the persona this task is assigned to (must exist in
-  the team's `configs/personas.yaml`).
+  the team's `configs/personas.yaml`). **Optional if the team
+  declares `default_persona:` at the top of `configs/personas.yaml`**
+  -- in that case omitting `--persona` uses the team default.
+  `tigerharness init` seeds the first persona created on a team as
+  the default automatically.
 
 Optional:
 
@@ -104,7 +108,10 @@ Optional:
   Default: `Shohoku`.
 - `--captain` -- accountable owner shown in `journal list` (the
   per-step personas come from the compiled graph, not this field).
-  Default: none.
+  Default: none. **Falls back to `default_captain:` in the playbook's
+  HTML-comment YAML metadata block if present**, so a team-standard
+  playbook can declare its owner once instead of every scaffold
+  needing to pass `--captain`.
 - `--title` -- explicit human label. Defaults to the first H1 of the
   brief, then `"workflow"` if none.
 - `--max-sessions` -- soft ceiling. Default 10 for workflow mode
