@@ -200,6 +200,450 @@ class TestRequiredWorkflowPersonas:
 # validate_personas
 # ---------------------------------------------------------------------------
 
+class TestPersonaAliases:
+    """Personas can carry an ``aliases:`` list in personas.yaml; the
+    scaffolder resolves any alias to its canonical name before
+    checking prompt.md and before counting playbook references."""
+
+    def test_canonicalize_returns_input_when_no_alias_map(self, tmp_path):
+        from tigerharness.journal.scaffold import canonicalize_persona
+        # No personas.yaml -> empty alias map -> input passes through.
+        team = tmp_path / "teams" / "T"
+        team.mkdir(parents=True)
+        assert canonicalize_persona(team, "Whoever") == "Whoever"
+
+    def test_canonicalize_self_maps_canonical_names(self, tmp_path):
+        from tigerharness.journal.scaffold import canonicalize_persona
+        team = _make_team(tmp_path)  # Anzai/Akagi/Ayako/Mitsui
+        assert canonicalize_persona(team, "Anzai") == "Anzai"
+        assert canonicalize_persona(team, "Mitsui") == "Mitsui"
+
+    def test_canonicalize_resolves_aliases(self, tmp_path):
+        team = _make_team(tmp_path)
+        # Add Kogure with alias Mumu to the team's personas.yaml.
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Ayako\n"
+            "  - name: Mitsui\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu, Kogure-san]\n"
+        )
+        from tigerharness.journal.scaffold import canonicalize_persona
+        assert canonicalize_persona(team, "Mumu") == "Kogure"
+        assert canonicalize_persona(team, "Kogure-san") == "Kogure"
+        assert canonicalize_persona(team, "Kogure") == "Kogure"
+
+    def test_canonicalize_is_case_and_separator_insensitive(self, tmp_path):
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu, Kogure-san]\n"
+        )
+        from tigerharness.journal.scaffold import canonicalize_persona
+        assert canonicalize_persona(team, "mumu") == "Kogure"
+        assert canonicalize_persona(team, "MUMU") == "Kogure"
+        # Separator differences (case + dash/space/underscore) all
+        # collapse to the same normalised key.
+        assert canonicalize_persona(team, "kogure-SAN") == "Kogure"
+        assert canonicalize_persona(team, "kogure san") == "Kogure"
+        assert canonicalize_persona(team, "kogure_san") == "Kogure"
+        assert canonicalize_persona(team, "  Mumu  ") == "Kogure"
+
+    def test_unknown_name_falls_through_unchanged(self, tmp_path):
+        team = _make_team(tmp_path)
+        from tigerharness.journal.scaffold import canonicalize_persona
+        # Unknown -> input back unchanged. The downstream missing-
+        # persona check then catches it.
+        assert canonicalize_persona(team, "NotAPersona") == "NotAPersona"
+
+    def test_persona_prompt_path_uses_canonical(self, tmp_path):
+        from tigerharness.journal.scaffold import _persona_prompt_path
+        team = _make_team(tmp_path)
+        # Add Kogure with alias Mumu, with a prompt.md under Kogure/.
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team / "personas" / "Kogure").mkdir(parents=True)
+        (team / "personas" / "Kogure" / "prompt.md").write_text("hi\n")
+        # Lookup by alias finds Kogure's prompt.md.
+        path = _persona_prompt_path(team, "Mumu")
+        assert path == team / "personas" / "Kogure" / "prompt.md"
+        assert path.is_file()
+
+    def test_validate_personas_resolves_alias_before_check(self, tmp_path):
+        from tigerharness.journal.scaffold import validate_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Ayako\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team / "personas" / "Kogure").mkdir(parents=True)
+        (team / "personas" / "Kogure" / "prompt.md").write_text("hi\n")
+        # Asking by alias -> alias resolves, prompt found, not missing.
+        assert validate_personas(team, {"Mumu"}) == []
+
+    def test_required_workflow_personas_recognises_alias_refs(self, tmp_path):
+        """Playbook prose that addresses Kogure by his alias Mumu is
+        recognised as a real persona reference, not as English prose."""
+        from tigerharness.journal.scaffold import _required_workflow_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Ayako\n"
+            "  - name: Mitsui\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        playbook = "Anzai plans. Mumu reviews. Mitsui implements.\n"
+        required = _required_workflow_personas(playbook, team)
+        # Canonical name returned (Kogure), not the alias.
+        assert "Kogure" in required
+        # Default compile personas still required.
+        assert {"Anzai", "Akagi", "Ayako"} <= required
+
+    def test_alias_map_non_dict_yaml_root_returns_empty(self, tmp_path):
+        """Defense-in-depth: a personas.yaml whose top level is a list
+        (typo / wrong file in the slot) yields an empty alias map
+        rather than crashing."""
+        from tigerharness.journal.scaffold import read_team_alias_map
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text("- list at root\n")
+        assert read_team_alias_map(team) == {}
+
+    def test_alias_map_skips_non_dict_entries(self, tmp_path):
+        """A `personas:` list with a stray scalar (string / int) at the
+        top instead of a dict is skipped, not crashed."""
+        from tigerharness.journal.scaffold import read_team_alias_map
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - just a string\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        m = read_team_alias_map(team)
+        # The stray scalar dropped; Kogure entry honoured.
+        assert m["kogure"] == "Kogure"
+        assert m["mumu"] == "Kogure"
+
+    def test_alias_map_skips_entries_missing_name(self, tmp_path):
+        """An entry with no `name:` (or a blank one) is skipped."""
+        from tigerharness.journal.scaffold import read_team_alias_map
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - description: nameless\n"
+            "  - name: '   '\n"  # whitespace-only -> skipped
+            "  - name: Kogure\n"
+        )
+        m = read_team_alias_map(team)
+        # Only Kogure survives.
+        assert list(m.values()) == ["Kogure"]
+
+    def test_alias_map_skips_non_list_aliases_field(self, tmp_path):
+        """A persona whose aliases field is not a list (e.g. a string)
+        is honoured for its canonical name but its alias field is
+        ignored rather than crashing."""
+        from tigerharness.journal.scaffold import read_team_alias_map
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: 'should be a list'\n"
+        )
+        m = read_team_alias_map(team)
+        # Self-mapping is present; the malformed aliases field skipped.
+        assert m["kogure"] == "Kogure"
+        # No alias entries added.
+        assert sum(1 for v in m.values() if v == "Kogure") == 1
+
+    def test_alias_map_skips_non_string_alias_entries(self, tmp_path):
+        """A stray non-string value inside the aliases list is
+        skipped, not coerced."""
+        from tigerharness.journal.scaffold import read_team_alias_map
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu, 42, '   ', '']\n"
+        )
+        m = read_team_alias_map(team)
+        # Only Mumu (and self-Kogure) survive.
+        assert m["mumu"] == "Kogure"
+        assert m["kogure"] == "Kogure"
+        # Nothing else.
+        assert len([v for v in m.values() if v == "Kogure"]) == 2
+
+    def test_alias_collision_with_other_personas_canonical_name_loses(
+        self, tmp_path,
+    ):
+        """Adversarial-review fix: when an alias on persona A would
+        collide with the CANONICAL name of persona B (regardless of
+        file order), the canonical name's self-mapping wins.
+        Otherwise lookups of B's own canonical name would silently
+        misroute to A."""
+        from tigerharness.journal.scaffold import canonicalize_persona
+        team = _make_team(tmp_path)
+        # Anzai is canonical. Rukawa declares an alias "Anzai" --
+        # which would (without the fix) hijack canonical Anzai lookups
+        # to point at Rukawa. The canonical layer wins.
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Rukawa\n"
+            "    aliases: [Anzai]\n"  # collides with Anzai's canonical
+        )
+        assert canonicalize_persona(team, "Anzai") == "Anzai"
+
+    def test_alias_collision_canonical_name_wins_regardless_of_order(
+        self, tmp_path,
+    ):
+        """Same collision but with the colliding-alias entry FIRST in
+        the file. Canonical name still wins -- order doesn't matter."""
+        from tigerharness.journal.scaffold import canonicalize_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Rukawa\n"
+            "    aliases: [Anzai]\n"  # appears BEFORE Anzai entry
+            "  - name: Anzai\n"
+        )
+        assert canonicalize_persona(team, "Anzai") == "Anzai"
+
+    def test_alias_collision_between_two_aliases_last_wins(self, tmp_path):
+        """When two personas declare the SAME alias (neither matches a
+        canonical name), the persona that appears LATER in the yaml
+        wins -- a documented precedence policy, pinned here so a
+        future refactor doesn't silently change it."""
+        from tigerharness.journal.scaffold import canonicalize_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Akagi\n"
+            "    aliases: [Captain]\n"
+            "  - name: Mitsui\n"
+            "    aliases: [Captain]\n"  # same alias on a later entry
+        )
+        # Last-wins among aliases: "Captain" resolves to Mitsui.
+        assert canonicalize_persona(team, "Captain") == "Mitsui"
+
+    def test_workflow_yaml_can_use_alias_in_compile_personas(self, tmp_path):
+        """If a team configures `compile_personas: { ayako: Mumu }`,
+        the scaffolder canonicalises through to Kogure before checking
+        whether the prompt.md exists on disk."""
+        from tigerharness.journal.scaffold import _required_workflow_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  ayako: Mumu\n"
+        )
+        required = _required_workflow_personas("playbook\n", team)
+        # The ayako-role persona is Kogure (canonical), not Mumu.
+        assert "Kogure" in required
+        assert "Mumu" not in required
+
+
+class TestExtractPlaybookMeta:
+    """Playbooks carry machine-readable metadata in HTML-comment YAML
+    blocks. extract_playbook_meta merges every such block into a
+    single dict."""
+
+    def test_no_comment_blocks_returns_empty(self):
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        assert extract_playbook_meta("# Just a heading\n") == {}
+
+    def test_single_block(self):
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "# Heading\n\n"
+            "<!--\n"
+            "default_captain: Mitsui\n"
+            "max_loop_iters: 5\n"
+            "-->\n"
+        )
+        assert extract_playbook_meta(text) == {
+            "default_captain": "Mitsui", "max_loop_iters": 5,
+        }
+
+    def test_multiple_blocks_merge_with_later_winning(self):
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "<!--\n"
+            "default_captain: Mitsui\n"
+            "max_loop_iters: 5\n"
+            "-->\n\n"
+            "<!--\n"
+            "default_captain: Akagi\n"
+            "extra: tagline\n"
+            "-->\n"
+        )
+        meta = extract_playbook_meta(text)
+        assert meta["default_captain"] == "Akagi"  # second block wins
+        assert meta["max_loop_iters"] == 5
+        assert meta["extra"] == "tagline"
+
+    def test_narrative_html_comment_is_skipped(self):
+        """A non-YAML HTML comment (just prose) is skipped without
+        crashing."""
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "<!-- This is a note from the author, not metadata. -->\n\n"
+            "<!--\n"
+            "default_captain: Mitsui\n"
+            "-->\n"
+        )
+        meta = extract_playbook_meta(text)
+        assert meta["default_captain"] == "Mitsui"
+
+    def test_non_dict_block_skipped(self):
+        """A YAML block that parses to a list / scalar is skipped --
+        only dicts merge."""
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "<!--\n- a list at root\n- not a dict\n-->\n\n"
+            "<!--\ndefault_captain: Mitsui\n-->\n"
+        )
+        assert extract_playbook_meta(text) == {"default_captain": "Mitsui"}
+
+
+class TestResolvePlaybookDefaultCaptain:
+    def test_none_when_no_block(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        assert resolve_playbook_default_captain("plain text\n", team) is None
+
+    def test_returns_canonical(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        text = "<!--\ndefault_captain: Mitsui\n-->\n"
+        assert resolve_playbook_default_captain(text, team) == "Mitsui"
+
+    def test_resolves_alias(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        text = "<!--\ndefault_captain: Mumu\n-->\n"
+        assert resolve_playbook_default_captain(text, team) == "Kogure"
+
+    def test_blank_value_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        text = "<!--\ndefault_captain: '   '\n-->\n"
+        assert resolve_playbook_default_captain(text, team) is None
+
+    def test_non_string_value_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import (
+            resolve_playbook_default_captain,
+        )
+        team = _make_team(tmp_path)
+        text = "<!--\ndefault_captain: 42\n-->\n"
+        assert resolve_playbook_default_captain(text, team) is None
+
+
+class TestResolveDefaultPersona:
+    """Top-level ``default_persona:`` in ``configs/personas.yaml`` is
+    the team's "if you don't say who, use this person" knob."""
+
+    def test_none_when_no_yaml(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = tmp_path / "teams" / "T"
+        team.mkdir(parents=True)
+        assert resolve_default_persona(team) is None
+
+    def test_none_when_key_absent(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        # _make_team doesn't add default_persona -- so absent.
+        assert resolve_default_persona(team) is None
+
+    def test_returns_key_value(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Mitsui\n"
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Mitsui\n"
+        )
+        assert resolve_default_persona(team) == "Mitsui"
+
+    def test_resolves_through_alias(self, tmp_path):
+        """A team can write `default_persona: Mumu` and have it resolve
+        to the canonical Kogure."""
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Mumu\n"
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        assert resolve_default_persona(team) == "Kogure"
+
+    def test_strips_whitespace(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: '  Mitsui  '\n"
+            "personas:\n  - name: Mitsui\n"
+        )
+        assert resolve_default_persona(team) == "Mitsui"
+
+    def test_blank_value_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: '   '\n"
+            "personas:\n  - name: Mitsui\n"
+        )
+        assert resolve_default_persona(team) is None
+
+    def test_non_string_value_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: 42\n"
+            "personas:\n  - name: Mitsui\n"
+        )
+        assert resolve_default_persona(team) is None
+
+    def test_non_dict_yaml_root_returns_none(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_default_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text("- not a dict\n")
+        assert resolve_default_persona(team) is None
+
+
 class TestResolveCompilePersonas:
     """Phase 2: team-level override of the role -> persona-name mapping
     via ``configs/workflow.yaml``."""

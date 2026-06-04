@@ -118,7 +118,7 @@ SLACK_APP_TOKEN=xapp-1-your-app-token
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 """
 
-_PERSONAS_YAML_HEADER = """\
+_PERSONAS_YAML_PREAMBLE = """\
 # Team: {team}
 # Personas registry for tigerharness.task_runner.
 #
@@ -137,8 +137,22 @@ _PERSONAS_YAML_HEADER = """\
 
 personas_dir: ../personas
 
-personas:
 """
+
+_PERSONAS_YAML_DEFAULT_PERSONA_LINE = """\
+# Default persona used by `tigerharness journal new --kind task` when
+# --persona is omitted. The first persona seeded by `tigerharness init`
+# is set here automatically; edit to point at a different team member
+# as the team grows.
+default_persona: {persona}
+
+"""
+
+# Built by concatenating preamble + (optional default_persona line) +
+# the personas-list opener; kept as one constant for the "team
+# scaffold without any persona yet" path that create_team takes
+# (default_persona is added when the first persona is appended).
+_PERSONAS_YAML_HEADER = _PERSONAS_YAML_PREAMBLE + "personas:\n"
 
 _PERSONA_ENTRY = """\
   - name: {persona}
@@ -709,13 +723,27 @@ def _append_persona_to_yaml(
         # mistaken for an existing entry.
         if f"  - name: {persona}\n" in text:
             return False
+        # If the file has no `default_persona:` line yet (e.g. it was
+        # scaffolded by an older tigerharness, or by create_team before
+        # any persona existed), inject one at the top of the file --
+        # the first persona added becomes the team default. Prepending
+        # is robust against unusual existing layouts (e.g. a yaml that
+        # opens directly with `personas:` and no preamble).
+        if "default_persona:" not in text:
+            default_block = _PERSONAS_YAML_DEFAULT_PERSONA_LINE.format(
+                persona=persona,
+            )
+            text = default_block + text
         if not text.endswith("\n"):
             text += "\n"
         yaml_path.write_text(text + entry)
         return True
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     yaml_path.write_text(
-        _PERSONAS_YAML_HEADER.format(team=team_name) + entry
+        _PERSONAS_YAML_PREAMBLE.format(team=team_name)
+        + _PERSONAS_YAML_DEFAULT_PERSONA_LINE.format(persona=persona)
+        + "personas:\n"
+        + entry
     )
     return True
 

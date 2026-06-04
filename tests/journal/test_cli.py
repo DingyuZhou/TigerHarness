@@ -152,6 +152,166 @@ class TestCmdNew:
             "new", "--prd", str(prd),
         ])
         assert rc == 2
+        err = capsys.readouterr().err
+        assert "--persona is required" in err
+        # Mentions the team default fallback so the operator knows
+        # where to set a default.
+        assert "default_persona" in err
+
+    def test_task_mode_uses_team_default_persona_when_omitted(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """When the cwd is a team root with `default_persona: X` in
+        personas.yaml, `journal new --kind task` omits `--persona` and
+        falls back to X."""
+        # Stand up a fake team root with default_persona and chdir to it.
+        team = tmp_path / "teams" / "Tigers"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Scout\n"
+            "personas:\n  - name: Scout\n"
+        )
+        # Scout's prompt.md must exist for the validate-persona check.
+        (team / "personas" / "Scout").mkdir(parents=True)
+        (team / "personas" / "Scout" / "prompt.md").write_text("hi\n")
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 0, capsys.readouterr().err
+        # The scaffolder used the team default.
+        paths = JournalPaths(root=journal_dir)
+        tid = paths.list_active_ids()[0]
+        s = Status.from_json(paths.status_json(tid).read_text())
+        assert s.persona == "Scout"
+
+    def test_task_mode_explicit_persona_overrides_default(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """An explicit `--persona Chief` wins over the team default."""
+        team = tmp_path / "teams" / "Tigers"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Scout\n"
+            "personas:\n  - name: Scout\n  - name: Chief\n"
+        )
+        for p in ("Scout", "Chief"):
+            (team / "personas" / p).mkdir(parents=True)
+            (team / "personas" / p / "prompt.md").write_text("hi\n")
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd), "--persona", "Chief",
+        ])
+        assert rc == 0
+        paths = JournalPaths(root=journal_dir)
+        tid = paths.list_active_ids()[0]
+        s = Status.from_json(paths.status_json(tid).read_text())
+        assert s.persona == "Chief"
+
+    def test_task_mode_default_persona_resolves_alias(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """If the team writes `default_persona: Mumu` and Mumu is an
+        alias of Kogure, the scaffolded task uses the canonical
+        Kogure as the assignee."""
+        team = tmp_path / "teams" / "Shohoku"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Mumu\n"
+            "personas:\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team / "personas" / "Kogure").mkdir(parents=True)
+        (team / "personas" / "Kogure" / "prompt.md").write_text("hi\n")
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 0, capsys.readouterr().err
+        paths = JournalPaths(root=journal_dir)
+        tid = paths.list_active_ids()[0]
+        s = Status.from_json(paths.status_json(tid).read_text())
+        assert s.persona == "Kogure"
+
+    def test_task_mode_explicit_persona_typo_rejected(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """Adversarial-review fix: an explicit --persona Typo (no
+        matching prompt.md on the team) is rejected at scaffold time,
+        not silently stored in status.json to fail later."""
+        team = tmp_path / "teams" / "Tigers"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n  - name: Scout\n"
+        )
+        (team / "personas" / "Scout").mkdir(parents=True)
+        (team / "personas" / "Scout" / "prompt.md").write_text("hi\n")
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd), "--persona", "Mistui",  # typo
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "'Mistui'" in err
+        assert "not on team Tigers" in err
+
+    def test_task_mode_default_persona_typo_rejected(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """default_persona in personas.yaml pointing at a non-existent
+        persona is also rejected -- the typo would otherwise affect
+        every subsequent scaffold."""
+        team = tmp_path / "teams" / "Tigers"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Mistui\n"  # typo (Mitsui)
+            "personas:\n  - name: Mitsui\n"
+        )
+        (team / "personas" / "Mitsui").mkdir(parents=True)
+        (team / "personas" / "Mitsui" / "prompt.md").write_text("hi\n")
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "'Mistui'" in err
+        assert "default_persona" in err
+
+    def test_task_mode_no_persona_and_no_default_still_errors(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """A cwd that IS a team root but has no `default_persona:` key
+        still errors when --persona is omitted (same as Phase 1)."""
+        team = tmp_path / "teams" / "Plain"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n  - name: Mitsui\n"
+        )
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 2
         assert "--persona is required" in capsys.readouterr().err
 
 
@@ -193,6 +353,76 @@ class TestCmdNewWorkflow:
         # task_dir landed
         paths = JournalPaths(root=journal_dir)
         assert paths.list_active_ids()
+
+    def test_workflow_uses_playbook_default_captain_when_omitted(
+        self, team_root, journal_dir, capsys,
+    ):
+        """If the playbook has `default_captain:` in an HTML-comment
+        YAML block and the CLI omits --captain, the playbook default
+        wins."""
+        (team_root / "workflow" / "default.md").write_text(
+            "# default\n\n"
+            "<!--\n"
+            "default_captain: Mitsui\n"
+            "-->\n\n"
+            "Anzai drafts. Akagi reviews. Ayako reviews.\n",
+        )
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--task-brief", "B",
+        ])
+        assert rc == 0, capsys.readouterr().err
+        assert "captain:      Mitsui" in capsys.readouterr().out
+
+    def test_workflow_explicit_captain_overrides_playbook_default(
+        self, team_root, journal_dir, capsys,
+    ):
+        """An explicit --captain wins over playbook default_captain."""
+        (team_root / "workflow" / "default.md").write_text(
+            "<!--\ndefault_captain: Mitsui\n-->\n\n"
+            "Anzai drafts. Akagi reviews. Ayako reviews.\n",
+        )
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--task-brief", "B",
+            "--captain", "Akagi",
+        ])
+        assert rc == 0
+        assert "captain:      Akagi" in capsys.readouterr().out
+
+    def test_workflow_playbook_default_captain_resolves_alias(
+        self, team_root, journal_dir, capsys,
+    ):
+        """If the playbook says `default_captain: Mumu` and Mumu
+        aliases Kogure, the scaffolded task carries Kogure."""
+        # Set up Kogure with Mumu alias on the team.
+        (team_root / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Ayako\n"
+            "  - name: Mitsui\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team_root / "personas" / "Kogure").mkdir(parents=True)
+        (team_root / "personas" / "Kogure" / "prompt.md").write_text("hi\n")
+        (team_root / "workflow" / "default.md").write_text(
+            "<!--\ndefault_captain: Mumu\n-->\n\n"
+            "Anzai drafts. Akagi reviews. Ayako reviews.\n",
+        )
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--kind", "workflow",
+            "--playbook", "default",
+            "--task-brief", "B",
+        ])
+        assert rc == 0, capsys.readouterr().err
+        assert "captain:      Kogure" in capsys.readouterr().out
 
     def test_workflow_brief_file(
         self, tmp_path, team_root, journal_dir, capsys,

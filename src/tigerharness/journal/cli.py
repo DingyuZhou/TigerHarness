@@ -29,6 +29,8 @@ from tigerharness.journal.scaffold import (
     MissingPersonaError,
     new_task,
     new_workflow_task,
+    resolve_default_persona,
+    resolve_playbook_default_captain,
     resolve_team_root,
 )
 from tigerharness.journal.sweep import (
@@ -77,12 +79,46 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             file=sys.stderr,
         )
         return 2
-    if not args.persona:
-        print(
-            "error: --persona is required for --kind task",
-            file=sys.stderr,
-        )
-        return 2
+    persona = args.persona
+    cwd = Path.cwd()
+    team_root = cwd if (cwd / "configs" / "personas.yaml").is_file() else None
+    if not persona:
+        # Fall back to the team's default_persona from personas.yaml
+        # if available. The team root is the cwd convention (same
+        # discovery rule the workflow-mode scaffolder uses below).
+        if team_root is not None:
+            default = resolve_default_persona(team_root)
+            if default:
+                persona = default
+        if not persona:
+            print(
+                "error: --persona is required for --kind task (no "
+                "default_persona configured in the team's "
+                "configs/personas.yaml)",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Symmetric with workflow mode: if we can identify a team root,
+    # verify the persona's prompt.md actually exists on disk before
+    # writing any artifact. Catches typos in both `--persona Typo`
+    # (explicit) and `default_persona: Typo` (from yaml). When cwd is
+    # NOT a team root we can't validate, and we accept the value as-is
+    # for back-compat (the same posture Phase 1 had).
+    if team_root is not None:
+        from tigerharness.journal.scaffold import validate_personas
+        missing = validate_personas(team_root, {persona})
+        if missing:
+            print(
+                f"error: persona {persona!r} is not on team "
+                f"{team_root.name} (no prompt.md under "
+                f"{team_root / 'personas' / persona}/). Add the "
+                "persona via `tigerharness init --persona <name>` "
+                "first, or fix the typo (in --persona or in "
+                "personas.yaml's default_persona).",
+                file=sys.stderr,
+            )
+            return 2
     prd_path = Path(args.prd).expanduser()
     if not prd_path.exists():
         print(f"error: PRD not found: {prd_path}", file=sys.stderr)
@@ -91,7 +127,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
     try:
         result = new_task(
             prd_text=prd_text,
-            persona=args.persona,
+            persona=persona,
             paths=paths,
             title=args.title,
             kind=args.kind,
@@ -179,6 +215,13 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
         return 2
     playbook_text = playbook_path.read_text(encoding="utf-8")
 
+    # If --captain wasn't passed, fall back to the playbook's
+    # `default_captain:` (HTML-comment YAML block). Alias-resolved
+    # through the team's personas.yaml.
+    captain = args.captain
+    if captain is None:
+        captain = resolve_playbook_default_captain(playbook_text, team_root)
+
     try:
         result = new_workflow_task(
             brief_text=brief_text,
@@ -187,7 +230,7 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
             team_root=team_root,
             paths=paths,
             title=args.title,
-            captain=args.captain,
+            captain=captain,
             max_sessions=args.max_sessions if args.max_sessions is not None else 10,
             slug=args.slug,
         )
