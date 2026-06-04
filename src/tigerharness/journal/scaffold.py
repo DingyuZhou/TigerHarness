@@ -428,24 +428,40 @@ _PLAYBOOK_META_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+# Whitelist of keys the journal scaffolder reads out of playbook
+# metadata blocks. Anything else (e.g. the existing ``workflow_config:``
+# block consumed by the api-backed workflow_runner) is parsed by the
+# yaml loader but DROPPED here, so journal-side code can't accidentally
+# consume runner-only config and the surface stays explicit.
+_PLAYBOOK_META_KNOWN_KEYS: frozenset[str] = frozenset({"default_captain"})
+
 
 def extract_playbook_meta(playbook_text: str) -> dict:
     """Parse every ``<!-- ... -->`` HTML comment in the playbook as
-    YAML and merge the results into one dict.
+    YAML and return a dict of the known journal-side metadata keys.
 
-    Playbooks use HTML-comment YAML blocks for machine-readable
-    metadata (see Shohoku's ``workflow/default.md``: the
-    ``workflow_config:`` block is one example). This Phase 2 / Phase 3
-    addition gives the journal scaffolder a single entry point for any
-    such metadata.
+    The HTML-comment YAML convention is shared with the api-backed
+    workflow_runner (see Shohoku's ``workflow/default.md``: the
+    ``workflow_config:`` block is the runner's example). To keep
+    surface minimal and intentional, this function filters the merged
+    dict down to keys in :data:`_PLAYBOOK_META_KNOWN_KEYS`. Adding a
+    new playbook-meta knob is therefore a deliberate code change here
+    + a doc change, never a silent dependency on whatever the playbook
+    author dropped into a comment.
 
-    Blocks that aren't valid YAML or don't parse to a dict are
-    skipped silently -- the playbook author can drop a stray narrative
-    HTML comment without breaking the scaffolder. Later blocks
-    override earlier ones on key collision (the same shallow-merge
-    convention task_runner's playbook reader uses).
+    Format requirements:
+
+    - The HTML comment delimiters must each be on their own line:
+      ``<!--`` followed by ``\\n``, then the YAML body, then ``\\n``
+      and ``-->``. Single-line comments like
+      ``<!-- foo: bar -->`` are treated as narrative prose and
+      skipped, so a playbook author can drop a stray comment without
+      breaking the scaffolder.
+    - Blocks that aren't valid YAML or don't parse to a dict are
+      skipped silently. Later blocks override earlier ones on key
+      collision (shallow last-wins merge).
     """
-    out: dict = {}
+    merged: dict = {}
     for match in _PLAYBOOK_META_BLOCK_RE.finditer(playbook_text):
         try:
             import yaml
@@ -453,8 +469,8 @@ def extract_playbook_meta(playbook_text: str) -> dict:
         except Exception:  # pragma: no cover - defensive
             continue
         if isinstance(data, dict):
-            out.update(data)
-    return out
+            merged.update(data)
+    return {k: v for k, v in merged.items() if k in _PLAYBOOK_META_KNOWN_KEYS}
 
 
 def resolve_playbook_default_captain(

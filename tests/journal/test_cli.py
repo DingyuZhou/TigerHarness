@@ -243,12 +243,16 @@ class TestCmdNew:
         s = Status.from_json(paths.status_json(tid).read_text())
         assert s.persona == "Kogure"
 
-    def test_task_mode_explicit_persona_typo_rejected(
+    def test_task_mode_explicit_persona_passes_through_unvalidated(
         self, tmp_path, journal_dir, capsys, monkeypatch,
     ):
-        """Adversarial-review fix: an explicit --persona Typo (no
-        matching prompt.md on the team) is rejected at scaffold time,
-        not silently stored in status.json to fail later."""
+        """Iteration on the review fix: explicit --persona is NOT
+        roster-validated. Phase 1 behaviour preserved -- the operator
+        typing the value seconds ago can correct the late "no
+        prompt.md" error from the task-runner. Only the default_persona
+        fallback path gets the safety gate (it's a yaml typo that
+        sticks around).
+        """
         team = tmp_path / "teams" / "Tigers"
         (team / "configs").mkdir(parents=True)
         (team / "configs" / "personas.yaml").write_text(
@@ -263,10 +267,12 @@ class TestCmdNew:
             "--journal-dir", str(journal_dir),
             "new", "--prd", str(prd), "--persona", "Mistui",  # typo
         ])
-        assert rc == 2
-        err = capsys.readouterr().err
-        assert "'Mistui'" in err
-        assert "not on team Tigers" in err
+        # Phase 1 behaviour: stored as-is, no early error.
+        assert rc == 0, capsys.readouterr().err
+        paths = JournalPaths(root=journal_dir)
+        tid = paths.list_active_ids()[0]
+        s = Status.from_json(paths.status_json(tid).read_text())
+        assert s.persona == "Mistui"
 
     def test_task_mode_default_persona_typo_rejected(
         self, tmp_path, journal_dir, capsys, monkeypatch,
@@ -293,6 +299,9 @@ class TestCmdNew:
         err = capsys.readouterr().err
         assert "'Mistui'" in err
         assert "default_persona" in err
+        # Error message points specifically at the yaml file the
+        # operator needs to fix.
+        assert "personas.yaml" in err
 
     def test_task_mode_no_persona_and_no_default_still_errors(
         self, tmp_path, journal_dir, capsys, monkeypatch,

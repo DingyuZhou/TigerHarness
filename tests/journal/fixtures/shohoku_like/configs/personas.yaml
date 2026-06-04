@@ -1,0 +1,37 @@
+# Test fixture mirroring the shape of a real Shohoku-like team:
+# multiple personas, each with multilingual aliases, a top-level
+# default_persona, and a Kogure entry whose aliases include Mumu
+# (the case the Operator exercises in production).
+#
+# Hermetic: the integration test points _at this fixture_, not at
+# the live teams/Shohoku/ directory on the user's filesystem.
+
+personas_dir: ../personas
+
+default_persona: Ayako
+
+personas:
+  - name: Ayako
+    aliases: [Ayako, Ayako-san, Caizi]
+    prompt_file: Ayako/prompt
+    description: "Ayako -- coordinator + QA backup"
+
+  - name: Anzai
+    aliases: [Anzai, Anxi, Anxi Jiaolian]
+    prompt_file: Anzai/prompt
+    description: "Coach Anzai -- planner"
+
+  - name: Akagi
+    aliases: [Akagi, Chimu, Captain]
+    prompt_file: Akagi/prompt
+    description: "Captain Akagi -- execution leader"
+
+  - name: Mitsui
+    aliases: [Mitsui, Sanjing, Mitsui-senpai]
+    prompt_file: Mitsui/prompt
+    description: "Mitsui -- veteran developer"
+
+  - name: Kogure
+    aliases: [Kogure, Mumu, Kogure-senpai, Megane-kun]
+    prompt_file: Kogure/prompt
+    description: "Kogure -- QA"

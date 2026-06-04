@@ -470,7 +470,11 @@ class TestExtractPlaybookMeta:
         from tigerharness.journal.scaffold import extract_playbook_meta
         assert extract_playbook_meta("# Just a heading\n") == {}
 
-    def test_single_block(self):
+    def test_single_block_returns_only_known_keys(self):
+        """Iteration: extract_playbook_meta now whitelists. A
+        single-block playbook that mixes a known key
+        (default_captain) with unrelated metadata (max_loop_iters --
+        the runner config block's key) returns only the known one."""
         from tigerharness.journal.scaffold import extract_playbook_meta
         text = (
             "# Heading\n\n"
@@ -479,9 +483,9 @@ class TestExtractPlaybookMeta:
             "max_loop_iters: 5\n"
             "-->\n"
         )
-        assert extract_playbook_meta(text) == {
-            "default_captain": "Mitsui", "max_loop_iters": 5,
-        }
+        # Only known keys leak through; max_loop_iters (runner-only)
+        # is parsed but dropped.
+        assert extract_playbook_meta(text) == {"default_captain": "Mitsui"}
 
     def test_multiple_blocks_merge_with_later_winning(self):
         from tigerharness.journal.scaffold import extract_playbook_meta
@@ -496,9 +500,12 @@ class TestExtractPlaybookMeta:
             "-->\n"
         )
         meta = extract_playbook_meta(text)
-        assert meta["default_captain"] == "Akagi"  # second block wins
-        assert meta["max_loop_iters"] == 5
-        assert meta["extra"] == "tagline"
+        # Second block wins on default_captain.
+        assert meta["default_captain"] == "Akagi"
+        # Unknown keys (max_loop_iters, extra) are filtered out by
+        # the whitelist.
+        assert "max_loop_iters" not in meta
+        assert "extra" not in meta
 
     def test_narrative_html_comment_is_skipped(self):
         """A non-YAML HTML comment (just prose) is skipped without
@@ -522,6 +529,39 @@ class TestExtractPlaybookMeta:
             "<!--\ndefault_captain: Mitsui\n-->\n"
         )
         assert extract_playbook_meta(text) == {"default_captain": "Mitsui"}
+
+    def test_single_line_html_comment_is_treated_as_narrative(self):
+        """Pins the documented requirement: HTML-comment YAML blocks
+        must span MULTIPLE lines (open tag on its own line, body on
+        the next, close tag on its own line). A single-line comment
+        like `<!-- default_captain: Mitsui -->` is treated as
+        narrative prose and skipped -- the operator avoids accidental
+        metadata escape from a stray one-liner comment."""
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "<!-- default_captain: Mitsui -->\n\n"
+            "<!--\n"
+            "default_captain: Akagi\n"
+            "-->\n"
+        )
+        # Only the multi-line block contributes.
+        assert extract_playbook_meta(text) == {"default_captain": "Akagi"}
+
+    def test_runner_config_block_does_not_leak_through(self):
+        """The api-backed runner's `workflow_config:` block (a real
+        Shohoku playbook has one) is parsed by the yaml loader but
+        filtered out of the journal-side meta. Pins the boundary."""
+        from tigerharness.journal.scaffold import extract_playbook_meta
+        text = (
+            "<!--\n"
+            "workflow_config:\n"
+            "  human_gate: true\n"
+            "  max_cost_usd: 10.0\n"
+            "  max_loop_iters: 5\n"
+            "-->\n"
+        )
+        # workflow_config is not in the whitelist -> dropped.
+        assert extract_playbook_meta(text) == {}
 
 
 class TestResolvePlaybookDefaultCaptain:

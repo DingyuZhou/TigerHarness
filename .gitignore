@@ -16,3 +16,8 @@ htmlcov/
 # Ephemeral -- removed automatically on job exit; only persists if a
 # job crashed or the cleanup itself failed.
 .worktrees/
+
+# Session-scratch / Claude working notes -- decisions logs, PR body
+# drafts, etc. Never meant for the repo; lived in `.tmp-*.md` by
+# convention.
+.tmp-*

@@ -723,21 +723,20 @@ def _append_persona_to_yaml(
         # mistaken for an existing entry.
         if f"  - name: {persona}\n" in text:
             return False
-        # If the file has no `default_persona:` line yet (e.g. it was
-        # scaffolded by an older tigerharness, or by create_team before
-        # any persona existed), inject one at the top of the file --
-        # the first persona added becomes the team default. Prepending
-        # is robust against unusual existing layouts (e.g. a yaml that
-        # opens directly with `personas:` and no preamble).
-        if "default_persona:" not in text:
-            default_block = _PERSONAS_YAML_DEFAULT_PERSONA_LINE.format(
-                persona=persona,
-            )
-            text = default_block + text
+        # Append to an existing file as-is. We intentionally DO NOT
+        # inject a `default_persona:` line into yamls that lack one --
+        # an older tigerharness install may have had a deliberate
+        # reason to omit it, and a silent mid-file edit could
+        # surprise an operator who's been managing the yaml by hand.
+        # `default_persona:` is seeded only when this function creates
+        # a fresh personas.yaml below.
         if not text.endswith("\n"):
             text += "\n"
         yaml_path.write_text(text + entry)
         return True
+    # Fresh file: write preamble + default_persona line + entry. The
+    # first persona added becomes the team's default; the operator
+    # can edit later.
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     yaml_path.write_text(
         _PERSONAS_YAML_PREAMBLE.format(team=team_name)

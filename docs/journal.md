@@ -104,10 +104,84 @@ Journal root resolution priority:
 3. `$XDG_STATE_HOME/tigerharness-journal`
 4. `~/.local/state/tigerharness-journal`
 
+## Team-level defaults (`configs/personas.yaml`)
+
+A team's `personas.yaml` carries two optional knobs that make the
+scaffolder less typey:
+
+- **`default_persona: <name>`** -- used by
+  `journal new --kind task` when `--persona` is omitted. The first
+  persona that `tigerharness init` adds becomes the default
+  automatically; edit later as the team grows. A `default_persona:`
+  that names a persona missing from disk is rejected at
+  `journal new` time with a clear error pointing at the yaml.
+- **Persona `aliases:` per entry** -- a list of alternate names
+  (case- and separator-insensitive) that resolve to the canonical
+  persona. Matches `task_runner.personas`. Examples on a team:
+
+  ```yaml
+  default_persona: Ayako
+  personas:
+    - name: Kogure
+      aliases: [Mumu, Kogure-senpai, 木暮]
+  ```
+
+  Then `journal new --persona Mumu` finds Kogure's prompt.md, the
+  playbook prose "Mumu reviews" counts as a real persona reference
+  for compile-time validation, and a `workflow.yaml` override like
+  `compile_personas: { ayako: Mumu }` correctly resolves to
+  Kogure.
+
+  Conflict policy: canonical names always win over alias entries
+  (regardless of file order); among colliding aliases, last-defined
+  wins.
+
+## Team-level workflow config (`configs/workflow.yaml`, optional)
+
+For `kind=workflow` tasks a team may override which personas play
+the three compile-time roles:
+
+```yaml
+compile_personas:
+  drafter: Anzai     # default; the steps-bundle author
+  akagi:   Akagi     # default; execution-mechanics critic
+  ayako:   Mumu      # alias of Kogure on this team -- QA critic
+```
+
+All three keys are optional; absent keys fall back to
+`Anzai`/`Akagi`/`Ayako`. Names resolve through the alias map above.
+A missing yaml file means "all defaults."
+
+## Playbook-level defaults (HTML-comment YAML)
+
+A playbook can declare metadata in a multi-line HTML comment:
+
+```markdown
+# My playbook
+
+<!--
+default_captain: Mitsui
+-->
+
+## Roles
+...
+```
+
+Recognised keys (whitelisted; unknown keys are dropped silently):
+
+- **`default_captain: <name>`** -- accountable owner used when
+  `journal new --kind workflow` omits `--captain`. Resolved through
+  aliases.
+
+Single-line comments like `<!-- foo: bar -->` are treated as
+narrative prose and ignored.
+
 ## Usage
 
 ```bash
 # Scaffold a new task from a PRD (kind=task -- single persona).
+# --persona is optional when the team's personas.yaml declares
+# `default_persona:` (see "Team-level defaults" above).
 tigerharness journal new \
     --prd brief.md \
     --persona Mitsui \
@@ -115,7 +189,8 @@ tigerharness journal new \
 
 # Scaffold a new workflow task (kind=workflow -- multi-persona,
 # compiled from a team playbook). Either --task-brief or --brief-file
-# supplies the brief; --captain is an optional accountable owner.
+# supplies the brief. --captain is optional and falls back to the
+# playbook's `default_captain:` HTML-comment YAML if present.
 tigerharness journal new \
     --kind workflow \
     --playbook default \
