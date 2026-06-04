@@ -179,9 +179,17 @@ result: CompileResult = compile_playbook(
 ### Mechanism
 
 A new skill `workflow-append-steps` is exposed to persona subprocesses.
-When invoked, it calls a workflow_runner module function:
+
+> **Shipped as:** runtime step-append landed in the **journal** backend,
+> not in `workflow_runner` — there is no
+> `workflow_runner.compile.append_steps` function. The shipped surface is
+> the CLI `tigerharness journal append-steps --task <id> --new-bundle <path>`
+> (driven by the `workflow-append-steps` skill); see
+> [`journal-workflow-mode.md`](journal-workflow-mode.md). The original
+> Phase-2 design (below) called a module function instead:
 
 ```python
+# Original Phase-2 design -- NOT shipped (see note above):
 from tigerharness.workflow_runner.compile import append_steps
 
 append_steps(
