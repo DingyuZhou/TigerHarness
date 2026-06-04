@@ -385,6 +385,59 @@ class TestPersonaAliases:
         # Nothing else.
         assert len([v for v in m.values() if v == "Kogure"]) == 2
 
+    def test_alias_collision_with_other_personas_canonical_name_loses(
+        self, tmp_path,
+    ):
+        """Adversarial-review fix: when an alias on persona A would
+        collide with the CANONICAL name of persona B (regardless of
+        file order), the canonical name's self-mapping wins.
+        Otherwise lookups of B's own canonical name would silently
+        misroute to A."""
+        from tigerharness.journal.scaffold import canonicalize_persona
+        team = _make_team(tmp_path)
+        # Anzai is canonical. Rukawa declares an alias "Anzai" --
+        # which would (without the fix) hijack canonical Anzai lookups
+        # to point at Rukawa. The canonical layer wins.
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Rukawa\n"
+            "    aliases: [Anzai]\n"  # collides with Anzai's canonical
+        )
+        assert canonicalize_persona(team, "Anzai") == "Anzai"
+
+    def test_alias_collision_canonical_name_wins_regardless_of_order(
+        self, tmp_path,
+    ):
+        """Same collision but with the colliding-alias entry FIRST in
+        the file. Canonical name still wins -- order doesn't matter."""
+        from tigerharness.journal.scaffold import canonicalize_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Rukawa\n"
+            "    aliases: [Anzai]\n"  # appears BEFORE Anzai entry
+            "  - name: Anzai\n"
+        )
+        assert canonicalize_persona(team, "Anzai") == "Anzai"
+
+    def test_alias_collision_between_two_aliases_last_wins(self, tmp_path):
+        """When two personas declare the SAME alias (neither matches a
+        canonical name), the persona that appears LATER in the yaml
+        wins -- a documented precedence policy, pinned here so a
+        future refactor doesn't silently change it."""
+        from tigerharness.journal.scaffold import canonicalize_persona
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Akagi\n"
+            "    aliases: [Captain]\n"
+            "  - name: Mitsui\n"
+            "    aliases: [Captain]\n"  # same alias on a later entry
+        )
+        # Last-wins among aliases: "Captain" resolves to Mitsui.
+        assert canonicalize_persona(team, "Captain") == "Mitsui"
+
     def test_workflow_yaml_can_use_alias_in_compile_personas(self, tmp_path):
         """If a team configures `compile_personas: { ayako: Mumu }`,
         the scaffolder canonicalises through to Kogure before checking

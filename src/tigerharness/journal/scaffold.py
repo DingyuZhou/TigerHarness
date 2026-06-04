@@ -321,7 +321,7 @@ def read_team_roster(team_root: Path) -> set[str]:
         import yaml
         with yaml_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
-    except (OSError, ImportError, Exception):  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - defensive
         # yaml may be unavailable in a stripped install; we'd rather
         # let the COMPILE_PERSONAS check fire on missing prompt.md
         # than crash at scaffold time on a malformed yaml.
@@ -352,15 +352,27 @@ def read_team_alias_map(team_root: Path) -> dict[str, str]:
     ``alias -> canonical`` mapping (alias key is normalized via
     :func:`_normalize_persona_key`).
 
-    Each persona entry's canonical name is mapped to itself; any
-    additional ``aliases:`` list is layered on top. A missing or
-    malformed yaml yields an empty mapping (the canonical-roster
-    behaviour from :func:`read_team_roster` then takes over).
+    Each persona entry's canonical name self-maps; any additional
+    ``aliases:`` list is layered on top. A missing or malformed yaml
+    yields an empty mapping (the canonical-roster behaviour from
+    :func:`read_team_roster` then takes over).
 
-    Convention: matches ``task_runner.personas`` -- aliases include the
-    canonical name when explicit, but a persona without an ``aliases``
-    field still self-maps to its canonical name. Case- and
-    separator-insensitive lookup.
+    Conflict policy (Phase 2 hardening):
+
+    - **Canonical names always win** over alias entries. If persona A
+      declares an alias that happens to match persona B's canonical
+      name (even when B appears earlier in the file), the canonical
+      name's self-mapping wins, so a lookup of B's canonical name
+      still resolves to B. This is implemented by collecting all alias
+      entries first and overlaying canonical self-mappings on top.
+    - Among aliases that collide with each other, **last-defined
+      wins** -- whichever entry appears later in personas.yaml takes
+      the alias. The tests pin this so the precedence is observable.
+
+    Convention: matches ``task_runner.personas`` -- aliases include
+    the canonical name when explicit, but a persona without an
+    ``aliases`` field still self-maps via the canonical layer. Case-
+    and separator-insensitive lookup.
     """
     yaml_path = team_root / "configs" / "personas.yaml"
     if not yaml_path.is_file():
@@ -369,12 +381,13 @@ def read_team_alias_map(team_root: Path) -> dict[str, str]:
         import yaml
         with yaml_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
-    except (OSError, ImportError, Exception):  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - defensive
         return {}
     if not isinstance(data, dict):
         return {}
     entries = data.get("personas") or []
-    out: dict[str, str] = {}
+    aliases_map: dict[str, str] = {}
+    canonicals_map: dict[str, str] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -382,15 +395,17 @@ def read_team_alias_map(team_root: Path) -> dict[str, str]:
         if not (isinstance(name, str) and name.strip()):
             continue
         canonical = name.strip()
-        # Self-mapping is always present so plain canonical lookups
-        # round-trip.
-        out[_normalize_persona_key(canonical)] = canonical
+        canonicals_map[_normalize_persona_key(canonical)] = canonical
         aliases = entry.get("aliases") or []
         if not isinstance(aliases, list):
             continue
         for alias in aliases:
             if isinstance(alias, str) and alias.strip():
-                out[_normalize_persona_key(alias)] = canonical
+                aliases_map[_normalize_persona_key(alias)] = canonical
+    # Aliases first, canonical self-mappings overlay so a canonical
+    # name is never shadowed by another persona's alias.
+    out = dict(aliases_map)
+    out.update(canonicals_map)
     return out
 
 
@@ -435,7 +450,7 @@ def extract_playbook_meta(playbook_text: str) -> dict:
         try:
             import yaml
             data = yaml.safe_load(match.group(1))
-        except (ImportError, Exception):  # pragma: no cover - defensive
+        except Exception:  # pragma: no cover - defensive
             continue
         if isinstance(data, dict):
             out.update(data)
@@ -481,7 +496,7 @@ def resolve_default_persona(team_root: Path) -> str | None:
         import yaml
         with yaml_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
-    except (OSError, ImportError, Exception):  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - defensive
         return None
     if not isinstance(data, dict):
         return None
@@ -525,7 +540,7 @@ def resolve_compile_personas(team_root: Path) -> dict[str, str]:
         import yaml
         with yaml_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
-    except (OSError, ImportError, Exception):  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - defensive
         return out
     if not isinstance(data, dict):
         return out

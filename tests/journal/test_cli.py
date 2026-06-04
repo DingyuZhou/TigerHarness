@@ -171,6 +171,9 @@ class TestCmdNew:
             "default_persona: Scout\n"
             "personas:\n  - name: Scout\n"
         )
+        # Scout's prompt.md must exist for the validate-persona check.
+        (team / "personas" / "Scout").mkdir(parents=True)
+        (team / "personas" / "Scout" / "prompt.md").write_text("hi\n")
         monkeypatch.chdir(team)
         prd = tmp_path / "b.md"
         prd.write_text("# T\nb\n")
@@ -195,6 +198,9 @@ class TestCmdNew:
             "default_persona: Scout\n"
             "personas:\n  - name: Scout\n  - name: Chief\n"
         )
+        for p in ("Scout", "Chief"):
+            (team / "personas" / p).mkdir(parents=True)
+            (team / "personas" / p / "prompt.md").write_text("hi\n")
         monkeypatch.chdir(team)
         prd = tmp_path / "b.md"
         prd.write_text("# T\nb\n")
@@ -222,6 +228,8 @@ class TestCmdNew:
             "  - name: Kogure\n"
             "    aliases: [Mumu]\n"
         )
+        (team / "personas" / "Kogure").mkdir(parents=True)
+        (team / "personas" / "Kogure" / "prompt.md").write_text("hi\n")
         monkeypatch.chdir(team)
         prd = tmp_path / "b.md"
         prd.write_text("# T\nb\n")
@@ -234,6 +242,57 @@ class TestCmdNew:
         tid = paths.list_active_ids()[0]
         s = Status.from_json(paths.status_json(tid).read_text())
         assert s.persona == "Kogure"
+
+    def test_task_mode_explicit_persona_typo_rejected(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """Adversarial-review fix: an explicit --persona Typo (no
+        matching prompt.md on the team) is rejected at scaffold time,
+        not silently stored in status.json to fail later."""
+        team = tmp_path / "teams" / "Tigers"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n  - name: Scout\n"
+        )
+        (team / "personas" / "Scout").mkdir(parents=True)
+        (team / "personas" / "Scout" / "prompt.md").write_text("hi\n")
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd), "--persona", "Mistui",  # typo
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "'Mistui'" in err
+        assert "not on team Tigers" in err
+
+    def test_task_mode_default_persona_typo_rejected(
+        self, tmp_path, journal_dir, capsys, monkeypatch,
+    ):
+        """default_persona in personas.yaml pointing at a non-existent
+        persona is also rejected -- the typo would otherwise affect
+        every subsequent scaffold."""
+        team = tmp_path / "teams" / "Tigers"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Mistui\n"  # typo (Mitsui)
+            "personas:\n  - name: Mitsui\n"
+        )
+        (team / "personas" / "Mitsui").mkdir(parents=True)
+        (team / "personas" / "Mitsui" / "prompt.md").write_text("hi\n")
+        monkeypatch.chdir(team)
+        prd = tmp_path / "b.md"
+        prd.write_text("# T\nb\n")
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "new", "--prd", str(prd),
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "'Mistui'" in err
+        assert "default_persona" in err
 
     def test_task_mode_no_persona_and_no_default_still_errors(
         self, tmp_path, journal_dir, capsys, monkeypatch,

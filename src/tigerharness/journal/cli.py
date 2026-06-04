@@ -80,13 +80,14 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
         )
         return 2
     persona = args.persona
+    cwd = Path.cwd()
+    team_root = cwd if (cwd / "configs" / "personas.yaml").is_file() else None
     if not persona:
         # Fall back to the team's default_persona from personas.yaml
         # if available. The team root is the cwd convention (same
         # discovery rule the workflow-mode scaffolder uses below).
-        cwd = Path.cwd()
-        if (cwd / "configs" / "personas.yaml").is_file():
-            default = resolve_default_persona(cwd)
+        if team_root is not None:
+            default = resolve_default_persona(team_root)
             if default:
                 persona = default
         if not persona:
@@ -94,6 +95,27 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
                 "error: --persona is required for --kind task (no "
                 "default_persona configured in the team's "
                 "configs/personas.yaml)",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Symmetric with workflow mode: if we can identify a team root,
+    # verify the persona's prompt.md actually exists on disk before
+    # writing any artifact. Catches typos in both `--persona Typo`
+    # (explicit) and `default_persona: Typo` (from yaml). When cwd is
+    # NOT a team root we can't validate, and we accept the value as-is
+    # for back-compat (the same posture Phase 1 had).
+    if team_root is not None:
+        from tigerharness.journal.scaffold import validate_personas
+        missing = validate_personas(team_root, {persona})
+        if missing:
+            print(
+                f"error: persona {persona!r} is not on team "
+                f"{team_root.name} (no prompt.md under "
+                f"{team_root / 'personas' / persona}/). Add the "
+                "persona via `tigerharness init --persona <name>` "
+                "first, or fix the typo (in --persona or in "
+                "personas.yaml's default_persona).",
                 file=sys.stderr,
             )
             return 2
