@@ -637,16 +637,32 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     # Skills: copy from tigerharness package's _bundled_skills/ directory.
     # Each skill lives at _bundled_skills/<name>/SKILL.md, shipped as
     # package data so they're available in installed wheels too.
-    pkg_skills_dir = Path(__file__).resolve().parent / "_bundled_skills"
-    if pkg_skills_dir.is_dir():
-        for skill_dir in sorted(pkg_skills_dir.iterdir()):
-            skill_src = skill_dir / "SKILL.md"
-            if not skill_src.is_file():
-                continue
-            dest = team_dir / ".claude" / "skills" / skill_dir.name / "SKILL.md"
-            if _write_if_missing(dest, skill_src.read_text(encoding="utf-8")):
-                created.append(dest)
+    created.extend(install_bundled_skills(team_dir))
 
+    return created
+
+
+def install_bundled_skills(team_dir: Path) -> list[Path]:
+    """Copy the tigerharness package's ``_bundled_skills/`` into the
+    team's ``.claude/skills/``. Idempotent -- skills that already
+    exist on disk are left untouched (so a team's hand-edited skill
+    is never clobbered). Returns the list of paths actually created.
+
+    Called from :func:`create_team` during initial scaffolding AND
+    by ``tigerharness init --refresh-skills`` so a team set up before
+    a new skill was added can pick it up without re-scaffolding.
+    """
+    created: list[Path] = []
+    pkg_skills_dir = Path(__file__).resolve().parent / "_bundled_skills"
+    if not pkg_skills_dir.is_dir():
+        return created
+    for skill_dir in sorted(pkg_skills_dir.iterdir()):
+        skill_src = skill_dir / "SKILL.md"
+        if not skill_src.is_file():
+            continue
+        dest = team_dir / ".claude" / "skills" / skill_dir.name / "SKILL.md"
+        if _write_if_missing(dest, skill_src.read_text(encoding="utf-8")):
+            created.append(dest)
     return created
 
 
@@ -1227,6 +1243,55 @@ def _format_path(p: Path, base: Path) -> str:
         return str(p)
 
 
+def _resolve_refresh_target(
+    args: argparse.Namespace, search_root: Path,
+) -> Path | None:
+    """Pick the team to refresh-skills for. Honours --team-dir and
+    --team explicitly; otherwise uses the unique-team-in-cwd
+    convention. Returns the team dir, or ``None`` (after printing an
+    error) if the team is ambiguous / missing.
+    """
+    if args.team_dir:
+        team_dir = Path(args.team_dir).resolve()
+        if not (team_dir / "configs" / "personas.yaml").is_file():
+            print(
+                f"error: --team-dir {team_dir} is not a team "
+                "(no configs/personas.yaml).",
+                file=sys.stderr,
+            )
+            return None
+        return team_dir
+    if args.team:
+        team_dir = search_root / args.team
+        if not (team_dir / "configs" / "personas.yaml").is_file():
+            print(
+                f"error: no team named {args.team!r} under "
+                f"{_format_path(search_root, search_root)}/.",
+                file=sys.stderr,
+            )
+            return None
+        return team_dir
+    existing = discover_teams(search_root)
+    if not existing:
+        print(
+            f"error: no teams found under "
+            f"{_format_path(search_root, search_root)}/. "
+            "Pass --team-dir or run `tigerharness init --persona <name>` "
+            "to scaffold one first.",
+            file=sys.stderr,
+        )
+        return None
+    if len(existing) > 1:
+        names = ", ".join(t.name for t in existing)
+        print(
+            f"error: multiple teams found ({names}); pass --team <name> "
+            "to disambiguate.",
+            file=sys.stderr,
+        )
+        return None
+    return existing[0]
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for ``tigerharness init``."""
     parser = argparse.ArgumentParser(
@@ -1272,7 +1337,38 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory to search for existing teams "
              "(default: current directory).",
     )
+    parser.add_argument(
+        "--refresh-skills",
+        action="store_true",
+        help="Don't create a persona; instead, copy any newly-bundled "
+             "skills (e.g. journal-new added after the team was first "
+             "scaffolded) into the team's .claude/skills/. Idempotent. "
+             "Skills already present on disk are left untouched.",
+    )
     args = parser.parse_args(argv)
+
+    # --refresh-skills bypasses persona creation entirely. Resolve the
+    # target team (the existing-team discovery flow) and just copy
+    # missing bundled skills into its .claude/skills/.
+    if args.refresh_skills:
+        search_root = Path(args.dir).resolve()
+        team_dir = _resolve_refresh_target(args, search_root)
+        if team_dir is None:
+            return 1
+        created = install_bundled_skills(team_dir)
+        if not created:
+            print(
+                f"Nothing to do -- all bundled skills already present "
+                f"under {_format_path(team_dir, search_root)}/.claude/skills/."
+            )
+            return 0
+        print(
+            f"Installed {len(created)} skill(s) under "
+            f"{_format_path(team_dir, search_root)}/:"
+        )
+        for p in created:
+            print(f"  {_format_path(p, search_root)}")
+        return 0
 
     search_root = Path(args.dir).resolve()
 
