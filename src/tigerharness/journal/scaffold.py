@@ -339,6 +339,75 @@ def read_team_roster(team_root: Path) -> set[str]:
     return out
 
 
+def _normalize_persona_key(name: str) -> str:
+    """Normalize a persona name for case- + separator-insensitive
+    matching. Mirrors :func:`task_runner.personas.resolve`:
+    lowercased, with spaces and underscores collapsed to hyphens.
+    """
+    return name.strip().lower().replace(" ", "-").replace("_", "-")
+
+
+def read_team_alias_map(team_root: Path) -> dict[str, str]:
+    """Read ``configs/personas.yaml`` and return an
+    ``alias -> canonical`` mapping (alias key is normalized via
+    :func:`_normalize_persona_key`).
+
+    Each persona entry's canonical name is mapped to itself; any
+    additional ``aliases:`` list is layered on top. A missing or
+    malformed yaml yields an empty mapping (the canonical-roster
+    behaviour from :func:`read_team_roster` then takes over).
+
+    Convention: matches ``task_runner.personas`` -- aliases include the
+    canonical name when explicit, but a persona without an ``aliases``
+    field still self-maps to its canonical name. Case- and
+    separator-insensitive lookup.
+    """
+    yaml_path = team_root / "configs" / "personas.yaml"
+    if not yaml_path.is_file():
+        return {}
+    try:
+        import yaml
+        with yaml_path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except (OSError, ImportError, Exception):  # pragma: no cover - defensive
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    entries = data.get("personas") or []
+    out: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not (isinstance(name, str) and name.strip()):
+            continue
+        canonical = name.strip()
+        # Self-mapping is always present so plain canonical lookups
+        # round-trip.
+        out[_normalize_persona_key(canonical)] = canonical
+        aliases = entry.get("aliases") or []
+        if not isinstance(aliases, list):
+            continue
+        for alias in aliases:
+            if isinstance(alias, str) and alias.strip():
+                out[_normalize_persona_key(alias)] = canonical
+    return out
+
+
+def canonicalize_persona(team_root: Path, given_name: str) -> str:
+    """Resolve ``given_name`` (which may be a canonical name OR any
+    alias) to its canonical persona name as declared in
+    ``personas.yaml``.
+
+    Returns ``given_name`` unchanged if no mapping is found (the team
+    config is missing, malformed, or the name simply isn't declared) --
+    callers can then surface a missing-persona error themselves.
+    """
+    return read_team_alias_map(team_root).get(
+        _normalize_persona_key(given_name), given_name,
+    )
+
+
 def resolve_compile_personas(team_root: Path) -> dict[str, str]:
     """Phase 2: resolve the role -> persona-name mapping for the three
     compile-time roles (``drafter``, ``akagi``, ``ayako``).
@@ -388,21 +457,42 @@ def resolve_compile_personas(team_root: Path) -> dict[str, str]:
 def _required_workflow_personas(
     playbook_text: str, team_root: Path,
 ) -> set[str]:
-    """The set of personas the workflow scaffolder requires on disk:
-    the team-configured compile-role personas PLUS any playbook reference
-    that matches the team's roster. Candidates the playbook mentions but
-    that aren't in the roster are treated as English prose, not
-    persona typos."""
+    """The set of CANONICAL persona names the workflow scaffolder
+    requires on disk: the team-configured compile-role personas PLUS
+    any playbook reference that matches the team's roster (including
+    aliases). Candidates the playbook mentions but that aren't in the
+    roster are treated as English prose, not persona typos.
+
+    Aliases are resolved before the intersection check so a playbook
+    that addresses a persona by alias (e.g. ``Mumu`` for the
+    Kogure-aliased persona) is still recognised as a real reference.
+    The compile-role names are canonicalised through the same path,
+    so a ``workflow.yaml`` override like ``akagi: Mumu`` lands on the
+    canonical ``Kogure`` for prompt-file validation.
+    """
     candidates = extract_persona_refs_from_playbook(playbook_text)
-    roster = read_team_roster(team_root)
-    real_refs = candidates & roster
-    compile_personas = set(resolve_compile_personas(team_root).values())
+    alias_map = read_team_alias_map(team_root)
+
+    def _canonical(name: str) -> str:
+        return alias_map.get(_normalize_persona_key(name), name)
+
+    real_refs = {
+        _canonical(c) for c in candidates
+        if _normalize_persona_key(c) in alias_map
+    }
+    compile_personas = {
+        _canonical(v) for v in resolve_compile_personas(team_root).values()
+    }
     return compile_personas | real_refs
 
 
 def _persona_prompt_path(team_root: Path, persona: str) -> Path:
-    """Path to a persona's ``prompt.md``. Used by the validator."""
-    return team_root / "personas" / persona / "prompt.md"
+    """Path to a persona's ``prompt.md``. Resolves aliases to the
+    canonical name before constructing the path -- so a caller passing
+    ``Mumu`` for a Kogure-aliased persona reads
+    ``personas/Kogure/prompt.md``."""
+    canonical = canonicalize_persona(team_root, persona)
+    return team_root / "personas" / canonical / "prompt.md"
 
 
 def validate_personas(team_root: Path, required: set[str]) -> list[str]:
