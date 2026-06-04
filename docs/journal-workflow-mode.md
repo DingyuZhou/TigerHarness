@@ -270,17 +270,20 @@ preamble before doing role work and emits a `WORKFLOW:` trailer
 after. The preamble:
 
 ```
-## Turn N -- adopting <persona>
-Role: <drafter | exec-critic | qa-critic | step-body>
-Prompt source: <abs path to persona prompt.md>
-Lens: <one-line role summary>
+PERSONA: <name>
+ROLE: <role from the playbook or step bundle>
+STEP: <step-id, or "compile-draft" / "compile-akagi" / "compile-ayako">
+OBJECTIVE: <one sentence on what this turn must produce>
 ```
 
+This is the exact preamble the shipped `OPERATING.md` (from
+`journal/operating_template.py`) instructs the session to write; the
+persona's prompt body (read from
+`teams/<team>/personas/<name>/prompt.md`) follows the preamble.
 Compile turns also reference a critic-lens prompt (Akagi or Ayako
-critic prompt from `workflow_runner.compile.critique`); graph-walk
-step turns reference the step body file. The persona prompt path is
-always the same uniform field — the audit trail format is identical
-across phases.
+critic prompt from `workflow_runner.compile.critique`); graph-walk step
+turns reference the step body file. The audit-trail format is identical
+across compile and graph-walk phases.
 
 The compile-time critic prompts are pulled by the session via
 `tigerharness journal compile-prompts --kind {drafter,akagi,ayako}`,
@@ -398,18 +401,21 @@ Same as Phase 1 with three additions:
 |---|---|---|
 | `kind` | `"task"` | `"task"` or `"workflow"` |
 | `persona` | required | optional captain; `null` allowed |
-| `max_sessions` | default `5` | default `len(steps) * 2 + 3` (extra 3 for compile budget) |
+| `max_sessions` | default `5` | default `10` (static; see below) |
 | `compile_pending` | not present | required `bool`; `true` at scaffold, `false` post-land |
 | `compile_phase` | not present | required `str` enum (seven values above) |
+| `playbook_name` | not present | required `str` (bare playbook name); rejected for `kind=task` |
 
 `Status.from_dict` enforces both new fields' presence/absence based
 on `kind`. The graph-walker gates on
 `compile_pending=false AND compile_phase=="complete"` before reading
 `orchestration.json`.
 
-`max_sessions = len(steps) * 2 + 3` gives compile a 3-session sub-
-budget within the unified counter (one happy-path compile + two
-recovery cycles). Override with `--max-sessions N`.
+`max_sessions` defaults to a static `10` for workflows (vs `5` for
+tasks). The original design proposal called for `len(steps) * 2 + 3`,
+but `len(steps)` is unknown at scaffold time (the graph has not been
+compiled yet), so the static default shipped instead (see
+`journal/models.py`). Override with `--max-sessions N`.
 
 ## Test strategy
 
