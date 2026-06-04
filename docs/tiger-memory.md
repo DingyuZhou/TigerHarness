@@ -32,7 +32,7 @@ Agent reads briefing/ at session start
 
 | Module | Purpose |
 |---|---|
-| `cli.py` | CLI: init, rebuild, search, drill, tree, raw, pin |
+| `cli.py` | CLI: init, bootstrap, rebuild, pin, resummarize, drill, tree, raw, search, state |
 | `config.py` | YAML config loading + validation |
 | `lifecycle.py` | The core engine: extract, summarize, rollup, rebuild |
 | `briefing.py` | Assemble the briefing/ directory from the store |
@@ -83,7 +83,7 @@ decay:
   preference: { days_per_point: 7 }
   decision: { days_per_point: 14 }
   incident: { days_per_point: 28 }
-  owner_explicit: locked
+  # owner_explicit memories are always locked (never decay) -- not configurable.
 
 rebuild:
   trigger: lazy
@@ -104,6 +104,9 @@ briefing:
 # Initialize the memory store
 tiger-memory --config my-config.yaml init
 
+# One-shot backfill of the full history (typical first run after init)
+tiger-memory --config my-config.yaml bootstrap
+
 # Rebuild briefing (incremental)
 tiger-memory --config my-config.yaml rebuild
 
@@ -122,13 +125,20 @@ tiger-memory --config my-config.yaml pin "Important decision" --kind decision
 
 ## Memory hierarchy
 
+The store has exactly **three** directories: `journal/`, `archive/`, and
+`briefing/`. Dailies, weeklies, and monthlies are **not** separate
+directories -- they live inside `journal/`, distinguished only by
+filename pattern:
+
 ```
-monthly/   YYYYMM-month-<UUID>.md
-weekly/    YYYYMMDD-week-<UUID>.md
-daily/     YYYYMMDD-daily-<UUID>.md
-journal/   YYYYMMDD-HHmmss-<UUID>.md  (short summaries)
-archive/   YYYYMMDD-HHmmss-<UUID>.md  (detailed summaries)
-briefing/  The assembled view the agent reads
+journal/   shorts + rollups + must_memorize + longer_memory:
+             YYYYMMDD-HHmmss-<UUID>.md   short summaries
+             YYYYMMDD-daily-<UUID>.md    daily rollups
+             YYYYMMDD-week-<UUID>.md     weekly rollups (Monday's date)
+             YYYYMM-month-<UUID>.md      monthly rollups
+             must_memorize.md, longer_memory.md
+archive/   YYYYMMDD-HHmmss-<UUID>.md     detailed summaries (raw-transcript linked)
+briefing/  the assembled view the agent reads at session start
 ```
 
 ## Search modes
