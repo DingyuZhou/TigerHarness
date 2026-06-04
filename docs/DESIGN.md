@@ -1,5 +1,23 @@
 # tigerharness Design Document
 
+> **Historical — Phase-0 design record (pre-implementation).** This
+> captures the original design at extraction time, when tigerharness had
+> three sub-packages (`task_runner`, `slack_bridge`, `tiger_memory`) and
+> `agent_sdk` was an external dependency. The shipped package has since
+> grown to six sub-packages — adding the in-tree `agent_sdk`, `journal`,
+> and `workflow_runner` — and the subscription backend reframed how work
+> is billed. Treat this as a frozen record of initial intent, **not** a
+> description of the current system. For the current system see the
+> per-feature docs in this directory (README,
+> [`journal.md`](journal.md),
+> [`subscription-backend.md`](subscription-backend.md),
+> [`workflow-runner.md`](workflow-runner.md),
+> [`agent_sdk.md`](agent_sdk.md), …) and the ADRs under [`adr/`](adr/).
+> Specific drifts below (the 3-service tree, the
+> `~/.local/state/tigerharness/` state-dir default, the
+> `personas/<role>.md` prompt convention, the `--persona-config` flag)
+> are left intact as part of the record.
+
 ## Overview
 
 tigerharness is a standalone, open-source Python package that provides a
