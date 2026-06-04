@@ -80,6 +80,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
         )
         return 2
     persona = args.persona
+    persona_came_from_default = False
     cwd = Path.cwd()
     team_root = cwd if (cwd / "configs" / "personas.yaml").is_file() else None
     if not persona:
@@ -90,6 +91,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             default = resolve_default_persona(team_root)
             if default:
                 persona = default
+                persona_came_from_default = True
         if not persona:
             print(
                 "error: --persona is required for --kind task (no "
@@ -99,23 +101,25 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             )
             return 2
 
-    # Symmetric with workflow mode: if we can identify a team root,
-    # verify the persona's prompt.md actually exists on disk before
-    # writing any artifact. Catches typos in both `--persona Typo`
-    # (explicit) and `default_persona: Typo` (from yaml). When cwd is
-    # NOT a team root we can't validate, and we accept the value as-is
-    # for back-compat (the same posture Phase 1 had).
-    if team_root is not None:
+    # Validate ONLY when persona came from the team's default_persona
+    # fallback -- a yaml typo there silently affects every subsequent
+    # scaffold and is hard to spot. An explicit `--persona Typo`
+    # passes through unchanged (Phase 1 behaviour preserved): the
+    # operator sees the late "no prompt.md" error from the task-
+    # runner, which they typed seconds ago and can immediately
+    # correct. Symmetric default-only validation keeps the safety net
+    # without changing the stable CLI surface.
+    if team_root is not None and persona_came_from_default:
         from tigerharness.journal.scaffold import validate_personas
         missing = validate_personas(team_root, {persona})
         if missing:
             print(
-                f"error: persona {persona!r} is not on team "
-                f"{team_root.name} (no prompt.md under "
-                f"{team_root / 'personas' / persona}/). Add the "
-                "persona via `tigerharness init --persona <name>` "
-                "first, or fix the typo (in --persona or in "
-                "personas.yaml's default_persona).",
+                f"error: default_persona {persona!r} (from "
+                f"{team_root / 'configs' / 'personas.yaml'}) has no "
+                f"prompt.md under "
+                f"{team_root / 'personas' / persona}/. Fix the typo "
+                "in personas.yaml's default_persona, or add the "
+                "persona via `tigerharness init --persona <name>`.",
                 file=sys.stderr,
             )
             return 2

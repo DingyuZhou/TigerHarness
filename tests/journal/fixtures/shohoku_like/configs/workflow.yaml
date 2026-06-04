@@ -1,0 +1,6 @@
+# Mirrors the Shohoku production workflow.yaml: the ayako-role
+# critic plays as Mumu (= Kogure via personas.yaml's alias map).
+# The integration test pins that the alias resolves cleanly.
+
+compile_personas:
+  ayako: Mumu
