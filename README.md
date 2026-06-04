@@ -16,7 +16,7 @@ integration, and persistent memory management.
 | `tigerharness.task_runner` | Fire-and-forget iterative task execution via `claude -p`. Phase 1.5+ users typically prefer the journal subscription backend; this remains for api-budget workloads. |
 | `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to a `claude -p` backend and posts replies back to the thread. |
 | `tigerharness.tiger_memory` | Persistent agent memory: archive, journal, briefing with lazy rebuild, kind-decay must-memorize, and drill-down. |
-| `tigerharness.workflow_runner` | Multi-persona workflow orchestration via `claude -p`. Phase 1.5+ users typically prefer `journal` with `--kind workflow` (same compile pipeline, in-session compile, no API billing). The api-backed runner remains for api-budget workloads. See [docs/workflow-runner.md](docs/workflow-runner.md). |
+| `tigerharness.workflow_runner` | Multi-persona workflow orchestration via `claude -p`. Phase 1.5+ users typically prefer `journal` with `--kind workflow` (same compile pipeline, in-session compile, no API billing). The api-backed runner remains for api-budget workloads. CLI: the standalone `workflow` console script (`start`/`show`/`list`/`tail`/`cancel`) — *not* a `tigerharness` subcommand. See [docs/workflow-runner.md](docs/workflow-runner.md). |
 
 ## Installation
 
