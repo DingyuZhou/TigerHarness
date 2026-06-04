@@ -1,4 +1,5 @@
-"""Compile-side CLI subcommands for the workflow-mode journal (Phase 1.5).
+"""Compile-side CLI subcommands for the workflow-mode journal
+(Phase 1.5 + Phase 2 + Phase 3).
 
 These commands are the Python primitives the interactive
 ``drive-journal`` session shells out to during an in-session compile.
@@ -6,17 +7,43 @@ All are **pure Python** -- no LLM calls, no ``claude -p``. The session
 itself does the reasoning; these CLIs just stage inputs, validate
 drafts, and atomically promote the final compiled artifacts.
 
-The six subcommands (see :func:`build_subparsers`):
+The nine subcommands (see :func:`build_subparsers`):
 
 - ``compile-context <task-id>``
 - ``compile-prompts --task <id> --kind {drafter|akagi|ayako} ...``
 - ``validate-graph --task <id> --draft <path>``
 - ``land-compile --task <id> --draft <path> --transcript <path> --rounds <N>``
+- ``compile-fail <task-id> --reason <str>``
+- ``compile-retry <task-id>``
+- ``append-steps --task <id> --new-bundle <path>``
 - ``abort <task-id>``
 - ``validate-personas <team>``
 
 The contract for each is fixed by ``OPERATING.md`` so the session can
 shell out from a static protocol without reading source.
+
+**Exit-code conventions (two CLI families)**
+
+Two distinct conventions exist by design:
+
+1. **Envelope-emitting validators** (``validate-graph``,
+   ``append-steps``) emit a structured JSON envelope
+   ``{ok, errors, trace}`` on stdout when they can run at all. They
+   reserve exit ``1`` for *"validator ran and produced ok=false"* and
+   use exit ``2`` for *"could not even run"* (bad task id, wrong
+   phase, unreadable input file, etc.). The exit code tells the
+   driver session whether stdout is parseable JSON.
+2. **State-mutation / info commands** (``compile-context``,
+   ``compile-prompts``, ``land-compile``, ``compile-fail``,
+   ``compile-retry``, ``abort``, ``validate-personas``) have no
+   machine-readable envelope and uniformly return exit ``1`` for any
+   error path (bad task id, wrong phase, unreadable input,
+   irrecoverable failure, etc.).
+
+A future cross-cutting normalisation could collapse the two
+conventions into a single 0/1/2 model, but that's a deliberate
+refactor with broad test surface; the current split is documented
+and tested.
 """
 
 from __future__ import annotations
@@ -45,6 +72,7 @@ from tigerharness.journal.scaffold import (
     COMPILE_PERSONAS,
     extract_persona_refs_from_playbook,
     read_team_roster,
+    resolve_compile_personas,
     resolve_team_root,
     validate_personas,
 )
@@ -151,6 +179,26 @@ def _roster_for_task(
     return []
 
 
+def _compile_personas_for_task(
+    paths: JournalPaths, task_id: str,
+) -> dict[str, str]:
+    """Phase 2: resolve the role -> persona-name mapping for the task's
+    team. Defaults to the Phase 1.5 ``{drafter: Anzai, akagi: Akagi,
+    ayako: Ayako}`` shape when cwd is not a team root.
+
+    Like :func:`_roster_for_task`, this is best-effort -- the team is
+    inferred from the cwd. A Phase 2 nicety would be to persist the
+    team on status.json at scaffold time.
+    """
+    cwd = Path.cwd()
+    if (cwd / "configs" / "personas.yaml").is_file():
+        return resolve_compile_personas(cwd)
+    # Sentinel: when we can't find the team, surface the defaults so
+    # callers always have a usable mapping.
+    from tigerharness.journal.scaffold import _DEFAULT_COMPILE_PERSONAS
+    return dict(_DEFAULT_COMPILE_PERSONAS)
+
+
 # ---------------------------------------------------------------------------
 # compile-context
 # ---------------------------------------------------------------------------
@@ -183,13 +231,20 @@ def cmd_compile_context(args: argparse.Namespace) -> int:
         feedback=None,
     )
 
+    compile_personas = _compile_personas_for_task(paths, status.id)
+
     # Plain-text section dump -- the session reads it as one block.
     print("# compile-context for task", status.id)
     print()
     print("## Task")
     print(f"id: {status.id}")
     print(f"title: {status.title}")
+    print(f"playbook: {status.playbook_name}")
     print(f"compile_phase: {status.compile_phase.value}")
+    print()
+    print("## Compile personas (role -> name)")
+    for role in ("drafter", "akagi", "ayako"):
+        print(f"- {role}: {compile_personas[role]}")
     print()
     print("## Roster")
     if roster:
@@ -439,16 +494,21 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
             )
         return 1
 
-    # Build Orchestration. The journal Phase 1.5 has no human-gate
-    # plumbing yet, so we disable that field and rely on the captain on
-    # the journal's status.json for accountability. A Phase 2 enhancement
-    # can let the playbook customise the runtime config.
+    # Build Orchestration. The journal subscription model is itself
+    # an implicit human gate (every persona turn happens inside a live
+    # interactive session a human is sitting in), so the api-backed
+    # Tier 3 human_gate mechanism does not port -- it's permanently
+    # disabled here. See docs/journal-workflow-mode.md "Out of scope"
+    # for the rationale.
     from tigerharness.workflow_runner.compile.pipeline import _build_orchestration
     from tigerharness.workflow_runner.models import WorkflowConfig
     orchestration = _build_orchestration(
         task_id=status.id,
         team=_guess_team_for_status(),
-        playbook_name="default",
+        # Phase 2: read the truthful playbook_name from status.json
+        # rather than hardcoding "default". Schema gate guarantees a
+        # non-None value for kind=workflow.
+        playbook_name=status.playbook_name,
         playbook_text=_read_brief_and_playbook(paths, status.id)[1],
         final_steps=steps,
         workflow_config=WorkflowConfig(human_gate=False),
@@ -515,9 +575,15 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
         pass  # best-effort cleanup
 
     # Flip status.json last -- this is the visibility gate the
-    # graph-walker checks before reading orchestration.json.
+    # graph-walker checks before reading orchestration.json. Also
+    # refresh updated_at on the same atomic write so the sweep
+    # doesn't reclassify this task as stale right after a landing
+    # that took more than a tick. Sibling CLIs (append-steps,
+    # compile-retry, compile-fail) do the same.
+    from tigerharness.journal.models import _utcnow_iso
     status.compile_pending = False
     status.compile_phase = CompilePhase.COMPLETE
+    status.updated_at = _utcnow_iso()
     _write_atomic(paths.status_json(status.id), status.to_json())
 
     print(f"landed: {status.id}")
@@ -553,6 +619,325 @@ def _guess_team_for_status() -> str:
 
 
 # ---------------------------------------------------------------------------
+# append-steps
+# ---------------------------------------------------------------------------
+
+def _read_existing_step(task_dir: Path, step_id: str):
+    """Re-hydrate a previously-landed step's frontmatter from
+    ``steps/<step_id>.md`` so we can re-validate the full graph when
+    append-steps extends it. Returns a ``StepFrontmatter``.
+
+    The file format mirrors what ``_render_frontmatter`` writes: a
+    YAML-ish key/value block between ``---`` delimiters, no body
+    (Phase 1.5/2 step files don't carry body text)."""
+    import yaml
+    from tigerharness.workflow_runner.models import StepFrontmatter
+
+    text = (task_dir / "steps" / f"{step_id}.md").read_text(encoding="utf-8")
+    # Pull the frontmatter block between the first two `---` lines.
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(
+            f"step file for {step_id!r} has no leading --- delimiter"
+        )
+    body_start = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            body_start = i
+            break
+    if body_start is None:
+        raise ValueError(
+            f"step file for {step_id!r} has no trailing --- delimiter"
+        )
+    fm_text = "\n".join(lines[1:body_start])
+    raw = yaml.safe_load(fm_text) or {}
+    return StepFrontmatter.from_dict(raw)
+
+
+def cmd_append_steps(args: argparse.Namespace) -> int:
+    """Phase 3: append one or more new steps to a workflow task's
+    already-compiled graph at runtime.
+
+    Inputs:
+
+    - ``--task <task-id>`` -- target workflow task; must be in
+      ``compile_phase=complete`` (graph is landed).
+    - ``--new-bundle <path>`` -- a drafter-format ``steps-bundle``
+      containing ONLY the new steps to append.
+
+    The CLI re-runs Tier 1 validators over the combined graph
+    (existing steps + new). On success it atomically:
+
+    1. Writes a step file per new step under ``steps/<id>.md``
+       (refuses if a step id collides with an existing file).
+    2. Rewrites ``orchestration.json`` with the extended ``steps`` list
+       and merged ``edges`` map, via temp + rename.
+
+    On Tier 1 failure the CLI emits the standard JSON envelope
+    ``{ok: false, errors: [...], trace: "..."}`` and exits 1; nothing
+    on disk is touched. This is the append-only invariant from the
+    workflow-runner-phase2 spec: a rejected append leaves the
+    currently-landed graph unchanged.
+    """
+    paths = _paths_from_args(args)
+    status_or_err = _load_workflow_status(paths, args.task)
+    if isinstance(status_or_err, str):
+        print(f"error: {status_or_err}", file=sys.stderr)
+        return 2
+    status = status_or_err
+
+    if status.compile_phase != CompilePhase.COMPLETE:
+        print(
+            f"error: task {status.id} is in compile_phase="
+            f"{status.compile_phase.value}; append-steps only operates "
+            "on a completed compile (compile_phase=complete).",
+            file=sys.stderr,
+        )
+        return 2
+
+    bundle_path = Path(args.new_bundle).expanduser()
+    try:
+        bundle_text = bundle_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"error: cannot read new-bundle {bundle_path}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Parse the new bundle into StepFrontmatter.
+    from tigerharness.workflow_runner.compile.drafter import (
+        DrafterParseError,
+        _parse_response,
+    )
+    try:
+        new_steps = _parse_response(bundle_text)
+    except DrafterParseError as exc:
+        envelope = {
+            "ok": False,
+            "errors": [
+                {
+                    "validator": "parse",
+                    "step_id": None,
+                    "message": str(exc),
+                }
+            ],
+            "trace": "",
+        }
+        print(json.dumps(envelope, indent=2))
+        return 1
+
+    if not new_steps:
+        print(
+            "error: new bundle parsed as zero steps; nothing to append",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Read the existing orchestration + step files.
+    task_dir = paths.task_dir(status.id)
+    orch_path = task_dir / "orchestration.json"
+    try:
+        orch_data = json.loads(orch_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            f"error: cannot read orchestration.json for {status.id}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    existing_step_ids = list(orch_data.get("steps") or [])
+    try:
+        existing_steps = [
+            _read_existing_step(task_dir, sid) for sid in existing_step_ids
+        ]
+    except Exception as exc:
+        print(
+            f"error: cannot rehydrate existing steps for re-validation: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Defensive: refuse if any new step's id collides with an existing.
+    existing_id_set = set(existing_step_ids)
+    new_id_set = {s.id for s in new_steps}
+    collisions = sorted(existing_id_set & new_id_set)
+    if collisions:
+        print(
+            f"error: new bundle has step id(s) that collide with the "
+            f"existing graph: {collisions}. append-steps is append-only; "
+            "rename the new step(s) and retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    combined = existing_steps + new_steps
+    roster = _roster_for_task(paths, status.id)
+    from tigerharness.workflow_runner.compile.validators import (
+        validate_compile_output,
+    )
+    result = validate_compile_output(combined, roster=roster)
+    if not result.ok:
+        envelope = {
+            "ok": False,
+            "errors": [
+                {
+                    "validator": e.validator,
+                    "step_id": e.step_id,
+                    "message": e.message,
+                }
+                for e in result.errors
+            ],
+            "trace": result.trace,
+        }
+        print(json.dumps(envelope, indent=2))
+        return 1
+
+    # Validation passed -- promote.
+    # 1. Write each new step file. A collision is impossible here
+    #    because we screened above; if a stray on-disk file exists
+    #    that orchestration.json doesn't reference, refuse rather
+    #    than overwrite. Track each written path so we can roll back
+    #    the partial write on a mid-loop failure (e.g. disk full),
+    #    keeping steps/ consistent with orchestration.json on retry.
+    steps_dir = task_dir / "steps"
+    written_paths: list[Path] = []
+    try:
+        for step in new_steps:
+            step_path = steps_dir / f"{step.id}.md"
+            if step_path.exists():
+                # Roll back any files written so far this invocation.
+                for p in written_paths:
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass  # best-effort cleanup
+                print(
+                    f"error: refusing to overwrite stray step file "
+                    f"{step_path} (not referenced by orchestration.json)",
+                    file=sys.stderr,
+                )
+                return 1
+            front = _render_frontmatter(step)
+            step_path.write_text(f"---\n{front}---\n", encoding="utf-8")
+            written_paths.append(step_path)
+    except OSError as exc:
+        # Disk full / permission denied mid-loop. Roll back partial
+        # writes so the next invocation isn't stuck on stray files.
+        for p in written_paths:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        print(
+            f"error: failed writing new step files: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 2. Extend orchestration.json (atomic write).
+    new_step_ids = [s.id for s in new_steps]
+    orch_data["steps"] = existing_step_ids + new_step_ids
+    edges = orch_data.get("edges") or {}
+    for step in new_steps:
+        edges[step.id] = {
+            "on_approve": step.on_approve,
+            "on_revise": step.on_revise,
+            "on_block": step.on_block,
+        }
+    orch_data["edges"] = edges
+    _write_atomic(orch_path, json.dumps(orch_data, indent=2) + "\n")
+
+    # 3. Refresh the heartbeat so the sweep doesn't reclassify this
+    #    task as stale while the operator is using it.
+    from tigerharness.journal.models import _utcnow_iso
+    status.updated_at = _utcnow_iso()
+    _write_atomic(paths.status_json(status.id), status.to_json())
+
+    print(f"appended: {len(new_steps)} step(s) to {status.id}")
+    for step in new_steps:
+        print(f"  + {step.id}  ({step.persona} / {step.role})")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# compile-retry
+# ---------------------------------------------------------------------------
+
+def cmd_compile_retry(args: argparse.Namespace) -> int:
+    """Reset a compile-failed workflow task so the next ``drive-journal``
+    invocation retries the in-session compile from scratch.
+
+    Allowed on tasks in ``compile_phase=failed`` only. The operator is
+    expected to have inspected ``compile/`` first; this CLI WIPES the
+    in-flight compile workspace (round-NN-*.md, transcript.md) and
+    flips the status back to its scaffold-time shape
+    (``state=pending``, ``compile_pending=true``,
+    ``compile_phase=pending``, ``sessions=0``).
+
+    Preserved across the retry (the brief + playbook snapshot are the
+    source of truth for the next compile attempt; progress.md and
+    artifacts/ are kept for human audit):
+
+    - ``task_brief.md``
+    - ``playbook_snapshot.md``
+    - ``progress.md``
+    - ``artifacts/``
+
+    If the operator wants to keep forensic artifacts from the failed
+    compile, they should copy ``compile/`` out of the task dir BEFORE
+    calling this CLI.
+    """
+    paths = _paths_from_args(args)
+    status_or_err = _load_workflow_status(paths, args.task_id)
+    if isinstance(status_or_err, str):
+        print(f"error: {status_or_err}", file=sys.stderr)
+        return 1
+    status = status_or_err
+
+    if status.compile_phase != CompilePhase.FAILED:
+        print(
+            f"error: task {status.id} is not in compile_phase=failed "
+            f"(currently {status.compile_phase.value if status.compile_phase else 'n/a'}); "
+            "compile-retry only operates on failed compiles. Use abort "
+            "to discard or wait for the in-flight compile to finish.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Wipe in-flight compile workspace -- if it exists. Missing compile/
+    # is not an error (the failure could have happened before any round
+    # files were written).
+    compile_dir = _compile_dir(paths, status.id)
+    if compile_dir.exists():
+        shutil.rmtree(compile_dir)
+
+    # Reset the status fields to scaffold-time shape. Sessions counter
+    # resets to 0 so the next pickup gets its full budget. updated_at
+    # gets a fresh timestamp so the sweep doesn't immediately reclassify
+    # this task as stale.
+    from tigerharness.journal.models import _utcnow_iso
+    status.state = State.PENDING
+    status.compile_pending = True
+    status.compile_phase = CompilePhase.PENDING
+    status.sessions = 0
+    status.session_ref = None
+    status.next_action = (
+        "Compile retry requested via `journal compile-retry`. The "
+        "next drive-journal invocation will run the in-session compile "
+        "sub-protocol from scratch (compile/ has been wiped)."
+    )
+    status.updated_at = _utcnow_iso()
+    _write_atomic(paths.status_json(status.id), status.to_json())
+
+    print(f"compile-retry: {status.id}")
+    print( "  state=pending, compile_pending=true, compile_phase=pending")
+    print(f"  next_action: {status.next_action}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # compile-fail
 # ---------------------------------------------------------------------------
 
@@ -579,9 +964,41 @@ def cmd_compile_fail(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # COMPLETE is terminal for the compile sub-machine -- a successfully
+    # landed graph must not be clobbered back to FAILED via this CLI.
+    # Without this guard, a misfired compile-fail call could be followed
+    # by a compile-retry that wipes compile/ and resets to PENDING,
+    # destroying the trusted orchestration.json + steps/.
+    if status.compile_phase == CompilePhase.COMPLETE:
+        print(
+            f"error: task {status.id} has compile_phase=complete "
+            "(the graph is landed); compile-fail would clobber a "
+            "successfully landed compile. Use `journal abort` to "
+            "archive a landed task or `journal compile-retry` to "
+            "reset a FAILED task; compile-fail only applies to "
+            "in-flight compiles.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # FAILED is already terminal until the operator retries. Re-marking
+    # is a no-op at best and an audit-trail loss at worst (the original
+    # next_action gets overwritten).
+    if status.compile_phase == CompilePhase.FAILED:
+        print(
+            f"error: task {status.id} is already compile_phase=failed; "
+            "re-marking would overwrite the original postmortem in "
+            "next_action. Inspect compile/ and use `journal abort` or "
+            "`journal compile-retry`.",
+            file=sys.stderr,
+        )
+        return 1
+
+    from tigerharness.journal.models import _utcnow_iso
     status.state = State.BLOCKED
     status.compile_phase = CompilePhase.FAILED
     status.next_action = args.reason
+    status.updated_at = _utcnow_iso()
     _write_atomic(paths.status_json(status.id), status.to_json())
 
     print(f"compile-failed: {status.id}  (state=blocked, compile_phase=failed)")
@@ -642,9 +1059,11 @@ def cmd_abort(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_validate_personas(args: argparse.Namespace) -> int:
-    """Pre-flight check: do Anzai/Akagi/Ayako prompts exist under the
-    named team? Exit 0 + "ok" on success; exit 1 + missing list on
-    failure.
+    """Pre-flight check: do the compile-time personas exist on disk for
+    the named team? Resolves the role -> persona mapping from
+    ``teams/<team>/configs/workflow.yaml`` (Phase 2) -- a missing
+    config falls back to the Anzai/Akagi/Ayako default. Exit 0 + "ok"
+    on success; exit 1 + missing list on failure.
 
     Used by the journal-new skill or a CI step to fail FAST before
     scaffolding a workflow that would crash mid-compile.
@@ -656,14 +1075,24 @@ def cmd_validate_personas(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    missing = validate_personas(team_root, set(COMPILE_PERSONAS))
+    mapping = resolve_compile_personas(team_root)
+    required = set(mapping.values())
+    missing = validate_personas(team_root, required)
     if missing:
         print(
             f"missing prompt.md for: {sorted(missing)} (under {team_root})",
             file=sys.stderr,
         )
+        # Show the role -> persona mapping so the operator sees how
+        # the missing names map to roles (helpful when the config
+        # overrides the defaults).
+        for role, name in sorted(mapping.items()):
+            marker = " <- MISSING" if name in missing else ""
+            print(f"  {role}: {name}{marker}", file=sys.stderr)
         return 1
-    print(f"ok: {team_root} has all of {sorted(COMPILE_PERSONAS)}")
+    print(f"ok: {team_root} has all of {sorted(required)}")
+    for role, name in sorted(mapping.items()):
+        print(f"  {role}: {name}")
     return 0
 
 
@@ -720,6 +1149,37 @@ def build_subparsers(sub: "argparse._SubParsersAction") -> None:
     lc.add_argument("--rounds", required=True, type=int)
     lc.set_defaults(func=cmd_land_compile)
 
+    # append-steps
+    ap = sub.add_parser(
+        "append-steps",
+        help=(
+            "Append new step(s) to a workflow task's already-landed "
+            "graph. Re-runs Tier 1 validators over the combined graph; "
+            "atomic on success, leaves the graph untouched on failure."
+        ),
+    )
+    ap.add_argument("--task", required=True)
+    ap.add_argument(
+        "--new-bundle", required=True,
+        help=(
+            "Path to a drafter-format steps-bundle containing ONLY "
+            "the new steps to append."
+        ),
+    )
+    ap.set_defaults(func=cmd_append_steps)
+
+    # compile-retry
+    cr = sub.add_parser(
+        "compile-retry",
+        help=(
+            "Reset a compile-failed workflow task so the next "
+            "drive-journal retries the in-session compile. "
+            "Wipes compile/."
+        ),
+    )
+    cr.add_argument("task_id")
+    cr.set_defaults(func=cmd_compile_retry)
+
     # compile-fail
     cf = sub.add_parser(
         "compile-fail",
@@ -751,7 +1211,12 @@ def build_subparsers(sub: "argparse._SubParsersAction") -> None:
     # validate-personas
     vp = sub.add_parser(
         "validate-personas",
-        help="Pre-flight: do the compile-time personas (Anzai/Akagi/Ayako) exist for <team>?",
+        help=(
+            "Pre-flight: do the compile-time personas exist on disk "
+            "for <team>? Resolves the role -> persona mapping from "
+            "configs/workflow.yaml (defaults: Anzai/Akagi/Ayako; "
+            "configurable per team)."
+        ),
     )
     vp.add_argument("team")
     vp.set_defaults(func=cmd_validate_personas)

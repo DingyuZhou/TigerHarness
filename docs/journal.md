@@ -1,15 +1,21 @@
 # journal
 
-File-based, human-driven subscription backend (Phase 1 + Phase 1.5).
+File-based, human-driven subscription backend (Phase 1 + Phase 1.5 + Phase 2 + Phase 3).
 
-> **Status:** Phase 1 + Phase 1.5 are shipped. Phase 1 covers single-
-> persona tasks (`kind=task`). Phase 1.5 adds multi-persona workflow
-> tasks (`kind=workflow`) compiled in-session from a team playbook --
-> zero API billing, the interactive session itself adopts the drafter
-> and critic personas and shells out only to pure-Python validators.
-> Both kinds share the same scaffolder, sweep, list, and `OPERATING.md`
-> protocol -- the protocol switches on `status.kind` at the work step.
-> 100% line + branch coverage across the journal package.
+> **Status:** Phase 1 + Phase 1.5 + Phase 2 (closeout) + Phase 3
+> step-append shipped. Phase 1 covers single-persona tasks
+> (`kind=task`, PR #25 / `7d6b9f8`). Phase 1.5 adds multi-persona
+> workflow tasks (`kind=workflow`, PR #26 / `155128f`) compiled
+> in-session from a team playbook -- zero API billing, the
+> interactive session itself adopts the drafter and critic personas
+> and shells out only to pure-Python validators. Phase 2 added
+> `journal compile-retry`, a configurable compile-time persona
+> roster, and an end-to-end scripted compile driver integration
+> suite. Phase 3 added `journal append-steps` for runtime graph
+> extension. Both kinds share the same scaffolder, sweep, list, and
+> `OPERATING.md` protocol -- the protocol switches on `status.kind`
+> at the work step. 100% line + branch coverage across the journal
+> package.
 
 ## What it does
 
@@ -123,6 +129,8 @@ tigerharness journal compile-prompts --task <id> --kind drafter|akagi|ayako ...
 tigerharness journal validate-graph --task <id> --draft <path>
 tigerharness journal land-compile   --task <id> --draft <path> --transcript <path> --rounds <N>
 tigerharness journal compile-fail   <task-id> --reason "<postmortem>"
+tigerharness journal compile-retry  <task-id>           # Phase 2: reset a failed compile + retry
+tigerharness journal append-steps   --task <id> --new-bundle <path>  # Phase 3: extend a landed graph
 tigerharness journal abort          <task-id>
 tigerharness journal validate-personas <team>
 
@@ -164,11 +172,16 @@ in [`journal-workflow-mode.md`](journal-workflow-mode.md).
 ## Skills
 
 - `skills/journal-new/` — scaffolder skill (CLI form is the primary;
-  the skill is a thin wrapper).
+  the skill is a thin wrapper). Teaches both `kind=task` and
+  `kind=workflow` modes.
 - `skills/drive-journal/` — driver skill (skill-only, no CLI form).
+- `skills/workflow-append-steps/` — Phase 3 step-append skill for
+  extending a landed graph at runtime. Wraps `journal append-steps`.
 
 The driver skill points the interactive session at the on-disk
-`OPERATING.md` for the canonical protocol.
+`OPERATING.md` for the canonical protocol, which now includes the
+compile sub-protocol (Phase 1.5) and the step-append sub-protocol
+(Phase 3).
 
 ## OPERATING.md
 

@@ -191,12 +191,22 @@ Trigger: step 4 on a `kind=workflow` task where
 `status.compile_pending=true`.
 
 The compile proceeds in rounds. Each round is one drafter turn
-followed by both critics, then a Tier 1 re-validation. The drafter is
-**Anzai**, the critics are **Akagi** and **Ayako**. A round ends with
-both critics emitting `APPROVE` -> land. If either critic emits
-`BLOCK` -> mark the task compile-failed (`journal compile-fail
-<task-id> --reason '...'`). Otherwise the loop continues with the
-critics' `REVISE` feedback merged for the next drafter turn.
+followed by both critics, then a Tier 1 re-validation. Three roles
+are involved: the **drafter** writes the steps bundle, and two
+critics -- the **akagi-role** critic (execution-mechanics lens) and
+the **ayako-role** critic (QA / acceptance lens) -- review it.
+
+The persona NAME for each role comes from the team's
+`configs/workflow.yaml` (`compile_personas` key). The defaults are
+`drafter=Anzai`, `akagi=Akagi`, `ayako=Ayako`; the `compile-context`
+output prints the resolved mapping for the task at hand so you know
+which persona to adopt at each turn.
+
+A round ends with both critics emitting `APPROVE` -> land. If either
+critic emits `BLOCK` -> mark the task compile-failed (`journal
+compile-fail <task-id> --reason '...'`). Otherwise the loop
+continues with the critics' `REVISE` feedback merged for the next
+drafter turn.
 
 Caps (compile gives up rather than spinning forever):
 
@@ -206,9 +216,17 @@ Caps (compile gives up rather than spinning forever):
   `next_action="compile failed at critiquing: <last round verdicts>"`.
 
 Both caps land the task in `state=blocked` + `compile_phase=failed`.
-The task stays in `active/` for the human to inspect; the operator
-either edits the playbook and re-scaffolds, or runs `journal abort`
-to archive.
+The task stays in `active/` for the human to inspect. The operator
+then chooses one of:
+
+- `tigerharness journal compile-retry <task-id>` -- wipes
+  `compile/`, resets the status to scaffold-time shape
+  (`state=pending`, `compile_pending=true`,
+  `compile_phase=pending`), and lets the next `drive-journal` retry
+  the compile from scratch. Brief + playbook snapshot preserved.
+- Edit the playbook and re-scaffold a fresh task.
+- `tigerharness journal abort <task-id>` -- archive to `done/`,
+  preserving `compile/` for forensics.
 
 ### Persona switching (uniform mechanic)
 
@@ -247,13 +265,18 @@ self-rejects); critics carry the real verdict.
    tigerharness journal compile-context <task-id>
    ```
 
-   This prints brief + playbook + roster + the round-1 drafter prompt
-   in one block. Read it.
+   This prints brief + playbook + roster + the role->persona mapping
+   + the round-1 drafter prompt in one block. Read it. The
+   "Compile personas" section tells you which persona to adopt for
+   each role -- the default is `drafter=Anzai`, `akagi=Akagi`,
+   `ayako=Ayako`, but the team's `configs/workflow.yaml` may have
+   remapped them.
 
-2. **Drafter turn (Anzai).** Adopt the persona via the four-line
-   preamble. Emit a `steps-bundle` per the drafter contract (one fence,
-   `## step: <id>` headers, frontmatter blocks). End with
-   `WORKFLOW: APPROVE`.
+2. **Drafter turn (the drafter-role persona).** Adopt the persona
+   named in the bootstrap's "Compile personas" section under
+   `drafter:` via the four-line preamble. Emit a `steps-bundle` per
+   the drafter contract (one fence, `## step: <id>` headers,
+   frontmatter blocks). End with `WORKFLOW: APPROVE`.
 
 3. **Tier 1 (pre-critique).** Save the drafter's bundle to
    `compile/round-NN-draft.md` and run:
@@ -268,20 +291,23 @@ self-rejects); critics carry the real verdict.
    waste critic effort on a malformed graph. Cap: 3 consecutive Tier
    1 failures -> `journal compile-fail`.
 
-4. **Akagi critique.** Run:
+4. **Akagi-role critique** (execution-mechanics lens). Run:
 
    ```bash
    tigerharness journal compile-prompts --task <task-id> \\
        --kind akagi --draft <path> --trace <trace-path>
    ```
 
-   The trace from step 3 goes here. Adopt Akagi via the preamble and
-   emit a critique ending with `WORKFLOW: APPROVE` /
-   `WORKFLOW: REVISE -- ...` / `WORKFLOW: BLOCK -- ...`. Save the full
-   turn to `compile/round-NN-akagi.md`.
+   The trace from step 3 goes here. Adopt the persona named under
+   `akagi:` in the bootstrap mapping (default: Akagi) via the
+   preamble, and emit a critique ending with `WORKFLOW: APPROVE` /
+   `WORKFLOW: REVISE -- ...` / `WORKFLOW: BLOCK -- ...`. Save the
+   full turn to `compile/round-NN-akagi.md`.
 
-5. **Ayako critique.** Same as step 4 but with `--kind ayako` and save
-   to `compile/round-NN-ayako.md`.
+5. **Ayako-role critique** (QA / acceptance lens). Same as step 4
+   but with `--kind ayako` and the persona under `ayako:` in the
+   bootstrap mapping (default: Ayako). Save to
+   `compile/round-NN-ayako.md`.
 
 6. **Round verdict.** Combine the two critic verdicts:
 
@@ -347,4 +373,81 @@ If a step is in `parallel_with`, the runtime may dispatch the listed
 steps concurrently; the journal driver does NOT need to thread these
 itself -- it asks each step for its trailer in document order and
 honours all `parallel_with` edges as a group barrier.
+
+## Step-append sub-protocol (kind=workflow, compile_phase=complete)
+
+Phase 3 lets a graph-walk step discover concrete follow-up work and
+**append** it to the running graph without re-scaffolding. Trigger:
+while walking the graph, a step's output identifies one or more new
+steps that need to exist before the walk can complete (e.g. Anzai's
+plan step calls for an extra QA pass that isn't in the compiled
+graph yet).
+
+Append is single-round: drafter writes a new bundle -> Tier 1
+re-validates the combined graph -> CLI atomically extends
+`orchestration.json` + writes the new step files. NO critic loop --
+the append is much smaller in scope than the original compile, and a
+Tier 1 failure (ref-resolution / roster / cycle bound) is enough to
+catch a bad append. The CLI is `journal append-steps`; the
+human-facing skill is `workflow-append-steps`.
+
+### Step-by-step
+
+1. **Adopt the drafter-role persona** (same as round 1 of the original
+   compile: the name under `drafter:` in the
+   `compile-context` bootstrap mapping). The append is a mini-compile,
+   so the same drafter discipline applies.
+
+2. **Emit a `steps-bundle`** containing ONLY the new step file(s) --
+   the same drafter format as the original compile output. The bundle
+   must NOT include any existing step ids; the CLI will reject
+   collisions.
+
+3. **Save the bundle** to a file under the task's
+   `compile/append-NN.md` (the suffix is operator-chosen; the CLI
+   doesn't care). Refresh `updated_at` as you go.
+
+4. **Run:**
+
+   ```bash
+   tigerharness journal append-steps --task <task-id> \\
+       --new-bundle <path>
+   ```
+
+   - Exit 0: graph extended. Continue the graph-walk; subsequent
+     steps can route into the new step ids.
+   - Exit 1: Tier 1 failure -- a JSON envelope
+     `{ok: false, errors: [...], trace: "..."}` is on stdout.
+     Treat the errors as drafter feedback, redraft the bundle, retry.
+     `orchestration.json` is untouched on failure.
+   - Exit 2: operator error (bad task id, wrong phase, unreadable
+     bundle). Read stderr.
+
+5. **Resume the graph walk** at whatever step you were on. The newly
+   appended steps are reachable via the `on_approve` / `on_revise` /
+   `on_block` edges of existing steps that the drafter wired up
+   (which is why the original-graph-step that triggered the append
+   needs to reference the new step id in one of its edges -- or the
+   new steps are unreachable). A future Phase 3+ enhancement may let
+   `append-steps` rewire an existing step's edge; today it only
+   *adds* nodes.
+
+### Caps + edge cases
+
+- **Append-only invariant**: the CLI enforces `existing_ids ∩
+  new_ids == ∅`. Reorders, renames, and rewrites are NOT supported.
+- **Reachability**: append is purely additive -- it never rewires an
+  existing step's edges. A new step is only reachable from the
+  graph-walk if some EXISTING edge already pointed at its id (a
+  "promise slot" the original compile planned for) or if a NEW
+  step routes into it from a reachable position. Otherwise the
+  appended step is documented but unreachable. Surface this to the
+  human if the original playbook didn't leave a promise slot.
+- **No critic loop**: append is single-round drafter -> Tier 1 ->
+  commit. If the drafter's bundle has logical problems Tier 1 won't
+  catch, the human is the gate (read it before running the CLI).
+- **Phase requirement**: refused unless
+  `status.compile_phase=complete`. A compile-in-flight task cannot
+  be appended to; a compile-failed task must be retried (or
+  re-scaffolded) first.
 """

@@ -417,6 +417,7 @@ class TestCmdList:
             session_ref=None,
             compile_pending=True,
             compile_phase=CompilePhase.DRAFTING,
+            playbook_name="default",
         )
         paths.status_json("20260602-w-33333333").write_text(s.to_json())
         rc = main(["--journal-dir", str(journal_dir), "list"])
@@ -448,6 +449,7 @@ class TestCmdList:
             session_ref=None,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
+            playbook_name="default",
         )
         paths.status_json("20260602-w-44444444").write_text(s.to_json())
         rc = main([
@@ -534,6 +536,7 @@ class TestCmdStatus:
             session_ref=None,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
+            playbook_name="default",
         )
         paths.status_json("20260602-w-55555555").write_text(s.to_json())
         rc = main([

@@ -200,6 +200,144 @@ class TestRequiredWorkflowPersonas:
 # validate_personas
 # ---------------------------------------------------------------------------
 
+class TestResolveCompilePersonas:
+    """Phase 2: team-level override of the role -> persona-name mapping
+    via ``configs/workflow.yaml``."""
+
+    def test_defaults_when_no_workflow_yaml(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        assert resolve_compile_personas(team) == {
+            "drafter": "Anzai", "akagi": "Akagi", "ayako": "Ayako",
+        }
+
+    def test_full_override(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(
+            tmp_path,
+            personas=["Sakuragi", "Rukawa", "Mitsui", "Coach"],
+        )
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: Sakuragi\n"
+            "  akagi: Rukawa\n"
+            "  ayako: Mitsui\n"
+        )
+        assert resolve_compile_personas(team) == {
+            "drafter": "Sakuragi",
+            "akagi": "Rukawa",
+            "ayako": "Mitsui",
+        }
+
+    def test_partial_override_falls_back_to_defaults(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        # Override only drafter; akagi + ayako keep their defaults.
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: Mitsui\n"
+        )
+        assert resolve_compile_personas(team) == {
+            "drafter": "Mitsui",
+            "akagi": "Akagi",
+            "ayako": "Ayako",
+        }
+
+    def test_unknown_role_key_silently_ignored(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: Anzai\n"
+            "  some_future_role: WhoKnows\n"  # forward-compat: ignore
+        )
+        result = resolve_compile_personas(team)
+        assert "some_future_role" not in result
+        assert result == {
+            "drafter": "Anzai", "akagi": "Akagi", "ayako": "Ayako",
+        }
+
+    def test_blank_value_falls_back_to_default(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: '   '\n"  # whitespace-only -> default
+        )
+        assert resolve_compile_personas(team)["drafter"] == "Anzai"
+
+    def test_non_dict_compile_personas_falls_back(self, tmp_path):
+        """If compile_personas is a list (or anything not a dict), we
+        ignore it and use the defaults. The team is the wrong shape
+        but we don't crash."""
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas: [Anzai, Akagi, Ayako]\n"
+        )
+        assert resolve_compile_personas(team) == {
+            "drafter": "Anzai", "akagi": "Akagi", "ayako": "Ayako",
+        }
+
+    def test_non_dict_yaml_root_falls_back(self, tmp_path):
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "- not a dict\n"
+        )
+        assert resolve_compile_personas(team) == {
+            "drafter": "Anzai", "akagi": "Akagi", "ayako": "Ayako",
+        }
+
+    def test_explicit_null_value_falls_back_to_default(self, tmp_path):
+        """`drafter: null` (explicit yaml null) falls back to default,
+        same as `drafter: ''` and the implicit-None form
+        (`drafter:` with no value). Belt-and-suspenders coverage."""
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: null\n"
+            "  akagi:\n"  # implicit None
+        )
+        result = resolve_compile_personas(team)
+        assert result["drafter"] == "Anzai"
+        assert result["akagi"] == "Akagi"
+        assert result["ayako"] == "Ayako"
+
+    def test_integer_value_falls_back_to_default(self, tmp_path):
+        """A non-string value (integer, bool, list) for a role falls
+        back to the default rather than being coerced. Belt-and-
+        suspenders against a yaml typo like `drafter: 42`."""
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: 42\n"
+        )
+        assert resolve_compile_personas(team)["drafter"] == "Anzai"
+
+
+class TestRequiredWorkflowPersonasUsesResolvedRoster:
+    """Phase 2: _required_workflow_personas pulls from
+    resolve_compile_personas, NOT the COMPILE_PERSONAS constant."""
+
+    def test_overridden_personas_become_required(self, tmp_path):
+        from tigerharness.journal.scaffold import _required_workflow_personas
+        team = _make_team(
+            tmp_path,
+            personas=["Sakuragi", "Rukawa", "Mitsui"],
+        )
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  drafter: Sakuragi\n"
+            "  akagi: Rukawa\n"
+            "  ayako: Mitsui\n"
+        )
+        required = _required_workflow_personas("a playbook", team)
+        assert required == {"Sakuragi", "Rukawa", "Mitsui"}
+
+
 class TestValidatePersonas:
     def test_all_present(self, tmp_path):
         team = _make_team(tmp_path)
