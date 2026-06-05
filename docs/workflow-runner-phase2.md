@@ -1,6 +1,11 @@
 # workflow-runner — Phase 2 spec
 
-> **Status:** Draft / design phase. Anchor for the Phase 2 team build.
+> **Status:** Shipped (Phase 2). This document was the design anchor for
+> the Phase 2 build; the compile sub-package (`workflow_runner/compile/`)
+> shipped per [ADR-0002](adr/0002-workflow-runner-phase2.md). Inline notes
+> flag the places where the implementation diverged from this design
+> (most notably: runtime step-append landed in the journal backend, not
+> in `workflow_runner` — see the Step-append section).
 > Companion to [`workflow-runner.md`](workflow-runner.md) (the canonical
 > spec, which describes the full design across all phases) and to
 > [`adr/0002-workflow-runner-phase2.md`](adr/0002-workflow-runner-phase2.md)
@@ -163,6 +168,7 @@ result: CompileResult = compile_playbook(
 #   critique_iters: int            # number of Tier-2 rounds run
 #   trace: str                     # dry-run trace string
 #   transcript: str                # compile_critique.md content
+#   cost_usd: float                # initial-draft + critique cost (rolls up into status.cost_usd_total)
 ```
 
 ---
@@ -378,24 +384,23 @@ teams need a one-line manual addition documented in
 
 ## Event additions
 
-Three new event kinds Phase 2 emits, all spec-compliant additions to
-the existing `events.jsonl` stream:
+Phase 2 emits **four** new event kinds, all from the CLI (`cmd_start`) —
+the compile pipeline itself emits no events:
 
 ```json
 {"ts":"...","kind":"compile_started","playbook":"default","task_brief_sha256":"..."}
-{"ts":"...","kind":"compile_tier1_failed","iter":2,"errors":[{"validator":"ref","msg":"..."}]}
-{"ts":"...","kind":"compile_critique_round","round":1,"akagi":"REVISE","ayako":"APPROVE","reasons":["..."]}
 {"ts":"...","kind":"compile_completed","steps":12,"critique_iters":3}
-{"ts":"...","kind":"compile_failed","tier":1,"errors":[...]}                              // alternative terminal
-{"ts":"...","kind":"human_gate_requested","approvers":["operator"],"slack_thread_ts":"..."}  // Phase-3 hand-off
-{"ts":"...","kind":"append_completed","added":["05-...","06-..."]}
-{"ts":"...","kind":"append_rejected","tier":1,"errors":[...]}
+{"ts":"...","kind":"compile_failed","tier":1,"errors":[...]}                              // Tier-1 OR Tier-2 terminal failure
+{"ts":"...","kind":"human_gate_requested","approvers":["operator"],"slack_thread_ts":"..."}  // announce-only (gate retired)
 ```
 
-Phase 1 event kinds are unchanged. The Phase-2 example block in
-[`docs/workflow-runner.md`](workflow-runner.md) (currently labelled
-"Phase 2+ (planned, not yet emitted)") becomes "Phase 2 (emitted)"
-once this work lands.
+A Tier-1 validation failure surfaces as `compile_failed{tier:1, errors:[...]}`
+and a Tier-2 exhaustion as `compile_failed{tier:2, last_verdicts:{...}}` —
+there is **no** separate `compile_tier1_failed` event, and **no**
+per-round `compile_critique_round` event (earlier drafts of this spec
+listed both; neither was built). The `append_completed` / `append_rejected`
+events were likewise not built here — runtime step-append shipped in the
+journal backend. Phase 1 event kinds are unchanged.
 
 ---
 
