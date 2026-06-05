@@ -90,7 +90,6 @@ examples/
     tiger-memory.config.yaml Standalone memory config reference
     env.example              Standalone Slack bridge env template
 docs/
-    DESIGN.md                High-level design + migration notes
     agent_sdk.md             Agent SDK reference
     task-runner.md           Task runner module README
     slack-bridge.md          Slack bridge module README

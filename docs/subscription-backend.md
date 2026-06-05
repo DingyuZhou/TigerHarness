@@ -532,5 +532,3 @@ skill, so the MVP is one chunk.
 - [`workflow-runner.md`](workflow-runner.md) — the multi-persona API
   backend driven by a pre-compiled workflow graph; already file-based,
   and the closest sibling to this design.
-- [`DESIGN.md`](DESIGN.md) — the env-var-driven configuration
-  philosophy this backend follows.
