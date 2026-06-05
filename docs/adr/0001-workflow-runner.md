@@ -5,6 +5,14 @@
 - **Decision-makers:** Operator + Anzai.
 - **Thread:** Slack DM 2026-05-28 (Anzai ↔ Operator).
 
+> **Clarification (2026-06-04, decisions unchanged):** the CLI shipped as
+> the standalone `workflow` console script — invocations written below as
+> `tigerharness workflow ...` are the standalone `workflow ...` in the
+> shipped code. The `workflow-run` skill and the sweep/diagnose surfaces
+> referenced below were not built. See
+> [`../workflow-runner.md`](../workflow-runner.md) for the current
+> surface; the decisions in this ADR stand.
+
 ## Context
 
 The team needs a way to orchestrate multi-persona workflows above

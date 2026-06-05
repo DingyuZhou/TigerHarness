@@ -2,14 +2,20 @@
 
 Team workflow orchestration for multi-persona tasks.
 
-> **Status:** Phase 1 shipped. The sequential executor, per-persona
-> sessions, persona-trailer parser, and the
-> `start`/`show`/`list`/`tail`/`cancel` CLI are implemented and tested
-> (`workflow start` runs a pre-compiled playbook to a terminal phase).
-> The compile phase (freestyle playbook → step files), the human gate,
-> and parallelism are **Phase 2+ and remain design-only** below. This
-> document is the source of truth for the design; sections describing
-> unimplemented phases say so inline.
+> **Status:** Phase 1 + the Phase 2 compile pipeline shipped.
+> Implemented and tested: the sequential executor, per-persona sessions,
+> the persona-trailer parser, the compile pipeline (freestyle playbook →
+> step files, under `workflow_runner/compile/`), and the
+> `start`/`show`/`list`/`tail`/`cancel` CLI (`workflow start` compiles a
+> playbook and/or runs pre-compiled steps to a terminal phase). Two
+> caveats: the **human gate is announce-only** — it emits
+> `human_gate_requested` but does not block, and was later **retired**
+> for the subscription model (see
+> [`journal-workflow-mode.md`](journal-workflow-mode.md)); and
+> **parallelism (`parallel_with`) remains design-only.** This document is
+> the source of truth for the design; sections describing unimplemented
+> surfaces (`resume`/`approve`/`validate`/`sweep`/`diagnose`,
+> parallelism) say so inline.
 
 ## What it does
 
@@ -185,9 +191,26 @@ End your reply with exactly one of:
     "entrypoint": "01-7f2a-anzai-plan",
     "compiled_at": "2026-05-28T14:00:00Z",
     "compiled_by": "anzai",
-    "compile_critique_iters": 3
+    "compile_critique_iters": 3,
+    "edges": {
+        "01-7f2a-anzai-plan": {"on_approve": "02-9c14-akagi-critique-exec", "on_revise": "01-7f2a-anzai-plan", "on_block": "__escalate__"},
+        "05-...": {"on_approve": "__done__", "on_revise": "04-1abf-anzai-revise-plan", "on_block": "__escalate__"}
+    },
+    "workflow_config": {
+        "human_gate": true, "max_compile_iters": 8, "max_cost_usd": 10.0,
+        "max_loop_iters": 5, "step_timeout_sec": 1800, "max_task_wall_sec": 86400,
+        "allow_parallel": false, "human_gate_approvers": []
+    }
 }
 ```
+
+`edges` maps each step id to its `on_approve` / `on_revise` / `on_block`
+routing (sentinels: `__done__` ends the walk, `__escalate__` blocks the
+task); the executor reads `edges` rather than re-parsing step
+frontmatter, so it is **always present** in a compiled graph.
+`workflow_config` carries the resolved constraint knobs
+(`WorkflowConfig` defaults baked in). Both fields were omitted from an
+earlier version of this example.
 
 **Mutability rule:** the `steps` array is append-only after compile.
 The currently-executing step may append new step ids to the end (via
@@ -353,7 +376,7 @@ internals and the Phase 3 human-gate resolution will add:
 {"ts":"...","kind":"human_gate_passed","by":"operator"}
 ```
 
-A `tigerharness workflow tail <task-id>` CLI renders this
+A `workflow tail <task-id>` CLI renders this
 human-friendly (similar to `task_runner logs`).
 
 ## Persona response trailer protocol
@@ -473,6 +496,15 @@ breach: emit `compile_failed` event and route to human gate even if
 
 ### Tier 3 — human gate (default ON for v1)
 
+> **Planned / not enforced — and since retired.** As shipped, the
+> orchestrator emits a `human_gate_requested` event and then **proceeds**
+> — it does not wait for an ACK, and there is no `approve` CLI. The
+> approver allowlist, the `human_gate_unauthorized_attempt` event, and
+> the pause-until-`APPROVE` flow described below are design only. The
+> human gate was later **retired** for the subscription model (where the
+> live human session is itself the gate) — see
+> [`journal-workflow-mode.md`](journal-workflow-mode.md) and ADR-0002 D9.
+
 After Tier 1+2 pass, the orchestrator slack-notifies the Operator
 with:
 
@@ -542,6 +574,10 @@ workflow_config:
 
 ### How the `workflow_config` block is parsed
 
+> **Planned.** As shipped, the playbook's `workflow_config` HTML-comment
+> block is **not** parsed — the compile pipeline uses `WorkflowConfig`'s
+> baked-in defaults. No `playbook_config_invalid` event is emitted.
+
 The orchestrator scans the playbook for HTML comment blocks of the
 form:
 
@@ -560,6 +596,11 @@ rejects the playbook and emits a `playbook_config_invalid` event.
 
 ## Trigger — the `workflow-run` skill
 
+> **Planned.** The `workflow-run` skill does not exist (the only shipped
+> workflow skill is `workflow-append-steps`). Start a workflow today by
+> invoking the `workflow start` CLI directly, as shown at the end of this
+> section.
+
 Primary entry point. Lives at
 `teams/<Team>/.claude/skills/workflow-run/SKILL.md`. Triggers on
 phrases like:
@@ -571,7 +612,7 @@ phrases like:
 The skill is a thin wrapper around the CLI:
 
 ```bash
-tigerharness workflow start \
+workflow start \
     --team Shohoku \
     --playbook default \
     --task-brief "<verbatim user request>" \
@@ -581,15 +622,22 @@ tigerharness workflow start \
 Other skill commands:
 
 ```bash
-tigerharness workflow list                  # list active tasks
-tigerharness workflow show <task-id>        # current status
-tigerharness workflow tail <task-id> -f     # follow events.jsonl
-tigerharness workflow cancel <task-id>      # graceful stop
-tigerharness workflow resume <task-id>      # after a pause
-tigerharness workflow approve <task-id>     # pass the human gate
+workflow list                  # list active tasks
+workflow show <task-id>        # current status
+workflow tail <task-id> -f     # follow events.jsonl
+workflow cancel <task-id>      # graceful stop
+# planned / not implemented:
+# workflow resume <task-id>    # after a pause
+# workflow approve <task-id>   # pass the human gate (retired)
 ```
 
 ## Sweep & diagnose — caring for in-flight tasks
+
+> **Planned (Phase 4–5) — not implemented.** Neither the
+> `workflow-sweep` / `workflow-diagnose` skills nor the `sweep` /
+> `diagnose` CLI subcommands exist; the shipped `workflow` CLI is
+> `start`/`show`/`list`/`tail`/`cancel`. For journal tasks the analogous
+> need is met by the subscription backend's `drive-journal` sweep.
 
 A workflow task can stall for many reasons: a persona's claude
 subprocess died, a step's `step_timeout_sec` hasn't been reached but
@@ -645,7 +693,7 @@ Output structure (when `--json`):
     "diagnosis": "process_dead_no_completion",
     "details": "Step started 1h ago; no step_completed or step_failed event; no claude pid visible in process tree; stale lock from pid 12345.",
     "recommended_action": "resume",
-    "recommended_command": "tigerharness workflow resume 20260528-7f2a9c14"
+    "recommended_command": "workflow resume 20260528-7f2a9c14"
 }
 ```
 
@@ -702,17 +750,25 @@ Personas never edit `orchestration.json`, `status.json`,
 `events.jsonl`, or compiled step files directly. They call skills:
 
 - `workflow-append-steps` — append new step files after the current
-  step (used during planning). Validates frontmatter, updates
-  `orchestration.json` atomically.
-- `workflow-emit-trailer` — convenience; appends a parseable
-  `WORKFLOW: ...` line. (Optional; personas can write the trailer by
-  hand.)
+  step (used during planning). Validates frontmatter, updates the graph
+  atomically. **Shipped** — the only workflow skill that exists; backed
+  by `tigerharness journal append-steps`.
+- `workflow-emit-trailer` — *(planned, not shipped)* a convenience that
+  would append a parseable `WORKFLOW: ...` line. Personas write the
+  trailer by hand today.
 
 The orchestrator owns all status / event writes. Tightening this
 with hook-based blocks on `Edit` against status/event paths is a
 TODO for Phase 1.
 
-## CLI surface (`tigerharness workflow ...`)
+## CLI surface (`workflow ...`)
+
+Invoke via the `workflow` console script (or `python -m
+tigerharness.workflow_runner`). **There is no `tigerharness workflow`
+subcommand** — `workflow` is its own entry point (see `pyproject.toml`
+`[project.scripts]`).
+
+Implemented (Phase 1 — the shipped parser):
 
 ```
 workflow start    --team <T> --playbook <name> (--task-brief <text> | --brief-file <p>) [--thread <ts>] [--no-run]
@@ -721,17 +777,24 @@ workflow list     [--team <T>] [--status <s>]
 workflow show     <task-id-or-prefix>
 workflow tail     <task-id-or-prefix> [-f]
 workflow cancel   <task-id-or-prefix>
-workflow resume   <task-id-or-prefix>
-workflow approve  <task-id-or-prefix>     # passes human gate
-workflow validate <playbook-path>         # standalone Tier 1 dry-run
+```
+
+Design-only — **not** in the shipped parser:
+
+```
+workflow resume   <task-id-or-prefix>             # Phase 3+ design
+workflow approve  <task-id-or-prefix>             # human gate (retired -- see note)
+workflow validate <playbook-path>                 # standalone Tier 1 dry-run
 workflow sweep    [--team <T>] [--stale-after DUR] [--auto-diagnose] [--auto-resume]
 workflow diagnose <task-id-or-prefix> [--json] [--llm-fallback]
 ```
 
-`workflow validate` lets a playbook author dry-run their prose
-against the validator suite before letting it loose on a real task.
-`workflow sweep` and `workflow diagnose` back the eponymous skills
-(see "Sweep & diagnose" above).
+`resume`/`approve`/`validate`/`sweep`/`diagnose` are described below as
+design but are not implemented; the shipped CLI is
+`start`/`show`/`list`/`tail`/`cancel` only. The human gate (`approve`)
+was **retired** for the subscription model — see
+[`journal-workflow-mode.md`](journal-workflow-mode.md). Tier 1
+validation is available today via `tigerharness journal validate-graph`.
 
 ### Operating: `--playbook` + `--task-brief`
 
@@ -798,8 +861,9 @@ new code (the project's coverage floor applies).
   `status.json` and SIGTERMs the current iteration's claude
   subprocess. The orchestrator finalizes a `cancel_complete` event
   and exits. State on disk is left intact for inspection.
-- **Resume.** `workflow resume <task-id>` reads `status.json` and
-  dispatches the `current_step` at `current_iter`. If the most
+- **Resume.** *(Planned — no `resume` CLI shipped.)* `workflow resume
+  <task-id>` would read `status.json` and dispatch the `current_step` at
+  `current_iter`. If the most
   recent event for that (step, iter) is `step_started` with no
   matching `step_completed`, the iteration is re-run from scratch
   (the persona's session memory carries the partial work, so the

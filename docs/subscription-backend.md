@@ -157,6 +157,13 @@ teams/<Team>/journal/
         <task-id>/            # finished tasks moved here by the next drive-journal sweep
 ```
 
+This is the `kind=task` shape. A `kind=workflow` task instead carries
+`task_brief.md` + `playbook_snapshot.md` (in place of `task.md`), a
+`compile/` workspace while compiling, and `orchestration.json` + `steps/`
+once the graph lands — see
+[`journal-workflow-mode.md`](journal-workflow-mode.md) and
+[`journal.md`](journal.md).
+
 `<task-id>` format mirrors the workflow-runner:
 `<YYYYMMDD>-<short-slug>-<8-char-uuid>`, e.g.
 `20260602-subscription-backend-7f2a9c14`.
@@ -201,6 +208,9 @@ keep `journal/OPERATING.md`.
 | `updated_at` | ISO 8601 UTC | driver | **Heartbeat.** Bumped on every `progress.md` append; OPERATING.md requires the driver to append progress at least every 10 minutes of wall-clock active work. A wedged session shows up stale once `updated_at` is older than `stuck_timeout` (default 1800s = 30 min). |
 | `next_action` | string | driver | The handoff note. Lets a *fresh* session resume without re-reasoning the whole `progress.md` — this is what makes the journal the memory, not the vendor's session. |
 | `session_ref` | string \| null | driver | Optional Claude session id, so the human can `--resume` the same conversation cheaply. Null is fine; `next_action` + `progress.md` are enough to resume from files alone. |
+| `compile_pending` | bool (`kind=workflow` only) | scaffolder / `land-compile` | `true` at scaffold; flipped to `false` (the visibility gate) once the compile lands the graph. Absent for `kind=task`. See [`journal-workflow-mode.md`](journal-workflow-mode.md). |
+| `compile_phase` | enum (`kind=workflow` only): `pending` / `drafting` / `tier1_pre` / `critiquing` / `tier1_post` / `complete` / `failed` | compile sub-protocol | The compile sub-state machine. Absent for `kind=task`. |
+| `playbook_name` | string, required for `kind=workflow` | scaffolder | Bare name of the playbook the workflow was compiled from. Rejected for `kind=task`. |
 
 Two fields carry the design: `updated_at` (heartbeat, doubles as soft
 lease) and `next_action` (resume-from-files). `session_ref` is a
@@ -217,7 +227,7 @@ The other fields are bookkeeping or human-facing labels.
 | `in_progress` | `in_progress` | driver | mid-task progress (clean stop, max_sessions not hit) | `updated_at` bumped, `next_action` rewritten. **No** `sessions` change -- the counter was already incremented on pickup |
 | `in_progress` | `done` | driver | task complete per acceptance criteria | `state=done`, `next_action` cleared, sweep will archive on next invocation |
 | `in_progress` | `blocked` | driver | real blocker (need human / another agent / external input) OR `sessions == max_sessions` | `state=blocked`, `next_action` names the blocker |
-| `blocked` | `in_progress` | human | manual edit of `status.json` to clear the blocker (a future `journal unblock` CLI is a Phase 2 nicety) | `next_action` rewritten by the human to point the next session at the resolution |
+| `blocked` | `in_progress` | human | manual edit of `status.json` to clear the blocker | `next_action` rewritten by the human to point the next session at the resolution |
 
 Phase 1 deliberately does **not** model a `failed` terminal state.
 "Failed" in v1 means "the human gave up" — they edit `state=done`
@@ -471,7 +481,7 @@ model:
 
 | Env var | Values | Meaning |
 |---|---|---|
-| `TIGERHARNESS_RUNNER_BACKEND` | `subscription` (default) / `api` | Which backend the task/workflow runner uses. |
+| `TIGERHARNESS_RUNNER_BACKEND` | `subscription` (default) / `api` | **Planned — not yet in code.** Which backend the task/workflow runner would use. |
 
 By default (in `subscription` mode) the runner CLI does **not**
 execute anything — `assign` / `start` simply scaffold a journal entry
@@ -522,5 +532,3 @@ skill, so the MVP is one chunk.
 - [`workflow-runner.md`](workflow-runner.md) — the multi-persona API
   backend driven by a pre-compiled workflow graph; already file-based,
   and the closest sibling to this design.
-- [`DESIGN.md`](DESIGN.md) — the env-var-driven configuration
-  philosophy this backend follows.
