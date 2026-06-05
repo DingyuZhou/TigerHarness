@@ -157,6 +157,13 @@ teams/<Team>/journal/
         <task-id>/            # finished tasks moved here by the next drive-journal sweep
 ```
 
+This is the `kind=task` shape. A `kind=workflow` task instead carries
+`task_brief.md` + `playbook_snapshot.md` (in place of `task.md`), a
+`compile/` workspace while compiling, and `orchestration.json` + `steps/`
+once the graph lands — see
+[`journal-workflow-mode.md`](journal-workflow-mode.md) and
+[`journal.md`](journal.md).
+
 `<task-id>` format mirrors the workflow-runner:
 `<YYYYMMDD>-<short-slug>-<8-char-uuid>`, e.g.
 `20260602-subscription-backend-7f2a9c14`.
