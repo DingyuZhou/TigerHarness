@@ -65,7 +65,7 @@ src/tigerharness/
         templates/           Briefing README template
     journal/                 File-based subscription backend (kind=task + kind=workflow)
         cli.py               new / list / status / sweep
-        compile_cli.py       Nine compile subcommands (compile-context ... append-steps)
+        compile_cli.py       Nine compile subcommands (compile-context ... validate-personas)
         models.py            status.json schema + state machine
         scaffold.py          Task / workflow scaffolding
         sweep.py             Lazy sweep (archive + fresh/stale classify)

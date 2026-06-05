@@ -116,7 +116,7 @@ backend constructor). For `claude_p` (`agent_sdk/backends/claude_p.py`):
   defaults to `"claude"` and is resolved via `shutil.which`; the backend
   raises `CLIError` if it isn't found on `PATH`.
 - `cfg.extra` keys: `permission_mode`
-  (`acceptEdits` / `plan` / `bypassPermissions`), `add_dirs`,
+  (`acceptEdits` / `plan` / `bypassPermissions` / `dontAsk`), `add_dirs`,
   `disallowed_tools`, `settings` (path to a `--settings` file),
   `max_budget_usd`, and `cli_args` (a free-form `{flag: value}` escape
   hatch passed straight through to the CLI).
