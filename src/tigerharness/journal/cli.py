@@ -473,7 +473,9 @@ def cmd_claim(args: argparse.Namespace) -> int:
     if status.state is State.IN_PROGRESS:
         try:
             klass = status.in_progress_class(stuck_timeout_sec=timeout)
-        except JournalModelError as exc:
+        except JournalModelError as exc:  # pragma: no cover -- unreachable:
+            # in_progress_class only raises for a non-in_progress state,
+            # which this branch has already excluded.
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if klass == "busy":
@@ -581,7 +583,8 @@ def cmd_release(args: argparse.Namespace) -> int:
         return 1
     try:
         new_state = State(args.state)
-    except ValueError:
+    except ValueError:  # pragma: no cover -- unreachable: argparse `choices`
+        # already restricts --state to valid State values.
         print(f"error: invalid --state {args.state!r}", file=sys.stderr)
         return 2
 
