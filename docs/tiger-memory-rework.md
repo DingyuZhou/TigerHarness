@@ -2,9 +2,9 @@
 
 > **Status:** Draft / spec phase. No code yet. This is the decision
 > scaffold we iterate on before implementation.
-> **Date:** 2026-06-05.
+> **Date:** 2026-06-05 (rounds 1-2) · 2026-06-06 (round 3).
 > **Decision-makers:** Operator + Anzai.
-> **Thread:** Slack DM 2026-06-05 (Operator ↔ Anzai).
+> **Thread:** Slack DM 2026-06-05 → 2026-06-06 (Operator ↔ Anzai).
 >
 > This document captures intent, not shipped behavior. Specific
 > numbers cited from the current implementation (call counts, config
@@ -71,6 +71,15 @@ vendor-shaped state — appears:
   emit the markdown" is a generic instruction; any interactive agent
   that can read and write files can run it. No Claude-Code-specific
   mechanics in the contract.
+- **Isolation strategy** — *how* the summarization contract gets a
+  bounded context to run in (so it does not crowd the driver) is a
+  swappable per-vendor adapter, kept separate from the contract itself.
+  `subagent` — a vendor sub-agent with its own context window — is the
+  strategy we build (see B8); `fresh_session` / `inline_mapreduce` /
+  `api_spawn` are other shapes a different vendor could register. The
+  *contract* — produce {short, detailed, must-memorize}, validate,
+  write to the store, return a short confirmation — does not change when
+  the strategy does.
 - **Transcript sources** — reading a vendor's transcript is inherently
   vendor-specific; keep it behind the existing `sources/` adapter
   interface (`claude_code` is one adapter; others plug in).
@@ -173,25 +182,36 @@ This is the hard part, and the part with the multi-persona trap.
 
 Per the billing fact above: a memory-rebuild **skill** (human-
 triggered, like drive-journal) runs the non-AI bookkeeping in Python,
-then has the **interactive session summarize the flagged transcripts
-itself** — adopt the summarizer role by prompt-prepending, emit the
-markdown, write it to the store. No `claude -p` spawn. API budget zero.
+then summarizes the flagged transcripts on the **subscription rail
+instead of the API rail**. The concrete mechanism is the `subagent`
+isolation strategy (B8): the interactive session **delegates each
+flagged transcript to an isolated summarizer sub-agent**, which adopts
+the summarizer role, emits the markdown, **writes it straight to the
+store**, and returns only a short confirmation. No programmatic
+`claude -p` spawn — a sub-agent of the interactive session rides the
+subscription. API budget zero.
 
-Two properties matter here:
+Three properties matter here:
 
-- **Vendor-neutral.** "Adopt the summarizer role, emit the markdown"
-  is a protocol *any* interactive agent can run — not a Claude-specific
-  mechanism (see the vendor-decoupling principle above).
-- **It subsumes Lever 1's biggest waste.** In-session, the transcript
-  is loaded into the driver's context *once* and all three artifacts
-  (short / detailed / must-memorize) come out of that single read —
-  the 3×-resend simply disappears. B1 and Lever 1 reinforce each other
-  rather than compete.
-- **Self-validating.** Because one emission now produces all three
-  artifacts, the protocol must validate its own output — all sections
-  present, within budget — *before* writing to the store. A malformed
-  emission must fail loudly, not corrupt the store (the "output
-  validation" half of the `anthropic.py:32-35` TODO).
+- **Vendor-neutral.** "Adopt the summarizer role, emit the markdown,
+  write to the store" is a protocol *any* interactive agent with a
+  sub-agent (or equivalent isolated context) can run — not a
+  Claude-specific mechanism (see the vendor-decoupling principle and
+  the contract-vs-strategy seam in B8).
+- **It subsumes Lever 1's biggest waste.** Each transcript is loaded
+  into a single bounded context *once* — the summarizer sub-agent's —
+  and all three artifacts (short / detailed / must-memorize) come out of
+  that one read; the 3×-resend simply disappears. B1 and Lever 1
+  reinforce each other rather than compete.
+- **Self-validating, in two layers.** The sub-agent validates its own
+  emission — all sections present, within budget — *before* writing, and
+  fails loudly rather than corrupting the store. After it returns, the
+  parent's non-AI bookkeeping does a cheap **structural** re-check
+  (files present, frontmatter parses, within budget) — defense in depth
+  at zero AI-context cost. On failure the transcript stays flagged and
+  the summarized-watermark (B5) does **not** advance, so the next sweep
+  retries it. Together these are the "output validation" half of the
+  `anthropic.py:32-35` TODO.
 
 Open: whether this is its own skill or folded into the drive-journal
 wake-up sweep (see Open Questions).
@@ -329,50 +349,91 @@ actual task. Mitigations, layered:
 
 ### B7 — In-session summarization is a new trust boundary
 
-Moving summarization into the live driver session removes an isolation
-property the spawned summarizer had — its own subprocess, its own cwd
-(see the feedback-loop note at `summarizers/anthropic.py:23-36`). Two
-hazards to design against:
+The spawned summarizer had hard isolation — its own subprocess, its own
+cwd (see the feedback-loop note at `summarizers/anthropic.py:23-36`).
+The `subagent` strategy (B8) restores most of it: a separate context
+window plus tool access we can scope down. But the summarizer still
+reads untrusted transcript text and still runs inside the team's trust
+domain, so three hazards remain to design against:
 
 - **Transcripts are untrusted input.** A past conversation may contain
-  text that reads as an instruction. Pulled into the driver's live
-  context, that is a prompt-injection surface. The summarization
-  sub-turn must treat transcript content as *data to be summarized* —
-  quoted, fenced, clearly delimited — never as instructions to the
-  driver.
+  text that reads as an instruction. Pulled into the summarizer's
+  context, that is a prompt-injection surface. The summarizer must treat
+  transcript content as *data to be summarized* — quoted, fenced,
+  clearly delimited — never as instructions.
+- **Constrain the summarizer sub-agent.** Give it only what the
+  contract needs — **Read** (the transcript source + the persona's
+  store), **Write** (scoped to that store path), and **nothing else**:
+  no shell, no network, no writes outside the store — plus
+  summarizer-only instructions. A narrow tool surface both blunts the
+  injection risk above and keeps a malformed run from touching anything
+  beyond its target.
 - **Don't let upkeep turns become a new source.** The spawned
-  summarizer deliberately routed *its own* transcripts to a throwaway
-  cwd-slug so the next rebuild would not re-ingest them
-  (`anthropic.py:23-36`). In-session, the driver's own memory-upkeep
-  turns live in the driver's transcript — which the next sweep reads.
-  We must mark or exclude upkeep turns from source ingestion, or the
-  self-referential feedback loop the old code warned about comes back.
+  summarizer routed *its own* transcripts to a throwaway cwd-slug so the
+  next rebuild would not re-ingest them (`anthropic.py:23-36`). The
+  sub-agent strategy needs the analogous guarantee: *(P0/P2 verify)*
+  whether a summarizer sub-agent's turns produce a transcript the
+  `claude_code` source would glob, and if so mark or exclude them — or
+  the self-referential feedback loop the old code warned about comes
+  back.
 
-### B8 — In-session summarization trades API dollars for context pressure
+### B8 — Context pressure: resolved by the `subagent` isolation strategy
 
-This is the sharpest tension in the design — and it is *between the two
-goals themselves*. The spawned summarizer got a **fresh context window
-per call**: it read one transcript and exited. In-session, the driver
-summarizes *on top of* everything it is already holding (its briefing,
-its current journal task). So moving summarization in-session is
-**subscription-friendly but context-hostile** — it can crowd the
-driver's window or degrade its real work, especially on large
-transcripts (the 120k-char ceiling exists for a reason).
+This *was* the sharpest tension in the design — and it sat **between the
+two goals themselves**. The spawned summarizer got a **fresh context
+window per call**: it read one transcript and exited. A naive in-session
+summarization — the driver doing it in *its own* turns — would summarize
+*on top of* everything the driver is already holding (its briefing, its
+current journal task), crowding the window and degrading the human's
+real work, especially on large transcripts (the 120k-char ceiling exists
+for a reason). Subscription-friendly but context-hostile.
 
-That makes two earlier levers **load-bearing, not optional**:
+**Resolution — delegate to an isolated sub-agent.** A vendor sub-agent
+(Claude Code's Task tool) runs in its **own context window**, can
+**write files to the store directly**, and returns **only a short
+confirmation** to the parent. That recovers the fresh-window property
+the old `claude -p` spawn had *and* keeps the work on the subscription
+rail — so we no longer trade context for billing. The tension dissolves.
 
-- **Transcript pre-filter (Lever 1.2)** becomes a *feasibility
-  requirement* for B1, not a nice-to-have — it caps what enters the
-  live context.
-- **Per-wake cap (B3)** bounds how many transcripts hit the context per
-  session.
+**Operator-verified by probe (2026-06-06).** A Claude Code sub-agent was
+given a read + a file-write and asked to return a one-line confirmation.
+It (a) ran on the **subscription, not the API**, (b) **wrote the file to
+disk** itself, and (c) returned **only** the short confirmation — the
+bulky output never transited the parent's context. Direct store-write +
+short-return is confirmed to work. *(This is a Claude Code property,
+verified in this deployment; other vendors verify their own — which is
+exactly why isolation is a* strategy *adapter, not a baked assumption.)*
 
-If pre-filtered transcripts still overflow, the fallback is to
-summarize in **bounded chunks** (or to spend one isolated sub-context
-per transcript where the vendor supports it) — accepting more turns to
-protect the driver's window. This is the live form of open question #4;
-resolving the context budget is a **P2 design gate**, not an
-afterthought.
+**Contract vs. strategy (the vendor-decoupling seam).** Keep two things
+separate:
+
+- The **summarization contract** is vendor-neutral and shared: given a
+  flagged transcript + the persona's store config, produce
+  {short, detailed, must-memorize}, self-validate, write to the store,
+  return a short confirmation (or a structured failure).
+- The **isolation strategy** is a swappable per-vendor adapter:
+  `subagent` is the one we build. `fresh_session`, `inline_mapreduce`,
+  and the legacy `api_spawn` are other shapes a different vendor could
+  register without touching the contract. **Scope: `subagent` only for
+  now** — we are not building fallbacks for vendors that lack sub-agents
+  yet.
+
+**What this does to the earlier levers.** Because the sub-agent's window
+is *separate from the driver's*, the transcript pre-filter (Lever 1.2)
+and the per-wake cap (B3) are **no longer load-bearing for protecting
+the driver's window** — they now bound the *sub-agent's* context and the
+*total quota per wake*, which is ordinary hygiene rather than a
+feasibility gate. The budget question (open-Q4) reframes from "how much
+of the driver do we spend?" to "how many sub-agent spawns per wake?" —
+answered by the per-wake cap.
+
+**Oversized-transcript fallback.** If a single transcript overflows even
+the sub-agent's own window, the fallback stays isolated from the driver:
+**map-reduce inside the strategy** — chunk-summarize the transcript (one
+bounded pass per chunk), then reduce the chunk summaries into the three
+artifacts — all within sub-agent context, never the driver's. The
+must-memorize extraction runs at reduce time over the chunk summaries;
+the quality trade-off of chunking is accepted only on the overflow path.
 
 ---
 
@@ -389,25 +450,32 @@ afterthought.
    get it for free without remembering a separate command?
 3. **Staleness floor & per-wake cap values.** Starting points to tune
    (e.g. 24h floor, cap of N sessions/wake).
-4. **In-session summarization context budget.** Summarizing in-session
-   loads transcripts into the live session's context — how much of a
-   driver session are we willing to spend on memory upkeep? **See B8 —
-   this is now a P2 design gate, not just an open question.**
+4. **In-session summarization context budget — RESOLVED (see B8).** The
+   `subagent` isolation strategy runs summarization in a *separate*
+   context window, so memory upkeep no longer spends the driver's
+   context at all. The budget question reduces to "how many sub-agent
+   spawns per wake," which the per-wake cap (B3) already governs.
+   Operator-verified by probe (2026-06-06): a Claude Code sub-agent runs
+   on the subscription, writes to the store directly, and returns only a
+   short confirmation.
 
 ## Phasing
 
 - **P0 (this doc).** Lock the design. Measure the current footprint as
   a baseline (calls per rebuild, tokens per call, briefing size).
   Verify the *(verify in P0)* facts. Confirm `threads.json` pruning
-  behavior (B5).
+  behavior (B5); confirm a summarizer sub-agent's turns are not
+  re-ingested as a new source (B7); confirm `must_memorize` decay is
+  wall-clock-anchored (core reframe).
 - **P1 — Lever 1 (build-side cuts).** Transcript pre-filter +
   cost/scope cap + context-budget tiering — the parts that survive the
   move to in-session. (Collapse/prefix-cache applies only to the legacy
   API-spawn path; it is subsumed by P2's in-session read-once.) Lowest
   risk, no change to what the agent reads.
 - **P2 — Lever 3 (subscription-safe multi-persona).** In-session
-  summarization skill (B1) + roster sweep (B3) + team-qualified IDs
-  (B4) + the summarized-watermark safeguard (B5).
+  summarization skill via the `subagent` isolation strategy (B1, B8) +
+  roster sweep (B3) + team-qualified IDs (B4) + the summarized-watermark
+  safeguard (B5).
 - **P3 — Lever 2 (read-side diet).** Lean core briefing + on-demand
   drill, measured before/after.
 
@@ -444,3 +512,21 @@ afterthought.
   resolution** explicit and verify-gated (B3); (6) corrected the
   `threads.json` backward-compat to absorb both existing entry shapes
   (B4). Operator confirmed `slack_bridge_dm` opt-in, default off.
+- **2026-06-06 — round 3 (Anzai + Operator).** Resolved B8's central
+  tension. The `subagent` isolation strategy runs summarization in an
+  isolated context window that bills to the **subscription** (not the
+  API), writes to the store directly, and returns only a short
+  confirmation — recovering the spawned summarizer's fresh window
+  *without* its API cost. **Operator-verified by probe.** Folded in:
+  (1) the **contract-vs-strategy seam** — a vendor-neutral summarization
+  contract plus `subagent` as one swappable isolation strategy (the only
+  one we build for now) — promoted to a vendor-decoupling lever;
+  (2) B1 reworked to *delegate* to the sub-agent, with two-layer
+  validation (sub-agent self-validates, parent structurally re-checks)
+  and watermark-on-failure retry; (3) B7 gains a **constrain-the-
+  sub-agent** hazard (Read transcript+store / Write store-only / no
+  shell or network) and reframes the feedback-loop worry as a sub-agent
+  verify item; (4) open-Q4 resolved — upkeep no longer spends the
+  driver's context; (5) pre-filter + per-wake cap **downgraded** from
+  feasibility gate to hygiene; (6) map-reduce kept as the oversized-
+  transcript fallback.
