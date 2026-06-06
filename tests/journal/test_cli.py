@@ -69,6 +69,27 @@ class TestCmdNew:
         paths = JournalPaths(root=journal_dir)
         assert paths.list_active_ids()
 
+    def test_early_exit_defaults_off_and_flag_turns_on(
+        self, tmp_path, journal_dir,
+    ):
+        prd = tmp_path / "brief.md"
+        prd.write_text("# T\nbody\n")
+        paths = JournalPaths(root=journal_dir)
+        # Default: no --early-exit -> run the full budget (exactly N).
+        assert main(["--journal-dir", str(journal_dir),
+                     "new", "--prd", str(prd), "--persona", "P"]) == 0
+        tid = paths.list_active_ids()[0]
+        assert Status.from_json(
+            paths.status_json(tid).read_text()
+        ).early_exit is False
+        # With --early-exit -> driver may stop when done.
+        assert main(["--journal-dir", str(journal_dir), "new", "--prd",
+                     str(prd), "--persona", "P", "--early-exit"]) == 0
+        other = [i for i in paths.list_active_ids() if i != tid][0]
+        assert Status.from_json(
+            paths.status_json(other).read_text()
+        ).early_exit is True
+
     def test_missing_prd_returns_2(self, journal_dir, capsys):
         rc = main([
             "--journal-dir", str(journal_dir),
@@ -816,17 +837,21 @@ class TestCmdSweep:
         paths = JournalPaths(root=journal_dir)
         _seed(paths, "p1", state=State.PENDING)
         _seed(paths, "d1", state=State.DONE)
-        _seed(paths, "ip-fresh", state=State.IN_PROGRESS,
+        # Detached in_progress -> idle/resumable.
+        _seed(paths, "ip-idle", state=State.IN_PROGRESS,
               updated_at="2026-06-02T08:00:00Z")
         rc = main([
             "--journal-dir", str(journal_dir),
-            "sweep", "--stuck-timeout", "1000000",  # never stale
+            "sweep", "--stuck-timeout", "1000000",  # never crashed
         ])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "p1" in out
         assert "Archived" in out and "d1" in out
-        assert "Fresh in_progress" in out and "ip-fresh" in out
+        # Finish-before-start: the resumable in_progress task is the
+        # pick, ahead of the pending one.
+        assert "Actionable" in out and "ip-idle" in out
+        assert "1 resumable" in out
+        assert "1 pending" in out
 
     def test_blocked_and_malformed_surfaced(self, journal_dir, capsys):
         paths = JournalPaths(root=journal_dir)
@@ -878,3 +903,96 @@ class TestDefaultJournalDir:
         assert rc == 0
         # The sweep ensured active/ exists.
         assert (target / "active").is_dir()
+
+
+# ---------------------------------------------------------------------------
+
+class TestCmdClaimRelease:
+    def test_claim_pending_starts_and_attaches(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--format", "json"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["task_id"] == "t1"
+        assert payload["session_ref"]
+        assert payload["sessions"] == 1
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+        assert s.session_ref == payload["session_ref"]
+
+    def test_claim_idle_in_progress_resumes_and_bumps_sessions(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        # Detached in_progress -> idle; resumable immediately.
+        _seed(paths, "t1", state=State.IN_PROGRESS, sessions=1,
+              updated_at="2026-06-02T08:00:00Z")
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.session_ref is not None
+        assert s.sessions == 2
+
+    def test_claim_busy_refused(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="held",
+              updated_at="2026-06-02T08:00:00Z")
+        # Huge timeout -> attached + fresh -> busy -> refuse.
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--stuck-timeout", "100000000"])
+        assert rc == 1
+        assert "busy" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.session_ref == "held"  # not stolen
+
+    def test_claim_crashed_is_reclaimable(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="dead",
+              updated_at="2026-06-02T08:00:00Z")
+        # Tiny timeout -> attached + stale -> crashed -> reclaimable.
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--stuck-timeout", "1"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.session_ref is not None
+        assert s.session_ref != "dead"  # re-attached with our token
+
+    def test_claim_done_refused(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.DONE)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1"])
+        assert rc == 1
+        assert "not claimable" in capsys.readouterr().err
+
+    def test_release_detaches_and_keeps_in_progress(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              updated_at="2026-06-02T08:00:00Z")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--next-action", "resume here"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.session_ref is None  # detached -> instantly resumable
+        assert s.state is State.IN_PROGRESS
+        assert s.next_action == "resume here"
+
+    def test_release_to_done(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "done"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.DONE
+        assert s.session_ref is None
+
+    def test_release_session_ref_mismatch_refused(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="real",
+              updated_at="2026-06-02T08:00:00Z")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--session-ref", "wrong"])
+        assert rc == 1
+        assert "does not match" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.session_ref == "real"  # untouched

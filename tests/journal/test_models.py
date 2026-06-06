@@ -28,7 +28,7 @@ class TestStatusNew:
         )
         assert s.state is State.PENDING
         assert s.sessions == 0
-        assert s.max_sessions == 5  # default
+        assert s.max_sessions == 3  # default
         assert s.created_at == s.updated_at == "2026-06-02T08:00:00Z"
         assert s.session_ref is None
         assert s.next_action == ""
@@ -524,3 +524,69 @@ class TestHeartbeat:
         monkeypatch.setattr(m, "_utcnow_iso", lambda: "2026-06-02T09:00:00Z")
         s = self._in_progress("2026-06-02T08:00:00Z")
         assert s.heartbeat_age_seconds() == pytest.approx(3600.0)
+
+
+class TestInProgressClass:
+    """in_progress_class() -- idle / busy / crashed via session_ref."""
+
+    def _ip(self, *, session_ref, updated_at):
+        return Status(
+            id="x", title="t", kind="task", persona="P",
+            state=State.IN_PROGRESS, sessions=1, max_sessions=5,
+            created_at="2026-06-02T08:00:00Z", updated_at=updated_at,
+            session_ref=session_ref,
+        )
+
+    def test_idle_when_detached_regardless_of_heartbeat(self):
+        # Detached + a very old heartbeat is still idle: the heartbeat is
+        # not even read when no session is attached.
+        s = self._ip(session_ref=None, updated_at="2026-06-01T08:00:00Z")
+        assert s.in_progress_class(
+            stuck_timeout_sec=300, now="2026-06-02T08:10:00Z",
+        ) == "idle"
+
+    def test_busy_when_attached_and_fresh(self):
+        s = self._ip(session_ref="tok", updated_at="2026-06-02T08:08:00Z")
+        assert s.in_progress_class(
+            stuck_timeout_sec=300, now="2026-06-02T08:10:00Z",
+        ) == "busy"
+
+    def test_crashed_when_attached_and_stale(self):
+        s = self._ip(session_ref="tok", updated_at="2026-06-01T08:00:00Z")
+        assert s.in_progress_class(
+            stuck_timeout_sec=300, now="2026-06-02T08:10:00Z",
+        ) == "crashed"
+
+    def test_raises_on_non_in_progress(self):
+        s = Status(
+            id="x", title="t", kind="task", persona="P",
+            state=State.PENDING, sessions=0, max_sessions=5,
+            created_at="2026-06-02T08:00:00Z",
+            updated_at="2026-06-02T08:00:00Z",
+        )
+        with pytest.raises(JournalModelError):
+            s.in_progress_class(stuck_timeout_sec=300)
+
+
+class TestEarlyExit:
+    """early_exit -- run-all-N (default) vs stop-when-done (opt-in)."""
+
+    def test_default_off(self):
+        assert Status.new(id="x", title="t", persona="P").early_exit is False
+
+    def test_settable_and_round_trips(self):
+        s = Status.new(id="x", title="t", persona="P", early_exit=True)
+        assert s.early_exit is True
+        assert Status.from_json(s.to_json()).early_exit is True
+
+    def test_legacy_status_without_field_defaults_off(self):
+        d = Status.new(id="x", title="t", persona="P").to_dict()
+        d.pop("early_exit")
+        assert Status.from_dict(d).early_exit is False
+
+    def test_workflow_carries_early_exit(self):
+        s = Status.new_workflow(
+            id="x", title="t", playbook_name="default", early_exit=True,
+        )
+        assert s.early_exit is True
+        assert Status.from_json(s.to_json()).early_exit is True

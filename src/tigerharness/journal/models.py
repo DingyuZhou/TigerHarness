@@ -140,6 +140,11 @@ class Status:
     updated_at: str
     next_action: str = ""
     session_ref: str | None = None
+    # When False (default), the driver runs the full ``max_sessions``
+    # budget -- "N iterations means exactly N". When True, the driver may
+    # stop early once the task is done per acceptance criteria (mirrors
+    # the task-runner's opt-in ``--early-exit``).
+    early_exit: bool = False
     # Workflow-only sub-state. Defaults are neutral so a task-mode
     # Status round-trips byte-identically; the JSON schema gate in
     # ``from_dict`` / ``to_dict`` is what makes the per-kind contract
@@ -165,8 +170,9 @@ class Status:
         title: str,
         persona: str,
         kind: str = "task",
-        max_sessions: int = 5,
+        max_sessions: int = 3,
         next_action: str = "",
+        early_exit: bool = False,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded Status in ``state=pending``.
@@ -203,6 +209,7 @@ class Status:
             updated_at=ts,
             next_action=next_action,
             session_ref=None,
+            early_exit=early_exit,
             compile_pending=False,
             compile_phase=None,
         )
@@ -217,6 +224,7 @@ class Status:
         captain: str | None = None,
         max_sessions: int = 10,
         next_action: str = "",
+        early_exit: bool = False,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded ``kind=workflow`` Status.
@@ -269,6 +277,7 @@ class Status:
             updated_at=ts,
             next_action=next_action,
             session_ref=None,
+            early_exit=early_exit,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
             playbook_name=playbook_name.strip(),
@@ -327,7 +336,7 @@ class Status:
                 f"status.json missing required keys: {sorted(missing)}"
             )
         optional_keys = {
-            "persona", "next_action", "session_ref",
+            "persona", "next_action", "session_ref", "early_exit",
             "compile_pending", "compile_phase", "playbook_name",
         }
         unknown = set(data) - (required | optional_keys)
@@ -461,6 +470,7 @@ class Status:
             updated_at=data["updated_at"],
             next_action=data.get("next_action", "") or "",
             session_ref=data.get("session_ref"),
+            early_exit=bool(data.get("early_exit", False)),
             compile_pending=compile_pending_val,
             compile_phase=compile_phase,
             playbook_name=playbook_name,
@@ -517,12 +527,45 @@ class Status:
         self, *, stuck_timeout_sec: int, now: str | None = None,
     ) -> bool:
         """The fresh-in-progress classification: ``in_progress`` AND
-        heartbeat within ``stuck_timeout_sec``. Step 2 of the OPERATING
-        decision procedure must NOT pick these (another session owns
-        them right now). The heartbeat is the soft lease."""
+        heartbeat within ``stuck_timeout_sec``. The heartbeat is the soft
+        lease. NOTE: with the attach signal (``session_ref``), a *fresh*
+        heartbeat only means "do not touch" when a session is actually
+        attached -- see :meth:`in_progress_class`, which is what the
+        sweep and ``claim`` now use."""
         if self.state is not State.IN_PROGRESS:
             return False
         return self.heartbeat_age_seconds(now=now) <= stuck_timeout_sec
+
+    def in_progress_class(
+        self, *, stuck_timeout_sec: int, now: str | None = None,
+    ) -> str:
+        """Classify an ``in_progress`` task by whether a session is
+        *attached* (``session_ref`` set) and, if so, whether its
+        heartbeat is fresh.
+
+        The attach signal is decoupled from the heartbeat: ``session_ref``
+        answers "is a session driving this right now?"; the heartbeat is
+        consulted *only* to catch a crashed owner. Returns one of:
+
+        - ``"idle"``    -- detached (``session_ref is None``): cleanly
+          handed off or never claimed. Resumable **immediately** -- no
+          heartbeat wait. This is the instant-resume class.
+        - ``"busy"``    -- attached + fresh heartbeat: a live session
+          owns it right now. Do not touch.
+        - ``"crashed"`` -- attached + stale heartbeat: the owning session
+          went silent past ``stuck_timeout_sec``. Reclaimable (rescue).
+
+        Raises ``JournalModelError`` if called on a non-``in_progress``
+        task (the caller gates on ``state``)."""
+        if self.state is not State.IN_PROGRESS:
+            raise JournalModelError(
+                f"in_progress_class called on state={self.state.value!r}"
+            )
+        if self.session_ref is None:
+            return "idle"
+        if self.heartbeat_age_seconds(now=now) > stuck_timeout_sec:
+            return "crashed"
+        return "busy"
 
 
 def _parse_iso(ts: str) -> _dt.datetime:
