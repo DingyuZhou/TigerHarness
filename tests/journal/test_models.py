@@ -590,3 +590,21 @@ class TestEarlyExit:
         )
         assert s.early_exit is True
         assert Status.from_json(s.to_json()).early_exit is True
+
+
+class TestLegacySessionRef:
+    """Pre-instant-resume status.json had no `session_ref` key; such an
+    in_progress task must load with session_ref=None and classify as
+    idle (resumable now), not stay stuck."""
+
+    def test_missing_session_ref_loads_none_and_classifies_idle(self):
+        d = Status.new(id="x", title="t", persona="P").to_dict()
+        d.pop("session_ref")
+        d["state"] = "in_progress"
+        d["sessions"] = 1
+        s = Status.from_dict(d)
+        assert s.session_ref is None
+        # idle short-circuits before any heartbeat read (even a stale clock).
+        assert s.in_progress_class(
+            stuck_timeout_sec=300, now="2099-01-01T00:00:00Z",
+        ) == "idle"

@@ -95,7 +95,7 @@ version, every invocation:
      here -- keep iterating and spend the full `max_sessions` budget
      ("N iterations = exactly N"); mark `done` on the final session.
    - A real blocker requires a human or another persona.
-   - `sessions == max_sessions` -- mark `done` if complete, else
+   - `sessions >= max_sessions` -- mark `done` if complete, else
      `blocked` with a `next_action` naming the cap.
    - The human ends the session.
 
@@ -109,7 +109,7 @@ version, every invocation:
    **detach**: clean stop with work left -> `release <id> --next-action
    "<note>"` (stays `in_progress`, now **idle** so the next drive
    resumes instantly, no wait); done -> `release <id> --state done`;
-   blocked, or `sessions == max_sessions` -> `release <id> --state
+   blocked, or `sessions >= max_sessions` -> `release <id> --state
    blocked --next-action "<why>"`. `release` clears `session_ref` +
    refreshes `updated_at`; do NOT bump `sessions` (that happened in
    `claim` at pickup).
@@ -122,7 +122,7 @@ version, every invocation:
    Drive a task through its whole session budget in one sitting -- a
    `max_sessions=10` task runs its sessions one after another, **not**
    one-per-invocation. Stop only when the task is done/blocked,
-   `sessions == max_sessions`, nothing is actionable, the human ends the
+   `sessions >= max_sessions`, nothing is actionable, the human ends the
    session, or your context is genuinely full (hand off -- a fresh drive
    resumes instantly). **Don't manufacture a stopping point just because
    one task finished -- drain the queue while the session is hot.**

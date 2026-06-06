@@ -288,3 +288,18 @@ class TestSweep:
         # The healthy tasks still classify (ip-fresh is detached -> idle).
         assert [s.id for s in result.pending] == ["p1"]
         assert [s.id for s in result.in_progress_idle] == ["ip-fresh"]
+
+    def test_legacy_in_progress_without_session_ref_key_is_idle(self, paths):
+        # A pre-instant-resume status.json with the session_ref key
+        # physically absent must sweep as idle (resumable), not stuck.
+        import json
+        (paths.active / "legacy").mkdir()
+        d = Status.new(id="legacy", title="L", persona="P").to_dict()
+        d.pop("session_ref")
+        d["state"] = "in_progress"
+        d["sessions"] = 1
+        (paths.active / "legacy" / "status.json").write_text(json.dumps(d))
+        result = sweep(paths, stuck_timeout_sec=300, now="2099-01-01T00:00:00Z")
+        assert [x.id for x in result.in_progress_idle] == ["legacy"]
+        assert result.in_progress_busy == []
+        assert result.in_progress_crashed == []

@@ -211,9 +211,14 @@ def sweep(
             continue
         if klass == "idle":
             result.in_progress_idle.append(status)
+        elif klass == "busy":
+            result.in_progress_busy.append(status)
         elif klass == "crashed":
             result.in_progress_crashed.append(status)
-        else:  # "busy"
-            result.in_progress_busy.append(status)
+        else:  # defensive: in_progress_class is exhaustive -- a new/typo'd
+            # value must fail loud, not silently land in the wrong bucket.
+            raise JournalModelError(
+                f"unexpected in_progress_class {klass!r} for task {task_id!r}"
+            )
 
     return result

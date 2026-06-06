@@ -237,7 +237,7 @@ class Status:
         graph and are unknown at scaffold time. ``captain=None`` is
         legitimate -- the workflow has no single owner.
 
-        ``max_sessions`` defaults to ``10`` here (not ``5`` as for
+        ``max_sessions`` defaults to ``10`` here (not ``3`` as for
         tasks) to give the in-session compile a reasonable budget.
         The design proposal called for ``len(steps) * 2 + 3`` but
         ``len(steps)`` is unknown at scaffold time (compile hasn't

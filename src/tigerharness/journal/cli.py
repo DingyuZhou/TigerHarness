@@ -34,6 +34,7 @@ from tigerharness.journal.paths import (
 from tigerharness.journal.scaffold import (
     JournalScaffoldError,
     MissingPersonaError,
+    _write_atomic,
     new_task,
     new_workflow_task,
     resolve_default_persona,
@@ -434,11 +435,11 @@ def cmd_sweep(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _write_status_atomic(paths: JournalPaths, status: Status) -> None:
-    """Write status.json atomically (temp + os.replace on the same dir)."""
-    path = paths.status_json(status.id)
-    tmp = path.parent / (path.name + ".tmp")
-    tmp.write_text(status.to_json())
-    os.replace(tmp, path)
+    """Write status.json atomically, reusing the scaffolder's canonical
+    helper so claim/release share its crash-safe, concurrency-safe write
+    path (unique same-dir temp + fsync + os.replace -- no fixed temp name
+    that racing writers could clobber)."""
+    _write_atomic(paths.status_json(status.id), status.to_json())
 
 
 def cmd_claim(args: argparse.Namespace) -> int:
@@ -484,6 +485,28 @@ def cmd_claim(args: argparse.Namespace) -> int:
             return 1
         # idle or crashed -> claimable (resume / rescue)
 
+    # Budget guard: a task already at its session cap must not be run
+    # past it. A crash/clean-stop that left an at-cap task in_progress
+    # (instead of blocked) could otherwise be re-claimed forever, and the
+    # driver's `sessions >= max_sessions` stop would overshoot a one-off
+    # bump. Self-heal: mark it blocked (so it stops surfacing as
+    # actionable) and refuse the claim.
+    if status.sessions >= status.max_sessions:
+        status.state = State.BLOCKED
+        status.session_ref = None
+        status.next_action = (
+            f"hit session cap ({status.sessions}/{status.max_sessions}); "
+            f"raise --max-sessions or close the task"
+        )
+        status.updated_at = _utcnow_iso()
+        _write_status_atomic(paths, status)
+        print(
+            f"error: task at session cap "
+            f"({status.sessions}/{status.max_sessions}); marked blocked.",
+            file=sys.stderr,
+        )
+        return 1
+
     token = secrets.token_hex(8)
     status.state = State.IN_PROGRESS
     status.session_ref = token
@@ -491,10 +514,12 @@ def cmd_claim(args: argparse.Namespace) -> int:
     status.updated_at = _utcnow_iso()
     _write_status_atomic(paths, status)
 
-    # Compare-and-set verification: re-read and confirm our token is the
-    # one on disk. If a concurrent claim raced us and won the last write,
-    # we lost -- back off. (Narrow TOCTOU window remains; see the design
-    # note's open question on flock vs. compare-and-set.)
+    # Compare-and-set check: re-read and confirm our token is on disk. If
+    # a concurrent claim won the last write we see a different token and
+    # back off. This is NOT a full mutex -- a tight write/read/write/read
+    # interleaving can still let two claims both believe they won. The
+    # design accepts that for the low-concurrency interactive model;
+    # flock is the upgrade path (see docs/journal-instant-resume.md).
     confirm = _read_status_or_none(paths, args.task_id)
     if confirm is None or confirm.session_ref != token:
         print(
