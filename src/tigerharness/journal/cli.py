@@ -14,11 +14,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import secrets
 import sys
 from pathlib import Path
 
 from tigerharness.journal.compile_cli import build_subparsers as _build_compile_subparsers
-from tigerharness.journal.models import JournalModelError, Status
+from tigerharness.journal.models import (
+    JournalModelError,
+    State,
+    Status,
+    _utcnow_iso,
+)
 from tigerharness.journal.paths import (
     JournalPathError,
     JournalPaths,
@@ -378,8 +385,9 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             "summary": result.to_summary(),
             "archived": result.archived,
             "pending": [s.id for s in result.pending],
-            "in_progress_fresh": [s.id for s in result.in_progress_fresh],
-            "in_progress_stale": [s.id for s in result.in_progress_stale],
+            "in_progress_idle": [s.id for s in result.in_progress_idle],
+            "in_progress_busy": [s.id for s in result.in_progress_busy],
+            "in_progress_crashed": [s.id for s in result.in_progress_crashed],
             "blocked": [s.id for s in result.blocked],
             "malformed": [
                 {"task_id": m.task_id, "error": m.error}
@@ -401,10 +409,10 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         print("Actionable (pick one of these next):")
         for s in result.actionable():
             print(f"  - {s.id}  [{s.state.value}]  {s.title}")
-    if result.in_progress_fresh:
+    if result.in_progress_busy:
         print()
-        print("Fresh in_progress (LEAVE ALONE -- another session owns):")
-        for s in result.in_progress_fresh:
+        print("Busy (LEAVE ALONE -- a live session owns these):")
+        for s in result.in_progress_busy:
             print(f"  - {s.id}  {s.title}")
     if result.blocked:
         print()
@@ -416,6 +424,139 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         print("Malformed status.json (sweep skipped these):")
         for m in result.malformed:
             print(f"  - {m.task_id}: {m.error}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# claim / release  (instant session hand-off; see docs/journal-instant-resume.md)
+# ---------------------------------------------------------------------------
+
+def _write_status_atomic(paths: JournalPaths, status: Status) -> None:
+    """Write status.json atomically (temp + os.replace on the same dir)."""
+    path = paths.status_json(status.id)
+    tmp = path.parent / (path.name + ".tmp")
+    tmp.write_text(status.to_json())
+    os.replace(tmp, path)
+
+
+def cmd_claim(args: argparse.Namespace) -> int:
+    """Atomically claim a task for this session (the pickup).
+
+    Claimable = ``pending`` (start), or ``in_progress`` that is *idle*
+    (detached) or *crashed* (attached but heartbeat stale). A *busy*
+    task (attached + fresh) is refused -- a live session owns it.
+
+    On success: set ``session_ref`` to a fresh token, flip to
+    ``in_progress``, bump ``sessions``, refresh ``updated_at``, write
+    atomically, then re-read and confirm our token won (compare-and-set).
+    """
+    paths = _paths_from_args(args)
+    status = _read_status_or_none(paths, args.task_id)
+    if status is None:
+        print(f"error: no task with id {args.task_id!r} in {paths.active}",
+              file=sys.stderr)
+        return 1
+    try:
+        timeout = (args.stuck_timeout if args.stuck_timeout is not None
+                   else stuck_timeout_from_env())
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if status.state in (State.DONE, State.BLOCKED):
+        print(f"error: task is {status.state.value}; not claimable",
+              file=sys.stderr)
+        return 1
+    if status.state is State.IN_PROGRESS:
+        try:
+            klass = status.in_progress_class(stuck_timeout_sec=timeout)
+        except JournalModelError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if klass == "busy":
+            print(
+                f"error: task is busy -- a live session owns it "
+                f"(session_ref={status.session_ref!r}). Not claimable.",
+                file=sys.stderr,
+            )
+            return 1
+        # idle or crashed -> claimable (resume / rescue)
+
+    token = secrets.token_hex(8)
+    status.state = State.IN_PROGRESS
+    status.session_ref = token
+    status.sessions += 1
+    status.updated_at = _utcnow_iso()
+    _write_status_atomic(paths, status)
+
+    # Compare-and-set verification: re-read and confirm our token is the
+    # one on disk. If a concurrent claim raced us and won the last write,
+    # we lost -- back off. (Narrow TOCTOU window remains; see the design
+    # note's open question on flock vs. compare-and-set.)
+    confirm = _read_status_or_none(paths, args.task_id)
+    if confirm is None or confirm.session_ref != token:
+        print(
+            "error: claim lost -- another session claimed this task "
+            "concurrently. Re-sweep and pick again.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if getattr(args, "format", "text") == "json":
+        print(json.dumps({
+            "task_id": status.id,
+            "session_ref": token,
+            "sessions": status.sessions,
+            "max_sessions": status.max_sessions,
+            "kind": status.kind,
+        }, indent=2))
+    else:
+        print(f"Claimed {status.id}")
+        print(f"  session_ref: {token}")
+        print(f"  sessions:    {status.sessions}/{status.max_sessions}")
+        print(f"  kind:        {status.kind}")
+    return 0
+
+
+def cmd_release(args: argparse.Namespace) -> int:
+    """Release this session's hold on a task (the hand-off / stop).
+
+    Clears ``session_ref`` (detach) so the next session can resume the
+    task **immediately** -- no heartbeat wait. Sets the exit ``--state``
+    (default ``in_progress`` = clean stop; ``done`` / ``blocked`` for
+    terminal stops) and optional ``--next-action``, then refreshes
+    ``updated_at``.
+
+    If ``--session-ref`` is given it must match the current holder, so a
+    stray release can't detach someone else's live task.
+    """
+    paths = _paths_from_args(args)
+    status = _read_status_or_none(paths, args.task_id)
+    if status is None:
+        print(f"error: no task with id {args.task_id!r} in {paths.active}",
+              file=sys.stderr)
+        return 1
+    if args.session_ref is not None and status.session_ref != args.session_ref:
+        print(
+            f"error: --session-ref {args.session_ref!r} does not match the "
+            f"current holder {status.session_ref!r}; refusing to release.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        new_state = State(args.state)
+    except ValueError:
+        print(f"error: invalid --state {args.state!r}", file=sys.stderr)
+        return 2
+
+    status.state = new_state
+    status.session_ref = None  # detach -> instantly resumable if still in_progress
+    if args.next_action is not None:
+        status.next_action = args.next_action
+    status.updated_at = _utcnow_iso()
+    _write_status_atomic(paths, status)
+
+    print(f"Released {status.id} (state={new_state.value}, detached)")
     return 0
 
 
@@ -566,6 +707,46 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sw.set_defaults(func=cmd_sweep)
+
+    cl = sub.add_parser(
+        "claim",
+        help=(
+            "Atomically claim a task for this session (the pickup): set "
+            "session_ref, flip to in_progress, bump sessions. Resumes an "
+            "idle/crashed task or starts a pending one; refuses a busy one."
+        ),
+    )
+    cl.add_argument("task_id")
+    cl.add_argument("--format", choices=["text", "json"], default="text")
+    cl.add_argument(
+        "--stuck-timeout", type=int, default=None,
+        help=(
+            "Heartbeat age past which an attached task counts as crashed "
+            "(and thus claimable). Defaults like sweep's."
+        ),
+    )
+    cl.set_defaults(func=cmd_claim)
+
+    rl = sub.add_parser(
+        "release",
+        help=(
+            "Release this session's hold on a task (the hand-off / stop): "
+            "clear session_ref so the next session resumes instantly. Use "
+            "--state done/blocked for terminal stops."
+        ),
+    )
+    rl.add_argument("task_id")
+    rl.add_argument(
+        "--state", choices=["in_progress", "done", "blocked"],
+        default="in_progress",
+        help="Exit state. Default in_progress (clean stop; resumable now).",
+    )
+    rl.add_argument("--next-action", default=None)
+    rl.add_argument(
+        "--session-ref", default=None,
+        help="If given, must match the current holder before releasing.",
+    )
+    rl.set_defaults(func=cmd_release)
 
     _build_compile_subparsers(sub)
 

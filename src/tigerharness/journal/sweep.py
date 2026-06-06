@@ -74,32 +74,53 @@ class SweepResult:
     sweep" section):
 
     - ``archived``: task ids moved from ``active/`` to ``done/``.
-    - ``pending`` / ``in_progress_fresh`` / ``in_progress_stale`` /
-      ``blocked``: the post-archive classification of remaining active
-      tasks.
+    - ``pending``: not-yet-started tasks.
+    - ``in_progress_idle``: ``in_progress`` with no session attached
+      (``session_ref is None``) -- cleanly handed off, resumable
+      **immediately** (no heartbeat wait). The instant-resume class.
+    - ``in_progress_busy``: ``in_progress`` + a session attached + a
+      fresh heartbeat -- a live session owns it; do not touch.
+    - ``in_progress_crashed``: ``in_progress`` + a session attached + a
+      *stale* heartbeat -- the owner went silent; reclaimable (rescue).
+    - ``blocked``: needs human attention.
     - ``malformed``: task directories whose ``status.json`` failed to
       parse (the sweep does not bail; the driver decides what to do).
     """
 
     archived: list[str] = field(default_factory=list)
     pending: list[Status] = field(default_factory=list)
-    in_progress_fresh: list[Status] = field(default_factory=list)
-    in_progress_stale: list[Status] = field(default_factory=list)
+    in_progress_idle: list[Status] = field(default_factory=list)
+    in_progress_busy: list[Status] = field(default_factory=list)
+    in_progress_crashed: list[Status] = field(default_factory=list)
     blocked: list[Status] = field(default_factory=list)
     malformed: list[MalformedEntry] = field(default_factory=list)
 
     def actionable(self) -> list[Status]:
-        """Tasks the driver may pick at step 2 of OPERATING.md: pending
-        and stale-in-progress. Sorted with pending first (newest pickup
-        is highest-value), then stale-in-progress by *oldest* heartbeat
-        (the most-abandoned wedge gets rescued first)."""
-        return list(self.pending) + sorted(
-            self.in_progress_stale,
+        """Tasks the driver may pick at step 2 of OPERATING.md, in
+        priority order (**finish before you start**):
+
+        1. **Resume** an in-flight task -- ``in_progress_idle`` (cleanly
+           handed off) or ``in_progress_crashed`` (rescue) -- sorted by
+           *oldest* heartbeat so the most-abandoned wedge goes first.
+        2. Only if nothing is in progress at all, **start** a ``pending``
+           task.
+
+        If a task is ``in_progress_busy`` (a live session owns it) and
+        nothing is resumable, the result is empty: the driver waits
+        rather than starting new work, so a later task cannot begin
+        before the in-flight one finishes (it may depend on it)."""
+        resumable = sorted(
+            self.in_progress_idle + self.in_progress_crashed,
             key=lambda s: s.updated_at,
         )
+        if resumable:
+            return resumable
+        if self.in_progress_busy:
+            return []  # a live session owns the in-flight task; wait
+        return list(self.pending)
 
     def has_actionable(self) -> bool:
-        return bool(self.pending or self.in_progress_stale)
+        return bool(self.actionable())
 
     def to_summary(self) -> str:
         """Human-readable one-line summary string. Used as the in-session
@@ -107,8 +128,9 @@ class SweepResult:
         invocation and between cascaded tasks."""
         parts = [
             f"{len(self.pending)} pending",
-            f"{len(self.in_progress_fresh)} in_progress (fresh)",
-            f"{len(self.in_progress_stale)} stale",
+            f"{len(self.in_progress_idle)} resumable",
+            f"{len(self.in_progress_busy)} busy",
+            f"{len(self.in_progress_crashed)} crashed",
             f"{len(self.blocked)} blocked",
         ]
         if self.archived:
@@ -168,12 +190,17 @@ def sweep(
             continue
 
         # state is IN_PROGRESS by elimination (the enum has 4 values).
-        # Classify fresh-vs-stale via the soft lease. Wrap the
-        # heartbeat read because a malformed ``updated_at`` (naive
-        # timestamp, garbage, ...) should flag just *this* task as
-        # malformed -- never abort classification of the others.
+        # Classify by the attach signal (session_ref) + heartbeat:
+        #   idle    = detached -> resumable now (no heartbeat read)
+        #   busy    = attached + fresh -> a live session owns it
+        #   crashed = attached + stale -> owner went silent, reclaimable
+        # Wrap the heartbeat read because a malformed ``updated_at``
+        # should flag just *this* task as malformed -- never abort the
+        # classification of the others. (Idle short-circuits before any
+        # heartbeat read, so a detached task with a bad timestamp is
+        # still resumable.)
         try:
-            stale = status.is_stale(
+            klass = status.in_progress_class(
                 stuck_timeout_sec=timeout, now=ts_now,
             )
         except JournalModelError as exc:
@@ -182,9 +209,11 @@ def sweep(
                 error=f"heartbeat unreadable: {exc}",
             ))
             continue
-        if stale:
-            result.in_progress_stale.append(status)
-        else:
-            result.in_progress_fresh.append(status)
+        if klass == "idle":
+            result.in_progress_idle.append(status)
+        elif klass == "crashed":
+            result.in_progress_crashed.append(status)
+        else:  # "busy"
+            result.in_progress_busy.append(status)
 
     return result

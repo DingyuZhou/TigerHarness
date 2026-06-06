@@ -25,8 +25,13 @@ def _write_status(
     *,
     state: State = State.PENDING,
     updated_at: str = "2026-06-02T08:00:00Z",
+    session_ref: str | None = None,
 ) -> None:
-    """Seed one status.json on disk in active/<task_id>/."""
+    """Seed one status.json on disk in active/<task_id>/.
+
+    ``session_ref`` is the attach token: ``None`` (default) = detached
+    (an ``in_progress`` task is then *idle*/resumable); a token = a
+    session is attached (then fresh=*busy*, stale=*crashed*)."""
     paths.ensure()
     (paths.active / task_id).mkdir(exist_ok=True)
     s = Status(
@@ -40,7 +45,7 @@ def _write_status(
         created_at="2026-06-02T08:00:00Z",
         updated_at=updated_at,
         next_action="",
-        session_ref=None,
+        session_ref=session_ref,
     )
     paths.status_json(task_id).write_text(s.to_json())
 
@@ -80,13 +85,16 @@ class TestStuckTimeoutFromEnv:
 # ---------------------------------------------------------------------------
 
 class TestSweepResultHelpers:
-    def test_actionable_orders_pending_first_then_stale_oldest_first(self):
-        oldest = Status(
+    def test_actionable_resumes_in_progress_before_pending(self):
+        # Finish-before-start: resumable in_progress (idle + crashed),
+        # oldest heartbeat first, come BEFORE any pending task.
+        crashed_old = Status(
             id="a", title="A", kind="task", persona="P",
             state=State.IN_PROGRESS, sessions=1, max_sessions=5,
             created_at="t", updated_at="2026-06-02T08:00:00Z",
+            session_ref="tok",
         )
-        newer = Status(
+        idle_new = Status(
             id="b", title="B", kind="task", persona="P",
             state=State.IN_PROGRESS, sessions=1, max_sessions=5,
             created_at="t", updated_at="2026-06-02T09:00:00Z",
@@ -98,10 +106,38 @@ class TestSweepResultHelpers:
         )
         r = SweepResult(
             pending=[pending],
-            in_progress_stale=[newer, oldest],
+            in_progress_idle=[idle_new],
+            in_progress_crashed=[crashed_old],
         )
-        out = r.actionable()
-        assert [s.id for s in out] == ["c", "a", "b"]
+        # Resumable first (oldest heartbeat first); pending held back.
+        assert [s.id for s in r.actionable()] == ["a", "b"]
+
+    def test_actionable_waits_when_only_busy_and_pending(self):
+        # A live session owns the in-flight task; do NOT start pending.
+        busy = Status(
+            id="a", title="A", kind="task", persona="P",
+            state=State.IN_PROGRESS, sessions=1, max_sessions=5,
+            created_at="t", updated_at="2026-06-02T08:00:00Z",
+            session_ref="tok",
+        )
+        pending = Status(
+            id="c", title="C", kind="task", persona="P",
+            state=State.PENDING, sessions=0, max_sessions=5,
+            created_at="t", updated_at="t",
+        )
+        r = SweepResult(pending=[pending], in_progress_busy=[busy])
+        assert r.actionable() == []
+        assert r.has_actionable() is False
+
+    def test_actionable_starts_pending_when_nothing_in_progress(self):
+        pending = Status(
+            id="c", title="C", kind="task", persona="P",
+            state=State.PENDING, sessions=0, max_sessions=5,
+            created_at="t", updated_at="t",
+        )
+        r = SweepResult(pending=[pending])
+        assert [s.id for s in r.actionable()] == ["c"]
+        assert r.has_actionable() is True
 
     def test_has_actionable(self):
         assert SweepResult().has_actionable() is False
@@ -138,17 +174,29 @@ class TestSweep:
     def paths(self, tmp_path):
         return JournalPaths(root=tmp_path).ensure()
 
-    def test_classifies_pending_in_progress_fresh_stale_blocked(self, paths):
+    def test_classifies_pending_idle_busy_crashed_blocked(self, paths):
         _write_status(paths, "p1", state=State.PENDING)
+        # Detached in_progress = idle/resumable -- regardless of heartbeat
+        # age (a stale timestamp here proves the heartbeat is ignored).
         _write_status(
-            paths, "ip-fresh",
+            paths, "ip-idle",
             state=State.IN_PROGRESS,
-            updated_at="2026-06-02T08:08:00Z",  # 2 min before "now" -- fresh
+            updated_at="2026-06-01T08:00:00Z",  # 24h+ old, but detached
+            session_ref=None,
         )
+        # Attached + fresh = busy (a live session owns it).
         _write_status(
-            paths, "ip-stale",
+            paths, "ip-busy",
             state=State.IN_PROGRESS,
-            updated_at="2026-06-01T08:00:00Z",  # 24h+ before "now" -- stale
+            updated_at="2026-06-02T08:08:00Z",  # 2 min before "now"
+            session_ref="tok-busy",
+        )
+        # Attached + stale = crashed (owner went silent).
+        _write_status(
+            paths, "ip-crashed",
+            state=State.IN_PROGRESS,
+            updated_at="2026-06-01T08:00:00Z",  # 24h+ old
+            session_ref="tok-crash",
         )
         _write_status(paths, "bl1", state=State.BLOCKED)
         result = sweep(
@@ -157,8 +205,9 @@ class TestSweep:
             now="2026-06-02T08:10:00Z",
         )
         assert [s.id for s in result.pending] == ["p1"]
-        assert [s.id for s in result.in_progress_fresh] == ["ip-fresh"]
-        assert [s.id for s in result.in_progress_stale] == ["ip-stale"]
+        assert [s.id for s in result.in_progress_idle] == ["ip-idle"]
+        assert [s.id for s in result.in_progress_busy] == ["ip-busy"]
+        assert [s.id for s in result.in_progress_crashed] == ["ip-crashed"]
         assert [s.id for s in result.blocked] == ["bl1"]
         assert result.archived == []
         assert result.malformed == []
@@ -184,17 +233,19 @@ class TestSweep:
 
     def test_uses_env_default_when_no_arg(self, paths, monkeypatch):
         monkeypatch.setenv("TIGERHARNESS_JOURNAL_STUCK_TIMEOUT", "600")
+        # Attached task so the heartbeat threshold actually applies.
         _write_status(
-            paths, "ip-fresh",
+            paths, "ip",
             state=State.IN_PROGRESS,
             updated_at="2026-06-02T08:00:00Z",
+            session_ref="tok",
         )
-        # 5 min < 10 min threshold from env -> fresh.
+        # 5 min < 10 min threshold from env -> attached + fresh = busy.
         result = sweep(paths, now="2026-06-02T08:05:00Z")
-        assert [s.id for s in result.in_progress_fresh] == ["ip-fresh"]
-        # 11 min > 10 min threshold -> stale.
+        assert [s.id for s in result.in_progress_busy] == ["ip"]
+        # 11 min > 10 min threshold -> attached + stale = crashed.
         result = sweep(paths, now="2026-06-02T08:11:00Z")
-        assert [s.id for s in result.in_progress_stale] == ["ip-fresh"]
+        assert [s.id for s in result.in_progress_crashed] == ["ip"]
 
     def test_empty_journal_returns_empty_result(self, paths):
         result = sweep(paths, stuck_timeout_sec=300, now="2026-06-02T08:00:00Z")
@@ -216,12 +267,15 @@ class TestSweep:
         )
         # One healthy pending task.
         _write_status(paths, "p1", state=State.PENDING)
-        # One bad task -- naive timestamp (no Z, no +00:00). Without
-        # the fix the sweep would abort here with a TypeError.
+        # One bad task -- naive timestamp (no Z, no +00:00). It must be
+        # *attached* (session_ref set) so the classifier actually reads
+        # the heartbeat; a detached task is idle and never parses it.
+        # Without the fix the sweep would abort here with a TypeError.
         _write_status(
             paths, "bad-naive",
             state=State.IN_PROGRESS,
             updated_at="2026-06-02T08:00:00",
+            session_ref="tok-bad",
         )
         result = sweep(
             paths,
@@ -231,6 +285,6 @@ class TestSweep:
         # The bad task is captured as malformed -- NOT silently dropped.
         assert [m.task_id for m in result.malformed] == ["bad-naive"]
         assert "heartbeat unreadable" in result.malformed[0].error
-        # The healthy tasks still classify.
+        # The healthy tasks still classify (ip-fresh is detached -> idle).
         assert [s.id for s in result.pending] == ["p1"]
-        assert [s.id for s in result.in_progress_fresh] == ["ip-fresh"]
+        assert [s.id for s in result.in_progress_idle] == ["ip-fresh"]

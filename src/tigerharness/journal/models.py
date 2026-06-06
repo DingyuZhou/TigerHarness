@@ -517,12 +517,45 @@ class Status:
         self, *, stuck_timeout_sec: int, now: str | None = None,
     ) -> bool:
         """The fresh-in-progress classification: ``in_progress`` AND
-        heartbeat within ``stuck_timeout_sec``. Step 2 of the OPERATING
-        decision procedure must NOT pick these (another session owns
-        them right now). The heartbeat is the soft lease."""
+        heartbeat within ``stuck_timeout_sec``. The heartbeat is the soft
+        lease. NOTE: with the attach signal (``session_ref``), a *fresh*
+        heartbeat only means "do not touch" when a session is actually
+        attached -- see :meth:`in_progress_class`, which is what the
+        sweep and ``claim`` now use."""
         if self.state is not State.IN_PROGRESS:
             return False
         return self.heartbeat_age_seconds(now=now) <= stuck_timeout_sec
+
+    def in_progress_class(
+        self, *, stuck_timeout_sec: int, now: str | None = None,
+    ) -> str:
+        """Classify an ``in_progress`` task by whether a session is
+        *attached* (``session_ref`` set) and, if so, whether its
+        heartbeat is fresh.
+
+        The attach signal is decoupled from the heartbeat: ``session_ref``
+        answers "is a session driving this right now?"; the heartbeat is
+        consulted *only* to catch a crashed owner. Returns one of:
+
+        - ``"idle"``    -- detached (``session_ref is None``): cleanly
+          handed off or never claimed. Resumable **immediately** -- no
+          heartbeat wait. This is the instant-resume class.
+        - ``"busy"``    -- attached + fresh heartbeat: a live session
+          owns it right now. Do not touch.
+        - ``"crashed"`` -- attached + stale heartbeat: the owning session
+          went silent past ``stuck_timeout_sec``. Reclaimable (rescue).
+
+        Raises ``JournalModelError`` if called on a non-``in_progress``
+        task (the caller gates on ``state``)."""
+        if self.state is not State.IN_PROGRESS:
+            raise JournalModelError(
+                f"in_progress_class called on state={self.state.value!r}"
+            )
+        if self.session_ref is None:
+            return "idle"
+        if self.heartbeat_age_seconds(now=now) > stuck_timeout_sec:
+            return "crashed"
+        return "busy"
 
 
 def _parse_iso(ts: str) -> _dt.datetime:
