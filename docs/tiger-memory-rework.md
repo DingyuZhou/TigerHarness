@@ -111,8 +111,10 @@ needs to move onto the in-session rail.
 must be wall-clock-anchored** — scored from each memo's own timestamp
 against *now*, never per-rebuild-invocation. With bursty, irregular
 sweeps (a persona rebuilt after a three-week gap; roster sweeps every
-24h), per-invocation decay would distort priorities badly. *(P0:
-verify decay is time-anchored in `must_memorize.py`.)*
+24h), per-invocation decay would distort priorities badly.
+*(P0-verified — already satisfied: decay is wall-clock-anchored AND
+idempotent across bursty rebuilds, `must_memorize.py:148-160`. Nothing
+to build; the invariant just has to be preserved. See P0 findings.)*
 
 ---
 
@@ -123,7 +125,8 @@ verify decay is time-anchored in `must_memorize.py`.)*
 1. **Collapse the per-session calls.** Today the lifecycle issues
    ~3 summarize calls per new session — short summary, detailed
    archive, must-memorize extraction — *all reading the same
-   transcript* *(verify exact count in `lifecycle.py` during P0)*.
+   transcript* *(P0-verified: exactly 3 per new session, 2 per addendum,
+   and uncached — `lifecycle.py:383,387`; see P0 findings)*.
    Collapse them into **one structured pass** that emits all three
    sections, or at minimum share a cached transcript prefix across
    them. Target: ~3× fewer calls per session.
@@ -243,13 +246,16 @@ active speaker.**
 
 A **team memory sweep** enumerates the team roster and rebuilds, in
 turn, each persona **that has a memory store configured** — skipping
-personas with no memory config. Two things must be pinned in P0: the
-**canonical roster source** (`configs/personas.yaml` is the candidate
-— *verify it is authoritative and not one of several competing roster
-notions*) and the **persona → tiger-memory-config resolution** (which
-store and which filter each persona maps to). With those, "no persona
-left behind" is guaranteed *by construction* — it does not matter who
-has been talking.
+personas with no memory config. Two things were pinned in P0, both now
+resolved: the **canonical roster source** — *(P0-verified:
+`configs/personas.yaml` is authoritative, no competing notion;
+`workflow_runner/compile/pipeline.py:218`, `slack_bridge/multi.py:178`)*
+— and the **persona → tiger-memory-config resolution** — *(P0-verified:
+convention-based — persona `X` maps to
+`<team>/memories/X/tiger-memory.config.yaml`, `slack_bridge/multi.py`;
+the config's `agent.name` must equal the roster name. No new registry
+needed.)* With those, "no persona left behind" is guaranteed *by
+construction* — it does not matter who has been talking.
 
 It piggybacks on a human-initiated interactive session, gated by:
 
@@ -333,8 +339,13 @@ the three-week-old chat.**
 
 So the real safeguard is not the trigger — it is a **"summarized"
 watermark**: never prune (or never strict-exclude) a persona
-attribution until its session has been folded into memory. *(P0 task:
-verify whether anything prunes `threads.json` today.)*
+attribution until its session has been folded into memory. *(P0-verified:
+nothing prunes `threads.json` today — `ThreadStore.set()` is
+append/update-only, no `del`/`pop`/TTL, and the migrator copies every
+key, `persistence.py:131-148`. So B5's loss scenario cannot occur on
+current code; this safeguard is **preventive** — an invariant to guard
+should pruning ever be added. One nuance: `set()` can overwrite an
+existing thread's persona (re-attribution) but cannot drop it.)*
 
 ### B6 — Residual risk: catch-up burst after long silence
 
@@ -371,11 +382,19 @@ domain, so three hazards remain to design against:
 - **Don't let upkeep turns become a new source.** The spawned
   summarizer routed *its own* transcripts to a throwaway cwd-slug so the
   next rebuild would not re-ingest them (`anthropic.py:23-36`). The
-  sub-agent strategy needs the analogous guarantee: *(P0/P2 verify)*
-  whether a summarizer sub-agent's turns produce a transcript the
-  `claude_code` source would glob, and if so mark or exclude them — or
-  the self-referential feedback loop the old code warned about comes
-  back.
+  sub-agent strategy needs the analogous guarantee. *(P0 finding:* the
+  adapter — `sources/claude_transcript.py`, kind `claude_code` — globs
+  **every** `*.jsonl` in the project dir, filtered only by mtime and the
+  persona filter, `:89-128`. A summarizer sub-agent's transcript is
+  *unattributed*, so the **strict multi-persona default**
+  (`persona` set, `include_unattributed=false`) already **excludes** it
+  — the target deployment is safe. But **single-tenant** (`persona=None`)
+  or `include_unattributed=true` would **re-ingest** it. The adapter
+  inspects no `isSidechain`/`parentUuid` marker. **P2 fix:** add an
+  explicit sidechain/sub-agent skip as defense-in-depth, independent of
+  the persona filter. **Still needs a runtime check:** whether a
+  sub-agent writes a *separate* glob-able `.jsonl` at all, or nests its
+  turns as `isSidechain` entries inside the parent session file.*)*
 
 ### B8 — Context pressure: resolved by the `subagent` isolation strategy
 
@@ -459,14 +478,62 @@ the quality trade-off of chunking is accepted only on the overflow path.
    on the subscription, writes to the store directly, and returns only a
    short confirmation.
 
+## P0 verification findings (2026-06-06)
+
+Code survey of `src/tigerharness/tiger_memory/` and `slack_bridge/` on
+`main`. Each `(verify in P0)` fact, resolved with file:line:
+
+| Claim | Verdict | Evidence |
+|---|---|---|
+| ~3 summarize calls per new session | **Confirmed** — 3 per new (short + detailed + must-memorize), 2 per addendum | `lifecycle.py:383,387,429,444,522` |
+| Transcript re-sent per call; no prefix cache | **Confirmed (worse than implied)** — each call re-clips and re-sends `rec.content`; backend is one-shot, no `cache_control` | `lifecycle.py:427,442,519`; `anthropic.py:6-7,78-105` |
+| Defaults 400 / 60 / 120k chars; window 2/7/28/90; decay 7/14/28; owner_explicit locked | **All confirmed in code**, not just docs | `config.py:65,71,77,104-107,82-85` |
+| must_memorize decay is wall-clock-anchored | **Confirmed — and already idempotent across bursty rebuilds** | `must_memorize.py:148-160` |
+| Nothing prunes `threads.json` | **Confirmed** — append/update-only; no `del`/`pop`/TTL; migrator copies every key | `persistence.py:131-148`; `migrate.py:96-107` |
+| `configs/personas.yaml` is the authoritative roster | **Confirmed — no competing source** | `workflow_runner/compile/pipeline.py:218`; `slack_bridge/multi.py:178` |
+| Sub-agent transcript could be re-ingested | **Open risk, gated by the strict filter** — see note | `sources/claude_transcript.py:89-128` |
+
+What this moved in the design:
+
+- **The 3× waste is real and uncached** — confirms the B1 premise. No
+  prefix-cache exists to lean on today, so the in-session *read-once*
+  (B1) is the actual win, not call-collapsing on the API path.
+- **Rollups are cheap** — 1 summarize call per *dirty* daily/weekly/
+  monthly period (`lifecycle.py:565,617,668`), reading prior summaries,
+  not transcripts. The per-session 3× dominates cost.
+- **Decay needs no new code** — the wall-clock anchor advances by exactly
+  `points*rate` days (`must_memorize.py:159-160`); a three-week gap
+  decays identically whether swept once or daily. Preserve, don't build.
+- **B5 is preventive, not corrective** — nothing deletes attributions
+  today, so the loss scenario cannot occur on current code. Re-attribution
+  (overwriting a thread's persona) is possible; deletion is not.
+- **Roster → config is convention** — enumerate `personas.yaml`, resolve
+  each store at `memories/<persona>/tiger-memory.config.yaml`. The B3
+  sweep needs no new registry.
+- **B7 is the one live risk** — the strict multi-persona default already
+  excludes a summarizer sub-agent's unattributed transcript, but
+  single-tenant / permissive mode would re-ingest it, and the adapter
+  reads no sidechain marker. P2 adds an explicit sidechain skip; a
+  runtime check (does a sub-agent even emit a separate `.jsonl`?) stays
+  open.
+
+Read-side baseline (`teams/Shohoku/memories/`): briefings run ~575–1,830
+words (~1.5k–4.6k tokens) today; for Anzai, `must_memorize.md` is 820 of
+1,366 briefing words (~60%) — the pinned core dominates, exactly Lever
+2's target. Per-call transcript input is capped at `max_prompt_content_chars` =
+120k chars (~30k tokens); a new session's three calls send 120k + 120k +
+60k chars (the extractor clips to half, `lifecycle.py:519`) ≈ 300k chars
+/ ~75k tokens of transcript input worst-case — before prompt scaffolding
+and output, and re-sent uncached. Tokens-per-rebuild on real transcripts
+needs an instrumented run — deferred to the P1/P2 measurement harness.
+
 ## Phasing
 
-- **P0 (this doc).** Lock the design. Measure the current footprint as
-  a baseline (calls per rebuild, tokens per call, briefing size).
-  Verify the *(verify in P0)* facts. Confirm `threads.json` pruning
-  behavior (B5); confirm a summarizer sub-agent's turns are not
-  re-ingested as a new source (B7); confirm `must_memorize` decay is
-  wall-clock-anchored (core reframe).
+- **P0 (this doc) — DONE (2026-06-06).** Design locked; every
+  `(verify in P0)` fact resolved against source (see **P0 verification
+  findings** above). Remaining runtime items, carried into P2: a
+  tokens-per-rebuild measurement on real transcripts, and the
+  sub-agent-transcript runtime check (B7).
 - **P1 — Lever 1 (build-side cuts).** Transcript pre-filter +
   cost/scope cap + context-budget tiering — the parts that survive the
   move to in-session. (Collapse/prefix-cache applies only to the legacy
@@ -530,3 +597,18 @@ the quality trade-off of chunking is accepted only on the overflow path.
   driver's context; (5) pre-filter + per-wake cap **downgraded** from
   feasibility gate to hygiene; (6) map-reduce kept as the oversized-
   transcript fallback.
+- **2026-06-06 — P0 verification pass (Anzai).** Surveyed
+  `tiger_memory/` + `slack_bridge/` and resolved every `(verify in P0)`
+  fact against source (new **P0 verification findings** section; inline
+  markers updated). Headlines: the 3×-per-session call count is real and
+  **uncached** (`anthropic.py` is one-shot, no `cache_control`) — so B1's
+  read-once is the genuine win; **decay is already wall-clock-anchored
+  and idempotent** across bursty rebuilds, nothing to build; **nothing
+  prunes `threads.json`**, so B5 is preventive not corrective;
+  **`configs/personas.yaml` is the sole authoritative roster** and
+  persona→store is a `memories/<persona>/tiger-memory.config.yaml`
+  convention; all config defaults confirmed in code. One live risk
+  remains — **B7 sub-agent re-ingestion**: the strict multi-persona
+  filter excludes it, but single-tenant/permissive mode would re-ingest,
+  and the adapter reads no sidechain marker (P2 fix + a runtime check
+  still open). Done on a `main`-based branch in an isolated worktree.
