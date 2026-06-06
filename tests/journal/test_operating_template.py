@@ -46,3 +46,12 @@ def test_soft_lease_concept_named():
     assert "soft lease" in text
     assert "fresh" in text
     assert "stale" in text
+
+
+def test_pick_prioritises_finishing_before_starting():
+    """Finish-before-start: an in_progress task is resumed before any
+    new pending task begins (a later task may depend on the in-flight
+    one). This is the load-bearing serial-queue contract."""
+    text = OPERATING_MD.lower()
+    assert "priority order" in text
+    assert "resume it (rescue)" in text

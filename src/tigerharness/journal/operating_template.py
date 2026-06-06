@@ -95,17 +95,28 @@ completed task until no actionable tasks remain.
    c. Print the summary (pending / in_progress-fresh / in_progress-
       stale / blocked counts) into the session.
 
-2. **Pick exactly ONE actionable task** -- never multiple in parallel:
-   - A `pending` task to start, OR
-   - A *stale* `in_progress` task to **rescue** (read the tail of
-     `progress.md` first to understand where the previous owner left
-     off, then resume from `next_action`).
-   - **NEVER** pick a *fresh* `in_progress` task -- the heartbeat is
-     the soft lease; another session owns it right now. Leaving it
-     alone is the correct behaviour.
-   - Skip `blocked` tasks; surface them in the summary so the human
-     can unblock manually.
-   - Prefer the one with the oldest heartbeat among the candidates.
+2. **Pick exactly ONE actionable task** -- never multiple in parallel.
+   Resolve candidates in this **priority order (finish before you
+   start)** so a task and *all* its sessions complete before any new
+   task begins -- a later task may depend on the one already in flight:
+
+   a. **A *stale* `in_progress` task -> resume it (rescue).** Finishing
+      started work beats starting new work. Read the tail of
+      `progress.md` to see where the previous owner left off, then
+      continue from `next_action`. Among several stale candidates,
+      prefer the oldest heartbeat.
+   b. **Else, if a *fresh* `in_progress` task exists, do NOT start new
+      work -- exit the invocation cleanly.** Another session owns that
+      task right now (the heartbeat is a soft lease); let it finish
+      before any `pending` task begins. A later invocation resumes it
+      once its heartbeat goes stale.
+   c. **Else, start the oldest `pending` task** -- reached only when
+      nothing is `in_progress`.
+
+   - **NEVER** pick a *fresh* `in_progress` task -- the soft lease means
+     another session owns it right now.
+   - Skip `blocked` tasks; surface them in the summary so the human can
+     unblock manually.
    - If no actionable task remains, exit the invocation cleanly.
 
 3. **Read context** -- for `kind=task`: `task.md` (the PRD),
