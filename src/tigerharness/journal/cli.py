@@ -496,7 +496,9 @@ def cmd_claim(args: argparse.Namespace) -> int:
         status.session_ref = None
         status.next_action = (
             f"hit session cap ({status.sessions}/{status.max_sessions}); "
-            f"raise --max-sessions or close the task"
+            f"re-scaffold with a higher --max-sessions, or `journal abort` "
+            f"(workflow) / close the task (there is no raise-cap CLI for an "
+            f"existing task)"
         )
         status.updated_at = _utcnow_iso()
         _write_status_atomic(paths, status)
@@ -562,6 +564,13 @@ def cmd_release(args: argparse.Namespace) -> int:
     if status is None:
         print(f"error: no task with id {args.task_id!r} in {paths.active}",
               file=sys.stderr)
+        return 1
+    if status.state is State.DONE:
+        # Don't resurrect a terminal task. `release` is the driver's
+        # in_progress -> exit transition; a done task is awaiting archive,
+        # and flipping it back would re-surface it as actionable.
+        print("error: task is done; refusing to release (would resurrect "
+              "an archived/terminal task).", file=sys.stderr)
         return 1
     if args.session_ref is not None and status.session_ref != args.session_ref:
         print(

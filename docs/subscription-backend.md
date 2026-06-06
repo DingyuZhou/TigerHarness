@@ -188,11 +188,11 @@ keep `journal/OPERATING.md`.
   "state": "in_progress",
   "persona": "Mitsui",
   "sessions": 2,
-  "max_sessions": 5,
+  "max_sessions": 3,
   "created_at": "2026-06-02T08:00:00Z",
   "updated_at": "2026-06-02T09:15:00Z",
   "next_action": "Resume step 2; last blocker was the missing schema",
-  "session_ref": "5e3b8023-d810-49a1-b763-0751a82baa15"
+  "session_ref": null
 }
 ```
 

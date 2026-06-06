@@ -1042,3 +1042,38 @@ class TestCmdClaimRelease:
         rc = main(["--journal-dir", str(journal_dir), "claim", "t1"])
         assert rc == 1
         assert "claim lost" in capsys.readouterr().err
+
+    def test_release_refuses_a_done_task(self, journal_dir, capsys):
+        # `release` must not resurrect a terminal (done) task.
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.DONE)
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "in_progress"])
+        assert rc == 1
+        assert "done" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.DONE  # not resurrected
+
+    def test_claim_then_release_workflow_preserves_compile_state(self, journal_dir):
+        # claim does the workflow pickup (in_progress + attach + sessions),
+        # leaving compile_pending intact; release detaches without touching it.
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        (paths.active / "wf1").mkdir()
+        st = Status.new_workflow(id="wf1", title="W", playbook_name="default")
+        paths.status_json("wf1").write_text(st.to_json())
+
+        assert main(["--journal-dir", str(journal_dir), "claim", "wf1"]) == 0
+        s = Status.from_json(paths.status_json("wf1").read_text())
+        assert s.state is State.IN_PROGRESS
+        assert s.session_ref is not None      # attached
+        assert s.sessions == 1                # bumped
+        assert s.compile_pending is True      # compile state untouched
+        assert s.kind == "workflow"
+
+        assert main(["--journal-dir", str(journal_dir), "release", "wf1",
+                     "--next-action", "resume compile"]) == 0
+        s = Status.from_json(paths.status_json("wf1").read_text())
+        assert s.session_ref is None          # detached -> idle/resumable
+        assert s.state is State.IN_PROGRESS
+        assert s.compile_pending is True      # still mid-compile

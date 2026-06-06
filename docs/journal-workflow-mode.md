@@ -150,9 +150,17 @@ When the driver picks a workflow task with `compile_pending=true`, it
 branches into OPERATING.md's `## Compile sub-protocol` section
 *before* any graph walk. The procedure:
 
-1. **Atomic pickup.** Flip `state=pending → in_progress`,
-   `compile_phase="drafting"`, bump heartbeat. Same soft-lease rule
-   as Phase 1: another drive seeing a fresh heartbeat must not touch.
+1. **Atomic pickup** — done by the outer protocol's
+   `tigerharness journal claim <task-id>` (the same pickup `kind=task`
+   uses): it flips `state=pending → in_progress`, sets the `session_ref`
+   attach token (the soft lease), and bumps `sessions`. It does **not**
+   set an intermediate `compile_phase`. In the shipped backend
+   `compile_phase` stays `pending` throughout the compile and is only
+   advanced to `complete` by `land-compile` (or `failed` by
+   `compile-fail`); the intermediate values
+   (`drafting`/`tier1_pre`/`critiquing`/`tier1_post`) are **reserved and
+   not written by any code path today**, so a rescuing session's resume
+   signal is the `compile/round-NN-*.md` files, not `compile_phase`.
 2. **Bootstrap.** Shell to `tigerharness journal compile-context
    <task-id>` to print playbook + brief + roster + the drafter
    prompt. One-shot context load — no path-fiddling inside the
@@ -403,7 +411,7 @@ Same as Phase 1 with three additions:
 |---|---|---|
 | `kind` | `"task"` | `"task"` or `"workflow"` |
 | `persona` | required | optional captain; `null` allowed |
-| `max_sessions` | default `5` | default `10` (static; see below) |
+| `max_sessions` | default `3` | default `10` (static; see below) |
 | `compile_pending` | not present | required `bool`; `true` at scaffold, `false` post-land |
 | `compile_phase` | not present | required `str` enum (seven values above) |
 | `playbook_name` | not present | required `str` (bare playbook name); rejected for `kind=task` |
@@ -413,7 +421,7 @@ on `kind`. The graph-walker gates on
 `compile_pending=false AND compile_phase=="complete"` before reading
 `orchestration.json`.
 
-`max_sessions` defaults to a static `10` for workflows (vs `5` for
+`max_sessions` defaults to a static `10` for workflows (vs `3` for
 tasks). The original design proposal called for `len(steps) * 2 + 3`,
 but `len(steps)` is unknown at scaffold time (the graph has not been
 compiled yet), so the static default shipped instead (see
