@@ -34,7 +34,7 @@ def test_decision_procedure_lists_six_steps():
     is the load-bearing contract. Any rename breaks the driver skill."""
     for marker in ["1. **Lazy sweep**", "2. **Pick exactly ONE",
                    "3. **Read context**", "4. **Work the task continuously**",
-                   "5. **On stop**", "6. **Cascade**"]:
+                   "5. **On stop**", "6. **Cascade"]:
         assert marker in OPERATING_MD, f"missing step marker: {marker!r}"
 
 
@@ -54,4 +54,17 @@ def test_pick_prioritises_finishing_before_starting():
     one). This is the load-bearing serial-queue contract."""
     text = OPERATING_MD.lower()
     assert "priority order" in text
-    assert "resume it (rescue)" in text
+    assert "resumable" in text
+
+
+def test_attach_signal_claim_release_documented():
+    """The instant-resume contract: session_ref is the attach signal,
+    the idle/busy/crashed classification, the claim/release CLIs, and
+    that a clean hand-off resumes with no wait."""
+    text = OPERATING_MD.lower()
+    assert "session_ref" in text
+    for word in ("idle", "busy", "crashed"):
+        assert word in text, f"missing classification term: {word!r}"
+    assert "journal claim" in text
+    assert "journal release" in text
+    assert "immediately" in text

@@ -1,12 +1,16 @@
-# Journal instant session hand-off (design proposal)
+# Journal instant session hand-off
 
-> **Status: design proposal — not implemented.** Spec for decoupling the
-> journal's crash-detection lease from its session-resume timing, so
-> same-task sessions resume *instantly* on a clean hand-off while the
-> 30-minute health check stays as a pure crash detector. Companion to
-> the "finish-before-start" pick rule on
-> `work/2026-06-05-journal-finish-before-start`. Authored by Anzai at
-> the Operator's request, 2026-06-05.
+> **Status: implemented (2026-06-06).** `session_ref` is the attach
+> signal; the sweep classifies `in_progress` as idle / busy / crashed;
+> `journal claim` / `release` are the atomic pickup / hand-off; the
+> 30-minute `stuck_timeout` is now crash-detection only. Decisions taken
+> at implementation: **Q1** reuse `session_ref` (it was an unused
+> `str|null` field); **Q2** compare-and-set on `session_ref` (write +
+> re-read; a narrow TOCTOU window remains by design — `flock` is the
+> upgrade path if real concurrency emerges). **Q3** (`max_sessions`
+> sizing) and **Q4** (driver self-relaunch) are still open — see below.
+> Companion to the "finish-before-start" pick rule. Authored by Anzai at
+> the Operator's request.
 
 ## Problem
 

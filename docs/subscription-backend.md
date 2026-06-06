@@ -205,17 +205,31 @@ keep `journal/OPERATING.md`.
 | `state` | enum: `pending` / `in_progress` / `blocked` / `done` | driver / sweep | See state-transition table below. |
 | `sessions` / `max_sessions` | int / int (default `5`) | driver / scaffolder | How many `drive-journal` invocations the task has consumed, and a soft ceiling. Each invocation counts as one session regardless of how much work happens inside it. When `sessions == max_sessions`, the driver moves the task to `blocked` with a `next_action` explaining why, and the human must raise the cap or close the task. |
 | `created_at` | ISO 8601 UTC | scaffolder | Set once at creation, never updated. Used by the sweep summary for the "age" display. |
-| `updated_at` | ISO 8601 UTC | driver | **Heartbeat.** Bumped on every `progress.md` append; OPERATING.md requires the driver to append progress at least every 10 minutes of wall-clock active work. A wedged session shows up stale once `updated_at` is older than `stuck_timeout` (default 1800s = 30 min). |
-| `next_action` | string | driver | The handoff note. Lets a *fresh* session resume without re-reasoning the whole `progress.md` — this is what makes the journal the memory, not the vendor's session. |
-| `session_ref` | string \| null | driver | Optional Claude session id, so the human can `--resume` the same conversation cheaply. Null is fine; `next_action` + `progress.md` are enough to resume from files alone. |
+| `updated_at` | ISO 8601 UTC | driver | **Heartbeat.** Bumped on every `progress.md` append (OPERATING.md requires ≤10 min between appends during active work). Consulted **only** to tell a *busy* attached task from a *crashed* one: an `in_progress` task whose `session_ref` is set shows up **crashed** once `updated_at` is older than `stuck_timeout` (default 1800s = 30 min). A *detached* task (`session_ref=null`) is **idle** regardless of heartbeat age. See [`journal-instant-resume.md`](journal-instant-resume.md). |
+| `next_action` | string | driver | The handoff note. Lets a resuming session pick up without re-reasoning the whole `progress.md` — this is what makes the journal the memory, not the vendor's session. |
+| `session_ref` | string \| null | `journal claim` / `release` | **Attach token.** Set (an opaque id) while a session is actively driving the task; `null` when detached (cleanly handed off, or never claimed). This is what distinguishes a *busy* task (a live session owns it — the soft lease) from an *idle* one (resumable immediately, no heartbeat wait). `journal claim` sets it atomically at pickup; `journal release` clears it on a clean stop. See [`journal-instant-resume.md`](journal-instant-resume.md). |
 | `compile_pending` | bool (`kind=workflow` only) | scaffolder / `land-compile` | `true` at scaffold; flipped to `false` (the visibility gate) once the compile lands the graph. Absent for `kind=task`. See [`journal-workflow-mode.md`](journal-workflow-mode.md). |
 | `compile_phase` | enum (`kind=workflow` only): `pending` / `drafting` / `tier1_pre` / `critiquing` / `tier1_post` / `complete` / `failed` | compile sub-protocol | The compile sub-state machine. Absent for `kind=task`. |
 | `playbook_name` | string, required for `kind=workflow` | scaffolder | Bare name of the playbook the workflow was compiled from. Rejected for `kind=task`. |
 
-Two fields carry the design: `updated_at` (heartbeat, doubles as soft
-lease) and `next_action` (resume-from-files). `session_ref` is a
-convenience, not a dependency — losing it costs nothing but a re-read.
-The other fields are bookkeeping or human-facing labels.
+Three fields carry the design: `session_ref` (the **attach signal** —
+is a live session driving this right now?), `updated_at` (the
+**heartbeat** — now used only to catch a *crashed* owner, not to gate
+resuming), and `next_action` (resume-from-files). Together they let a
+cleanly handed-off task resume **immediately** while a genuinely crashed
+one is still reclaimed after `stuck_timeout`. The other fields are
+bookkeeping or human-facing labels.
+
+> **Instant session hand-off (2026-06-06).** `session_ref` was promoted
+> from a convenience to the load-bearing attach signal so same-task
+> sessions resume with no 30-minute wait. The canonical mechanics — the
+> idle/busy/crashed classification, the `journal claim` / `release`
+> CLIs, and the compare-and-set claim — live in
+> [`journal-instant-resume.md`](journal-instant-resume.md) and the
+> on-disk `OPERATING.md`. Some older "fresh/stale" prose elsewhere in
+> *this* document still reflects the pre-change framing and is being
+> migrated; where they differ, journal-instant-resume.md + OPERATING.md
+> win.
 
 ### State transitions
 

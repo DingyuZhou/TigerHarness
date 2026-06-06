@@ -40,30 +40,33 @@ version, every invocation:
    tigerharness journal sweep
    ```
 
-   It archives `done/`, classifies every `in_progress` task as
-   *fresh* (heartbeat within `stuck_timeout`) or *stale* (older), and
-   prints a one-line summary. Read the summary out loud to the user.
+   It archives `done/`, classifies every `in_progress` task as **idle**
+   (detached -- resumable now), **busy** (a live session owns it), or
+   **crashed** (owner went silent), and prints a one-line summary. Read
+   the summary out loud to the user.
 
 2. **Pick exactly ONE actionable task** -- never multiple in parallel.
    Resolve candidates in this **priority order (finish before you
    start)** so a task and *all* its sessions complete before any new
    task begins -- a later task may depend on the one already in flight:
 
-   a. **A *stale* `in_progress` task -> resume it (rescue).** Finishing
-      started work beats starting new work. Read the tail of
-      `progress.md` to see where the previous owner left off, then
-      continue from `next_action`. Among several stale candidates,
-      prefer the oldest heartbeat.
-   b. **Else, if a *fresh* `in_progress` task exists, do NOT start new
-      work -- exit cleanly.** Another session owns it right now (the
-      heartbeat is a soft lease); let it finish before any `pending`
-      task begins. A later invocation resumes it once its heartbeat
-      goes stale.
+   a. **A *resumable* `in_progress` task -> resume it.** Idle (cleanly
+      handed off -- resume **immediately**, no wait) or crashed
+      (rescue). Read the tail of `progress.md` and continue from
+      `next_action`. Among several, prefer the oldest heartbeat.
+   b. **Else, if a *busy* `in_progress` task exists, do NOT start new
+      work -- exit cleanly.** A live session owns it (the soft lease);
+      let it finish before any `pending` task begins.
    c. **Else, start the oldest `pending` task** -- reached only when
       nothing is `in_progress`.
 
-   - **NEVER** pick a *fresh* `in_progress` task -- the soft lease means
-     another session owns it right now.
+   Then **claim it atomically**: `tigerharness journal claim <task-id>`
+   BEFORE working. Claim sets `session_ref`, flips to `in_progress`,
+   bumps `sessions`, and refreshes the heartbeat with a compare-and-set
+   re-read. If it exits non-zero ("busy" / "claim lost"), another
+   session won -- re-sweep and pick again, or exit.
+
+   - **NEVER** work a *busy* task -- a live session owns it right now.
    - Skip `blocked` tasks; surface them so the user can unblock.
    - If nothing is actionable, **exit the invocation cleanly** -- the
      queue is drained.
@@ -98,26 +101,36 @@ version, every invocation:
    work, ideally on every progress entry. For workflows, refresh
    after every compile round and after every graph-walk step.
 
-5. **On stop**, write a final `progress.md` entry summarising the
-   session, then update `status.json` (bump `sessions` on the
-   *pickup*; refresh `updated_at`; rewrite `next_action`; set `state`
-   to `done` / `blocked` / leave `in_progress` for a clean stop).
+5. **On stop**, write a final `progress.md` entry, then
+   **`tigerharness journal release <task-id>`** to record the exit and
+   **detach**: clean stop with work left -> `release <id> --next-action
+   "<note>"` (stays `in_progress`, now **idle** so the next drive
+   resumes instantly, no wait); done -> `release <id> --state done`;
+   blocked, or `sessions == max_sessions` -> `release <id> --state
+   blocked --next-action "<why>"`. `release` clears `session_ref` +
+   refreshes `updated_at`; do NOT bump `sessions` (that happened in
+   `claim` at pickup).
 
-6. **Cascade.** If you moved the task to `done` or `blocked`, loop
-   back to step 1 (re-sweep) and pick up the next actionable task.
-   Keep cycling until step 1 reports nothing actionable, the human
-   ends the session, or a session-level guard rail fires. **Don't
-   manufacture a stopping point just because one task finished --
-   drain the queue while the session is hot.**
+6. **Cascade / keep going.** After a stop, loop back to step 1
+   (re-sweep). A task you moved to `done`/`blocked` yields a different
+   next pick; a task you cleanly stopped (not done) is now **idle** and
+   you may re-`claim` it and keep going **immediately**, no wait. Keep
+   cycling until step 1 reports nothing actionable, the human ends the
+   session, a guard rail fires, or your context is exhausted (hand off
+   to a fresh drive, which resumes instantly). **Don't manufacture a
+   stopping point just because one task finished -- drain the queue
+   while the session is hot.**
 
 ## What NOT to do
 
 - Don't skip the sweep. It's how the protocol stays correct.
-- Don't pick a fresh `in_progress` task. Soft lease -- another
-  session owns it.
+- Don't work a *busy* task (attached + fresh heartbeat). Soft lease --
+  a live session owns it. (An *idle* detached task IS yours to resume.)
 - Don't pick multiple tasks in parallel within one invocation.
-- Don't mutate `status.json` mid-task except to refresh `updated_at`
-  and (on stop) write the exit state. For workflows, also bump
+- Don't hand-edit `status.json` for pickup/stop -- use `journal claim`
+  (pickup: sets `session_ref`, bumps `sessions`) and `journal release`
+  (stop: clears `session_ref`, sets exit state). Mid-task you may
+  refresh `updated_at` on a `progress.md` append. For workflows, bump
   `compile_phase` only through the compile CLIs -- never hand-edit.
 - Don't invent state values. The allowed states are `pending`,
   `in_progress`, `blocked`, `done`. The allowed `compile_phase`

@@ -65,11 +65,21 @@ sweep / pick / cascade scaffolding is identical for both kinds.
 load-bearing fields are:
 
 - `state` -- one of `pending`, `in_progress`, `blocked`, `done`.
-- `updated_at` -- the **heartbeat**, refreshed on every `progress.md`
-  append. If older than `stuck_timeout` (default 30 min), the task is
-  classified as **stale in_progress** and reclaimable. Otherwise it is
-  classified as **fresh in_progress** and another session is assumed
-  to own it right now.
+- `session_ref` -- the **attach token**. Set (an opaque id) while a
+  session is actively driving the task; `null` when no session is
+  attached (cleanly handed off, or never claimed). This is the signal
+  that distinguishes "a live session owns this" from "paused and ready."
+- `updated_at` -- the **heartbeat**, refreshed while a session drives
+  the task. It is consulted **only** to tell a *busy* attached task from
+  a *crashed* one -- NOT to gate resuming a detached task. An
+  `in_progress` task is classified as:
+  - **idle** -- `session_ref` is `null`: cleanly handed off (or never
+    claimed). Resumable **immediately**, no heartbeat wait.
+  - **busy** -- `session_ref` set + heartbeat fresh (within
+    `stuck_timeout`, default 30 min): a live session owns it right now
+    (the **soft lease**); leave it alone.
+  - **crashed** -- `session_ref` set + heartbeat stale (older than
+    `stuck_timeout`): the owner went silent; reclaimable.
 - `next_action` -- the handoff note. A fresh session reads this and
   the tail of `progress.md` to resume without re-reading everything.
 - `sessions` / `max_sessions` -- soft ceiling. When `sessions ==
@@ -90,31 +100,39 @@ completed task until no actionable tasks remain.
 
 1. **Lazy sweep** -- run `tigerharness journal sweep`. It will:
    a. Archive any `done` task (`active/<id>/` -> `done/<id>/`).
-   b. Classify every `in_progress` task as fresh or stale by
-      comparing `updated_at` to `stuck_timeout`.
-   c. Print the summary (pending / in_progress-fresh / in_progress-
-      stale / blocked counts) into the session.
+   b. Classify every `in_progress` task as **idle** (detached),
+      **busy** (attached + fresh), or **crashed** (attached + stale).
+   c. Print the summary (pending / resumable / busy / crashed / blocked
+      counts) into the session.
 
 2. **Pick exactly ONE actionable task** -- never multiple in parallel.
    Resolve candidates in this **priority order (finish before you
    start)** so a task and *all* its sessions complete before any new
    task begins -- a later task may depend on the one already in flight:
 
-   a. **A *stale* `in_progress` task -> resume it (rescue).** Finishing
-      started work beats starting new work. Read the tail of
-      `progress.md` to see where the previous owner left off, then
-      continue from `next_action`. Among several stale candidates,
+   a. **A *resumable* `in_progress` task -> resume it.** That is an
+      **idle** task (cleanly handed off -- resume **immediately**, no
+      wait) or a **crashed** task (rescue). Read the tail of
+      `progress.md` and continue from `next_action`. Among several,
       prefer the oldest heartbeat.
-   b. **Else, if a *fresh* `in_progress` task exists, do NOT start new
-      work -- exit the invocation cleanly.** Another session owns that
-      task right now (the heartbeat is a soft lease); let it finish
-      before any `pending` task begins. A later invocation resumes it
-      once its heartbeat goes stale.
+   b. **Else, if a *busy* `in_progress` task exists, do NOT start new
+      work -- exit the invocation cleanly.** A live session owns it right
+      now (the soft lease); let it finish before any `pending` task
+      begins. A later invocation resumes it once it goes idle (clean
+      hand-off) or crashed (the owner's heartbeat ages out).
    c. **Else, start the oldest `pending` task** -- reached only when
       nothing is `in_progress`.
 
-   - **NEVER** pick a *fresh* `in_progress` task -- the soft lease means
-     another session owns it right now.
+   **Claim it atomically.** Once you have chosen a task, run
+   `tigerharness journal claim <task-id>` BEFORE doing any work. Claim
+   sets `session_ref` to a fresh token, flips the task to `in_progress`,
+   bumps `sessions`, and refreshes the heartbeat -- atomically, with a
+   compare-and-set re-read so two concurrent drives cannot both grab it.
+   If claim exits non-zero ("busy" / "claim lost"), another session won:
+   re-sweep and pick again, or exit.
+
+   - **NEVER** work a *busy* task -- the attach token + fresh heartbeat
+     means a live session owns it right now.
    - Skip `blocked` tasks; surface them in the summary so the human can
      unblock manually.
    - If no actionable task remains, exit the invocation cleanly.
@@ -140,24 +158,32 @@ completed task until no actionable tasks remain.
    goal is to take the task as far as possible in this session.
 
 5. **On stop**, write a final `progress.md` entry summarising the
-   session and update `status.json`:
-   - Refresh `updated_at` one last time.
-   - **Do NOT bump `sessions` here.** The counter is incremented once
-     per *pickup* (when step 2 first picks the task on the current
-     invocation), not on exit. Bumping on exit too would double-count.
-   - Rewrite `next_action` (or clear it if `done`).
-   - Set `state` to one of:
-     - `done` -- task fully complete per acceptance criteria.
-     - `blocked` -- real blocker (need human, missing input, etc.) OR
-       `sessions == max_sessions`.
-     - leave as `in_progress` -- clean stop (human ended session).
+   session, then run **`tigerharness journal release <task-id>`** to
+   record the exit and **detach** (clear `session_ref`):
+   - Clean stop, work remains: `release <id> --next-action "<handoff
+     note>"` (leaves `state=in_progress`). Detaching makes the task
+     **idle**, so the very next drive resumes it **immediately** -- no
+     30-minute wait.
+   - Done: `release <id> --state done`.
+   - Blocked (real blocker, or `sessions == max_sessions`):
+     `release <id> --state blocked --next-action "<why>"`.
 
-6. **Cascade** -- if step 5 moved the task to `done` or `blocked`,
-   loop back to step 1 (re-sweep) and pick up the next actionable
-   task. Keep cycling until:
-   - Step 1 reports nothing actionable, OR
-   - The human ends the session, OR
-   - A session-level guard rail fires.
+   `release` refreshes `updated_at` and clears `session_ref` for you.
+   Do NOT bump `sessions` here -- that happened atomically in `claim`
+   at pickup. For a mid-task heartbeat (not a stop), just append to
+   `progress.md` and refresh `updated_at`; keep `session_ref` set while
+   you are still driving.
+
+6. **Cascade / keep going** -- after a stop, loop back to step 1
+   (re-sweep) and pick up the next actionable task:
+   - If you moved a task to `done` / `blocked`, the next pick is a
+     different task.
+   - If you cleanly stopped a task that is NOT done (a natural
+     checkpoint), it is now **idle** -- you may re-`claim` it and keep
+     going **immediately**, no wait. Stop the loop entirely only when
+     step 1 reports nothing actionable, the human ends the session, a
+     guard rail fires, or your own context is exhausted (hand off to a
+     fresh drive, which resumes instantly).
 
    Don't manufacture a stopping point just because one task finished
    -- drain the queue while the session is hot.
@@ -178,10 +204,13 @@ checkpoint mid-task.
 ## Heartbeat cadence
 
 Bump `updated_at` on every `progress.md` append. Append progress at
-least every 10 minutes of wall-clock active work. A wedged session
-will show as stale once `updated_at` exceeds `stuck_timeout` (default
-1800 seconds = 30 min), and a *later* invocation will rescue it via
-step 2.
+least every 10 minutes of wall-clock active work. A wedged session that
+never released will show as **crashed** once `updated_at` exceeds
+`stuck_timeout` (default 1800 seconds = 30 min) *while still attached*,
+and a *later* invocation rescues it via step 2. A session that stops
+cleanly should `release` instead (detach) -- a detached task is **idle**
+and resumes with no wait, so the 30-minute window only ever applies to a
+genuine crash, never to a normal hand-off.
 
 ## What NOT to do
 
