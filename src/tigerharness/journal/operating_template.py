@@ -83,8 +83,15 @@ load-bearing fields are:
 - `next_action` -- the handoff note. A fresh session reads this and
   the tail of `progress.md` to resume without re-reading everything.
 - `sessions` / `max_sessions` -- soft ceiling. When `sessions ==
-  max_sessions`, the driver moves the task to `blocked` with a
-  `next_action` naming the cap as the blocker.
+  max_sessions` the budget is spent: the driver marks the task `done`
+  if the work is complete, else `blocked` with a `next_action` naming
+  the cap.
+- `early_exit` -- bool. When `false` (the **default**), the driver runs
+  the full `max_sessions` budget -- "N iterations means exactly N" --
+  and does NOT mark the task `done` before the budget is spent (it keeps
+  iterating: review, harden, extend). When `true`, the driver may mark
+  `done` as soon as the acceptance criteria are met, before the budget
+  is spent. Mirrors the task-runner's `--early-exit`.
 - `kind` -- `task` or `workflow`. The driver switches behaviour at
   step 4 on this field.
 - `compile_pending` + `compile_phase` (workflow only) -- the compile
@@ -198,10 +205,14 @@ completed task until no actionable tasks remain.
 
 Exit the inner loop on **any** of:
 
-- The task is fully `done` per its acceptance criteria.
+- The task is fully `done` per its acceptance criteria **and**
+  `early_exit=true`. If `early_exit=false` (the default), do NOT stop
+  here -- keep iterating (review, harden, extend) and spend the session
+  budget; "N iterations means exactly N". The task reaches `done` on
+  the final session (or earlier only when `early_exit=true`).
 - A real blocker requires a human or another persona (`blocked`).
-- `sessions == max_sessions` -- write a `blocked` entry naming the
-  cap as the blocker.
+- `sessions == max_sessions` -- the budget is spent. Mark `done` if the
+  work is complete, else `blocked` with a `next_action` naming the cap.
 - The human ends the session.
 
 Otherwise keep going. Do not hand the turn back to manufacture a

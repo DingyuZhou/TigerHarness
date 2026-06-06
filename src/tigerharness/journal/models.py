@@ -140,6 +140,11 @@ class Status:
     updated_at: str
     next_action: str = ""
     session_ref: str | None = None
+    # When False (default), the driver runs the full ``max_sessions``
+    # budget -- "N iterations means exactly N". When True, the driver may
+    # stop early once the task is done per acceptance criteria (mirrors
+    # the task-runner's opt-in ``--early-exit``).
+    early_exit: bool = False
     # Workflow-only sub-state. Defaults are neutral so a task-mode
     # Status round-trips byte-identically; the JSON schema gate in
     # ``from_dict`` / ``to_dict`` is what makes the per-kind contract
@@ -167,6 +172,7 @@ class Status:
         kind: str = "task",
         max_sessions: int = 3,
         next_action: str = "",
+        early_exit: bool = False,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded Status in ``state=pending``.
@@ -203,6 +209,7 @@ class Status:
             updated_at=ts,
             next_action=next_action,
             session_ref=None,
+            early_exit=early_exit,
             compile_pending=False,
             compile_phase=None,
         )
@@ -217,6 +224,7 @@ class Status:
         captain: str | None = None,
         max_sessions: int = 10,
         next_action: str = "",
+        early_exit: bool = False,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded ``kind=workflow`` Status.
@@ -269,6 +277,7 @@ class Status:
             updated_at=ts,
             next_action=next_action,
             session_ref=None,
+            early_exit=early_exit,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
             playbook_name=playbook_name.strip(),
@@ -327,7 +336,7 @@ class Status:
                 f"status.json missing required keys: {sorted(missing)}"
             )
         optional_keys = {
-            "persona", "next_action", "session_ref",
+            "persona", "next_action", "session_ref", "early_exit",
             "compile_pending", "compile_phase", "playbook_name",
         }
         unknown = set(data) - (required | optional_keys)
@@ -461,6 +470,7 @@ class Status:
             updated_at=data["updated_at"],
             next_action=data.get("next_action", "") or "",
             session_ref=data.get("session_ref"),
+            early_exit=bool(data.get("early_exit", False)),
             compile_pending=compile_pending_val,
             compile_phase=compile_phase,
             playbook_name=playbook_name,

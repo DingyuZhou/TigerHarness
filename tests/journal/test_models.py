@@ -566,3 +566,27 @@ class TestInProgressClass:
         )
         with pytest.raises(JournalModelError):
             s.in_progress_class(stuck_timeout_sec=300)
+
+
+class TestEarlyExit:
+    """early_exit -- run-all-N (default) vs stop-when-done (opt-in)."""
+
+    def test_default_off(self):
+        assert Status.new(id="x", title="t", persona="P").early_exit is False
+
+    def test_settable_and_round_trips(self):
+        s = Status.new(id="x", title="t", persona="P", early_exit=True)
+        assert s.early_exit is True
+        assert Status.from_json(s.to_json()).early_exit is True
+
+    def test_legacy_status_without_field_defaults_off(self):
+        d = Status.new(id="x", title="t", persona="P").to_dict()
+        d.pop("early_exit")
+        assert Status.from_dict(d).early_exit is False
+
+    def test_workflow_carries_early_exit(self):
+        s = Status.new_workflow(
+            id="x", title="t", playbook_name="default", early_exit=True,
+        )
+        assert s.early_exit is True
+        assert Status.from_json(s.to_json()).early_exit is True

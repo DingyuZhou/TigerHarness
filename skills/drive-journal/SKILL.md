@@ -90,10 +90,13 @@ version, every invocation:
      OPERATING.md.
 
    Stop conditions (same for all kinds):
-   - The task is fully `done` per its acceptance criteria.
+   - The task is `done` per acceptance criteria **and**
+     `early_exit=true`. With `early_exit=false` (default), do NOT stop
+     here -- keep iterating and spend the full `max_sessions` budget
+     ("N iterations = exactly N"); mark `done` on the final session.
    - A real blocker requires a human or another persona.
-   - `sessions == max_sessions` -- move to `blocked` with a
-     `next_action` naming the cap as the blocker.
+   - `sessions == max_sessions` -- mark `done` if complete, else
+     `blocked` with a `next_action` naming the cap.
    - The human ends the session.
 
    Append to `progress.md` and refresh `updated_at` (the heartbeat)

@@ -143,6 +143,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             title=args.title,
             kind=args.kind,
             max_sessions=args.max_sessions if args.max_sessions is not None else 3,
+            early_exit=args.early_exit,
             slug=args.slug,
         )
     except (JournalScaffoldError, JournalModelError) as exc:
@@ -243,6 +244,7 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
             title=args.title,
             captain=captain,
             max_sessions=args.max_sessions if args.max_sessions is not None else 10,
+            early_exit=args.early_exit,
             slug=args.slug,
         )
     except MissingPersonaError as exc:
@@ -676,6 +678,15 @@ def build_parser() -> argparse.ArgumentParser:
             "kicks in only when --max-sessions is unset)."
         ),
     )
+    n.add_argument(
+        "--early-exit", action="store_true", default=False,
+        help=(
+            "Allow the driver to stop early once the task is done per "
+            "acceptance criteria. Default off -> run the full "
+            "max_sessions budget (N iterations = exactly N). Mirrors the "
+            "task-runner's --early-exit."
+        ),
+    )
     n.set_defaults(func=cmd_new)
 
     li = sub.add_parser("list", help="List active tasks.")
@@ -692,7 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
         "sweep",
         help=(
             "Run the lazy sweep: archive done tasks, classify "
-            "in_progress as fresh/stale, summarise. Side-effecting."
+            "in_progress as idle/busy/crashed, summarise. Side-effecting."
         ),
     )
     sw.add_argument(

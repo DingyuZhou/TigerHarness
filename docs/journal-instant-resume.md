@@ -7,10 +7,15 @@
 > at implementation: **Q1** reuse `session_ref` (it was an unused
 > `str|null` field); **Q2** compare-and-set on `session_ref` (write +
 > re-read; a narrow TOCTOU window remains by design — `flock` is the
-> upgrade path if real concurrency emerges). **Q3** (`max_sessions`
-> sizing) and **Q4** (driver self-relaunch) are still open — see below.
-> Companion to the "finish-before-start" pick rule. Authored by Anzai at
-> the Operator's request.
+> upgrade path if real concurrency emerges). **Q3** resolved: task
+> `max_sessions` default lowered to 3 (raise per-task with
+> `--max-sessions N`). **Q4** resolved: the driver runs sessions
+> back-to-back in one sitting (no self-relaunch — that would defeat the
+> subscription model; a `/loop` bridges context boundaries, now without
+> the old short-loop no-op). Plus a new `early_exit` toggle (default
+> off = run exactly N iterations; on = stop when done). Companion to the
+> "finish-before-start" pick rule. Authored by Anzai at the Operator's
+> request.
 
 ## Problem
 
@@ -149,24 +154,27 @@ update.
 - The `stuck_timeout` value (30 min stays; now crash-only).
 - The serial finish-before-start ordering (kept; composes).
 
-## Open questions for the Operator
+## Decisions (resolved)
 
-1. **Field:** reuse `session_ref` (existing field, adds "who's driving"
-   observability) vs a fresh `session_active` boolean? Depends on
-   whether `session_ref` already carries meaning in code (to check).
-2. **Atomic claim:** file-lock during pick-up vs compare-and-set token.
-   Both work; the lock is simpler, the token is more inspectable.
-3. **`max_sessions` semantics:** with instant resume + cascade, a big
-   task burns sessions fast (each context boundary = a session). Should
-   the cap count *context-resumes* only, or should the defaults rise?
-   (5 is tight — the docs-audit task finished at exactly 5/5.)
-4. **Self-relaunch:** should the driver launch the next drive itself at
-   a context boundary, or do we rely on a (now-short-OK) loop / manual
-   run? The former is more "always keeps going" but couples the driver
-   to a spawn mechanism.
+1. **Field:** reuse `session_ref` — it was a declared-but-unused
+   `str|null`, so no new field was needed.
+2. **Atomic claim:** compare-and-set on `session_ref` (`journal claim`
+   writes a token + re-reads to confirm). A narrow TOCTOU window remains
+   by design; `flock` is the upgrade path if real concurrency emerges.
+3. **`max_sessions` sizing:** task default lowered to **3**; raise
+   per-task with `--max-sessions N` (e.g. "do this in 10 iterations").
+   Workflow default stays 10 (compile budget).
+4. **Self-relaunch:** not built — a driver spawning its own
+   continuation would route work through the API/CLI and defeat the
+   subscription model. Instead the driver runs a task's sessions
+   **back-to-back in one sitting**; a `/loop` bridges context
+   boundaries (and, now that resume is instant, a short loop no longer
+   no-ops).
 
-## Next step
+## Related: the `early_exit` toggle
 
-On approval (and a decision on Q1–Q2), implement as a branch + PR:
-schema + sweep + protocol + tests, with the **atomic claim** as the
-careful part. Companion to the finish-before-start change.
+Added alongside this work: a per-task `early_exit` flag (`journal new
+--early-exit`). Default **off** runs the full `max_sessions` budget —
+"N iterations means exactly N", mirroring the task-runner's default.
+Set it on to let the driver stop as soon as the task is done per its
+acceptance criteria.

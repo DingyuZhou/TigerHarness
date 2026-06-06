@@ -71,6 +71,9 @@ Optional:
   before the task moves to `blocked` for human review. Default 3; raise
   it with `--max-sessions N` for bigger tasks (e.g. "do this task in 10
   iterations" -> `--max-sessions 10`).
+- `--early-exit` -- let the driver stop as soon as the task is done per
+  its acceptance criteria. Default off: run the full `--max-sessions`
+  budget ("N iterations = exactly N", matching the task-runner).
 - `--slug` -- override the slug portion of the task id.
 
 ## How to invoke -- workflow mode (`kind=workflow`)
