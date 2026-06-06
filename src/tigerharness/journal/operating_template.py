@@ -82,7 +82,7 @@ load-bearing fields are:
     `stuck_timeout`): the owner went silent; reclaimable.
 - `next_action` -- the handoff note. A fresh session reads this and
   the tail of `progress.md` to resume without re-reading everything.
-- `sessions` / `max_sessions` -- soft ceiling. When `sessions ==
+- `sessions` / `max_sessions` -- soft ceiling. When `sessions >=
   max_sessions` the budget is spent: the driver marks the task `done`
   if the work is complete, else `blocked` with a `next_action` naming
   the cap.
@@ -172,7 +172,7 @@ completed task until no actionable tasks remain.
      **idle**, so the very next drive resumes it **immediately** -- no
      30-minute wait.
    - Done: `release <id> --state done`.
-   - Blocked (real blocker, or `sessions == max_sessions`):
+   - Blocked (real blocker, or `sessions >= max_sessions`):
      `release <id> --state blocked --next-action "<why>"`.
 
    `release` refreshes `updated_at` and clears `session_ref` for you.
@@ -193,7 +193,7 @@ completed task until no actionable tasks remain.
    Drive a task through its whole session budget *in this one sitting*:
    a task scaffolded with `max_sessions=10` should run its sessions one
    after another here, **not** one-per-invocation. Stop the loop only
-   when the task is `done` / `blocked`, `sessions == max_sessions`, step
+   when the task is `done` / `blocked`, `sessions >= max_sessions`, step
    1 reports nothing actionable, the human ends the session, or your own
    context window is genuinely full -- and in that last case hand off,
    because a fresh drive resumes the idle task instantly (no wait).
@@ -208,10 +208,12 @@ Exit the inner loop on **any** of:
 - The task is fully `done` per its acceptance criteria **and**
   `early_exit=true`. If `early_exit=false` (the default), do NOT stop
   here -- keep iterating (review, harden, extend) and spend the session
-  budget; "N iterations means exactly N". The task reaches `done` on
-  the final session (or earlier only when `early_exit=true`).
+  budget; "N iterations means exactly N". On the final session do the
+  full work pass first, *then* `release --state done` at its end -- do
+  NOT treat merely reaching the cap on entry as "already done" and skip
+  the work. Mark `done` earlier only when `early_exit=true`.
 - A real blocker requires a human or another persona (`blocked`).
-- `sessions == max_sessions` -- the budget is spent. Mark `done` if the
+- `sessions >= max_sessions` -- the budget is spent. Mark `done` if the
   work is complete, else `blocked` with a `next_action` naming the cap.
 - The human ends the session.
 

@@ -203,7 +203,7 @@ keep `journal/OPERATING.md`.
 | `kind` | enum: `"task"` (Phase 1) or `"workflow"` (Phase 1.5+) | scaffolder | Phase 1 ships `task`; Phase 1.5 added `workflow` -- see [`journal-workflow-mode.md`](journal-workflow-mode.md). |
 | `persona` | string, required for `kind=task` | scaffolder | The persona this task is assigned to (must exist in the team's persona registry). |
 | `state` | enum: `pending` / `in_progress` / `blocked` / `done` | driver / sweep | See state-transition table below. |
-| `sessions` / `max_sessions` | int / int (default `5`) | driver / scaffolder | How many `drive-journal` invocations the task has consumed, and a soft ceiling. Each invocation counts as one session regardless of how much work happens inside it. When `sessions == max_sessions`, the driver moves the task to `blocked` with a `next_action` explaining why, and the human must raise the cap or close the task. |
+| `sessions` / `max_sessions` | int / int (default `3` task / `10` workflow) | driver / scaffolder | How many `drive-journal` invocations the task has consumed, and a soft ceiling. Each invocation counts as one session regardless of how much work happens inside it. When `sessions >= max_sessions` the budget is spent: the driver marks the task `done` if complete, else `blocked` (raise the cap or close it). `journal claim` self-heals an at-cap task by blocking it rather than running past the cap. |
 | `created_at` | ISO 8601 UTC | scaffolder | Set once at creation, never updated. Used by the sweep summary for the "age" display. |
 | `updated_at` | ISO 8601 UTC | driver | **Heartbeat.** Bumped on every `progress.md` append (OPERATING.md requires ≤10 min between appends during active work). Consulted **only** to tell a *busy* attached task from a *crashed* one: an `in_progress` task whose `session_ref` is set shows up **crashed** once `updated_at` is older than `stuck_timeout` (default 1800s = 30 min). A *detached* task (`session_ref=null`) is **idle** regardless of heartbeat age. See [`journal-instant-resume.md`](journal-instant-resume.md). |
 | `next_action` | string | driver | The handoff note. Lets a resuming session pick up without re-reasoning the whole `progress.md` — this is what makes the journal the memory, not the vendor's session. |
@@ -211,6 +211,7 @@ keep `journal/OPERATING.md`.
 | `compile_pending` | bool (`kind=workflow` only) | scaffolder / `land-compile` | `true` at scaffold; flipped to `false` (the visibility gate) once the compile lands the graph. Absent for `kind=task`. See [`journal-workflow-mode.md`](journal-workflow-mode.md). |
 | `compile_phase` | enum (`kind=workflow` only): `pending` / `drafting` / `tier1_pre` / `critiquing` / `tier1_post` / `complete` / `failed` | compile sub-protocol | The compile sub-state machine. Absent for `kind=task`. |
 | `playbook_name` | string, required for `kind=workflow` | scaffolder | Bare name of the playbook the workflow was compiled from. Rejected for `kind=task`. |
+| `early_exit` | bool (default `false`) | scaffolder | When `false`, the driver runs the full `max_sessions` budget ("N iterations = exactly N"); when `true`, it may mark `done` as soon as acceptance criteria are met. Set via `journal new --early-exit`. See [`journal-instant-resume.md`](journal-instant-resume.md). |
 
 Three fields carry the design: `session_ref` (the **attach signal** —
 is a live session driving this right now?), `updated_at` (the
@@ -236,8 +237,8 @@ bookkeeping or human-facing labels.
 | From | To | Who | Trigger | Side effects |
 |---|---|---|---|---|
 | (none) | `pending` | scaffolder | `tigerharness journal new --prd ...` succeeds | full status.json initialized |
-| `pending` | `in_progress` | driver | sweep step 2 picks this task | `sessions += 1`, `updated_at` bumped, `session_ref` set if cheap to capture |
-| `in_progress`-stale | `in_progress` | driver | **rescue** -- the sweep classified the task as stale (heartbeat older than `stuck_timeout`) and step 2 picked it up; the previous owner is presumed wedged or crashed | `sessions += 1`, `updated_at` bumped, `session_ref` overwritten if newly captured. The driver reads the tail of `progress.md` to figure out where the previous owner left off |
+| `pending` | `in_progress` | driver | sweep step 2 picks this task | `sessions += 1`, `updated_at` bumped, `session_ref` set to a fresh attach token by `journal claim` |
+| `in_progress`-stale | `in_progress` | driver | **rescue** -- the sweep classified the task as stale (heartbeat older than `stuck_timeout`) and step 2 picked it up; the previous owner is presumed wedged or crashed | `sessions += 1`, `updated_at` bumped, `session_ref` re-set to a fresh attach token by `journal claim`. The driver reads the tail of `progress.md` to figure out where the previous owner left off |
 | `in_progress` | `in_progress` | driver | mid-task progress (clean stop, max_sessions not hit) | `updated_at` bumped, `next_action` rewritten. **No** `sessions` change -- the counter was already incremented on pickup |
 | `in_progress` | `done` | driver | task complete per acceptance criteria | `state=done`, `next_action` cleared, sweep will archive on next invocation |
 | `in_progress` | `blocked` | driver | real blocker (need human / another agent / external input) OR `sessions == max_sessions` | `state=blocked`, `next_action` names the blocker |
@@ -293,6 +294,16 @@ right now and should be left alone. The heartbeat doubles as a soft
 lease without an explicit lease field.
 
 ## OPERATING.md — the protocol
+
+> **⚠ Superseded below (instant session hand-off, 2026-06-06).** The
+> inlined decision-procedure summary in this section still describes the
+> OLD fresh/stale heartbeat-lease model. The shipped protocol classifies
+> `in_progress` as **idle / busy / crashed** via the `session_ref`
+> attach token, resumes an idle task **immediately** (no 30-min wait),
+> and picks up / hands off via `journal claim` / `release`. The on-disk
+> `OPERATING.md` (generated from `operating_template.py`) and
+> [`journal-instant-resume.md`](journal-instant-resume.md) are
+> authoritative; read the walkthrough below as historical.
 
 `OPERATING.md` is the instruction file: a vendor-neutral markdown
 contract that teaches *any* file-reading agent to drive the journal.
@@ -395,9 +406,9 @@ the routine session.** Responsibilities:
   - **Stale** (`updated_at` older than `stuck_timeout`): the previous
     owner wedged or crashed. Flag it for rescue — it's reclaimable
     by the next step-2 pick.
-- Summarize what's actionable: e.g. *"2 pending, 1 in_progress
-  (fresh — owned by another session), 1 stale (no heartbeat 40m), 1
-  blocked awaiting your review."* The summary lands in the same
+- Summarize what's actionable: e.g. *"2 pending, 1 resumable, 1 busy
+  (owned by a live session), 1 crashed (no heartbeat 40m), 1 blocked
+  awaiting your review."* The summary lands in the same
   interactive context where you're about to act on it, instead of a
   separate Slack DM from a daemon.
 
@@ -438,9 +449,11 @@ it.
    queue as it can in one sitting.
 4. **Resume if needed.** If the task isn't `done` (you stopped, it
    blocked, or it hit `max_sessions`), come back later and invoke
-   `drive-journal` again — same or fresh session, using `--resume` /
-   `session_ref` for cheap continuity. The next invocation's sweep
-   picks up where this one left off; state is durable on disk
+   `drive-journal` again — a fresh session resumes the idle task
+   instantly (`journal claim` re-attaches; `next_action` + `progress.md`
+   carry the context, so no vendor `--resume` is needed). The next
+   invocation's sweep picks up where this one left off; state is durable
+   on disk
    regardless.
 
 For multi-persona work — i.e. a pre-defined workflow graph — the
@@ -457,6 +470,14 @@ other stop conditions above) is run-through, not stop-and-yield.
 Serial and human-paced — by design.
 
 ### How serial execution is enforced
+
+> **⚠ Partially superseded (instant session hand-off, 2026-06-06).** The
+> serial "one task at a time" principle still holds, but the mechanism
+> below is in the old fresh/stale terms. Today the soft lease is the
+> `session_ref` attach token (not the heartbeat); a cleanly handed-off
+> task is **idle** and resumes immediately; the heartbeat only flags a
+> **crashed** owner. See
+> [`journal-instant-resume.md`](journal-instant-resume.md).
 
 Serial means **one task at a time**, not one task per invocation.
 The decision procedure picks exactly **one** task at step 2, drives

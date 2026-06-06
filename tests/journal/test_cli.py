@@ -996,3 +996,49 @@ class TestCmdClaimRelease:
         assert "does not match" in capsys.readouterr().err
         s = Status.from_json(paths.status_json("t1").read_text())
         assert s.session_ref == "real"  # untouched
+
+    def test_release_to_blocked(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "blocked", "--next-action", "needs human"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.BLOCKED
+        assert s.session_ref is None
+        assert s.next_action == "needs human"
+
+    def test_claim_at_cap_self_heals_to_blocked(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        # in_progress, idle (detached), already at the session cap.
+        _seed(paths, "t1", state=State.IN_PROGRESS, sessions=3, max_sessions=3)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1"])
+        assert rc == 1
+        assert "session cap" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.BLOCKED    # self-healed, not run past cap
+        assert s.session_ref is None
+        assert s.sessions == 3             # NOT bumped to 4
+
+    def test_claim_lost_when_another_session_won_the_race(
+        self, journal_dir, capsys, monkeypatch,
+    ):
+        # The compare-and-set re-read must detect that a racing claim
+        # overwrote our token, and back off (rc=1, "claim lost").
+        from tigerharness.journal import cli as _cli
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        real = _cli._read_status_or_none
+        calls = {"n": 0}
+
+        def fake(p, tid):
+            calls["n"] += 1
+            s = real(p, tid)
+            if calls["n"] >= 2 and s is not None:
+                s.session_ref = "won-by-someone-else"  # simulate the race
+            return s
+
+        monkeypatch.setattr(_cli, "_read_status_or_none", fake)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1"])
+        assert rc == 1
+        assert "claim lost" in capsys.readouterr().err

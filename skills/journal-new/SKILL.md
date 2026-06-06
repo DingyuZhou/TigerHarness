@@ -120,7 +120,7 @@ Optional:
 - `--title` -- explicit human label. Defaults to the first H1 of the
   brief, then `"workflow"` if none.
 - `--max-sessions` -- soft ceiling. Default 10 for workflow mode
-  (vs 5 for task mode).
+  (vs 3 for task mode).
 - `--slug` -- override the slug portion of the task id.
 
 The scaffolder pre-flights the team's compile-time personas AND
