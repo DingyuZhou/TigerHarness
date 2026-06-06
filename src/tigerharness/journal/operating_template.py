@@ -175,15 +175,21 @@ completed task until no actionable tasks remain.
    you are still driving.
 
 6. **Cascade / keep going** -- after a stop, loop back to step 1
-   (re-sweep) and pick up the next actionable task:
+   (re-sweep) and pick up the next actionable task. **Do not hand the
+   turn back between sessions** -- run them back-to-back:
    - If you moved a task to `done` / `blocked`, the next pick is a
      different task.
    - If you cleanly stopped a task that is NOT done (a natural
-     checkpoint), it is now **idle** -- you may re-`claim` it and keep
-     going **immediately**, no wait. Stop the loop entirely only when
-     step 1 reports nothing actionable, the human ends the session, a
-     guard rail fires, or your own context is exhausted (hand off to a
-     fresh drive, which resumes instantly).
+     checkpoint, or you split a long job into sessions), it is now
+     **idle** -- re-`claim` it and continue **immediately**, no wait.
+
+   Drive a task through its whole session budget *in this one sitting*:
+   a task scaffolded with `max_sessions=10` should run its sessions one
+   after another here, **not** one-per-invocation. Stop the loop only
+   when the task is `done` / `blocked`, `sessions == max_sessions`, step
+   1 reports nothing actionable, the human ends the session, or your own
+   context window is genuinely full -- and in that last case hand off,
+   because a fresh drive resumes the idle task instantly (no wait).
 
    Don't manufacture a stopping point just because one task finished
    -- drain the queue while the session is hot.

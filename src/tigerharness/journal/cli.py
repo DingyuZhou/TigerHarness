@@ -142,7 +142,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             paths=paths,
             title=args.title,
             kind=args.kind,
-            max_sessions=args.max_sessions if args.max_sessions is not None else 5,
+            max_sessions=args.max_sessions if args.max_sessions is not None else 3,
             slug=args.slug,
         )
     except (JournalScaffoldError, JournalModelError) as exc:
@@ -671,7 +671,7 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument(
         "--max-sessions", type=int, default=None,
         help=(
-            "Soft ceiling on drive-journal invocations. Default 5 for "
+            "Soft ceiling on drive-journal invocations. Default 3 for "
             "task mode and 10 for workflow mode (kind-specific default "
             "kicks in only when --max-sessions is unset)."
         ),

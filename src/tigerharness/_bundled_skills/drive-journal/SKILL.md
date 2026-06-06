@@ -112,14 +112,17 @@ version, every invocation:
    `claim` at pickup).
 
 6. **Cascade / keep going.** After a stop, loop back to step 1
-   (re-sweep). A task you moved to `done`/`blocked` yields a different
-   next pick; a task you cleanly stopped (not done) is now **idle** and
-   you may re-`claim` it and keep going **immediately**, no wait. Keep
-   cycling until step 1 reports nothing actionable, the human ends the
-   session, a guard rail fires, or your context is exhausted (hand off
-   to a fresh drive, which resumes instantly). **Don't manufacture a
-   stopping point just because one task finished -- drain the queue
-   while the session is hot.**
+   (re-sweep). **Do not hand the turn back between sessions** -- run
+   them back-to-back. A task you moved to `done`/`blocked` yields a
+   different next pick; a task you cleanly stopped (not done) is now
+   **idle**, so re-`claim` it and continue **immediately**, no wait.
+   Drive a task through its whole session budget in one sitting -- a
+   `max_sessions=10` task runs its sessions one after another, **not**
+   one-per-invocation. Stop only when the task is done/blocked,
+   `sessions == max_sessions`, nothing is actionable, the human ends the
+   session, or your context is genuinely full (hand off -- a fresh drive
+   resumes instantly). **Don't manufacture a stopping point just because
+   one task finished -- drain the queue while the session is hot.**
 
 ## What NOT to do
 

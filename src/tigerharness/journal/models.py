@@ -165,7 +165,7 @@ class Status:
         title: str,
         persona: str,
         kind: str = "task",
-        max_sessions: int = 5,
+        max_sessions: int = 3,
         next_action: str = "",
         now: str | None = None,
     ) -> "Status":

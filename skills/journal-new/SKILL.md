@@ -48,7 +48,7 @@ tigerharness journal new \
     --prd <path-to-PRD.md> \
     --persona <persona-name> \
     [--title "<human label>"] \
-    [--max-sessions 5]
+    [--max-sessions 3]
 ```
 
 `--kind task` is the default; you can omit it for backwards-compat.
@@ -68,7 +68,9 @@ Optional:
 - `--title` -- explicit human label. Defaults to the first H1 of the
   PRD, then `"task"` if none.
 - `--max-sessions` -- soft ceiling on `drive-journal` invocations
-  before the task moves to `blocked` for human review. Default 5.
+  before the task moves to `blocked` for human review. Default 3; raise
+  it with `--max-sessions N` for bigger tasks (e.g. "do this task in 10
+  iterations" -> `--max-sessions 10`).
 - `--slug` -- override the slug portion of the task id.
 
 ## How to invoke -- workflow mode (`kind=workflow`)

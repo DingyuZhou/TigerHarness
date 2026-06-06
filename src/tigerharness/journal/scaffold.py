@@ -170,7 +170,7 @@ def new_task(
     paths: JournalPaths,
     title: str | None = None,
     kind: str = "task",
-    max_sessions: int = 5,
+    max_sessions: int = 3,
     slug: str | None = None,
 ) -> ScaffoldResult:
     """Create a new task in ``paths.active``. Returns ``ScaffoldResult``.

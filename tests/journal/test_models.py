@@ -28,7 +28,7 @@ class TestStatusNew:
         )
         assert s.state is State.PENDING
         assert s.sessions == 0
-        assert s.max_sessions == 5  # default
+        assert s.max_sessions == 3  # default
         assert s.created_at == s.updated_at == "2026-06-02T08:00:00Z"
         assert s.session_ref is None
         assert s.next_action == ""
