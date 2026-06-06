@@ -44,7 +44,7 @@ journal/ (passive file-based state machine)         <-- source of truth
 Driver (`drive-journal` skill, interactive session)
   1. Lazy sweep of active/ (no AI, no cron, no daemon)
        - archive done/ tasks
-       - classify in_progress as fresh-vs-stale (heartbeat = soft lease)
+       - classify in_progress as idle/busy/crashed via the `session_ref` attach signal (heartbeat is crash-only; see docs/journal-instant-resume.md)
        - summarise actionable counts in-session
   2. Pick ONE actionable task, run to done / blocked / stop
        - reads OPERATING.md
@@ -94,7 +94,7 @@ Task-id format: `<YYYYMMDD>-<slug>-<uuid8>`.
 | Env var | Default | Purpose |
 |---|---|---|
 | `TIGERHARNESS_JOURNAL_DIR` | resolver (below) | Override the journal root. |
-| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which an `in_progress` task is classified as stale. |
+| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which an *attached* `in_progress` task (`session_ref` set) is treated as **crashed** and reclaimable. A detached task is **idle**/resumable regardless of age — the heartbeat is crash-detection only. |
 
 Journal root resolution priority:
 
