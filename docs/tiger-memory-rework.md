@@ -454,6 +454,74 @@ artifacts — all within sub-agent context, never the driver's. The
 must-memorize extraction runs at reduce time over the chunk summaries;
 the quality trade-off of chunking is accepted only on the overflow path.
 
+### B1/B8 — implementation design (2026-06-07, Anzai)
+
+Grounded in the shipped P1 + P2-adapter code. **The seam: split
+`lifecycle.rebuild()` at the AI boundary into three stages**, mirroring
+drive-journal's "non-AI sweep + AI in-session". Today `rebuild()` does
+discovery → `_decide` → summarize (spawns `claude -p`) → rollups →
+briefing in one CLI process; the subscription model needs the *summarize*
+middle to run inside an interactive session.
+
+1. **plan (non-AI, Python)** — `plan_rebuild(cfg, store) -> WorkManifest`:
+   `_build_adapters` + `discover` + `_decide`, apply the per-wake session
+   count (reuse `_cap_reason`), and for each `SUMMARIZE_NEW`/`RE_SUMMARIZE`
+   record build the **collapsed prompt** (reuse `combined_summary.md` +
+   `_fill_prompt`) over the **pre-filtered** content (P1.1). Emit a JSON
+   manifest: `[{conversation_uuid, action, prompt, short_path,
+   archive_path, expected_budget}]`. No AI, no spend.
+
+2. **execute (in-session — the `subagent` strategy)** — the interactive
+   driver walks the manifest and spawns ONE constrained sub-agent (Task
+   tool) per item: tools limited to Read(transcript source + *this*
+   persona's store) / Write(store path only) / no shell, no network (the
+   B7 trust boundary). The sub-agent emits the
+   `@@SHORT@@/@@DETAILED@@/@@MUST_MEMORIZE@@` bundle, **self-validates**
+   via `parse_collapsed` (all sections present, within budget), writes
+   short + archive + merges must-memorize **straight to the store**, and
+   returns only a short confirmation — the bulky output never re-enters
+   the driver's context (B8 fresh-window). API budget zero.
+
+3. **finalize (non-AI, Python)** — `finalize_rebuild(cfg, store, manifest)`:
+   the parent's **structural re-check** (B1 two-layer validation) over
+   each item — short + archive exist, frontmatter parses, body within
+   budget; on failure leave the transcript flagged and do NOT advance the
+   summarized-watermark (B5) so the next sweep retries. Then the existing
+   non-AI tail unchanged: `_cascade_all_rollups`, `_refresh_longer_memory`,
+   `_apply_decay`, `_write_state` (+ metrics), `rebuild_briefing`.
+
+**P1.3 is reused, not wasted.** The stage-2 *contract* IS P1.3's
+`combined_summary.md` + `parse_collapsed` — the in-session read-once is
+exactly the collapsed single pass. Likewise P1.1 prefilter shrinks the
+sub-agent's read, P1.2 cap becomes the per-wake cap (B3/B6), B7 keeps the
+sub-agent's own transcript out of the next sweep, and B4 routes each
+persona to the right store in a roster sweep. Every P1/P2-adapter piece
+feeds B1.
+
+**Contract vs. strategy seam.** `subagent` (Task tool) is the strategy we
+build; `api_spawn` (today's `claude -p`) stays registered as the fallback.
+A `summarizer.strategy` config selects it; `subagent` is a no-op from the
+bare CLI (it needs an interactive host) and raises a clear "run via the
+memory-sweep skill" error if invoked headless.
+
+**OPEN — Operator decision (open-Q2): stage-2 host / skill placement.**
+The executor is a vendor-neutral `OPERATING.md`-style contract; the only
+question is its trigger surface:
+- **(A)** its **own** `memory-sweep` skill — explicit/composable, but
+  users must remember to run it;
+- **(B)** **folded into the drive-journal wake sweep** — every drive
+  opportunistically refreshes stale stores for free (the B3 invariant
+  "any contact keeps the roster fresh"). **Recommended: (B)**, gated by
+  the B3 staleness floor + atomic team claim so it doesn't run every drive.
+
+Stages 1 + 3 (plan, finalize) are **decision-independent** and can be
+built first. **Build order once unblocked:** (i) `plan_rebuild` +
+`WorkManifest` + tests; (ii) `finalize_rebuild` + structural validator +
+tests; (iii) the `subagent` strategy + the in-session skill per the
+placement decision; (iv) **B3** roster sweep (atomic team claim, staleness
+floor, per-wake cap, per-persona resumable) wrapping the
+plan→execute→finalize loop over the `configs/personas.yaml` roster.
+
 ---
 
 ## Open questions (need Operator input)
@@ -723,3 +791,14 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   Full suite green (2902); 100% coverage. Next: B1/B8 (in-session
   summarization via sub-agent — needs an Operator call on skill
   placement) + B3 (roster sweep).
+- **2026-06-07 — B1/B8 implementation design (Anzai).** Design-first
+  session (no code; decision-agnostic, advances P2 in-order). Added the
+  **B1/B8 — implementation design** subsection above: split `rebuild()`
+  at the AI boundary into non-AI **plan** → in-session **execute**
+  (`subagent` strategy) → non-AI **finalize**, mirroring drive-journal.
+  Key realization — the stage-2 contract IS P1.3's `combined_summary.md`
+  + `parse_collapsed`, so the collapse work is reused on the subscription
+  rail (not legacy-only); P1.1/P1.2/B7/B4 all feed B1 too. Planner +
+  finalizer are decision-independent and slated first; only the stage-2
+  host depends on the open skill-placement decision (recommend folding
+  into drive-journal). No suite/coverage change (doc only).
