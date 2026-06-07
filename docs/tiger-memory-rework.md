@@ -470,13 +470,19 @@ discovery → `_decide` → summarize (spawns `claude -p`) → rollups →
 briefing in one CLI process; the subscription model needs the *summarize*
 middle to run inside an interactive session.
 
-1. **plan (non-AI, Python)** — `plan_rebuild(cfg, store) -> WorkManifest`:
-   `_build_adapters` + `discover` + `_decide`, apply the per-wake session
-   count (reuse `_cap_reason`), and for each `SUMMARIZE_NEW`/`RE_SUMMARIZE`
-   record build the **collapsed prompt** (reuse `combined_summary.md` +
-   `_fill_prompt`) over the **pre-filtered** content (P1.1). Emit a JSON
-   manifest: `[{conversation_uuid, action, prompt, short_path,
-   archive_path, expected_budget}]`. No AI, no spend.
+1. **plan (non-AI, Python). LANDED (s14, `lifecycle.plan_rebuild`).**
+   `plan_rebuild(cfg, store, *, max_sessions=None) -> list[item]`:
+   `_build_adapters` + `discover` + `_decide`; for each
+   `SUMMARIZE_NEW`/`RE_SUMMARIZE` (capped at `max_sessions`) apply the
+   P1.1 pre-filter, fill `combined_summary.md` with the clipped content,
+   and write it to `<store>/.sweep-staging/<uuid>.prompt.md`. Returns the
+   manifest items `{conversation_uuid, source, source_id,
+   first/last_event_at, raw_path, prompt_path, action}` and persists
+   `.sweep-staging/manifest.json`. **The sub-agent reads its own
+   `<uuid>.prompt.md`** (which already embeds the prefiltered transcript),
+   so the bulky content never transits the driver's context (B8); the
+   driver only handles the small manifest. ADDENDUM deferred (the
+   collapsed pass targets the 3-call new-session cost). No AI, no spend.
 
 2. **execute (in-session — the `subagent` strategy)** — the interactive
    driver walks the manifest and spawns ONE constrained sub-agent (Task
@@ -1009,3 +1015,13 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   legacy collapsed path emit identical artifacts. Full suite green (2942);
   100% coverage (executor.py + lifecycle.py 100%). Next (s14):
   `plan_rebuild` manifest + CLI wrapper + wiring the shared hook.
+- **2026-06-07 — B3 slice d (part 1): plan_rebuild (Anzai).** Built
+  `lifecycle.plan_rebuild` — the executor's input side: discover + decide,
+  then stage one prefiltered, clipped `combined_summary.md` prompt per
+  `SUMMARIZE_NEW`/`RE_SUMMARIZE` transcript to
+  `<store>/.sweep-staging/<uuid>.prompt.md` (capped) + a `manifest.json`.
+  The sub-agent reads its own staged prompt (B8: bulky content stays out
+  of the driver). Clean partial per the Operator's "clean partial > rushed
+  full" steer — CLI (`plan` + `ingest-summary`) + `maybe_sweep_roster`
+  hook + slack_bridge/drive-journal wiring are s15. Full suite green
+  (2948); 100% coverage.

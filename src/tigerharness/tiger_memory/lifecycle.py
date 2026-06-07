@@ -4,8 +4,10 @@ Implements §7 (algorithm) and §11 (bootstrap) of the design doc.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -275,6 +277,96 @@ def _finalize_rebuild(
     )
     from .briefing import rebuild_briefing
     rebuild_briefing(cfg, store)
+
+
+# ----- B1 stage-2: plan side (in-session sub-agent executor) ----------------
+
+
+def _sweep_staging_dir(store: Store) -> Path:
+    return store.root / ".sweep-staging"
+
+
+def plan_rebuild(
+    cfg: Config,
+    store: Store,
+    *,
+    max_sessions: int | None = None,
+) -> list[dict]:
+    """B1 stage-2 PLAN (non-AI): stage one collapsed prompt per flagged
+    transcript for the in-session sub-agent executor, and return the work
+    manifest.
+
+    For each ``SUMMARIZE_NEW`` / ``RE_SUMMARIZE`` decision (capped at
+    *max_sessions*), apply the P1.1 pre-filter, fill ``combined_summary.md``
+    with the clipped content, and write it to
+    ``<store>/.sweep-staging/<uuid>.prompt.md``. The sub-agent later reads
+    *that* file (so the bulky transcript never transits the driver's
+    context — B8), emits the bundle, and writes it back via
+    ``executor.ingest_collapsed_summary``. ADDENDUM is deferred (the
+    collapsed pass targets the 3-call new-session cost).
+
+    Returns the manifest items and persists ``.sweep-staging/manifest.json``.
+    """
+    store.init_layout()
+    adapters = _build_adapters(cfg)
+    records: list[SourceRecord] = []
+    for adapter in adapters:
+        if isinstance(adapter, DocsAdapter):
+            continue
+        records.extend(adapter.discover())
+    decisions = _decide(records, store, cfg, now=time.time())
+
+    staging = _sweep_staging_dir(store)
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    prompts_root = _prompts_root(cfg)
+    items: list[dict] = []
+    processed = 0
+    for d in decisions:
+        if d.action not in (SUMMARIZE_NEW, RE_SUMMARIZE):
+            continue
+        if max_sessions is not None and processed >= max_sessions:
+            break
+        rec = d.record
+        content = rec.content
+        if cfg.prefilter.enabled:
+            content = filter_transcript(
+                content,
+                drop_tool_results=cfg.prefilter.drop_tool_results,
+                drop_system_reminders=cfg.prefilter.drop_system_reminders,
+            )
+        prompt = _fill_prompt(
+            prompts_root / "combined_summary.md",
+            agent_name=cfg.agent.name,
+            short_max_words=cfg.budgets.short_summary_words,
+            detailed_max_words=cfg.budgets.detailed_summary_words,
+            memo_max_words=cfg.budgets.must_memorize_memo_words,
+            source=rec.source,
+            source_id=rec.source_id,
+            first_event_at=rec.first_event_at.isoformat(),
+            last_event_at=rec.last_event_at.isoformat(),
+            content=_clip(content, max_chars=cfg.budgets.max_prompt_content_chars),
+        )
+        prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        items.append({
+            "conversation_uuid": rec.conversation_uuid,
+            "source": rec.source,
+            "source_id": rec.source_id,
+            "first_event_at": rec.first_event_at.isoformat(),
+            "last_event_at": rec.last_event_at.isoformat(),
+            "raw_path": str(rec.raw_path),
+            "prompt_path": str(prompt_path),
+            "action": d.action,
+        })
+        processed += 1
+
+    (staging / "manifest.json").write_text(
+        json.dumps({"items": items}, indent=2), encoding="utf-8"
+    )
+    return items
 
 
 # ----- adapter / summarizer factories --------------------------------------
