@@ -107,11 +107,62 @@ class WalkingConfig:
     monthlies_working_days: int = 90
 
 
+VALID_RESIDENT_LAYERS = ("recent", "daily", "weekly", "monthly")
+
+
 @dataclass(frozen=True)
 class BriefingConfig:
     walking: WalkingConfig = field(default_factory=WalkingConfig)
     always_first: str = "must_memorize.md"
     order: str = "oldest_to_newest"
+    # P3 / Lever 2 — which walking-window layers are COPIED into the
+    # always-resident briefing. Layers omitted here stay in the journal
+    # and are listed as drill-on-demand in MANIFEST.md (recall-safe).
+    # ``must_memorize.md`` + ``longer_memory.md`` are always resident.
+    # Default = all four (no diet; backward compatible).
+    resident_layers: tuple[str, ...] = VALID_RESIDENT_LAYERS
+
+
+@dataclass(frozen=True)
+class PrefilterConfig:
+    """Transcript pre-filter knobs (P1.1 / Lever 1.2).
+
+    Conservative-on by default: every flag is an independent off-switch
+    so aggressiveness is tunable per persona. See ``prefilter.py``.
+    """
+
+    enabled: bool = True
+    drop_tool_results: bool = True
+    drop_system_reminders: bool = True
+
+
+@dataclass(frozen=True)
+class CapConfig:
+    """Hard cost/scope cap per automatic rebuild (P1.2 / Lever 1.4).
+
+    A backstop so a lazy ``rebuild`` can never run away: it processes at
+    most ``max_sessions_per_rebuild`` sessions, or stops once cumulative
+    spend reaches ``max_usd_per_rebuild`` — whichever trips first. The
+    remainder is deferred to the next rebuild (re-discovered, stateless).
+    ``bootstrap``/``resummarize`` are user-scoped (``--limit`` / ``--since``)
+    and exempt.
+    """
+
+    max_sessions_per_rebuild: int = 10
+    max_usd_per_rebuild: float = 20.0
+
+
+@dataclass(frozen=True)
+class CollapseConfig:
+    """Collapse the 3 per-session summarize calls into 1 (P1.3 / Lever 1.1).
+
+    Default **off**: the legacy 3-call path stays the default (and the
+    automatic fallback on any parse drift). The collapsed pass only helps
+    the legacy API-spawn path — P2's in-session read-once subsumes it for
+    free — so it ships opt-in. See ``collapse.py``.
+    """
+
+    enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,6 +175,9 @@ class Config:
     decay: DecayConfig
     rebuild: RebuildConfig
     briefing: BriefingConfig
+    prefilter: PrefilterConfig = field(default_factory=PrefilterConfig)
+    cap: CapConfig = field(default_factory=CapConfig)
+    collapse: CollapseConfig = field(default_factory=CollapseConfig)
     env_var: str = "TIGER_MEMORY_CONFIG"
     # Resolved at load time so tests can introspect.
     source_path: Path | None = None
@@ -340,10 +394,34 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         monthlies_working_days=int(walking_raw.get("monthlies_working_days", 90)),
     )
     _validate_walking(walking)
+    resident_layers = _parse_resident_layers(briefing_raw)
     briefing = BriefingConfig(
         walking=walking,
         always_first=str(briefing_raw.get("always_first", "must_memorize.md")),
         order=str(briefing_raw.get("order", "oldest_to_newest")),
+        resident_layers=resident_layers,
+    )
+
+    prefilter_raw = raw.get("prefilter") or {}
+    prefilter = PrefilterConfig(
+        enabled=bool(prefilter_raw.get("enabled", True)),
+        drop_tool_results=bool(prefilter_raw.get("drop_tool_results", True)),
+        drop_system_reminders=bool(
+            prefilter_raw.get("drop_system_reminders", True)
+        ),
+    )
+
+    cap_raw = raw.get("cap") or {}
+    cap = CapConfig(
+        max_sessions_per_rebuild=int(
+            cap_raw.get("max_sessions_per_rebuild", 10)
+        ),
+        max_usd_per_rebuild=float(cap_raw.get("max_usd_per_rebuild", 20.0)),
+    )
+
+    collapse_raw = raw.get("collapse") or {}
+    collapse = CollapseConfig(
+        enabled=bool(collapse_raw.get("enabled", False)),
     )
 
     return Config(
@@ -355,6 +433,9 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         decay=decay,
         rebuild=rebuild,
         briefing=briefing,
+        prefilter=prefilter,
+        cap=cap,
+        collapse=collapse,
         env_var=str(raw.get("env_var", "TIGER_MEMORY_CONFIG")),
         source_path=source_path,
     )
@@ -394,6 +475,33 @@ def _expand_path_if_pathy(value: Any) -> Any:
     if isinstance(value, str) and (value.startswith("~") or "/" in value):
         return str(Path(value).expanduser())
     return value
+
+
+def _parse_resident_layers(briefing_raw: dict[str, Any]) -> tuple[str, ...]:
+    """Parse + validate ``briefing.resident_layers`` (P3 lean core).
+
+    Absent -> all four layers resident (backward compatible). Present ->
+    a list whose entries must each be one of ``VALID_RESIDENT_LAYERS``;
+    an empty list is allowed (only ``must_memorize`` / ``longer_memory``
+    stay resident, everything else drill-on-demand).
+    """
+    raw = briefing_raw.get("resident_layers")
+    if raw is None:
+        return VALID_RESIDENT_LAYERS
+    if not isinstance(raw, list):
+        raise ConfigError(
+            "briefing.resident_layers must be a list of layer names "
+            f"(subset of {list(VALID_RESIDENT_LAYERS)})."
+        )
+    out: list[str] = []
+    for item in raw:
+        if item not in VALID_RESIDENT_LAYERS:
+            raise ConfigError(
+                f"briefing.resident_layers: unknown layer {item!r}; "
+                f"allowed: {list(VALID_RESIDENT_LAYERS)}."
+            )
+        out.append(item)
+    return tuple(out)
 
 
 def _validate_walking(w: WalkingConfig) -> None:

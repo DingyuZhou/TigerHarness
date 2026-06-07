@@ -54,6 +54,8 @@ class TestRenderManifestStale:
             layer1=[], layer2=[], layer3=[], layer4=[],
             has_longer=False,
             has_mm=False,
+            stats={"total_words": 0, "total_chars": 0, "sections": {}},
+            resident_layers=("recent", "daily", "weekly", "monthly"),
         )
         assert "stale" in manifest.lower()
 

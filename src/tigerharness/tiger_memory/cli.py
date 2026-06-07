@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from .config import Config, ConfigError, load_config
@@ -91,6 +92,23 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("state", help="Print JSON state snapshot.")
 
+    # ----- B1 stage-2: in-session sub-agent executor (plan / ingest) -----
+    p_plan = sub.add_parser(
+        "plan",
+        help="Stage collapsed prompts for the in-session sub-agent and "
+             "print the work manifest (non-AI).",
+    )
+    p_plan.add_argument("--max-sessions", type=int, default=None,
+                        help="Cap on transcripts staged this plan.")
+
+    p_ing = sub.add_parser(
+        "ingest-summary",
+        help="Write back one sub-agent's collapsed summary bundle (read "
+             "from stdin) for a planned conversation uuid.",
+    )
+    p_ing.add_argument("--uuid", required=True,
+                       help="conversation_uuid from the plan manifest.")
+
     args = parser.parse_args(argv)
 
     try:
@@ -129,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
         return search_cmd(cfg, store, topic=args.topic, mode=args.mode)
     if args.cmd == "state":
         return _cmd_state(cfg, store)
+    if args.cmd == "plan":
+        return _cmd_plan(cfg, store, args.max_sessions)
+    if args.cmd == "ingest-summary":
+        return _cmd_ingest_summary(cfg, store, args.uuid)
 
     parser.print_help()
     return 2
@@ -151,6 +173,61 @@ def _cmd_state(cfg: Config, store: Store) -> int:
     from .state import compute_state
     payload = compute_state(cfg, store)
     print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_plan(cfg: Config, store: Store, max_sessions: int | None) -> int:
+    from .lifecycle import plan_rebuild
+    items = plan_rebuild(cfg, store, max_sessions=max_sessions)
+    print(json.dumps({"items": items}, indent=2))
+    return 0
+
+
+def _cmd_ingest_summary(cfg: Config, store: Store, uuid: str) -> int:
+    """Write back one sub-agent's collapsed bundle (stdin) for a planned
+    conversation. The metadata comes from the plan manifest so the caller
+    only needs the uuid + the bundle."""
+    from .collapse import CollapseParseError
+    from .executor import ingest_collapsed_summary
+    from .lifecycle import _sweep_staging_dir
+
+    manifest_path = _sweep_staging_dir(store) / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(f"no plan manifest at {manifest_path}; run `tiger-memory plan` "
+              f"first", file=sys.stderr)
+        return 2
+    item = next(
+        (it for it in manifest.get("items", [])
+         if it.get("conversation_uuid") == uuid),
+        None,
+    )
+    if item is None:
+        print(f"uuid {uuid} not in plan manifest", file=sys.stderr)
+        return 2
+
+    bundle = sys.stdin.read()
+    try:
+        result = ingest_collapsed_summary(
+            store, cfg,
+            conversation_uuid=item["conversation_uuid"],
+            source=item["source"],
+            source_id=item["source_id"],
+            first_event_at=datetime.fromisoformat(item["first_event_at"]),
+            last_event_at=datetime.fromisoformat(item["last_event_at"]),
+            bundle_text=bundle,
+            raw_path=Path(item["raw_path"]),
+        )
+    except CollapseParseError as exc:
+        print(f"malformed summary bundle for {uuid}: {exc}", file=sys.stderr)
+        return 1
+    # The staged prompt embeds the (prefiltered) transcript; once ingested
+    # it is consumed, so drop it to avoid leaving transcript content at rest.
+    # (A malformed bundle above keeps it so the sub-agent can re-ask.)
+    Path(item["prompt_path"]).unlink(missing_ok=True)
+    print(f"ingested {result.conversation_uuid} "
+          f"(+{result.must_memorize_added} must-memorize)")
     return 0
 
 

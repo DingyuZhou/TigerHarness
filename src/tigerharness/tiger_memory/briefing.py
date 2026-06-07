@@ -21,6 +21,7 @@ All written to briefing.tmp/ then mv-swap with briefing/.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from datetime import date, timedelta
@@ -72,10 +73,26 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
             working, cfg
         )
 
-        layer1_files = _copy_layer1(store, layer1_dates, tmp)
-        layer2_files = _copy_layer2(store, layer2_dates, tmp)
-        layer3_files = _copy_layer3(store, layer3_dates, tmp)
-        layer4_files = _copy_layer4(store, layer4_dates, tmp)
+        # P3 lean core: only copy the walking-window layers configured as
+        # resident; the rest stay in the journal and are listed as
+        # drill-on-demand in the MANIFEST (recall-safe — nothing deleted).
+        resident = cfg.briefing.resident_layers
+        layer1_files = (
+            _copy_layer1(store, layer1_dates, tmp) if "recent" in resident else []
+        )
+        layer2_files = (
+            _copy_layer2(store, layer2_dates, tmp) if "daily" in resident else []
+        )
+        layer3_files = (
+            _copy_layer3(store, layer3_dates, tmp) if "weekly" in resident else []
+        )
+        layer4_files = (
+            _copy_layer4(store, layer4_dates, tmp) if "monthly" in resident else []
+        )
+
+        # P3 read-side measurement: size the *resident* briefing (total +
+        # per-section) before the swap, so the read-side diet is provable.
+        stats = _briefing_stats(tmp)
 
         manifest_text = _render_manifest(
             cfg=cfg,
@@ -86,10 +103,17 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
             layer4=layer4_files,
             has_longer=lm_src.exists(),
             has_mm=mm_src.exists(),
+            stats=stats,
+            resident_layers=resident,
         )
         (tmp / "MANIFEST.md").write_text(manifest_text, encoding="utf-8")
         (tmp / ".fingerprint").write_text(_compute_fingerprint(store),
                                           encoding="utf-8")
+        # Sidecar metrics, swapped in atomically with the briefing (like
+        # .fingerprint). Queryable for before/after read-side comparison.
+        (tmp / ".briefing_metrics.json").write_text(
+            json.dumps(stats, indent=2), encoding="utf-8"
+        )
 
         # Atomic swap.
         store.atomic_swap_dir(tmp, store.paths.briefing)
@@ -276,6 +300,8 @@ def _render_manifest(
     layer4: list[Path],
     has_longer: bool,
     has_mm: bool,
+    stats: dict,
+    resident_layers: tuple[str, ...],
 ) -> str:
     """Generate the MANIFEST.md per §8.3."""
     saved = store.read_state() or {}
@@ -287,6 +313,8 @@ def _render_manifest(
         f"- Agent: {cfg.agent.name}",
         f"- Last rebuild: {last_rebuild}",
         f"- Briefing files: {len(layer1) + len(layer2) + len(layer3) + len(layer4)}",
+        f"- Briefing size: {stats['total_words']} words / "
+        f"{stats['total_chars']} chars",
         "",
     ]
     if _is_stale(last_rebuild):
@@ -322,6 +350,16 @@ def _render_manifest(
         for f in sorted(layer1):
             parts.append(f"- `recent/{f.name}` — {_one_line_preview(f)}")
         parts.append("")
+    non_resident = [n for n in _LAYER_DIRS if n not in resident_layers]
+    if non_resident:
+        parts.append("## Drill on demand (not loaded into context)")
+        parts.append(
+            "These layers stay in the journal; pull them with "
+            "`tiger-memory drill` / search when a turn needs them:"
+        )
+        for name in non_resident:
+            parts.append(f"- `{name}/` — {_LAYER_LABELS[name]}")
+        parts.append("")
     parts.append(
         "**Read order**: must_memorize → longer_memory → monthlies → weeklies "
         "→ dailies → shorts. Last mention wins on factual conflict."
@@ -354,3 +392,59 @@ def _one_line_preview(path: Path) -> str:
             return s[2:].strip()[:80]
         return s[:80]
     return ""
+
+
+# ----- read-side measurement (P3 / Lever 2) --------------------------------
+
+
+# The memory-bearing files the agent actually loads each session. The
+# `must_memorize.md` core + the four walking-window layers; README and
+# MANIFEST are scaffolding and excluded from the content measure.
+_CORE_FILES = ("must_memorize.md", "longer_memory.md")
+_LAYER_DIRS = ("recent", "daily", "weekly", "monthly")
+_LAYER_LABELS = {
+    "recent": "recent full short summaries",
+    "daily": "daily rollups",
+    "weekly": "weekly rollups",
+    "monthly": "monthly rollups",
+}
+
+
+def _wordcount(path: Path) -> tuple[int, int]:
+    """Return ``(chars, words)`` for *path*; ``(0, 0)`` if unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return (0, 0)
+    return (len(text), len(text.split()))
+
+
+def _briefing_stats(briefing_dir: Path) -> dict:
+    """Size the assembled briefing: total + per-section chars/words.
+
+    The read-side counterpart to the rebuild's write-side ``metrics``
+    (P3 / Lever 2). The per-section breakdown surfaces where the weight
+    sits (e.g. ``must_memorize.md`` typically dominates), so a lean-core
+    diet can be targeted and measured without regressing recall.
+    """
+    sections: dict[str, dict[str, int]] = {}
+    total_chars = total_words = 0
+    for name in _CORE_FILES:
+        c, w = _wordcount(briefing_dir / name)
+        sections[name] = {"chars": c, "words": w}
+        total_chars += c
+        total_words += w
+    for sub in _LAYER_DIRS:
+        c = w = 0
+        for f in sorted((briefing_dir / sub).glob("*.md")):
+            fc, fw = _wordcount(f)
+            c += fc
+            w += fw
+        sections[sub] = {"chars": c, "words": w}
+        total_chars += c
+        total_words += w
+    return {
+        "total_chars": total_chars,
+        "total_words": total_words,
+        "sections": sections,
+    }

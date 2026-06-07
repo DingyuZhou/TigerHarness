@@ -364,3 +364,113 @@ class TestTeamDefaults:
         )
         with pytest.raises(ConfigError, match="defaults YAML"):
             load_config(cfg_path)
+
+
+def test_prefilter_defaults_on(minimal_config_yaml: Path) -> None:
+    """No prefilter block -> conservative-on defaults."""
+    cfg = load_config(minimal_config_yaml)
+    assert cfg.prefilter.enabled is True
+    assert cfg.prefilter.drop_tool_results is True
+    assert cfg.prefilter.drop_system_reminders is True
+
+
+def test_prefilter_explicit_overrides(tmp_path: Path) -> None:
+    """An explicit prefilter block overrides each knob independently."""
+    cfg_path = tmp_path / "pf.yaml"
+    cfg_path.write_text(
+        f"agent:\n  name: T\n  role: t\n"
+        f"store:\n  root: {tmp_path}/memory\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+        f"prefilter:\n"
+        f"  enabled: false\n"
+        f"  drop_tool_results: false\n"
+        f"  drop_system_reminders: true\n"
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.prefilter.enabled is False
+    assert cfg.prefilter.drop_tool_results is False
+    assert cfg.prefilter.drop_system_reminders is True
+
+
+def test_cap_defaults(minimal_config_yaml: Path) -> None:
+    """No cap block -> sane backstop defaults."""
+    cfg = load_config(minimal_config_yaml)
+    assert cfg.cap.max_sessions_per_rebuild == 10
+    assert cfg.cap.max_usd_per_rebuild == 20.0
+
+
+def test_cap_explicit_overrides(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "cap.yaml"
+    cfg_path.write_text(
+        f"agent:\n  name: T\n  role: t\n"
+        f"store:\n  root: {tmp_path}/memory\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+        f"cap:\n"
+        f"  max_sessions_per_rebuild: 3\n"
+        f"  max_usd_per_rebuild: 1.5\n"
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.cap.max_sessions_per_rebuild == 3
+    assert cfg.cap.max_usd_per_rebuild == 1.5
+
+
+def test_collapse_defaults_off(minimal_config_yaml: Path) -> None:
+    """No collapse block -> default OFF (legacy 3-call path stays default)."""
+    cfg = load_config(minimal_config_yaml)
+    assert cfg.collapse.enabled is False
+
+
+def test_collapse_explicit_on(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "collapse.yaml"
+    cfg_path.write_text(
+        f"agent:\n  name: T\n  role: t\n"
+        f"store:\n  root: {tmp_path}/memory\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+        f"collapse:\n  enabled: true\n"
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.collapse.enabled is True
+
+
+def test_resident_layers_default_all(minimal_config_yaml: Path) -> None:
+    cfg = load_config(minimal_config_yaml)
+    assert cfg.briefing.resident_layers == ("recent", "daily", "weekly", "monthly")
+
+
+def _briefing_cfg(tmp_path: Path, briefing_block: str) -> Path:
+    cfg_path = tmp_path / "rl.yaml"
+    cfg_path.write_text(
+        f"agent:\n  name: T\n  role: t\n"
+        f"store:\n  root: {tmp_path}/memory\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+        f"{briefing_block}"
+    )
+    return cfg_path
+
+
+def test_resident_layers_explicit_subset(tmp_path: Path) -> None:
+    cfg = load_config(_briefing_cfg(
+        tmp_path, "briefing:\n  resident_layers: [recent, daily]\n"))
+    assert cfg.briefing.resident_layers == ("recent", "daily")
+
+
+def test_resident_layers_empty_allowed(tmp_path: Path) -> None:
+    cfg = load_config(_briefing_cfg(
+        tmp_path, "briefing:\n  resident_layers: []\n"))
+    assert cfg.briefing.resident_layers == ()
+
+
+def test_resident_layers_unknown_raises(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="unknown layer"):
+        load_config(_briefing_cfg(
+            tmp_path, "briefing:\n  resident_layers: [recent, bogus]\n"))
+
+
+def test_resident_layers_not_a_list_raises(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="must be a list"):
+        load_config(_briefing_cfg(
+            tmp_path, "briefing:\n  resident_layers: recent\n"))

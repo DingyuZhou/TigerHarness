@@ -244,6 +244,13 @@ active speaker.**
 
 ### B3 — Roster sweep, piggybacked on the human session
 
+> **Trigger RESOLVED (2026-06-07):** the sweep fires at **persona-session
+> bootstrap, shared by all personas** (any persona conversation start),
+> NOT a config-gated trigger-set defaulting off. The "Configurable trigger
+> set / `slack_bridge_dm` opt-in default off" paragraph below is
+> superseded — broadening the trigger is safe because the executor is
+> always the Task-tool sub-agent (B8). See "B3 — implementation design".
+
 A **team memory sweep** enumerates the team roster and rebuilds, in
 turn, each persona **that has a memory store configured** — skipping
 personas with no memory config. Two things were pinned in P0, both now
@@ -454,6 +461,176 @@ artifacts — all within sub-agent context, never the driver's. The
 must-memorize extraction runs at reduce time over the chunk summaries;
 the quality trade-off of chunking is accepted only on the overflow path.
 
+### B1/B8 — implementation design (2026-06-07, Anzai)
+
+Grounded in the shipped P1 + P2-adapter code. **The seam: split
+`lifecycle.rebuild()` at the AI boundary into three stages**, mirroring
+drive-journal's "non-AI sweep + AI in-session". Today `rebuild()` does
+discovery → `_decide` → summarize (spawns `claude -p`) → rollups →
+briefing in one CLI process; the subscription model needs the *summarize*
+middle to run inside an interactive session.
+
+1. **plan (non-AI, Python). LANDED (s14, `lifecycle.plan_rebuild`).**
+   `plan_rebuild(cfg, store, *, max_sessions=None) -> list[item]`:
+   `_build_adapters` + `discover` + `_decide`; for each
+   `SUMMARIZE_NEW`/`RE_SUMMARIZE` (capped at `max_sessions`) apply the
+   P1.1 pre-filter, fill `combined_summary.md` with the clipped content,
+   and write it to `<store>/.sweep-staging/<uuid>.prompt.md`. Returns the
+   manifest items `{conversation_uuid, source, source_id,
+   first/last_event_at, raw_path, prompt_path, action}` and persists
+   `.sweep-staging/manifest.json`. **The sub-agent reads its own
+   `<uuid>.prompt.md`** (which already embeds the prefiltered transcript),
+   so the bulky content never transits the driver's context (B8); the
+   driver only handles the small manifest. ADDENDUM deferred (the
+   collapsed pass targets the 3-call new-session cost). No AI, no spend.
+
+2. **execute (in-session — the `subagent` strategy)** — the interactive
+   driver walks the manifest and spawns ONE constrained sub-agent (Task
+   tool) per item: tools limited to Read(transcript source + *this*
+   persona's store) / Write(store path only) / no shell, no network (the
+   B7 trust boundary). The sub-agent emits the
+   `@@SHORT@@/@@DETAILED@@/@@MUST_MEMORIZE@@` bundle, **self-validates**
+   via `parse_collapsed` (all sections present, within budget), writes
+   short + archive + merges must-memorize **straight to the store**, and
+   returns only a short confirmation — the bulky output never re-enters
+   the driver's context (B8 fresh-window). API budget zero.
+   - **Write-back LANDED (s13, `executor.py`).** The bundle→store half is
+     `ingest_collapsed_summary(store, cfg, *, conversation_uuid, source,
+     source_id, first/last_event_at, bundle_text, raw_path)`: it
+     `parse_collapsed`s the bundle (raises `CollapseParseError` *before*
+     any write → store untouched on a malformed bundle, so the caller can
+     re-ask), writes short + archive via the shared
+     `_write_short_archive_bodies` (refactored to take a tag string so it
+     needs no Python `Summarizer`; tag = `subagent@v1`), and merges
+     must-memorize. The sub-agent runs this via a `tiger-memory` CLI so
+     parsing/writing stay in robust Python and the bundle never transits
+     the driver. **Still s14:** `plan_rebuild` (the manifest the sub-agent
+     reads) + the CLI wrapper + the OPERATING-style sub-agent contract.
+
+3. **finalize (non-AI, Python)** — `finalize_rebuild(cfg, store, manifest)`:
+   the parent's **structural re-check** (B1 two-layer validation) over
+   each item — short + archive exist, frontmatter parses, body within
+   budget; on failure leave the transcript flagged and do NOT advance the
+   summarized-watermark (B5) so the next sweep retries. Then the existing
+   non-AI tail unchanged: `_cascade_all_rollups`, `_refresh_longer_memory`,
+   `_apply_decay`, `_write_state` (+ metrics), `rebuild_briefing`.
+   - **Landed (2026-06-07):** the non-AI tail is now factored into
+     `lifecycle._finalize_rebuild(...)`, shared verbatim by `bootstrap` /
+     `rebuild` / `resummarize` (behavior-preserving DRY refactor). The
+     in-session path will call the same helper after its sub-agents write
+     the per-session artifacts. The structural re-check + manifest
+     plumbing are deferred until the stage-2 executor exists (building
+     them now would be unused/speculative).
+
+**P1.3 is reused, not wasted.** The stage-2 *contract* IS P1.3's
+`combined_summary.md` + `parse_collapsed` — the in-session read-once is
+exactly the collapsed single pass. Likewise P1.1 prefilter shrinks the
+sub-agent's read, P1.2 cap becomes the per-wake cap (B3/B6), B7 keeps the
+sub-agent's own transcript out of the next sweep, and B4 routes each
+persona to the right store in a roster sweep. Every P1/P2-adapter piece
+feeds B1.
+
+**Contract vs. strategy seam.** `subagent` (Task tool) is the strategy we
+build; `api_spawn` (today's `claude -p`) stays registered as the fallback.
+A `summarizer.strategy` config selects it; `subagent` is a no-op from the
+bare CLI (it needs an interactive host) and raises a clear "run via the
+memory-sweep skill" error if invoked headless.
+
+**RESOLVED — stage-2 host / skill placement (2026-06-07, Operator).** The
+executor is a vendor-neutral `OPERATING.md`-style contract; its trigger
+surface is **persona-session bootstrap, shared by all personas** — NOT a
+bespoke skill and NOT drive-journal-only. Any persona conversation start
+calls the same gated hook; drive-journal and `slack_bridge` are two
+callers. The executor is always the Task-tool sub-agent, so the trigger
+context's billing is irrelevant (subscription-safe by construction). See
+the "B3 — implementation design" subsection below and the resolved
+open-Q2.
+
+Stages 1 + 3 (plan, finalize) are **decision-independent** and can be
+built first. **Build order once unblocked:** (i) `plan_rebuild` +
+`WorkManifest` + tests; (ii) `finalize_rebuild` + structural validator +
+tests; (iii) the `subagent` strategy + the in-session skill per the
+placement decision; (iv) **B3** roster sweep (atomic team claim, staleness
+floor, per-wake cap, per-persona resumable) wrapping the
+plan→execute→finalize loop over the `configs/personas.yaml` roster.
+
+### B3 — implementation design (2026-06-07, Anzai)
+
+**The shared persona-session bootstrap hook.** One function — call it
+`tiger_memory.sweep.maybe_sweep_roster(team_root, *, now, trigger)` — is
+THE hook. Every persona-session-bootstrap caller invokes it; today's
+known callers:
+- **`slack_bridge`** — already fires `_trigger_tiger_memory_rebuild` on
+  each new thread (`bridge.py:469`). Generalize it: instead of
+  `tiger-memory rebuild --background` for the *active* persona via
+  `claude -p`, call the shared hook (roster-wide, sub-agent executor).
+- **`drive-journal`** — its wake sweep calls the same hook opportunistically.
+- (Future callers — any other interactive persona entrypoint — plug in
+  the same one-liner.)
+
+**Gating (non-AI bookkeeping, exactly the journal-sweep mold).** The hook
+returns a decision without doing any AI work itself:
+1. **Team `last_sweep_at` watermark + staleness floor.** **LANDED (s11,
+   `tiger_memory/sweep.py`).** Team-scoped state file at
+   **`<team>/memories/.tiger-memory-sweep.json`** — anchored at
+   `cfg.store.root.parent` (a persona store resolves to
+   `<team>/memories/<persona>/`, so its parent is the shared memories dir,
+   the same path for every persona — cleaner than walking three parents up
+   from the config). `sweep_due(last_sweep_at, now, floor_hours=24)`
+   returns "not due" inside the floor — a cheap no-op on every trigger.
+2. **Soft-lease claim (team-scoped). LANDED (s11).**
+   `try_claim_sweep(team_memories_dir, *, now, token, floor_hours,
+   lease_seconds=1800)` stamps a claim token + timestamp into the
+   sweep-state file (atomic tmp+replace). A *fresh* claim by another token
+   → `busy`; a *stale* one (crashed owner) is stolen; re-claiming our own
+   token is allowed. `mark_sweep_complete` bumps `last_sweep_at` and clears
+   the claim. This is a soft lease (read-check-write, not a hard OS lock):
+   simultaneous first-triggers are rare given the floor + watermark, the
+   per-store lock serialises writes downstream, and per-persona atomic
+   commits bound redundant work; a hard `O_EXCL` lock can harden it later
+   if contention is observed.
+   - **Run lifetime bound (hardened 2026-06-07).** A sweep *run* spans
+     several wakes (cap → `release_sweep_claim` → resume), and `progress`
+     carries the already-done personas across them. To stop an abandoned
+     run (team silent past the floor mid-sweep) from skipping a now-stale
+     persona, `try_claim_sweep` stamps `run_started_at` on a run's first
+     claim and, on a later claim whose in-flight run is older than
+     `floor_hours`, treats it as abandoned → clears `progress` + restarts
+     the run. `mark_sweep_complete` clears `run_started_at` too.
+3. **Per-wake cap.** Cap personas-per-wake (default **N** = small) so a
+   large backlog spreads across several wakes; reuse the P1.2
+   `_cap_reason` per-session cap *inside* each persona's rebuild.
+4. **Roster walk. LANDED (s12, `sweep.py`).**
+   `enumerate_persona_configs(team_memories_dir)` reads
+   `<team>/configs/personas.yaml` (tolerant — a missing/malformed roster
+   yields `[]` so the hook never crashes a session) and keeps personas
+   whose `memories/<name>/tiger-memory.config.yaml` exists, in roster
+   order. `plan_team_sweep(team_memories_dir, *, max_personas)` skips
+   personas already in this run's `progress`, applies the per-wake cap,
+   and returns the targets + how many remain.
+   **Per-persona resumable progress** lives in the sweep-state file:
+   `record_persona_done` appends, `sweep_progress` reads, and the per-wake
+   lifecycle is: claim → process ≤cap not-yet-done personas (recording
+   each) → if all done `mark_sweep_complete` (watermark + claim + progress
+   cleared), else `release_sweep_claim` (clear the claim, KEEP progress +
+   the stale watermark so the next wake resumes the rest). The per-persona
+   *rebuild* itself (plan → execute via sub-agent → `_finalize_rebuild`)
+   is slice c. (`tiger_memory` re-implements a minimal roster reader — it
+   must not import `slack_bridge`, the higher layer.)
+
+**Executor billing (the load-bearing invariant).** Stage-2 summarization
+is always the Task-tool sub-agent (B1/B8), so broadening the trigger to
+any persona session does NOT reintroduce API billing — the trigger
+context's billing is irrelevant.
+
+**Build slices (s11–s14):** (a) `sweep.py` gating — watermark read/write +
+staleness floor + atomic claim, pure-Python + tests; (b) the roster walk +
+per-persona resumable progress; (c) the `subagent` strategy + in-session
+executor contract (reusing `combined_summary.md` + `parse_collapsed` +
+`finalize_rebuild`); (d) wire the two callers (`slack_bridge` generalized,
+drive-journal) to the shared hook. Each slice: test-first, 100% cov,
+`anzai:` commit, Slack.
+
 ---
 
 ## Open questions (need Operator input)
@@ -464,9 +641,21 @@ the quality trade-off of chunking is accepted only on the overflow path.
    billing fact (is *your* bridge subscription- or API-authed?) still
    informs whether you flip it on — but the design no longer needs the
    answer to proceed. Remaining input wanted: your default preference.
-2. **Skill placement.** Memory sweep as its **own** human-triggered
-   skill, or **folded into** the drive-journal wake-up sweep so users
-   get it for free without remembering a separate command?
+2. **Skill placement — RESOLVED (2026-06-07, Operator).** Neither framing
+   was right; the answer is broader. The in-session rebuild is triggered
+   by **ANY persona conversation**, not only the journal driver ("not all
+   work is done in the journal driver"). The trigger hook lives at
+   **persona-session bootstrap** — the point where any Shohoku persona
+   conversation begins — and is **shared by all personas**; drive-journal
+   is just *one* caller. This is the B3 invariant ("any human contact with
+   any teammate keeps the whole roster fresh") realized as a shared hook,
+   not a bespoke skill. Subscription-safety is preserved because the
+   executor is **always** the Task-tool sub-agent (B8) regardless of which
+   conversation triggered it — the trigger context's billing is
+   irrelevant. (The existing `slack_bridge._trigger_tiger_memory_rebuild`,
+   which today fires `tiger-memory rebuild --background` for the *active*
+   persona via `claude -p`, becomes one caller of the shared hook,
+   generalized to a gated roster sweep with the sub-agent executor.)
 3. **Staleness floor & per-wake cap values.** Starting points to tune
    (e.g. 24h floor, cap of N sessions/wake).
 4. **In-session summarization context budget — RESOLVED (see B8).** The
@@ -539,12 +728,111 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   move to in-session. (Collapse/prefix-cache applies only to the legacy
   API-spawn path; it is subsumed by P2's in-session read-once.) Lowest
   risk, no change to what the agent reads.
+  - **Status (2026-06-07): pre-filter + thin metrics hook SHIPPED.**
+    `tiger_memory/prefilter.py` (`filter_transcript`) elides
+    `[tool_result]` payloads (→ `[tool_result elided: N chars]`) and
+    strips `<system-reminder>` blocks from the *rendered* transcript,
+    keeping all prose + `[tool_use: …]` intents. It runs **once per
+    record** in `lifecycle._process_decisions` (via
+    `dataclasses.replace` on the `SourceRecord`), *above* the summarizer
+    interface, so every short/detailed/addendum/extractor call reuses the
+    de-noised content and the win survives the P2 in-session move. Config
+    knobs: `prefilter.{enabled,drop_tool_results,drop_system_reminders}`
+    (all default-on; conservative). The thin metrics hook
+    (`tiger_memory/metrics.py` `RebuildMetrics`) accumulates
+    `sessions_processed`, `summarize_calls` (3 new / 2 addendum — the
+    P1.3-collapse baseline), and `content_chars_raw` vs.
+    `content_chars_filtered`, stamped into `state.json["metrics"]` so the
+    reduction is provable across rebuilds.
+  - **Status (2026-06-07): cost/scope cap (Lever 1.4) SHIPPED.** The
+    automatic `rebuild` processes at most `cap.max_sessions_per_rebuild`
+    (default 10) sessions, or stops once cumulative spend
+    (`summarizer.cost_so_far`) reaches `cap.max_usd_per_rebuild` (default
+    20.0) — whichever trips first (`lifecycle._cap_reason`, checked
+    before each session). The remainder is **deferred with no extra
+    state**: a skipped session writes no archive, so the next rebuild's
+    `_decide` re-emits it as `SUMMARIZE_NEW` — resumability by
+    construction (the design's "resumable via state.py" needs no state at
+    all). `metrics.stopped_reason` (`"session_cap"`/`"usd_cap"`/`None`)
+    surfaces a cap hit. **Scope:** caps apply to `rebuild` only;
+    `bootstrap` (`--limit`) and `resummarize` (`--since`) are user-scoped
+    and exempt. This answers the `anthropic.py:32-35` TODO's "cost cap +
+    scope cutoff" half.
+  - **Status (2026-06-07): 3→1 call-collapse SHIPPED (default OFF).** A
+    `combined_summary.md` prompt emits {short, detailed, must-memorize}
+    behind a strict `@@SHORT@@`/`@@DETAILED@@`/`@@MUST_MEMORIZE@@`
+    delimiter contract; `collapse.py` `parse_collapsed` validates it
+    (all markers present, in order, short+detailed non-empty) and
+    `lifecycle._write_session_collapsed` issues ONE call, writes the
+    artifacts, and parses must-memorize from the same output —
+    `metrics.summarize_calls` drops 3→1. On any `CollapseParseError` it
+    **falls back to the legacy 3-call path** (no store corruption; the
+    spent attempt + 3 fallback calls are counted honestly as 4). Gated
+    by `collapse.enabled` **default false**: the design downgrades
+    call-collapse to the legacy API-spawn path (P2's in-session
+    read-once subsumes it for free), so it ships opt-in with the safe
+    3-call path remaining the default and the fallback. **P1 floor
+    COMPLETE:** pre-filter + cost/scope cap + metrics + call-collapse all
+    landed, tested, 100% coverage, doc synced. Model-tiering (Lever 1.3)
+    stays optional/API-specific and is deferred to P2's context-budget
+    framing.
 - **P2 — Lever 3 (subscription-safe multi-persona).** In-session
   summarization skill via the `subagent` isolation strategy (B1, B8) +
   roster sweep (B3) + team-qualified IDs (B4) + the summarized-watermark
   safeguard (B5).
+  - **Status (2026-06-07): adapter hardening landed (B7 + B4 reader + B5
+    noted).** **B7** — `sources/claude_transcript.py:_record_for` now
+    drops every `isSidechain == true` row up front, so sub-agent turns
+    are never ingested (nested rows fall out of a parent session; an
+    all-sidechain file collapses to empty → skipped). *Runtime check
+    resolved:* `isSidechain` is a real per-row field across the corpus,
+    but **0 rows are `true`** in the current 774-file project dir — so
+    today this is pure defense-in-depth, independent of the persona
+    filter, exactly as designed. **B4** — `_normalize_owner` upgrades a
+    threads.json `persona` to `(team|None, name)`, accepting a bare name,
+    a `team/name` string, or a `{team, name}` dict; `_allowed` enforces
+    the team only when BOTH the adapter (`team=` source field) and the
+    record carry one, else name-only — fully backward compatible.
+    *Reader-side only*: nothing writes the `{team,name}` shape yet (the
+    bridge still writes bare names), so this is forward-compat insurance
+    as the design intended. **B5** — preventive only; P0 confirmed
+    nothing prunes `threads.json` (`ThreadStore.set()` is append/update),
+    so there is **no code to add today** — the invariant holds by
+    construction and only needs a guard if pruning is ever introduced.
+    **Next:** the big architectural piece — **B1/B8** in-session
+    summarization via a Claude Code sub-agent — plus **B3** roster sweep.
 - **P3 — Lever 2 (read-side diet).** Lean core briefing + on-demand
   drill, measured before/after.
+  - **Status (2026-06-07): measurement hook landed.** `briefing.py` now
+    sizes the assembled briefing — `_briefing_stats` totals chars/words
+    over the memory-bearing files (`must_memorize.md`, `longer_memory.md`,
+    and the recent/daily/weekly/monthly layers), written as a
+    `.briefing_metrics.json` sidecar (atomic with the briefing swap, like
+    `.fingerprint`) plus a "Briefing size: N words / M chars" line in
+    `MANIFEST.md`. Mirrors the P1.2 write-side metrics so the read-side
+    diet is provable before/after; the per-section breakdown pinpoints the
+    weight (the design's baseline: `must_memorize.md` ≈ 60% of Anzai's
+    briefing). **Sequencing note:** P3 was started ahead of P2's
+    completion because P2's remaining work (B1 stage-2 executor + B3) is
+    blocked on the Operator's skill-placement decision; read-side (Lever 2,
+    `briefing.py`) and write-side (Lever 3, `lifecycle.py`) are independent
+    levers, so there's no coupling.
+  - **Status (2026-06-07): lean-core cut landed.** New config
+    `briefing.resident_layers` (subset of recent/daily/weekly/monthly,
+    **default all four**) selects which walking-window layers are copied
+    into the always-resident briefing. Non-resident layers are NOT
+    deleted — they stay in `journal/` and are listed in a MANIFEST
+    "Drill on demand" section (reachable via `tiger-memory drill` /
+    search, which the README already documents). `must_memorize.md` +
+    `longer_memory.md` are always resident (load-bearing). This is the
+    design's "lean core + lazy-load deeper via drill", config-driven and
+    **recall-safe by default** (default = no change). Operators set e.g.
+    `resident_layers: [recent, daily]` per persona to realize the diet as
+    weekly/monthly rollups accumulate; the `.briefing_metrics.json`
+    sidecar measures the resident size so the drop is provable. *(Measured
+    on the real Anzai store: 2559 resident words today — recent 38% /
+    must_memorize 32% / daily 30% / weekly+monthly empty — so the win is
+    forward-looking as deeper rollups grow.)*
 
 ## Non-goals
 
@@ -612,3 +900,183 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   filter excludes it, but single-tenant/permissive mode would re-ingest,
   and the adapter reads no sidechain marker (P2 fix + a runtime check
   still open). Done on a `main`-based branch in an isolated worktree.
+- **2026-06-07 — P1.1 implementation (Anzai).** First build session of
+  the rework: shipped the transcript **pre-filter** (`prefilter.py`,
+  pure `filter_transcript`) and a **thin metrics hook** (`metrics.py`,
+  `RebuildMetrics` → `state.json["metrics"]`), wired once-per-record into
+  `lifecycle._process_decisions` ahead of `_clip`, with
+  `prefilter.{enabled,drop_tool_results,drop_system_reminders}` config
+  knobs (default-on). Landed the metrics scaffold first so the
+  pre-filter's char reduction is measurable; both kept above the
+  summarizer interface so they survive the P2 in-session move. 100%
+  coverage held; full suite green. See the P1 status note in **Phasing**.
+  Next: the Lever 1.4 cost/scope cap on top of the metrics hook.
+- **2026-06-07 — P1.2 implementation (Anzai).** Shipped the **cost/scope
+  cap** (`lifecycle._cap_reason` + `CapConfig`): the automatic `rebuild`
+  stops after N sessions (default 10) or a USD ceiling (default 20.0),
+  whichever trips first, deferring the remainder to the next rebuild with
+  **zero extra state** (skipped → no archive → re-discovered). Cap hit is
+  surfaced via `metrics.stopped_reason`. `bootstrap`/`resummarize` stay
+  uncapped (user-scoped). Closes the "cost cap + scope cutoff" half of the
+  `anthropic.py:32-35` TODO. 100% coverage held; full suite green (2872).
+- **2026-06-07 — P1.3 implementation + P1 floor complete (Anzai).**
+  Shipped the 3→1 **call-collapse** (`collapse.py` `parse_collapsed` +
+  `combined_summary.md` + `lifecycle._write_session_collapsed`), behind
+  `collapse.enabled` **default OFF** with automatic fallback to the
+  legacy 3-call path on any parse drift. With this, the **P1 floor is
+  complete** (pre-filter + cost/scope cap + metrics + call-collapse, all
+  tested at 100% coverage, doc synced). The collapse only benefits the
+  legacy API-spawn path — P2's in-session read-once subsumes it — so it's
+  opt-in. Full suite green (2885). Next: P2 (Lever 3) — in-session
+  summarization via the `subagent` strategy (B1/B8), roster sweep (B3),
+  team-qualified IDs (B4), summarized-watermark (B5).
+- **2026-06-07 — P2 adapter hardening (Anzai).** First P2 session: the
+  contained, low-risk items. **B7** — explicit `isSidechain` skip in
+  `claude_transcript.py:_record_for` (defense-in-depth vs sub-agent
+  transcript re-ingestion; runtime check found the field present but 0
+  `true` rows in the corpus). **B4** — `_normalize_owner` + team-aware
+  `_allowed` make persona attribution `(team, name)`-qualified, backward
+  compatible with bare-name entries and team-less adapters; reader-side
+  only (no writer yet). **B5** — confirmed no-op today (nothing prunes
+  `threads.json`); documented as a guard-if-pruning-added invariant.
+  Full suite green (2902); 100% coverage. Next: B1/B8 (in-session
+  summarization via sub-agent — needs an Operator call on skill
+  placement) + B3 (roster sweep).
+- **2026-06-07 — B1/B8 implementation design (Anzai).** Design-first
+  session (no code; decision-agnostic, advances P2 in-order). Added the
+  **B1/B8 — implementation design** subsection above: split `rebuild()`
+  at the AI boundary into non-AI **plan** → in-session **execute**
+  (`subagent` strategy) → non-AI **finalize**, mirroring drive-journal.
+  Key realization — the stage-2 contract IS P1.3's `combined_summary.md`
+  + `parse_collapsed`, so the collapse work is reused on the subscription
+  rail (not legacy-only); P1.1/P1.2/B7/B4 all feed B1 too. Planner +
+  finalizer are decision-independent and slated first; only the stage-2
+  host depends on the open skill-placement decision (recommend folding
+  into drive-journal). No suite/coverage change (doc only).
+- **2026-06-07 — finalize-stage refactor (Anzai).** First *code* step of
+  the B1 split, decision-independent: extracted the non-AI tail (rollups,
+  longer-memory fold, decay, state, briefing) — duplicated verbatim
+  across `bootstrap`/`rebuild`/`resummarize` — into a single
+  `lifecycle._finalize_rebuild(...)`. Behavior-preserving (bootstrap/
+  resummarize keep `duration_sec=None`; order unchanged); the in-session
+  path will reuse this exact tail. `plan_rebuild` + the structural
+  validator deferred to stage 2 (avoid speculative unused code). Full
+  suite green (2902); 100% coverage held (existing tests cover the
+  helper; lifecycle.py −8 statements).
+- **2026-06-07 — P3 read-side measurement hook (Anzai).** With P2's
+  remaining work (stage-2 executor + B3) blocked on the Operator's
+  skill-placement decision, pivoted to the decision-independent read-side
+  lever. Added `briefing._briefing_stats` + a `.briefing_metrics.json`
+  sidecar + a MANIFEST size line, sizing the assembled briefing (total +
+  per-section). Measurement-first, mirroring P1.2, so the upcoming
+  lean-core cut is provable and recall-safe. Independent of P2 (different
+  file/lever). Full suite green (2904); 100% coverage held.
+- **2026-06-07 — P3 lean-core cut (Anzai).** Landed `briefing.resident_layers`
+  (default all four → backward compatible): non-resident walking-window
+  layers are left in `journal/` and listed as MANIFEST "Drill on demand"
+  rather than copied into the resident briefing — the design's "lean core
+  + lazy drill", recall-safe by default. `must_memorize`/`longer_memory`
+  always resident. Data-grounded via the new sidecar (real Anzai briefing
+  = 2559 resident words; win scales as weekly/monthly accrue). Full suite
+  green (2910); 100% coverage held.
+- **2026-06-07 — open-Q2 resolved + B3 design (Anzai).** Design session
+  (s10): folded the Operator's skill-placement answer into the doc —
+  open-Q2 RESOLVED (trigger = persona-session bootstrap, shared by all
+  personas; executor always the sub-agent → subscription-safe), the
+  B1/B8 "stage-2 host" item RESOLVED, the original B3 trigger-set
+  paragraph marked superseded, and a concrete **"B3 — implementation
+  design"** subsection added: the shared `maybe_sweep_roster` hook,
+  team `last_sweep_at` watermark + 24h staleness floor + atomic team
+  claim + per-wake cap, roster walk over `configs/personas.yaml` with
+  per-persona resumable progress, and the existing
+  `slack_bridge._trigger_tiger_memory_rebuild` (active-persona /
+  `claude -p`) named as one caller to generalize. Build slices for
+  s11–s14 enumerated. Doc-only (no code; team-root path layout flagged to
+  pin during the s11 build, like `_load_defaults`); suite unchanged.
+- **2026-06-07 — B3 slice a: sweep.py gating (Anzai).** Built
+  `tiger_memory/sweep.py` (pure non-AI): team sweep-state IO (tolerant
+  read, atomic write), `sweep_due` staleness floor (default 24h), the
+  `try_claim_sweep` soft-lease claim (claimed / not_due / busy, with
+  stale-steal + re-entrant own-token), and `mark_sweep_complete`
+  (watermark bump + claim clear). Team anchor pinned to
+  `cfg.store.root.parent` (= `<team>/memories/`), cleaner than the
+  three-parents-up walk. Full suite green (2925); 100% coverage. Next
+  (s12): the roster walk + per-persona resumable progress on top.
+- **2026-06-07 — B3 slice b: roster walk + resumable progress (Anzai).**
+  Extended `sweep.py` with `enumerate_persona_configs` (tolerant roster
+  read over `configs/personas.yaml`, keeps personas with a memory store,
+  order-preserving), `plan_team_sweep` (skip-done + per-wake cap +
+  remaining count), and the resumable-progress helpers
+  (`sweep_progress` / `record_persona_done` / `release_sweep_claim`, plus
+  `mark_sweep_complete` now clears `progress`). Pure non-AI sequencing;
+  `tiger_memory` re-implements the roster read rather than importing the
+  higher-layer `slack_bridge`. Full suite green (2938); 100% coverage.
+  Next (s13): the sub-agent summarization executor.
+- **2026-06-07 — B3 slice c: executor write-back (Anzai).** Built
+  `tiger_memory/executor.py` `ingest_collapsed_summary` — the bundle→store
+  half of the in-session sub-agent path: parse the collapsed bundle
+  (raises before any write on malformed → store untouched), write
+  short+archive (refactored `_write_short_archive_bodies` to take a tag
+  string, `subagent@v1`, so no Python `Summarizer` is needed), merge
+  must-memorize (incl. the demote/append-dropped path). Reuses
+  `parse_collapsed` + the existing writers, so the sub-agent and the
+  legacy collapsed path emit identical artifacts. Full suite green (2942);
+  100% coverage (executor.py + lifecycle.py 100%). Next (s14):
+  `plan_rebuild` manifest + CLI wrapper + wiring the shared hook.
+- **2026-06-07 — B3 slice d (part 1): plan_rebuild (Anzai).** Built
+  `lifecycle.plan_rebuild` — the executor's input side: discover + decide,
+  then stage one prefiltered, clipped `combined_summary.md` prompt per
+  `SUMMARIZE_NEW`/`RE_SUMMARIZE` transcript to
+  `<store>/.sweep-staging/<uuid>.prompt.md` (capped) + a `manifest.json`.
+  The sub-agent reads its own staged prompt (B8: bulky content stays out
+  of the driver). Clean partial per the Operator's "clean partial > rushed
+  full" steer — CLI (`plan` + `ingest-summary`) + `maybe_sweep_roster`
+  hook + slack_bridge/drive-journal wiring are s15. Full suite green
+  (2948); 100% coverage.
+- **2026-06-07 — B3 slice d (part 2): executor CLI + sweep hook (Anzai).**
+  Added the `tiger-memory plan` (stages prompts, prints the manifest) and
+  `tiger-memory ingest-summary --uuid X` (reads the manifest by uuid + the
+  bundle from stdin → `executor.ingest_collapsed_summary`;
+  `CollapseParseError` → exit 1, unknown-uuid / no-manifest → exit 2) CLI
+  commands, and `sweep.maybe_sweep_roster` — the shared bootstrap hook
+  that claims the team sweep and returns the roster `SweepPlan` for the
+  caller to execute. **The entire Python + CLI surface of B1/B3 is now
+  complete and tested** (gating + roster + write-back + plan + CLI + hook).
+  Full suite green (2956); 100% coverage (cli.py + sweep.py 100%). The
+  only remaining piece is the LIVE trigger (s16): the OPERATING-style
+  sub-agent contract + wiring `slack_bridge`/drive-journal to call the
+  hook and spawn the sub-agent — an interactive Claude Code mechanic the
+  Python unit suite cannot exercise.
+- **2026-06-07 — s16 (final, budget 16/16): sweep protocol + close (Anzai).**
+  Wrote the in-session sub-agent contract
+  (`docs/tiger-memory-sweep-protocol.md`): how a persona session claims
+  the team sweep (`maybe_sweep_roster`), runs `tiger-memory plan` per
+  target, spawns one constrained Task-tool sub-agent per transcript
+  (Read staged prompt+store / Write store-only / no shell+net) that emits
+  the bundle + self-validates + pipes to `tiger-memory ingest-summary`,
+  then `record_persona_done` → `mark_sweep_complete` / `release_sweep_claim`.
+  Deliberately did **not** alter the working legacy `slack_bridge` trigger
+  (the in-session loop needs live interactive verification first; the two
+  can coexist behind a flag). **Task closed `done`:** acceptance criteria
+  in `task.md` MET (P1 floor complete; P2/P3 progressed as far as the
+  16-session budget allows — P2-adapter B7/B4 + the full B1/B3 Python+CLI
+  stack; P3 measurement + lean-core; no regressions, 100% cov at every
+  commit). **Remaining follow-up (new task):** activate + live-verify the
+  in-session trigger per the protocol doc's "Wiring + status".
+- **2026-06-07 — critique & harden pass (5 iters, Anzai).** A focused
+  review of the 15 rework commits before push (separate journal task).
+  Fixes: (i1) **sweep run-lifetime bound** — `run_started_at` so an
+  abandoned partial sweep can't skip a stale persona (B3 "no persona left
+  behind"); (i2) **line-anchored `parse_collapsed`** — an `@@`-marker
+  echoed inline from an untrusted transcript can no longer silently
+  mis-split a bundle; (i3) **`ingest-summary` cleans up the consumed
+  staged prompt** (less transcript content at rest) + documented the
+  must_memorize per-persona serial-ingest constraint; (i4) **pinned P3
+  recall-safety** with a test (the lean-core diet cannot drop
+  must_memorize/longer_memory or locked rows — verified by construction).
+  Verified-no-change: cost/scope cap bounds spend (no unbounded loop),
+  metrics/logs are content-free, combined-prompt parity, `.sweep-staging`
+  inert w.r.t. store reads. Each iteration: a severity-ranked
+  `artifacts/critique-NN.md`, 100% line+branch coverage held, `anzai:`
+  commit, **no push**. See `artifacts/summary.md` for the full change list
+  + the remaining pre-push recommendations.

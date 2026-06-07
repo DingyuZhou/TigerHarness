@@ -4,19 +4,24 @@ Implements §7 (algorithm) and §11 (bootstrap) of the design doc.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from . import frontmatter, must_memorize as mm
+from .collapse import CollapseParseError, parse_collapsed
 from .config import Config
+from .metrics import RebuildMetrics
+from .prefilter import filter_transcript
 from .sources import (
     ClaudeTranscriptAdapter,
     DocsAdapter,
@@ -121,18 +126,13 @@ def bootstrap(
             print(f"DRY-RUN: estimated total cost: ${est:.2f}")
             return 0
 
-        cost = _process_decisions(new_or_resum, store, cfg, summarizer)
-        _cascade_all_rollups(store, cfg, summarizer)
-        _refresh_longer_memory(store, cfg, summarizer)
-        _apply_decay(store, cfg)
-
-        # Write state BEFORE building the briefing so the manifest
-        # shows the current rebuild's timestamp, not the prior one.
-        _write_state(store, cfg, decisions=decisions, cost_usd=cost,
-                    last_op="bootstrap")
-
-        from .briefing import rebuild_briefing
-        rebuild_briefing(cfg, store)
+        metrics = RebuildMetrics()
+        cost = _process_decisions(new_or_resum, store, cfg, summarizer, metrics)
+        _finalize_rebuild(
+            store, cfg, summarizer,
+            decisions=decisions, cost=cost, metrics=metrics,
+            last_op="bootstrap",
+        )
         print(f"bootstrap done. cost: ${cost:.2f}")
     return 0
 
@@ -169,19 +169,18 @@ def rebuild(
             if d.action in (SUMMARIZE_NEW, RE_SUMMARIZE, ADDENDUM)
         ]
 
-        cost = _process_decisions(new_or_resum, store, cfg, summarizer)
-        _cascade_all_rollups(store, cfg, summarizer)
-        _refresh_longer_memory(store, cfg, summarizer)
-        _apply_decay(store, cfg)
-
+        metrics = RebuildMetrics()
+        cost = _process_decisions(
+            new_or_resum, store, cfg, summarizer, metrics,
+            max_sessions=cfg.cap.max_sessions_per_rebuild,
+            max_usd=cfg.cap.max_usd_per_rebuild,
+        )
         duration = time.time() - start
-        # Write state BEFORE building the briefing (so the manifest's
-        # last_rebuild_at reflects THIS rebuild, not the previous one).
-        _write_state(store, cfg, decisions=decisions, cost_usd=cost,
-                    duration_sec=duration, last_op="rebuild")
-
-        from .briefing import rebuild_briefing
-        rebuild_briefing(cfg, store)
+        _finalize_rebuild(
+            store, cfg, summarizer,
+            decisions=decisions, cost=cost, metrics=metrics,
+            last_op="rebuild", duration_sec=duration,
+        )
     return 0
 
 
@@ -233,18 +232,141 @@ def resummarize(
             )
         print(f"resummarize: {len(forced)} sessions since {since}")
 
-        cost = _process_decisions(forced, store, cfg, summarizer_obj)
-        _cascade_all_rollups(store, cfg, summarizer_obj)
-        _refresh_longer_memory(store, cfg, summarizer_obj)
-        _apply_decay(store, cfg)
-
-        _write_state(store, cfg, decisions=forced, cost_usd=cost,
-                    last_op="resummarize")
-
-        from .briefing import rebuild_briefing
-        rebuild_briefing(cfg, store)
+        metrics = RebuildMetrics()
+        cost = _process_decisions(forced, store, cfg, summarizer_obj, metrics)
+        _finalize_rebuild(
+            store, cfg, summarizer_obj,
+            decisions=forced, cost=cost, metrics=metrics,
+            last_op="resummarize",
+        )
         print(f"resummarize done. cost: ${cost:.2f}")
     return 0
+
+
+# ----- finalize stage (shared non-AI tail) ---------------------------------
+
+
+def _finalize_rebuild(
+    store: Store,
+    cfg: Config,
+    summarizer: Summarizer,
+    *,
+    decisions: list[Decision],
+    cost: float,
+    metrics: RebuildMetrics,
+    last_op: str,
+    duration_sec: float | None = None,
+) -> None:
+    """The non-AI tail shared by every rebuild entry point
+    (bootstrap / rebuild / resummarize): cascade rollups, fold
+    longer-memory, decay must-memorize, write state, rebuild the briefing.
+
+    This is the ``finalize`` stage of the P2 plan -> execute -> finalize
+    split (see ``docs/tiger-memory-rework.md``, "B1/B8 — implementation
+    design"): the in-session summarization path will call this same tail
+    once its sub-agents have written the per-session artifacts.
+    """
+    _cascade_all_rollups(store, cfg, summarizer)
+    _refresh_longer_memory(store, cfg, summarizer)
+    _apply_decay(store, cfg)
+    # Write state BEFORE building the briefing so the manifest's
+    # last_rebuild_at reflects THIS run, not the previous one.
+    _write_state(
+        store, cfg, decisions=decisions, cost_usd=cost,
+        duration_sec=duration_sec, last_op=last_op, metrics=metrics,
+    )
+    from .briefing import rebuild_briefing
+    rebuild_briefing(cfg, store)
+
+
+# ----- B1 stage-2: plan side (in-session sub-agent executor) ----------------
+
+
+def _sweep_staging_dir(store: Store) -> Path:
+    return store.root / ".sweep-staging"
+
+
+def plan_rebuild(
+    cfg: Config,
+    store: Store,
+    *,
+    max_sessions: int | None = None,
+) -> list[dict]:
+    """B1 stage-2 PLAN (non-AI): stage one collapsed prompt per flagged
+    transcript for the in-session sub-agent executor, and return the work
+    manifest.
+
+    For each ``SUMMARIZE_NEW`` / ``RE_SUMMARIZE`` decision (capped at
+    *max_sessions*), apply the P1.1 pre-filter, fill ``combined_summary.md``
+    with the clipped content, and write it to
+    ``<store>/.sweep-staging/<uuid>.prompt.md``. The sub-agent later reads
+    *that* file (so the bulky transcript never transits the driver's
+    context — B8), emits the bundle, and writes it back via
+    ``executor.ingest_collapsed_summary``. ADDENDUM is deferred (the
+    collapsed pass targets the 3-call new-session cost).
+
+    Returns the manifest items and persists ``.sweep-staging/manifest.json``.
+    """
+    store.init_layout()
+    adapters = _build_adapters(cfg)
+    records: list[SourceRecord] = []
+    for adapter in adapters:
+        if isinstance(adapter, DocsAdapter):
+            continue
+        records.extend(adapter.discover())
+    decisions = _decide(records, store, cfg, now=time.time())
+
+    staging = _sweep_staging_dir(store)
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    prompts_root = _prompts_root(cfg)
+    items: list[dict] = []
+    processed = 0
+    for d in decisions:
+        if d.action not in (SUMMARIZE_NEW, RE_SUMMARIZE):
+            continue
+        if max_sessions is not None and processed >= max_sessions:
+            break
+        rec = d.record
+        content = rec.content
+        if cfg.prefilter.enabled:
+            content = filter_transcript(
+                content,
+                drop_tool_results=cfg.prefilter.drop_tool_results,
+                drop_system_reminders=cfg.prefilter.drop_system_reminders,
+            )
+        prompt = _fill_prompt(
+            prompts_root / "combined_summary.md",
+            agent_name=cfg.agent.name,
+            short_max_words=cfg.budgets.short_summary_words,
+            detailed_max_words=cfg.budgets.detailed_summary_words,
+            memo_max_words=cfg.budgets.must_memorize_memo_words,
+            source=rec.source,
+            source_id=rec.source_id,
+            first_event_at=rec.first_event_at.isoformat(),
+            last_event_at=rec.last_event_at.isoformat(),
+            content=_clip(content, max_chars=cfg.budgets.max_prompt_content_chars),
+        )
+        prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        items.append({
+            "conversation_uuid": rec.conversation_uuid,
+            "source": rec.source,
+            "source_id": rec.source_id,
+            "first_event_at": rec.first_event_at.isoformat(),
+            "last_event_at": rec.last_event_at.isoformat(),
+            "raw_path": str(rec.raw_path),
+            "prompt_path": str(prompt_path),
+            "action": d.action,
+        })
+        processed += 1
+
+    (staging / "manifest.json").write_text(
+        json.dumps({"items": items}, indent=2), encoding="utf-8"
+    )
+    return items
 
 
 # ----- adapter / summarizer factories --------------------------------------
@@ -282,12 +404,16 @@ def _build_adapters(
             # claude-p sessions (no bridge attribution) as well.
             persona = s.fields.get("persona")
             persona = persona.strip() if isinstance(persona, str) and persona.strip() else None
+            # B4 — optional team qualifier; defaults None (name-only match).
+            team = s.fields.get("team")
+            team = team.strip() if isinstance(team, str) and team.strip() else None
             include_unattributed = bool(s.fields.get("include_unattributed", False))
             adapters.append(
                 ClaudeTranscriptAdapter(
                     project_path=Path(s.fields["project_path"]),
                     threads_json=threads_json,
                     persona=persona,
+                    team=team,
                     include_unattributed=include_unattributed,
                     max_age_days=max_age_days,
                 )
@@ -354,37 +480,109 @@ def _decide(
 # ----- per-session processing ----------------------------------------------
 
 
+def _cap_reason(
+    processed: int,
+    spent_usd: float,
+    max_sessions: int | None,
+    max_usd: float | None,
+) -> str | None:
+    """Return why a rebuild should stop processing, or ``None`` to continue.
+
+    The cost/scope cap (P1.2 / Lever 1.4): a rebuild processes at most
+    ``max_sessions`` sessions, or stops once ``spent_usd`` reaches
+    ``max_usd`` — whichever trips first. ``None`` for either bound
+    disables it (the default for user-scoped bootstrap / resummarize).
+    """
+    if max_sessions is not None and processed >= max_sessions:
+        return "session_cap"
+    if max_usd is not None and spent_usd >= max_usd:
+        return "usd_cap"
+    return None
+
+
 def _process_decisions(
     decisions: list[Decision],
     store: Store,
     cfg: Config,
     summarizer: Summarizer,
+    metrics: RebuildMetrics | None = None,
+    *,
+    max_sessions: int | None = None,
+    max_usd: float | None = None,
 ) -> float:
     """Run the summarizer for each decision and write archive/short.
 
     Returns total cost in USD — from ``summarizer.cost_so_far`` when
     the backend reports real numbers (Anthropic does), or a rough
     char-count heuristic for backends that don't (MockSummarizer reports 0).
+
+    The transcript pre-filter (P1.1) runs once per record here, *before*
+    any summarize call, so all of short/detailed/addendum/extractor reuse
+    the same de-noised content. When *metrics* is supplied, the raw vs.
+    filtered char counts and the per-session call count are accumulated
+    into it for the rebuild's ``state.json`` snapshot.
+
+    ``max_sessions`` / ``max_usd`` are the P1.2 cost/scope cap: once
+    either trips we stop *before* starting the next session, leaving the
+    remainder unprocessed. Those records simply keep no archive, so the
+    next rebuild's ``_decide`` re-emits them — resumability with no extra
+    state. Both default ``None`` (uncapped) for the user-scoped paths.
     """
     cost_at_start = summarizer.cost_so_far
     heuristic_fallback = 0.0
     rows = mm.load(store)
     today = datetime.now(timezone.utc).date().isoformat()
+    processed = 0
     for d in decisions:
         if d.action == SKIP_ACTIVE or d.action == SKIP_CLEAN:
             continue
+        reason = _cap_reason(
+            processed,
+            summarizer.cost_so_far - cost_at_start,
+            max_sessions,
+            max_usd,
+        )
+        if reason is not None:
+            if metrics is not None:
+                metrics.note_capped(reason)
+            log.info(
+                "tiger-memory rebuild cap hit (%s) after %d session(s); "
+                "deferring the rest to the next rebuild",
+                reason, processed,
+            )
+            break
         rec = d.record
+        raw_chars = len(rec.content)
+        if cfg.prefilter.enabled:
+            rec = replace(
+                rec,
+                content=filter_transcript(
+                    rec.content,
+                    drop_tool_results=cfg.prefilter.drop_tool_results,
+                    drop_system_reminders=cfg.prefilter.drop_system_reminders,
+                ),
+            )
+        filtered_chars = len(rec.content)
         try:
             if d.action == ADDENDUM:
                 _write_addendum(store, cfg, summarizer, rec)
                 heuristic_fallback += _approx_cost(cfg, rec.content,
                                                    n_short=1, n_detailed=0)
-            else:  # SUMMARIZE_NEW or RE_SUMMARIZE
+                candidates = _extract_must_memorize(cfg, summarizer, rec)
+                calls = 2  # short + extractor
+            elif cfg.collapse.enabled:  # SUMMARIZE_NEW / RE_SUMMARIZE, collapsed
+                candidates, calls = _write_session_collapsed(
+                    store, cfg, summarizer, rec
+                )
+                heuristic_fallback += _approx_cost(cfg, rec.content,
+                                                   n_short=1, n_detailed=1)
+            else:  # SUMMARIZE_NEW / RE_SUMMARIZE, legacy 3-call
                 _write_short_and_archive(store, cfg, summarizer, rec)
                 heuristic_fallback += _approx_cost(cfg, rec.content,
                                                    n_short=1, n_detailed=1)
+                candidates = _extract_must_memorize(cfg, summarizer, rec)
+                calls = 3  # short + detailed + extractor
 
-            candidates = _extract_must_memorize(cfg, summarizer, rec)
             rows, demoted = mm.merge_candidates(
                 rows,
                 candidates,
@@ -394,6 +592,13 @@ def _process_decisions(
             )
             if demoted:
                 mm.append_dropped(store, demoted)
+            processed += 1
+            if metrics is not None:
+                metrics.record_session(
+                    chars_raw=raw_chars,
+                    chars_filtered=filtered_chars,
+                    calls=calls,
+                )
         except Exception:
             log.exception(
                 "failed to process %s (%s)", rec.conversation_uuid, d.action
@@ -445,6 +650,24 @@ def _write_short_and_archive(
         prompt=detailed_prompt, max_words=cfg.budgets.detailed_summary_words
     )
 
+    return _write_short_archive_bodies(
+        store, cfg, summarizer.tag, rec, short_body, detailed_body
+    )
+
+
+def _write_short_archive_bodies(
+    store: Store,
+    cfg: Config,
+    summarizer_tag: str,
+    rec: SourceRecord,
+    short_body: str,
+    detailed_body: str,
+) -> int:
+    """Write the short + detailed-archive files for *rec*. Shared by the
+    legacy 3-call path, the collapsed single-call path, and the in-session
+    sub-agent ingest (B1 stage-2) so all emit identical on-disk artifacts.
+    Takes a *summarizer_tag* string (not a Summarizer) so the sub-agent
+    path — which has no Python summarizer object — can reuse it."""
     filename = Store.short_filename(rec.first_event_at, rec.conversation_uuid)
     short_path = store.paths.journal / filename
     archive_path = store.paths.archive / filename
@@ -456,13 +679,59 @@ def _write_short_and_archive(
         "source_id": rec.source_id,
         "first_event_at": rec.first_event_at.isoformat(),
         "last_event_at": rec.last_event_at.isoformat(),
-        "summarizer": summarizer.tag,
+        "summarizer": summarizer_tag,
     }
     archive_fm = {**short_fm, "type": "detailed_summary"}
 
     store.atomic_write(short_path, frontmatter.render(short_fm, short_body))
     store.atomic_write(archive_path, frontmatter.render(archive_fm, detailed_body))
     return 2
+
+
+def _write_session_collapsed(
+    store: Store,
+    cfg: Config,
+    summarizer: Summarizer,
+    rec: SourceRecord,
+) -> tuple[list[mm.Row], int]:
+    """Collapsed single-pass summarize (P1.3): one call emits short +
+    detailed + must-memorize. Falls back to the legacy 3-call path on a
+    ``CollapseParseError`` so a malformed response never corrupts the
+    store. Returns ``(must_memorize_candidates, n_calls)`` — ``n_calls``
+    is 1 on success, 4 on fallback (the spent collapse call plus 3).
+    """
+    prompts_root = _prompts_root(cfg)
+    prompt = _fill_prompt(
+        prompts_root / "combined_summary.md",
+        agent_name=cfg.agent.name,
+        short_max_words=cfg.budgets.short_summary_words,
+        detailed_max_words=cfg.budgets.detailed_summary_words,
+        memo_max_words=cfg.budgets.must_memorize_memo_words,
+        source=rec.source,
+        source_id=rec.source_id,
+        first_event_at=rec.first_event_at.isoformat(),
+        last_event_at=rec.last_event_at.isoformat(),
+        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars),
+    )
+    # One generous cap covering both bodies; per-section budgets are stated
+    # in the template itself.
+    max_words = (
+        cfg.budgets.short_summary_words + cfg.budgets.detailed_summary_words + 100
+    )
+    raw = summarizer.summarize(prompt=prompt, max_words=max_words)
+    try:
+        short_body, detailed_body, mm_section = parse_collapsed(raw)
+    except CollapseParseError:
+        log.warning(
+            "collapsed summary parse failed for %s; falling back to 3-call path",
+            rec.conversation_uuid,
+        )
+        _write_short_and_archive(store, cfg, summarizer, rec)
+        return _extract_must_memorize(cfg, summarizer, rec), 4
+    _write_short_archive_bodies(
+        store, cfg, summarizer.tag, rec, short_body, detailed_body
+    )
+    return mm.parse_extractor_output(mm_section), 1
 
 
 def _write_addendum(
@@ -793,6 +1062,7 @@ def _write_state(
     cost_usd: float,
     duration_sec: float | None = None,
     last_op: str = "rebuild",
+    metrics: RebuildMetrics | None = None,
 ) -> None:
     counts = {"active": 0, "clean": 0, "dirty": 0, "frozen": 0}
     for d in decisions:
@@ -824,6 +1094,8 @@ def _write_state(
         "total_cost_usd": prev_total + cost_usd,     # running total since bootstrap
         "last_bootstrap_cost_usd": bootstrap_cost,
     }
+    if metrics is not None:
+        payload["metrics"] = metrics.as_dict()
     store.write_state(payload)
 
 
