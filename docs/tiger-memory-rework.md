@@ -589,6 +589,14 @@ returns a decision without doing any AI work itself:
    per-store lock serialises writes downstream, and per-persona atomic
    commits bound redundant work; a hard `O_EXCL` lock can harden it later
    if contention is observed.
+   - **Run lifetime bound (hardened 2026-06-07).** A sweep *run* spans
+     several wakes (cap → `release_sweep_claim` → resume), and `progress`
+     carries the already-done personas across them. To stop an abandoned
+     run (team silent past the floor mid-sweep) from skipping a now-stale
+     persona, `try_claim_sweep` stamps `run_started_at` on a run's first
+     claim and, on a later claim whose in-flight run is older than
+     `floor_hours`, treats it as abandoned → clears `progress` + restarts
+     the run. `mark_sweep_complete` clears `run_started_at` too.
 3. **Per-wake cap.** Cap personas-per-wake (default **N** = small) so a
    large backlog spreads across several wakes; reuse the P1.2
    `_cap_reason` per-session cap *inside* each persona's rebuild.
@@ -1055,3 +1063,20 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   stack; P3 measurement + lean-core; no regressions, 100% cov at every
   commit). **Remaining follow-up (new task):** activate + live-verify the
   in-session trigger per the protocol doc's "Wiring + status".
+- **2026-06-07 — critique & harden pass (5 iters, Anzai).** A focused
+  review of the 15 rework commits before push (separate journal task).
+  Fixes: (i1) **sweep run-lifetime bound** — `run_started_at` so an
+  abandoned partial sweep can't skip a stale persona (B3 "no persona left
+  behind"); (i2) **line-anchored `parse_collapsed`** — an `@@`-marker
+  echoed inline from an untrusted transcript can no longer silently
+  mis-split a bundle; (i3) **`ingest-summary` cleans up the consumed
+  staged prompt** (less transcript content at rest) + documented the
+  must_memorize per-persona serial-ingest constraint; (i4) **pinned P3
+  recall-safety** with a test (the lean-core diet cannot drop
+  must_memorize/longer_memory or locked rows — verified by construction).
+  Verified-no-change: cost/scope cap bounds spend (no unbounded loop),
+  metrics/logs are content-free, combined-prompt parity, `.sweep-staging`
+  inert w.r.t. store reads. Each iteration: a severity-ranked
+  `artifacts/critique-NN.md`, 100% line+branch coverage held, `anzai:`
+  commit, **no push**. See `artifacts/summary.md` for the full change list
+  + the remaining pre-push recommendations.
