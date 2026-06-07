@@ -2,9 +2,9 @@
 
 > **Status:** Draft / spec phase. No code yet. This is the decision
 > scaffold we iterate on before implementation.
-> **Date:** 2026-06-05.
+> **Date:** 2026-06-05 (rounds 1-2) · 2026-06-06 (round 3).
 > **Decision-makers:** Operator + Anzai.
-> **Thread:** Slack DM 2026-06-05 (Operator ↔ Anzai).
+> **Thread:** Slack DM 2026-06-05 → 2026-06-06 (Operator ↔ Anzai).
 >
 > This document captures intent, not shipped behavior. Specific
 > numbers cited from the current implementation (call counts, config
@@ -55,6 +55,43 @@ re-auth the spawned summarizer. The summarization must move *into* the
 interactive session — the agent summarizes transcripts as itself, in
 its own turns, the same way compile works.
 
+## Design principle: vendor-neutral at every AI touch-point
+
+The memory system must not hard-bind to one AI vendor (Claude /
+Anthropic). Treat the vendor as pluggable wherever AI — or
+vendor-shaped state — appears:
+
+- **Summarizer backend** — already pluggable via the `Summarizer`
+  base + `register_summarizer` registry
+  ([`tiger-memory.md`](tiger-memory.md), "Adding a new summarizer
+  vendor"). Keep that contract; the rework must not reach around it.
+- **In-session summarization** (B1) — express it as a *vendor-neutral
+  protocol* the interactive driver executes, the way the journal's
+  `OPERATING.md` is vendor-neutral. "Adopt the summarizer role and
+  emit the markdown" is a generic instruction; any interactive agent
+  that can read and write files can run it. No Claude-Code-specific
+  mechanics in the contract.
+- **Isolation strategy** — *how* the summarization contract gets a
+  bounded context to run in (so it does not crowd the driver) is a
+  swappable per-vendor adapter, kept separate from the contract itself.
+  `subagent` — a vendor sub-agent with its own context window — is the
+  strategy we build (see B8); `fresh_session` / `inline_mapreduce` /
+  `api_spawn` are other shapes a different vendor could register. The
+  *contract* — produce {short, detailed, must-memorize}, validate,
+  write to the store, return a short confirmation — does not change when
+  the strategy does.
+- **Transcript sources** — reading a vendor's transcript is inherently
+  vendor-specific; keep it behind the existing `sources/` adapter
+  interface (`claude_code` is one adapter; others plug in).
+- **Billing model** — state the *principle* generically: "AI work
+  rides the human's interactive session; autonomous/programmatic
+  spawns are the metered path." That maps onto any vendor's
+  subscription-vs-API split, not only Anthropic's.
+
+**Litmus test:** swapping the AI vendor should touch *adapters and
+config* — never the lifecycle, store, briefing, roster, or identity
+logic.
+
 ## The core reframe: bookkeeping vs summarization
 
 A `tiger-memory rebuild` today does two very different kinds of work:
@@ -70,6 +107,15 @@ job, or systemd unit"* (`subscription-backend.md:140-143`). Memory's
 bookkeeping half fits that mold unchanged. Only the summarization half
 needs to move onto the in-session rail.
 
+**One caveat on that "free" bookkeeping:** `must_memorize` **decay
+must be wall-clock-anchored** — scored from each memo's own timestamp
+against *now*, never per-rebuild-invocation. With bursty, irregular
+sweeps (a persona rebuilt after a three-week gap; roster sweeps every
+24h), per-invocation decay would distort priorities badly.
+*(P0-verified — already satisfied: decay is wall-clock-anchored AND
+idempotent across bursty rebuilds, `must_memorize.py:148-160`. Nothing
+to build; the invariant just has to be preserved. See P0 findings.)*
+
 ---
 
 ## Goal A — leanness (Levers 1 & 2)
@@ -79,7 +125,8 @@ needs to move onto the in-session rail.
 1. **Collapse the per-session calls.** Today the lifecycle issues
    ~3 summarize calls per new session — short summary, detailed
    archive, must-memorize extraction — *all reading the same
-   transcript* *(verify exact count in `lifecycle.py` during P0)*.
+   transcript* *(P0-verified: exactly 3 per new session, 2 per addendum,
+   and uncached — `lifecycle.py:383,387`; see P0 findings)*.
    Collapse them into **one structured pass** that emits all three
    sections, or at minimum share a cached transcript prefix across
    them. Target: ~3× fewer calls per session.
@@ -97,6 +144,15 @@ needs to move onto the in-session rail.
    see the TODO at `summarizers/anthropic.py:32-35` ("cost cap + scope
    cutoff + output validation"). A rebuild must never be able to run
    away; it processes at most *N* sessions per invocation and stops.
+
+**Note on sequencing.** Once summarization moves in-session (B1), the
+"3× same transcript" waste vanishes *for free* — the driver loads the
+transcript into its context once and emits all three artifacts from
+that single read. So on the in-session path Lever 1 reduces to the
+parts that survive the move: **transcript pre-filter**, the
+**cost/scope cap**, and **context-budget tiering**. The "collapse
+calls / prefix-cache" sub-lever only matters for the legacy API-spawn
+path we keep as an opt-in (see Non-goals).
 
 ### Lever 2 — read-side context diet (make *reading* memory cheaper)
 
@@ -129,9 +185,36 @@ This is the hard part, and the part with the multi-persona trap.
 
 Per the billing fact above: a memory-rebuild **skill** (human-
 triggered, like drive-journal) runs the non-AI bookkeeping in Python,
-then has the **interactive session summarize the flagged transcripts
-itself** — adopt the summarizer role by prompt-prepending, emit the
-markdown, write it to the store. No `claude -p` spawn. API budget zero.
+then summarizes the flagged transcripts on the **subscription rail
+instead of the API rail**. The concrete mechanism is the `subagent`
+isolation strategy (B8): the interactive session **delegates each
+flagged transcript to an isolated summarizer sub-agent**, which adopts
+the summarizer role, emits the markdown, **writes it straight to the
+store**, and returns only a short confirmation. No programmatic
+`claude -p` spawn — a sub-agent of the interactive session rides the
+subscription. API budget zero.
+
+Three properties matter here:
+
+- **Vendor-neutral.** "Adopt the summarizer role, emit the markdown,
+  write to the store" is a protocol *any* interactive agent with a
+  sub-agent (or equivalent isolated context) can run — not a
+  Claude-specific mechanism (see the vendor-decoupling principle and
+  the contract-vs-strategy seam in B8).
+- **It subsumes Lever 1's biggest waste.** Each transcript is loaded
+  into a single bounded context *once* — the summarizer sub-agent's —
+  and all three artifacts (short / detailed / must-memorize) come out of
+  that one read; the 3×-resend simply disappears. B1 and Lever 1
+  reinforce each other rather than compete.
+- **Self-validating, in two layers.** The sub-agent validates its own
+  emission — all sections present, within budget — *before* writing, and
+  fails loudly rather than corrupting the store. After it returns, the
+  parent's non-AI bookkeeping does a cheap **structural** re-check
+  (files present, frontmatter parses, within budget) — defense in depth
+  at zero AI-context cost. On failure the transcript stays flagged and
+  the summarized-watermark (B5) does **not** advance, so the next sweep
+  retries it. Together these are the "output validation" half of the
+  `anthropic.py:32-35` TODO.
 
 Open: whether this is its own skill or folded into the drive-journal
 wake-up sweep (see Open Questions).
@@ -161,19 +244,48 @@ active speaker.**
 
 ### B3 — Roster sweep, piggybacked on the human session
 
-A **team memory sweep** loops over every persona in the roster
-(`configs/personas.yaml`) and rebuilds each store in turn. This is
-where "no persona left behind" is guaranteed *by construction* — it
-does not matter who has been talking.
+A **team memory sweep** enumerates the team roster and rebuilds, in
+turn, each persona **that has a memory store configured** — skipping
+personas with no memory config. Two things were pinned in P0, both now
+resolved: the **canonical roster source** — *(P0-verified:
+`configs/personas.yaml` is authoritative, no competing notion;
+`workflow_runner/compile/pipeline.py:218`, `slack_bridge/multi.py:178`)*
+— and the **persona → tiger-memory-config resolution** — *(P0-verified:
+convention-based — persona `X` maps to
+`<team>/memories/X/tiger-memory.config.yaml`, `slack_bridge/multi.py`;
+the config's `agent.name` must equal the roster name. No new registry
+needed.)* With those, "no persona left behind" is guaranteed *by
+construction* — it does not matter who has been talking.
 
-It piggybacks on a human-initiated interactive session (the
-drive-journal wake-up, or any interactive driver start), gated by:
+It piggybacks on a human-initiated interactive session, gated by:
 
+- **Configurable trigger set.** Which session starts fire the sweep is
+  a config knob. `drive_journal` (the interactive driver) always
+  qualifies; `slack_bridge_dm` is **opt-in, default off**. Rationale:
+  a slack-bridge DM spawns `claude -p` programmatically, which may be
+  API-metered in a given deployment (see the billing fact). Default-off
+  keeps the sweep strictly subscription-safe out of the box; an
+  operator whose bridge is subscription-authed — or who accepts the
+  API cost — flips it on.
+- **Atomic sweep claim, not just a watermark.** Two interactive
+  sessions can clear the staleness floor in the same instant. The sweep
+  must *claim* the run atomically (a team-scoped lease, reusing the
+  drive-journal heartbeat-as-soft-lease pattern) so only one session
+  sweeps; the other sees a fresh claim and skips. A per-store lock
+  alone is not enough — it serializes writes but still lets both
+  sessions do the redundant work.
 - a **team `last_sweep_at` watermark** + a staleness floor (e.g. once
-  per 24h) so it does not re-run every invocation;
-- a **store lock** so concurrent sessions do not collide;
+  per 24h), stored in team-scoped state *(P0: pin the exact
+  location)*, so the sweep does not re-run every invocation;
 - a **per-wake work cap** so a large backlog spreads across several
-  wakes instead of one giant turn.
+  wakes instead of one giant turn;
+- **path-contained writes** — the sweep writes only within each
+  persona's own store dir;
+- **resumable, not all-or-nothing** — a human can end the session (or
+  `/compact` can fire) mid-sweep. Commit each persona's rebuild
+  atomically and track **per-persona** progress, so an interrupted
+  sweep resumes where it stopped rather than redoing or skipping work;
+  the team watermark advances only for personas actually completed.
 
 The waking persona refreshes **its own** store promptly (fresh for
 *this* conversation); the roster catch-up for idle personas runs
@@ -201,9 +313,15 @@ The tiger-memory source filter matches on the **(team, name) pair**,
 not the name alone. Single source of truth for `team` = the team's
 `configs/personas.yaml` roster.
 
-**Backward compat:** a bare string / `name`-only entry is read as
-`{team: <from config>, name: <persona>}`, so existing `threads.json`
-files keep working.
+**Backward compat (two existing shapes to absorb).** Today's entries
+are `{thread_ts: {session_id, persona}}` where `persona` is a bare
+name; a pre-routing legacy entry is a bare `"session_id"` string with
+no persona at all (see [`tiger-memory.md`](tiger-memory.md),
+"Per-persona filtering"). The reader upgrades a bare `persona` **name**
+to `{team: <from config>, name}`, and continues to treat a
+no-persona / pre-routing entry as *unattributed* (excluded under strict
+mode, included with `include_unattributed`). Existing `threads.json`
+files keep working unchanged.
 
 This is mostly defense-in-depth — store dirs and configs are already
 team-scoped (they live in the team folder), and transcripts are keyed
@@ -221,8 +339,13 @@ the three-week-old chat.**
 
 So the real safeguard is not the trigger — it is a **"summarized"
 watermark**: never prune (or never strict-exclude) a persona
-attribution until its session has been folded into memory. *(P0 task:
-verify whether anything prunes `threads.json` today.)*
+attribution until its session has been folded into memory. *(P0-verified:
+nothing prunes `threads.json` today — `ThreadStore.set()` is
+append/update-only, no `del`/`pop`/TTL, and the migrator copies every
+key, `persistence.py:131-148`. So B5's loss scenario cannot occur on
+current code; this safeguard is **preventive** — an invariant to guard
+should pruning ever be added. One nuance: `set()` can overwrite an
+existing thread's persona (re-attribution) but cannot drop it.)*
 
 ### B6 — Residual risk: catch-up burst after long silence
 
@@ -235,39 +358,191 @@ actual task. Mitigations, layered:
   wakes;
 - the **cost/scope cap** (Lever 1.4) is the hard backstop.
 
+### B7 — In-session summarization is a new trust boundary
+
+The spawned summarizer had hard isolation — its own subprocess, its own
+cwd (see the feedback-loop note at `summarizers/anthropic.py:23-36`).
+The `subagent` strategy (B8) restores most of it: a separate context
+window plus tool access we can scope down. But the summarizer still
+reads untrusted transcript text and still runs inside the team's trust
+domain, so three hazards remain to design against:
+
+- **Transcripts are untrusted input.** A past conversation may contain
+  text that reads as an instruction. Pulled into the summarizer's
+  context, that is a prompt-injection surface. The summarizer must treat
+  transcript content as *data to be summarized* — quoted, fenced,
+  clearly delimited — never as instructions.
+- **Constrain the summarizer sub-agent.** Give it only what the
+  contract needs — **Read** (the transcript source + the persona's
+  store), **Write** (scoped to that store path), and **nothing else**:
+  no shell, no network, no writes outside the store — plus
+  summarizer-only instructions. A narrow tool surface both blunts the
+  injection risk above and keeps a malformed run from touching anything
+  beyond its target.
+- **Don't let upkeep turns become a new source.** The spawned
+  summarizer routed *its own* transcripts to a throwaway cwd-slug so the
+  next rebuild would not re-ingest them (`anthropic.py:23-36`). The
+  sub-agent strategy needs the analogous guarantee. *(P0 finding:* the
+  adapter — `sources/claude_transcript.py`, kind `claude_code` — globs
+  **every** `*.jsonl` in the project dir, filtered only by mtime and the
+  persona filter, `:89-128`. A summarizer sub-agent's transcript is
+  *unattributed*, so the **strict multi-persona default**
+  (`persona` set, `include_unattributed=false`) already **excludes** it
+  — the target deployment is safe. But **single-tenant** (`persona=None`)
+  or `include_unattributed=true` would **re-ingest** it. The adapter
+  inspects no `isSidechain`/`parentUuid` marker. **P2 fix:** add an
+  explicit sidechain/sub-agent skip as defense-in-depth, independent of
+  the persona filter. **Still needs a runtime check:** whether a
+  sub-agent writes a *separate* glob-able `.jsonl` at all, or nests its
+  turns as `isSidechain` entries inside the parent session file.*)*
+
+### B8 — Context pressure: resolved by the `subagent` isolation strategy
+
+This *was* the sharpest tension in the design — and it sat **between the
+two goals themselves**. The spawned summarizer got a **fresh context
+window per call**: it read one transcript and exited. A naive in-session
+summarization — the driver doing it in *its own* turns — would summarize
+*on top of* everything the driver is already holding (its briefing, its
+current journal task), crowding the window and degrading the human's
+real work, especially on large transcripts (the 120k-char ceiling exists
+for a reason). Subscription-friendly but context-hostile.
+
+**Resolution — delegate to an isolated sub-agent.** A vendor sub-agent
+(Claude Code's Task tool) runs in its **own context window**, can
+**write files to the store directly**, and returns **only a short
+confirmation** to the parent. That recovers the fresh-window property
+the old `claude -p` spawn had *and* keeps the work on the subscription
+rail — so we no longer trade context for billing. The tension dissolves.
+
+**Operator-verified by probe (2026-06-06).** A Claude Code sub-agent was
+given a read + a file-write and asked to return a one-line confirmation.
+It (a) ran on the **subscription, not the API**, (b) **wrote the file to
+disk** itself, and (c) returned **only** the short confirmation — the
+bulky output never transited the parent's context. Direct store-write +
+short-return is confirmed to work. *(This is a Claude Code property,
+verified in this deployment; other vendors verify their own — which is
+exactly why isolation is a* strategy *adapter, not a baked assumption.)*
+
+**Contract vs. strategy (the vendor-decoupling seam).** Keep two things
+separate:
+
+- The **summarization contract** is vendor-neutral and shared: given a
+  flagged transcript + the persona's store config, produce
+  {short, detailed, must-memorize}, self-validate, write to the store,
+  return a short confirmation (or a structured failure).
+- The **isolation strategy** is a swappable per-vendor adapter:
+  `subagent` is the one we build. `fresh_session`, `inline_mapreduce`,
+  and the legacy `api_spawn` are other shapes a different vendor could
+  register without touching the contract. **Scope: `subagent` only for
+  now** — we are not building fallbacks for vendors that lack sub-agents
+  yet.
+
+**What this does to the earlier levers.** Because the sub-agent's window
+is *separate from the driver's*, the transcript pre-filter (Lever 1.2)
+and the per-wake cap (B3) are **no longer load-bearing for protecting
+the driver's window** — they now bound the *sub-agent's* context and the
+*total quota per wake*, which is ordinary hygiene rather than a
+feasibility gate. The budget question (open-Q4) reframes from "how much
+of the driver do we spend?" to "how many sub-agent spawns per wake?" —
+answered by the per-wake cap.
+
+**Oversized-transcript fallback.** If a single transcript overflows even
+the sub-agent's own window, the fallback stays isolated from the driver:
+**map-reduce inside the strategy** — chunk-summarize the transcript (one
+bounded pass per chunk), then reduce the chunk summaries into the three
+artifacts — all within sub-agent context, never the driver's. The
+must-memorize extraction runs at reduce time over the chunk summaries;
+the quality trade-off of chunking is accepted only on the overflow path.
+
 ---
 
 ## Open questions (need Operator input)
 
-1. **Slack-bridge billing.** The drive-journal interactive session is
-   unambiguously subscription. Is a **slack-bridge DM session**
-   (which spawns `claude -p` programmatically) subscription-billed or
-   API-billed in your deployment? This decides whether DM wake-ups are
-   a valid subscription trigger for the sweep, or only the
-   drive-journal interactive session is. **I will not bake an
-   assumption here.**
+1. **Slack-bridge billing — RESOLVED into config (see B3).** The
+   trigger set is a config knob; `slack_bridge_dm` defaults **off**, so
+   the sweep is subscription-safe out of the box. The underlying
+   billing fact (is *your* bridge subscription- or API-authed?) still
+   informs whether you flip it on — but the design no longer needs the
+   answer to proceed. Remaining input wanted: your default preference.
 2. **Skill placement.** Memory sweep as its **own** human-triggered
    skill, or **folded into** the drive-journal wake-up sweep so users
    get it for free without remembering a separate command?
 3. **Staleness floor & per-wake cap values.** Starting points to tune
    (e.g. 24h floor, cap of N sessions/wake).
-4. **In-session summarization context budget.** Summarizing in-session
-   loads transcripts into the live session's context — how much of a
-   driver session are we willing to spend on memory upkeep?
+4. **In-session summarization context budget — RESOLVED (see B8).** The
+   `subagent` isolation strategy runs summarization in a *separate*
+   context window, so memory upkeep no longer spends the driver's
+   context at all. The budget question reduces to "how many sub-agent
+   spawns per wake," which the per-wake cap (B3) already governs.
+   Operator-verified by probe (2026-06-06): a Claude Code sub-agent runs
+   on the subscription, writes to the store directly, and returns only a
+   short confirmation.
+
+## P0 verification findings (2026-06-06)
+
+Code survey of `src/tigerharness/tiger_memory/` and `slack_bridge/` on
+`main`. Each `(verify in P0)` fact, resolved with file:line:
+
+| Claim | Verdict | Evidence |
+|---|---|---|
+| ~3 summarize calls per new session | **Confirmed** — 3 per new (short + detailed + must-memorize), 2 per addendum | `lifecycle.py:383,387,429,444,522` |
+| Transcript re-sent per call; no prefix cache | **Confirmed (worse than implied)** — each call re-clips and re-sends `rec.content`; backend is one-shot, no `cache_control` | `lifecycle.py:427,442,519`; `anthropic.py:6-7,78-105` |
+| Defaults 400 / 60 / 120k chars; window 2/7/28/90; decay 7/14/28; owner_explicit locked | **All confirmed in code**, not just docs | `config.py:65,71,77,104-107,82-85` |
+| must_memorize decay is wall-clock-anchored | **Confirmed — and already idempotent across bursty rebuilds** | `must_memorize.py:148-160` |
+| Nothing prunes `threads.json` | **Confirmed** — append/update-only; no `del`/`pop`/TTL; migrator copies every key | `persistence.py:131-148`; `migrate.py:96-107` |
+| `configs/personas.yaml` is the authoritative roster | **Confirmed — no competing source** | `workflow_runner/compile/pipeline.py:218`; `slack_bridge/multi.py:178` |
+| Sub-agent transcript could be re-ingested | **Open risk, gated by the strict filter** — see note | `sources/claude_transcript.py:89-128` |
+
+What this moved in the design:
+
+- **The 3× waste is real and uncached** — confirms the B1 premise. No
+  prefix-cache exists to lean on today, so the in-session *read-once*
+  (B1) is the actual win, not call-collapsing on the API path.
+- **Rollups are cheap** — 1 summarize call per *dirty* daily/weekly/
+  monthly period (`lifecycle.py:565,617,668`), reading prior summaries,
+  not transcripts. The per-session 3× dominates cost.
+- **Decay needs no new code** — the wall-clock anchor advances by exactly
+  `points*rate` days (`must_memorize.py:159-160`); a three-week gap
+  decays identically whether swept once or daily. Preserve, don't build.
+- **B5 is preventive, not corrective** — nothing deletes attributions
+  today, so the loss scenario cannot occur on current code. Re-attribution
+  (overwriting a thread's persona) is possible; deletion is not.
+- **Roster → config is convention** — enumerate `personas.yaml`, resolve
+  each store at `memories/<persona>/tiger-memory.config.yaml`. The B3
+  sweep needs no new registry.
+- **B7 is the one live risk** — the strict multi-persona default already
+  excludes a summarizer sub-agent's unattributed transcript, but
+  single-tenant / permissive mode would re-ingest it, and the adapter
+  reads no sidechain marker. P2 adds an explicit sidechain skip; a
+  runtime check (does a sub-agent even emit a separate `.jsonl`?) stays
+  open.
+
+Read-side baseline (`teams/Shohoku/memories/`): briefings run ~575–1,830
+words (~1.5k–4.6k tokens) today; for Anzai, `must_memorize.md` is 820 of
+1,366 briefing words (~60%) — the pinned core dominates, exactly Lever
+2's target. Per-call transcript input is capped at `max_prompt_content_chars` =
+120k chars (~30k tokens); a new session's three calls send 120k + 120k +
+60k chars (the extractor clips to half, `lifecycle.py:519`) ≈ 300k chars
+/ ~75k tokens of transcript input worst-case — before prompt scaffolding
+and output, and re-sent uncached. Tokens-per-rebuild on real transcripts
+needs an instrumented run — deferred to the P1/P2 measurement harness.
 
 ## Phasing
 
-- **P0 (this doc).** Lock the design. Measure the current footprint as
-  a baseline (calls per rebuild, tokens per call, briefing size).
-  Verify the *(verify in P0)* facts. Confirm `threads.json` pruning
-  behavior (B5).
-- **P1 — Lever 1 (build-side cuts).** Collapse per-session calls +
-  prefix cache + transcript pre-filter + cost/scope cap. Biggest quota
-  win, lowest risk, no change to what the agent reads. Done first so
-  later phases inherit a cheaper rebuild.
+- **P0 (this doc) — DONE (2026-06-06).** Design locked; every
+  `(verify in P0)` fact resolved against source (see **P0 verification
+  findings** above). Remaining runtime items, carried into P2: a
+  tokens-per-rebuild measurement on real transcripts, and the
+  sub-agent-transcript runtime check (B7).
+- **P1 — Lever 1 (build-side cuts).** Transcript pre-filter +
+  cost/scope cap + context-budget tiering — the parts that survive the
+  move to in-session. (Collapse/prefix-cache applies only to the legacy
+  API-spawn path; it is subsumed by P2's in-session read-once.) Lowest
+  risk, no change to what the agent reads.
 - **P2 — Lever 3 (subscription-safe multi-persona).** In-session
-  summarization skill (B1) + roster sweep (B3) + team-qualified IDs
-  (B4) + the summarized-watermark safeguard (B5).
+  summarization skill via the `subagent` isolation strategy (B1, B8) +
+  roster sweep (B3) + team-qualified IDs (B4) + the summarized-watermark
+  safeguard (B5).
 - **P3 — Lever 2 (read-side diet).** Lean core briefing + on-demand
   drill, measured before/after.
 
@@ -280,3 +555,60 @@ actual task. Mitigations, layered:
   runs and *how much* it costs — not the store's shape.
 - Cross-persona memory sharing. Each persona still reads only its own
   store.
+
+## Revision log
+
+- **2026-06-05 — round 1 critique (Anzai).** Caught and folded in:
+  (1) in-session summarization *subsumes* Lever 1's 3×-resend waste —
+  connected the levers and re-scoped P1; (2) the roster sweep needs an
+  *atomic claim*, not just a per-store lock, or two sessions both sweep
+  (B3); (3) in-session summarization is a new **trust boundary** —
+  transcript-as-untrusted-input and the upkeep-turn feedback loop (B7);
+  (4) promoted **vendor decoupling** to an explicit design principle
+  with a litmus test. Resolved open-question #1 into a configurable,
+  default-off slack-bridge trigger.
+- **2026-06-05 — round 2 critique (Anzai).** Caught and folded in:
+  (1) the central tension — in-session summarization is
+  **subscription-friendly but context-hostile**; makes the pre-filter
+  and per-wake cap load-bearing, with chunking as fallback (B8);
+  (2) `must_memorize` decay must be **wall-clock-anchored**, or bursty
+  sweeps distort priorities (core-reframe caveat); (3) the sweep must
+  be **resumable** — atomic per-persona commit, per-persona progress
+  (B3); (4) the in-session emission must **self-validate** before
+  writing to the store (B1); (5) made the **roster → config
+  resolution** explicit and verify-gated (B3); (6) corrected the
+  `threads.json` backward-compat to absorb both existing entry shapes
+  (B4). Operator confirmed `slack_bridge_dm` opt-in, default off.
+- **2026-06-06 — round 3 (Anzai + Operator).** Resolved B8's central
+  tension. The `subagent` isolation strategy runs summarization in an
+  isolated context window that bills to the **subscription** (not the
+  API), writes to the store directly, and returns only a short
+  confirmation — recovering the spawned summarizer's fresh window
+  *without* its API cost. **Operator-verified by probe.** Folded in:
+  (1) the **contract-vs-strategy seam** — a vendor-neutral summarization
+  contract plus `subagent` as one swappable isolation strategy (the only
+  one we build for now) — promoted to a vendor-decoupling lever;
+  (2) B1 reworked to *delegate* to the sub-agent, with two-layer
+  validation (sub-agent self-validates, parent structurally re-checks)
+  and watermark-on-failure retry; (3) B7 gains a **constrain-the-
+  sub-agent** hazard (Read transcript+store / Write store-only / no
+  shell or network) and reframes the feedback-loop worry as a sub-agent
+  verify item; (4) open-Q4 resolved — upkeep no longer spends the
+  driver's context; (5) pre-filter + per-wake cap **downgraded** from
+  feasibility gate to hygiene; (6) map-reduce kept as the oversized-
+  transcript fallback.
+- **2026-06-06 — P0 verification pass (Anzai).** Surveyed
+  `tiger_memory/` + `slack_bridge/` and resolved every `(verify in P0)`
+  fact against source (new **P0 verification findings** section; inline
+  markers updated). Headlines: the 3×-per-session call count is real and
+  **uncached** (`anthropic.py` is one-shot, no `cache_control`) — so B1's
+  read-once is the genuine win; **decay is already wall-clock-anchored
+  and idempotent** across bursty rebuilds, nothing to build; **nothing
+  prunes `threads.json`**, so B5 is preventive not corrective;
+  **`configs/personas.yaml` is the sole authoritative roster** and
+  persona→store is a `memories/<persona>/tiger-memory.config.yaml`
+  convention; all config defaults confirmed in code. One live risk
+  remains — **B7 sub-agent re-ingestion**: the strict multi-persona
+  filter excludes it, but single-tenant/permissive mode would re-ingest,
+  and the adapter reads no sidechain marker (P2 fix + a runtime check
+  still open). Done on a `main`-based branch in an isolated worktree.
