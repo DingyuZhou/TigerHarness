@@ -488,6 +488,18 @@ middle to run inside an interactive session.
    short + archive + merges must-memorize **straight to the store**, and
    returns only a short confirmation — the bulky output never re-enters
    the driver's context (B8 fresh-window). API budget zero.
+   - **Write-back LANDED (s13, `executor.py`).** The bundle→store half is
+     `ingest_collapsed_summary(store, cfg, *, conversation_uuid, source,
+     source_id, first/last_event_at, bundle_text, raw_path)`: it
+     `parse_collapsed`s the bundle (raises `CollapseParseError` *before*
+     any write → store untouched on a malformed bundle, so the caller can
+     re-ask), writes short + archive via the shared
+     `_write_short_archive_bodies` (refactored to take a tag string so it
+     needs no Python `Summarizer`; tag = `subagent@v1`), and merges
+     must-memorize. The sub-agent runs this via a `tiger-memory` CLI so
+     parsing/writing stay in robust Python and the bundle never transits
+     the driver. **Still s14:** `plan_rebuild` (the manifest the sub-agent
+     reads) + the CLI wrapper + the OPERATING-style sub-agent contract.
 
 3. **finalize (non-AI, Python)** — `finalize_rebuild(cfg, store, manifest)`:
    the parent's **structural re-check** (B1 two-layer validation) over
@@ -986,3 +998,14 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   `tiger_memory` re-implements the roster read rather than importing the
   higher-layer `slack_bridge`. Full suite green (2938); 100% coverage.
   Next (s13): the sub-agent summarization executor.
+- **2026-06-07 — B3 slice c: executor write-back (Anzai).** Built
+  `tiger_memory/executor.py` `ingest_collapsed_summary` — the bundle→store
+  half of the in-session sub-agent path: parse the collapsed bundle
+  (raises before any write on malformed → store untouched), write
+  short+archive (refactored `_write_short_archive_bodies` to take a tag
+  string, `subagent@v1`, so no Python `Summarizer` is needed), merge
+  must-memorize (incl. the demote/append-dropped path). Reuses
+  `parse_collapsed` + the existing writers, so the sub-agent and the
+  legacy collapsed path emit identical artifacts. Full suite green (2942);
+  100% coverage (executor.py + lifecycle.py 100%). Next (s14):
+  `plan_rebuild` manifest + CLI wrapper + wiring the shared hook.

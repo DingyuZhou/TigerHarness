@@ -559,21 +559,23 @@ def _write_short_and_archive(
     )
 
     return _write_short_archive_bodies(
-        store, cfg, summarizer, rec, short_body, detailed_body
+        store, cfg, summarizer.tag, rec, short_body, detailed_body
     )
 
 
 def _write_short_archive_bodies(
     store: Store,
     cfg: Config,
-    summarizer: Summarizer,
+    summarizer_tag: str,
     rec: SourceRecord,
     short_body: str,
     detailed_body: str,
 ) -> int:
     """Write the short + detailed-archive files for *rec*. Shared by the
-    legacy 3-call path and the collapsed single-call path so both emit
-    identical on-disk artifacts."""
+    legacy 3-call path, the collapsed single-call path, and the in-session
+    sub-agent ingest (B1 stage-2) so all emit identical on-disk artifacts.
+    Takes a *summarizer_tag* string (not a Summarizer) so the sub-agent
+    path — which has no Python summarizer object — can reuse it."""
     filename = Store.short_filename(rec.first_event_at, rec.conversation_uuid)
     short_path = store.paths.journal / filename
     archive_path = store.paths.archive / filename
@@ -585,7 +587,7 @@ def _write_short_archive_bodies(
         "source_id": rec.source_id,
         "first_event_at": rec.first_event_at.isoformat(),
         "last_event_at": rec.last_event_at.isoformat(),
-        "summarizer": summarizer.tag,
+        "summarizer": summarizer_tag,
     }
     archive_fm = {**short_fm, "type": "detailed_summary"}
 
@@ -635,7 +637,7 @@ def _write_session_collapsed(
         _write_short_and_archive(store, cfg, summarizer, rec)
         return _extract_must_memorize(cfg, summarizer, rec), 4
     _write_short_archive_bodies(
-        store, cfg, summarizer, rec, short_body, detailed_body
+        store, cfg, summarizer.tag, rec, short_body, detailed_body
     )
     return mm.parse_extractor_output(mm_section), 1
 
