@@ -56,23 +56,33 @@ def test_plan_command_prints_manifest(tmp_path: Path, capsys) -> None:
     assert out["items"][0]["conversation_uuid"] == uid
 
 
+def _staged_prompt(tmp_path: Path, uid: str) -> Path:
+    return next((tmp_path / "memory").rglob(f"{uid}.prompt.md"))
+
+
 def test_ingest_summary_success(tmp_path: Path, capsys) -> None:
     cfg_path, uid = _setup(tmp_path)
     main(["--config", cfg_path, "plan"])
+    staged = _staged_prompt(tmp_path, uid)  # exists after plan
     with patch("sys.stdin", io.StringIO(_bundle())):
         rc = main(["--config", cfg_path, "ingest-summary", "--uuid", uid])
     assert rc == 0
     assert f"ingested {uid}" in capsys.readouterr().out
     # Store root has the agent slug appended (memory/t/); glob recursively.
     assert any(uid in f.name for f in (tmp_path / "memory").rglob("*.md"))
+    # The consumed staged prompt is cleaned up on success (no content at rest).
+    assert not staged.exists()
 
 
 def test_ingest_summary_malformed_bundle_exits_1(tmp_path: Path) -> None:
     cfg_path, uid = _setup(tmp_path)
     main(["--config", cfg_path, "plan"])
+    staged = _staged_prompt(tmp_path, uid)
     with patch("sys.stdin", io.StringIO("no markers")):
         rc = main(["--config", cfg_path, "ingest-summary", "--uuid", uid])
     assert rc == 1
+    # A malformed bundle keeps the staged prompt so the sub-agent can re-ask.
+    assert staged.exists()
 
 
 def test_ingest_summary_unknown_uuid_exits_2(tmp_path: Path) -> None:

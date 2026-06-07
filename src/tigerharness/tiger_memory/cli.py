@@ -222,6 +222,10 @@ def _cmd_ingest_summary(cfg: Config, store: Store, uuid: str) -> int:
     except CollapseParseError as exc:
         print(f"malformed summary bundle for {uuid}: {exc}", file=sys.stderr)
         return 1
+    # The staged prompt embeds the (prefiltered) transcript; once ingested
+    # it is consumed, so drop it to avoid leaving transcript content at rest.
+    # (A malformed bundle above keeps it so the sub-agent can re-ask.)
+    Path(item["prompt_path"]).unlink(missing_ok=True)
     print(f"ingested {result.conversation_uuid} "
           f"(+{result.must_memorize_added} must-memorize)")
     return 0
