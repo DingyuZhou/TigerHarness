@@ -240,3 +240,30 @@ def test_complete_clears_progress(tmp_path: Path) -> None:
     record_persona_done(tmp_path, "Ayako")
     mark_sweep_complete(tmp_path, NOW)
     assert sweep_progress(tmp_path) == set()
+
+
+# ----- maybe_sweep_roster (the shared hook) --------------------------------
+
+
+def test_maybe_sweep_claims_and_plans(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.sweep import maybe_sweep_roster
+    team = _make_team(tmp_path, _ROSTER, with_config=["Ayako", "Anzai"])
+    dec = maybe_sweep_roster(team, now=NOW, token="A")
+    assert dec.ran is True and dec.reason == "claimed"
+    assert [t.name for t in dec.plan.targets] == ["Ayako", "Anzai"]
+
+
+def test_maybe_sweep_noop_when_not_due(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.sweep import maybe_sweep_roster
+    team = _make_team(tmp_path, _ROSTER, with_config=["Ayako"])
+    write_sweep_state(team, {"last_sweep_at": _iso(1)})  # within 24h floor
+    dec = maybe_sweep_roster(team, now=NOW, token="A")
+    assert dec.ran is False and dec.reason == "not_due" and dec.plan is None
+
+
+def test_maybe_sweep_noop_when_busy(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.sweep import maybe_sweep_roster
+    team = _make_team(tmp_path, _ROSTER, with_config=["Ayako"])
+    write_sweep_state(team, {"claim_token": "other", "claim_at": _iso(0.1)})
+    dec = maybe_sweep_roster(team, now=NOW, token="A")
+    assert dec.ran is False and dec.reason == "busy" and dec.plan is None

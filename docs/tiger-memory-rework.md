@@ -1025,3 +1025,17 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   full" steer — CLI (`plan` + `ingest-summary`) + `maybe_sweep_roster`
   hook + slack_bridge/drive-journal wiring are s15. Full suite green
   (2948); 100% coverage.
+- **2026-06-07 — B3 slice d (part 2): executor CLI + sweep hook (Anzai).**
+  Added the `tiger-memory plan` (stages prompts, prints the manifest) and
+  `tiger-memory ingest-summary --uuid X` (reads the manifest by uuid + the
+  bundle from stdin → `executor.ingest_collapsed_summary`;
+  `CollapseParseError` → exit 1, unknown-uuid / no-manifest → exit 2) CLI
+  commands, and `sweep.maybe_sweep_roster` — the shared bootstrap hook
+  that claims the team sweep and returns the roster `SweepPlan` for the
+  caller to execute. **The entire Python + CLI surface of B1/B3 is now
+  complete and tested** (gating + roster + write-back + plan + CLI + hook).
+  Full suite green (2956); 100% coverage (cli.py + sweep.py 100%). The
+  only remaining piece is the LIVE trigger (s16): the OPERATING-style
+  sub-agent contract + wiring `slack_bridge`/drive-journal to call the
+  hook and spawn the sub-agent — an interactive Claude Code mechanic the
+  Python unit suite cannot exercise.

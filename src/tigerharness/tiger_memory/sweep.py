@@ -246,3 +246,38 @@ def plan_team_sweep(
         remaining=len(pending) - len(selected),
         all_personas=len(all_targets),
     )
+
+
+@dataclass(frozen=True)
+class SweepDecision:
+    ran: bool
+    reason: str             # "claimed" | "not_due" | "busy"
+    plan: SweepPlan | None  # the roster targets to process when ran
+
+
+def maybe_sweep_roster(
+    team_memories_dir: Path,
+    *,
+    now: datetime,
+    token: str,
+    floor_hours: float = DEFAULT_STALENESS_FLOOR_HOURS,
+    lease_seconds: float = DEFAULT_LEASE_SECONDS,
+    max_personas: int | None = None,
+) -> SweepDecision:
+    """The shared persona-session-bootstrap hook (B3). Tries to claim the
+    team sweep; on success returns the roster `plan` for the caller to
+    execute (per-persona plan → sub-agent → finalize, then
+    `record_persona_done` and finally `mark_sweep_complete` /
+    `release_sweep_claim`). On `not_due` / `busy` it is a cheap no-op.
+
+    Pure gating + sequencing — no AI. The caller owns execution so this
+    stays vendor-neutral and unit-testable.
+    """
+    claim = try_claim_sweep(
+        team_memories_dir, now=now, token=token,
+        floor_hours=floor_hours, lease_seconds=lease_seconds,
+    )
+    if not claim.claimed:
+        return SweepDecision(ran=False, reason=claim.reason, plan=None)
+    plan = plan_team_sweep(team_memories_dir, max_personas=max_personas)
+    return SweepDecision(ran=True, reason="claimed", plan=plan)
