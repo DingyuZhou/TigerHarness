@@ -111,3 +111,48 @@ def test_lean_core_makes_layers_drill_on_demand(tmp_path: Path) -> None:
     assert "Drill on demand" in manifest
     for layer in ("recent", "daily", "weekly", "monthly"):
         assert f"`{layer}/`" in manifest
+
+
+def test_lean_core_keeps_load_bearing_core_resident(tmp_path: Path) -> None:
+    """Recall-safety invariant: even the most aggressive diet
+    (`resident_layers: []`) keeps the load-bearing core — must_memorize.md
+    (incl. its owner_explicit/locked rows) AND longer_memory.md — resident.
+    The core is copied unconditionally; `resident_layers` can only gate the
+    four walking-window layers."""
+    cfg_path = tmp_path / "lean.yaml"
+    cfg_path.write_text(dedent(f"""\
+        agent: {{name: T, role: T}}
+        store: {{root: {tmp_path}/memory}}
+        sources:
+          - kind: claude_code
+            project_path: {tmp_path}/proj/
+        summarizer: {{backend: anthropic, model: claude-opus-4-7, prompts: default/v1}}
+        rebuild: {{lock_path: {tmp_path}/lock}}
+        briefing:
+          resident_layers: []
+    """))
+    cfg = load_config(cfg_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    (store.paths.journal / "must_memorize.md").write_text(
+        "| Score | Kind | Last bump | Last decay | Source | Memo |\n"
+        "|------:|------|-----------|------------|--------|------|\n"
+        "| inf | owner_explicit | 2026-01-01 | 2026-01-01 | pin | never forget X |\n"
+    )
+    (store.paths.journal / "longer_memory.md").write_text(
+        "Compressed project history.\n"
+    )
+    uid = str(uuid4())
+    (store.paths.journal / f"20260514-082136-{uid}.md").write_text(
+        frontmatter.render({"type": "short_summary"}, "A recent short.\n")
+    )
+
+    rebuild_briefing(cfg, store)
+
+    # BOTH core files are resident regardless of resident_layers=[].
+    mm = store.paths.briefing / "must_memorize.md"
+    lm = store.paths.briefing / "longer_memory.md"
+    assert mm.exists() and "never forget X" in mm.read_text()  # locked row survives
+    assert lm.exists() and "project history" in lm.read_text()
+    # ...while the walking-window layers are NOT resident (drill-on-demand).
+    assert list((store.paths.briefing / "recent").glob("*.md")) == []
