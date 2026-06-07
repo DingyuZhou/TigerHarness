@@ -1039,3 +1039,19 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   sub-agent contract + wiring `slack_bridge`/drive-journal to call the
   hook and spawn the sub-agent — an interactive Claude Code mechanic the
   Python unit suite cannot exercise.
+- **2026-06-07 — s16 (final, budget 16/16): sweep protocol + close (Anzai).**
+  Wrote the in-session sub-agent contract
+  (`docs/tiger-memory-sweep-protocol.md`): how a persona session claims
+  the team sweep (`maybe_sweep_roster`), runs `tiger-memory plan` per
+  target, spawns one constrained Task-tool sub-agent per transcript
+  (Read staged prompt+store / Write store-only / no shell+net) that emits
+  the bundle + self-validates + pipes to `tiger-memory ingest-summary`,
+  then `record_persona_done` → `mark_sweep_complete` / `release_sweep_claim`.
+  Deliberately did **not** alter the working legacy `slack_bridge` trigger
+  (the in-session loop needs live interactive verification first; the two
+  can coexist behind a flag). **Task closed `done`:** acceptance criteria
+  in `task.md` MET (P1 floor complete; P2/P3 progressed as far as the
+  16-session budget allows — P2-adapter B7/B4 + the full B1/B3 Python+CLI
+  stack; P3 measurement + lean-core; no regressions, 100% cov at every
+  commit). **Remaining follow-up (new task):** activate + live-verify the
+  in-session trigger per the protocol doc's "Wiring + status".
