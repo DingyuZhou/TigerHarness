@@ -128,6 +128,22 @@ class PrefilterConfig:
 
 
 @dataclass(frozen=True)
+class CapConfig:
+    """Hard cost/scope cap per automatic rebuild (P1.2 / Lever 1.4).
+
+    A backstop so a lazy ``rebuild`` can never run away: it processes at
+    most ``max_sessions_per_rebuild`` sessions, or stops once cumulative
+    spend reaches ``max_usd_per_rebuild`` — whichever trips first. The
+    remainder is deferred to the next rebuild (re-discovered, stateless).
+    ``bootstrap``/``resummarize`` are user-scoped (``--limit`` / ``--since``)
+    and exempt.
+    """
+
+    max_sessions_per_rebuild: int = 10
+    max_usd_per_rebuild: float = 20.0
+
+
+@dataclass(frozen=True)
 class Config:
     agent: AgentConfig
     store: StoreConfig
@@ -138,6 +154,7 @@ class Config:
     rebuild: RebuildConfig
     briefing: BriefingConfig
     prefilter: PrefilterConfig = field(default_factory=PrefilterConfig)
+    cap: CapConfig = field(default_factory=CapConfig)
     env_var: str = "TIGER_MEMORY_CONFIG"
     # Resolved at load time so tests can introspect.
     source_path: Path | None = None
@@ -369,6 +386,14 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         ),
     )
 
+    cap_raw = raw.get("cap") or {}
+    cap = CapConfig(
+        max_sessions_per_rebuild=int(
+            cap_raw.get("max_sessions_per_rebuild", 10)
+        ),
+        max_usd_per_rebuild=float(cap_raw.get("max_usd_per_rebuild", 20.0)),
+    )
+
     return Config(
         agent=agent,
         store=store,
@@ -379,6 +404,7 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         rebuild=rebuild,
         briefing=briefing,
         prefilter=prefilter,
+        cap=cap,
         env_var=str(raw.get("env_var", "TIGER_MEMORY_CONFIG")),
         source_path=source_path,
     )

@@ -30,6 +30,11 @@ class RebuildMetrics:
     # the P1.1 win.
     content_chars_raw: int = 0
     content_chars_filtered: int = 0
+    # Why the rebuild stopped processing sessions early, if it did:
+    # "session_cap" / "usd_cap" (P1.2). ``None`` == ran to completion.
+    # Deferred sessions need no counter -- they simply stay unsummarized
+    # and are re-discovered on the next rebuild.
+    stopped_reason: str | None = None
 
     def record_session(
         self, *, chars_raw: int, chars_filtered: int, calls: int
@@ -38,6 +43,10 @@ class RebuildMetrics:
         self.content_chars_raw += chars_raw
         self.content_chars_filtered += chars_filtered
         self.summarize_calls += calls
+
+    def note_capped(self, reason: str) -> None:
+        """Mark that a cost/scope cap stopped the rebuild early."""
+        self.stopped_reason = reason
 
     @property
     def chars_saved(self) -> int:
@@ -59,4 +68,5 @@ class RebuildMetrics:
             "content_chars_filtered": self.content_chars_filtered,
             "content_chars_saved": self.chars_saved,
             "prefilter_reduction_pct": self.reduction_pct,
+            "stopped_reason": self.stopped_reason,
         }

@@ -15,7 +15,16 @@ def test_empty_metrics_reduction_is_zero() -> None:
         "content_chars_filtered": 0,
         "content_chars_saved": 0,
         "prefilter_reduction_pct": 0.0,
+        "stopped_reason": None,
     }
+
+
+def test_note_capped_sets_reason() -> None:
+    m = RebuildMetrics()
+    assert m.stopped_reason is None
+    m.note_capped("session_cap")
+    assert m.stopped_reason == "session_cap"
+    assert m.as_dict()["stopped_reason"] == "session_cap"
 
 
 def test_record_session_accumulates() -> None:

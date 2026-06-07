@@ -173,7 +173,11 @@ def rebuild(
         ]
 
         metrics = RebuildMetrics()
-        cost = _process_decisions(new_or_resum, store, cfg, summarizer, metrics)
+        cost = _process_decisions(
+            new_or_resum, store, cfg, summarizer, metrics,
+            max_sessions=cfg.cap.max_sessions_per_rebuild,
+            max_usd=cfg.cap.max_usd_per_rebuild,
+        )
         _cascade_all_rollups(store, cfg, summarizer)
         _refresh_longer_memory(store, cfg, summarizer)
         _apply_decay(store, cfg)
@@ -359,12 +363,35 @@ def _decide(
 # ----- per-session processing ----------------------------------------------
 
 
+def _cap_reason(
+    processed: int,
+    spent_usd: float,
+    max_sessions: int | None,
+    max_usd: float | None,
+) -> str | None:
+    """Return why a rebuild should stop processing, or ``None`` to continue.
+
+    The cost/scope cap (P1.2 / Lever 1.4): a rebuild processes at most
+    ``max_sessions`` sessions, or stops once ``spent_usd`` reaches
+    ``max_usd`` — whichever trips first. ``None`` for either bound
+    disables it (the default for user-scoped bootstrap / resummarize).
+    """
+    if max_sessions is not None and processed >= max_sessions:
+        return "session_cap"
+    if max_usd is not None and spent_usd >= max_usd:
+        return "usd_cap"
+    return None
+
+
 def _process_decisions(
     decisions: list[Decision],
     store: Store,
     cfg: Config,
     summarizer: Summarizer,
     metrics: RebuildMetrics | None = None,
+    *,
+    max_sessions: int | None = None,
+    max_usd: float | None = None,
 ) -> float:
     """Run the summarizer for each decision and write archive/short.
 
@@ -377,14 +404,36 @@ def _process_decisions(
     the same de-noised content. When *metrics* is supplied, the raw vs.
     filtered char counts and the per-session call count are accumulated
     into it for the rebuild's ``state.json`` snapshot.
+
+    ``max_sessions`` / ``max_usd`` are the P1.2 cost/scope cap: once
+    either trips we stop *before* starting the next session, leaving the
+    remainder unprocessed. Those records simply keep no archive, so the
+    next rebuild's ``_decide`` re-emits them — resumability with no extra
+    state. Both default ``None`` (uncapped) for the user-scoped paths.
     """
     cost_at_start = summarizer.cost_so_far
     heuristic_fallback = 0.0
     rows = mm.load(store)
     today = datetime.now(timezone.utc).date().isoformat()
+    processed = 0
     for d in decisions:
         if d.action == SKIP_ACTIVE or d.action == SKIP_CLEAN:
             continue
+        reason = _cap_reason(
+            processed,
+            summarizer.cost_so_far - cost_at_start,
+            max_sessions,
+            max_usd,
+        )
+        if reason is not None:
+            if metrics is not None:
+                metrics.note_capped(reason)
+            log.info(
+                "tiger-memory rebuild cap hit (%s) after %d session(s); "
+                "deferring the rest to the next rebuild",
+                reason, processed,
+            )
+            break
         rec = d.record
         raw_chars = len(rec.content)
         if cfg.prefilter.enabled:
@@ -419,6 +468,7 @@ def _process_decisions(
             )
             if demoted:
                 mm.append_dropped(store, demoted)
+            processed += 1
             if metrics is not None:
                 metrics.record_session(
                     chars_raw=raw_chars,

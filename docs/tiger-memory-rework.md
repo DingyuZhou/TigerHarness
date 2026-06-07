@@ -554,9 +554,23 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
     `sessions_processed`, `summarize_calls` (3 new / 2 addendum — the
     P1.3-collapse baseline), and `content_chars_raw` vs.
     `content_chars_filtered`, stamped into `state.json["metrics"]` so the
-    reduction is provable across rebuilds. **Still TODO in P1:** the
-    cost/scope cap (Lever 1.4 — `summarizers/anthropic.py:32-35`), the
-    3→1 call-collapse (legacy API path only), and model tiering.
+    reduction is provable across rebuilds.
+  - **Status (2026-06-07): cost/scope cap (Lever 1.4) SHIPPED.** The
+    automatic `rebuild` processes at most `cap.max_sessions_per_rebuild`
+    (default 10) sessions, or stops once cumulative spend
+    (`summarizer.cost_so_far`) reaches `cap.max_usd_per_rebuild` (default
+    20.0) — whichever trips first (`lifecycle._cap_reason`, checked
+    before each session). The remainder is **deferred with no extra
+    state**: a skipped session writes no archive, so the next rebuild's
+    `_decide` re-emits it as `SUMMARIZE_NEW` — resumability by
+    construction (the design's "resumable via state.py" needs no state at
+    all). `metrics.stopped_reason` (`"session_cap"`/`"usd_cap"`/`None`)
+    surfaces a cap hit. **Scope:** caps apply to `rebuild` only;
+    `bootstrap` (`--limit`) and `resummarize` (`--since`) are user-scoped
+    and exempt. This answers the `anthropic.py:32-35` TODO's "cost cap +
+    scope cutoff" half. **Still TODO in P1:** the 3→1 call-collapse
+    (legacy API path only) and model tiering — both optional / API-path
+    specific, deferred behind P2's in-session read-once.
 - **P2 — Lever 3 (subscription-safe multi-persona).** In-session
   summarization skill via the `subagent` isolation strategy (B1, B8) +
   roster sweep (B3) + team-qualified IDs (B4) + the summarized-watermark
@@ -641,3 +655,11 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   summarizer interface so they survive the P2 in-session move. 100%
   coverage held; full suite green. See the P1 status note in **Phasing**.
   Next: the Lever 1.4 cost/scope cap on top of the metrics hook.
+- **2026-06-07 — P1.2 implementation (Anzai).** Shipped the **cost/scope
+  cap** (`lifecycle._cap_reason` + `CapConfig`): the automatic `rebuild`
+  stops after N sessions (default 10) or a USD ceiling (default 20.0),
+  whichever trips first, deferring the remainder to the next rebuild with
+  **zero extra state** (skipped → no archive → re-discovered). Cap hit is
+  surfaced via `metrics.stopped_reason`. `bootstrap`/`resummarize` stay
+  uncapped (user-scoped). Closes the "cost cap + scope cutoff" half of the
+  `anthropic.py:32-35` TODO. 100% coverage held; full suite green (2872).
