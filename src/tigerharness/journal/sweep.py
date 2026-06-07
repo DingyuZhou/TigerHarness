@@ -215,8 +215,9 @@ def sweep(
             result.in_progress_busy.append(status)
         elif klass == "crashed":
             result.in_progress_crashed.append(status)
-        else:  # defensive: in_progress_class is exhaustive -- a new/typo'd
-            # value must fail loud, not silently land in the wrong bucket.
+        else:  # pragma: no cover -- in_progress_class is exhaustive
+            # (idle/busy/crashed); this only fails loud if a future or
+            # typo'd value appears, instead of silently mis-bucketing.
             raise JournalModelError(
                 f"unexpected in_progress_class {klass!r} for task {task_id!r}"
             )

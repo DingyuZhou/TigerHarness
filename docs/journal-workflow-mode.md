@@ -211,8 +211,11 @@ the 30-minute `stuck_timeout`.
 The four-state top-level machine (`pending / in_progress / blocked /
 done`) is **unchanged**. Compile is a *sub-phase of `in_progress`*,
 not a fifth top-level state. The sweep classifier is identical for
-compile-phase and graph-walk-phase workflows: fresh heartbeat =
-owned, stale = rescue-eligible, etc.
+compile-phase and graph-walk-phase workflows: an `in_progress` task is
+**idle** (detached `session_ref` → resumable now), **busy** (attached +
+fresh heartbeat → a live session owns it), or **crashed** (attached +
+stale heartbeat → reclaimable). See
+[`journal-instant-resume.md`](journal-instant-resume.md).
 
 A new `compile_phase: str` field on `status.json` tracks the
 sub-phase (required for `kind=workflow`, rejected for `kind=task`):
@@ -308,13 +311,15 @@ a full claude-p invocation with the persona's prompt prepended).
 
 ## Failure modes and recovery
 
-**Mid-compile session crash / context exhaustion / human-stop.**
-Recoverable to next-round granularity. The heartbeat ages out via
-the standard Phase 1 `stuck_timeout`; the next `drive-journal` sweep
-classifies the task as stale `in_progress` and a future session
-rescues it. The rescuing session reads `compile_phase` and the
-highest-numbered `round-NN-*.md` to find the resume point. Per-phase
-resume rules:
+**Mid-compile clean stop / human-stop / context exhaustion.** The driver
+`release`s the task, clearing `session_ref` → the task is **idle** and
+the next `drive-journal` resumes it **immediately**, no wait.
+**Mid-compile crash** (no `release`): the task stays attached, its
+heartbeat ages out past `stuck_timeout`, and a later sweep classifies it
+**crashed** → reclaimable. Either way recovery is to next-round
+granularity, and the resume signal is the highest-numbered
+`compile/round-NN-*.md` files (not `compile_phase`, which stays
+`pending` mid-compile). Per-phase resume rules:
 
 | `compile_phase` | Recovery action |
 |---|---|

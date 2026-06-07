@@ -878,6 +878,18 @@ class TestCmdSweep:
         assert payload["pending"] == ["p1"]
         assert payload["actionable"] == ["p1"]
 
+    def test_text_lists_busy_tasks(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "b1", state=State.IN_PROGRESS, session_ref="held",
+              updated_at="2026-06-02T08:00:00Z")
+        # huge timeout -> attached + fresh -> busy -> shown in the
+        # "Busy (LEAVE ALONE...)" text section.
+        rc = main(["--journal-dir", str(journal_dir), "sweep",
+                   "--stuck-timeout", "100000000"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Busy" in out and "b1" in out
+
     def test_bad_env_stuck_timeout_returns_2(
         self, journal_dir, capsys, monkeypatch,
     ):
@@ -1077,3 +1089,23 @@ class TestCmdClaimRelease:
         assert s.session_ref is None          # detached -> idle/resumable
         assert s.state is State.IN_PROGRESS
         assert s.compile_pending is True      # still mid-compile
+
+    def test_claim_unknown_task_errors(self, journal_dir, capsys):
+        rc = main(["--journal-dir", str(journal_dir), "claim", "nope"])
+        assert rc == 1
+        assert "no task" in capsys.readouterr().err
+
+    def test_release_unknown_task_errors(self, journal_dir, capsys):
+        rc = main(["--journal-dir", str(journal_dir), "release", "nope"])
+        assert rc == 1
+        assert "no task" in capsys.readouterr().err
+
+    def test_claim_bad_env_stuck_timeout_returns_2(
+        self, journal_dir, capsys, monkeypatch,
+    ):
+        monkeypatch.setenv("TIGERHARNESS_JOURNAL_STUCK_TIMEOUT", "notanint")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1"])
+        assert rc == 2
+        assert "TIGERHARNESS_JOURNAL_STUCK_TIMEOUT" in capsys.readouterr().err
