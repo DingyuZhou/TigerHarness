@@ -574,14 +574,23 @@ returns a decision without doing any AI work itself:
 3. **Per-wake cap.** Cap personas-per-wake (default **N** = small) so a
    large backlog spreads across several wakes; reuse the P1.2
    `_cap_reason` per-session cap *inside* each persona's rebuild.
-4. **Roster walk.** Enumerate `configs/personas.yaml` (the authoritative
-   roster, P0-verified), resolve each persona's store via the
-   `memories/<persona>/tiger-memory.config.yaml` convention, skip personas
-   with no memory config, and run the **plan → execute (sub-agent) →
-   finalize** loop per persona. Commit each persona atomically and advance
-   a **per-persona** progress marker so an interrupted sweep resumes where
-   it stopped; advance the team watermark only when all due personas
-   completed (or the per-wake cap is hit).
+4. **Roster walk. LANDED (s12, `sweep.py`).**
+   `enumerate_persona_configs(team_memories_dir)` reads
+   `<team>/configs/personas.yaml` (tolerant — a missing/malformed roster
+   yields `[]` so the hook never crashes a session) and keeps personas
+   whose `memories/<name>/tiger-memory.config.yaml` exists, in roster
+   order. `plan_team_sweep(team_memories_dir, *, max_personas)` skips
+   personas already in this run's `progress`, applies the per-wake cap,
+   and returns the targets + how many remain.
+   **Per-persona resumable progress** lives in the sweep-state file:
+   `record_persona_done` appends, `sweep_progress` reads, and the per-wake
+   lifecycle is: claim → process ≤cap not-yet-done personas (recording
+   each) → if all done `mark_sweep_complete` (watermark + claim + progress
+   cleared), else `release_sweep_claim` (clear the claim, KEEP progress +
+   the stale watermark so the next wake resumes the rest). The per-persona
+   *rebuild* itself (plan → execute via sub-agent → `_finalize_rebuild`)
+   is slice c. (`tiger_memory` re-implements a minimal roster reader — it
+   must not import `slack_bridge`, the higher layer.)
 
 **Executor billing (the load-bearing invariant).** Stage-2 summarization
 is always the Task-tool sub-agent (B1/B8), so broadening the trigger to
@@ -967,3 +976,13 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   `cfg.store.root.parent` (= `<team>/memories/`), cleaner than the
   three-parents-up walk. Full suite green (2925); 100% coverage. Next
   (s12): the roster walk + per-persona resumable progress on top.
+- **2026-06-07 — B3 slice b: roster walk + resumable progress (Anzai).**
+  Extended `sweep.py` with `enumerate_persona_configs` (tolerant roster
+  read over `configs/personas.yaml`, keeps personas with a memory store,
+  order-preserving), `plan_team_sweep` (skip-done + per-wake cap +
+  remaining count), and the resumable-progress helpers
+  (`sweep_progress` / `record_persona_done` / `release_sweep_claim`, plus
+  `mark_sweep_complete` now clears `progress`). Pure non-AI sequencing;
+  `tiger_memory` re-implements the roster read rather than importing the
+  higher-layer `slack_bridge`. Full suite green (2938); 100% coverage.
+  Next (s13): the sub-agent summarization executor.

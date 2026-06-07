@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 SWEEP_STATE_FILENAME = ".tiger-memory-sweep.json"
 DEFAULT_STALENESS_FLOOR_HOURS = 24.0
 # How long a claim is honoured before a later session may steal it (a
@@ -136,12 +138,111 @@ def try_claim_sweep(
     return ClaimResult(True, "claimed")
 
 
+def release_sweep_claim(team_memories_dir: Path) -> None:
+    """Drop the claim WITHOUT advancing the watermark — used when a wake
+    finished its per-wake chunk but the roster sweep isn't complete. The
+    in-run ``progress`` is preserved so the next wake resumes the rest,
+    and the watermark stays stale so the sweep is still "due"."""
+    state = read_sweep_state(team_memories_dir)
+    state.pop("claim_token", None)
+    state.pop("claim_at", None)
+    write_sweep_state(team_memories_dir, state)
+
+
 def mark_sweep_complete(team_memories_dir: Path, now: datetime) -> None:
-    """Advance the team watermark and release the claim. The bumped
-    ``last_sweep_at`` is what makes the next trigger inside the floor
-    window a cheap no-op."""
+    """Advance the team watermark and end the run: clear the claim AND the
+    per-persona progress. The bumped ``last_sweep_at`` is what makes the
+    next trigger inside the floor window a cheap no-op."""
     state = read_sweep_state(team_memories_dir)
     state["last_sweep_at"] = now.isoformat()
     state.pop("claim_token", None)
     state.pop("claim_at", None)
+    state.pop("progress", None)
     write_sweep_state(team_memories_dir, state)
+
+
+# ----- roster walk + per-persona resumable progress (B3 slice b) -----------
+
+
+@dataclass(frozen=True)
+class PersonaTarget:
+    name: str
+    config_path: Path
+
+
+@dataclass(frozen=True)
+class SweepPlan:
+    targets: list[PersonaTarget]  # to process THIS wake (capped, not-yet-done)
+    remaining: int                # personas still pending after the cap
+    all_personas: int             # personas with a memory store on the roster
+
+
+def enumerate_persona_configs(team_memories_dir: Path) -> list[PersonaTarget]:
+    """Roster personas that have a tiger-memory store, in roster order.
+
+    Reads ``<team>/configs/personas.yaml`` (``team_memories_dir.parent``)
+    and keeps each persona whose
+    ``<team>/memories/<name>/tiger-memory.config.yaml`` exists. Tolerant:
+    a missing/malformed roster yields ``[]`` so the bootstrap hook never
+    crashes a persona session over a roster read.
+    """
+    team_memories_dir = Path(team_memories_dir)
+    roster_path = team_memories_dir.parent / "configs" / "personas.yaml"
+    try:
+        data = yaml.safe_load(roster_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return []
+    personas = data.get("personas") if isinstance(data, dict) else None
+    if not isinstance(personas, list):
+        return []
+    out: list[PersonaTarget] = []
+    for entry in personas:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        cfg_path = team_memories_dir / name / "tiger-memory.config.yaml"
+        if cfg_path.exists():
+            out.append(PersonaTarget(name=name, config_path=cfg_path))
+    return out
+
+
+def sweep_progress(team_memories_dir: Path) -> set[str]:
+    """Persona names already completed in the in-flight sweep run."""
+    prog = read_sweep_state(team_memories_dir).get("progress") or []
+    return {str(p) for p in prog} if isinstance(prog, list) else set()
+
+
+def record_persona_done(team_memories_dir: Path, persona: str) -> None:
+    """Mark *persona* completed in the current run (idempotent)."""
+    state = read_sweep_state(team_memories_dir)
+    prog = state.get("progress")
+    prog = list(prog) if isinstance(prog, list) else []
+    if persona not in prog:
+        prog.append(persona)
+    state["progress"] = prog
+    write_sweep_state(team_memories_dir, state)
+
+
+def plan_team_sweep(
+    team_memories_dir: Path,
+    *,
+    max_personas: int | None = None,
+) -> SweepPlan:
+    """Sequence the roster for THIS wake: skip personas already done in the
+    in-flight run, then take at most *max_personas* of the rest.
+
+    Pure sequencing (non-AI): the per-persona rebuild — a no-op when the
+    persona has no new sessions — runs in the executor (slice c).
+    """
+    done = sweep_progress(team_memories_dir)
+    all_targets = enumerate_persona_configs(team_memories_dir)
+    pending = [t for t in all_targets if t.name not in done]
+    selected = pending if max_personas is None else pending[:max_personas]
+    return SweepPlan(
+        targets=selected,
+        remaining=len(pending) - len(selected),
+        all_personas=len(all_targets),
+    )

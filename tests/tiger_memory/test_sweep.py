@@ -6,11 +6,16 @@ from pathlib import Path
 
 from tigerharness.tiger_memory import sweep
 from tigerharness.tiger_memory.sweep import (
+    enumerate_persona_configs,
+    mark_sweep_complete,
+    plan_team_sweep,
     read_sweep_state,
+    record_persona_done,
+    release_sweep_claim,
     sweep_due,
+    sweep_progress,
     sweep_state_path,
     try_claim_sweep,
-    mark_sweep_complete,
     write_sweep_state,
 )
 
@@ -119,3 +124,119 @@ def test_mark_complete_advances_watermark_and_clears_claim(tmp_path: Path) -> No
 def test_module_exposes_defaults() -> None:
     assert sweep.DEFAULT_STALENESS_FLOOR_HOURS == 24.0
     assert sweep.DEFAULT_LEASE_SECONDS == 1800.0
+
+
+# ----- roster walk (slice b) -----------------------------------------------
+
+
+def _make_team(tmp_path: Path, roster_yaml: str, *, with_config) -> Path:
+    """Build <tmp>/configs/personas.yaml + <tmp>/memories/<p>/config for
+    each persona in *with_config*. Returns team_memories_dir."""
+    (tmp_path / "configs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "configs" / "personas.yaml").write_text(roster_yaml)
+    team_memories = tmp_path / "memories"
+    for name in with_config:
+        d = team_memories / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "tiger-memory.config.yaml").write_text("agent: {name: x}\n")
+    team_memories.mkdir(parents=True, exist_ok=True)
+    return team_memories
+
+
+_ROSTER = (
+    "personas:\n"
+    "  - name: Ayako\n"
+    "  - name: Anzai\n"
+    "  - name: Sakuragi\n"
+)
+
+
+def test_enumerate_keeps_only_personas_with_a_store(tmp_path: Path) -> None:
+    team = _make_team(tmp_path, _ROSTER, with_config=["Ayako", "Anzai"])
+    targets = enumerate_persona_configs(team)
+    assert [t.name for t in targets] == ["Ayako", "Anzai"]  # order preserved
+    assert targets[0].config_path.name == "tiger-memory.config.yaml"
+
+
+def test_enumerate_missing_roster_is_empty(tmp_path: Path) -> None:
+    assert enumerate_persona_configs(tmp_path / "memories") == []
+
+
+def test_enumerate_malformed_roster_is_empty(tmp_path: Path) -> None:
+    team = _make_team(tmp_path, "personas: [unclosed\n", with_config=[])
+    assert enumerate_persona_configs(team) == []
+
+
+def test_enumerate_top_level_not_dict_is_empty(tmp_path: Path) -> None:
+    team = _make_team(tmp_path, "- just\n- a\n- list\n", with_config=[])
+    assert enumerate_persona_configs(team) == []
+
+
+def test_enumerate_personas_not_a_list_is_empty(tmp_path: Path) -> None:
+    team = _make_team(tmp_path, "personas: nope\n", with_config=[])
+    assert enumerate_persona_configs(team) == []
+
+
+def test_enumerate_skips_bad_entries(tmp_path: Path) -> None:
+    roster = (
+        "personas:\n"
+        "  - just-a-string\n"        # not a dict
+        "  - name: ''\n"             # empty name
+        "  - other: 1\n"             # missing name
+        "  - name: Ayako\n"          # valid
+    )
+    team = _make_team(tmp_path, roster, with_config=["Ayako"])
+    assert [t.name for t in enumerate_persona_configs(team)] == ["Ayako"]
+
+
+def test_plan_no_cap_returns_all_pending(tmp_path: Path) -> None:
+    team = _make_team(tmp_path, _ROSTER, with_config=["Ayako", "Anzai"])
+    plan = plan_team_sweep(team)
+    assert [t.name for t in plan.targets] == ["Ayako", "Anzai"]
+    assert plan.remaining == 0 and plan.all_personas == 2
+
+
+def test_plan_cap_limits_and_reports_remaining(tmp_path: Path) -> None:
+    team = _make_team(tmp_path, _ROSTER, with_config=["Ayako", "Anzai"])
+    plan = plan_team_sweep(team, max_personas=1)
+    assert [t.name for t in plan.targets] == ["Ayako"]
+    assert plan.remaining == 1
+
+
+def test_plan_skips_already_done(tmp_path: Path) -> None:
+    team = _make_team(tmp_path, _ROSTER, with_config=["Ayako", "Anzai"])
+    record_persona_done(team, "Ayako")
+    plan = plan_team_sweep(team)
+    assert [t.name for t in plan.targets] == ["Anzai"]
+
+
+# ----- progress + claim lifecycle ------------------------------------------
+
+
+def test_sweep_progress_empty_and_corrupt(tmp_path: Path) -> None:
+    assert sweep_progress(tmp_path) == set()             # no state
+    write_sweep_state(tmp_path, {"progress": "nope"})    # non-list
+    assert sweep_progress(tmp_path) == set()
+
+
+def test_record_persona_done_is_idempotent(tmp_path: Path) -> None:
+    write_sweep_state(tmp_path, {"progress": "corrupt"})  # non-list -> reset
+    record_persona_done(tmp_path, "Ayako")
+    record_persona_done(tmp_path, "Ayako")  # idempotent
+    record_persona_done(tmp_path, "Anzai")
+    assert sweep_progress(tmp_path) == {"Ayako", "Anzai"}
+
+
+def test_release_keeps_progress_and_watermark(tmp_path: Path) -> None:
+    try_claim_sweep(tmp_path, now=NOW, token="A")
+    record_persona_done(tmp_path, "Ayako")
+    release_sweep_claim(tmp_path)
+    state = read_sweep_state(tmp_path)
+    assert "claim_token" not in state
+    assert state["progress"] == ["Ayako"]  # preserved for the next wake
+
+
+def test_complete_clears_progress(tmp_path: Path) -> None:
+    record_persona_done(tmp_path, "Ayako")
+    mark_sweep_complete(tmp_path, NOW)
+    assert sweep_progress(tmp_path) == set()
