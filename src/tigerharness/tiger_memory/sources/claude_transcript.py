@@ -43,6 +43,31 @@ from .base import SourceAdapter, SourceRecord
 _CONTENT_TYPES = {"user", "assistant"}
 
 
+def _normalize_owner(persona_value) -> "tuple[str | None, str] | None":
+    """Normalize a threads.json ``persona`` value into ``(team|None, name)``.
+
+    Accepts three shapes for forward/backward compatibility (B4):
+      - ``{"team": "shohoku", "name": "ayako"}`` — self-describing
+      - ``"shohoku/ayako"`` — flattened team/name
+      - ``"ayako"`` — today's bare name (team unknown -> ``None``)
+    Returns ``None`` for anything empty / unrecognized (unattributed).
+    """
+    if isinstance(persona_value, dict):
+        name = persona_value.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        team = persona_value.get("team")
+        return (team if isinstance(team, str) and team else None, name)
+    if isinstance(persona_value, str) and persona_value:
+        if "/" in persona_value:
+            team, _, name = persona_value.partition("/")
+            if not name:
+                return None
+            return (team or None, name)
+        return (None, persona_value)
+    return None
+
+
 class ClaudeTranscriptAdapter(SourceAdapter):
     kind = "claude_code"  # umbrella; resolves to "slack" per-transcript
 
@@ -52,6 +77,7 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         threads_json: Path | None = None,
         *,
         persona: str | None = None,
+        team: str | None = None,
         include_unattributed: bool = False,
         max_age_days: int | None = 7,
     ):
@@ -63,6 +89,12 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         # are emitted. ``None`` preserves the legacy "emit everything"
         # behavior.
         self.persona = persona
+        # B4 — team-qualified identity. When set, a threads.json entry that
+        # *also* carries a team must match it (so two teams' "Michael"
+        # records never collide). A bare-name entry, or a team-less
+        # adapter, falls back to name-only matching — fully backward
+        # compatible with today's bare-string attributions.
+        self.team = team
         # When persona-filtering, controls whether sessions with NO
         # persona attribution (local claude -p, or pre-routing entries)
         # are also emitted. Default False == strict.
@@ -105,7 +137,7 @@ class ClaudeTranscriptAdapter(SourceAdapter):
     def _allowed(
         self,
         session_uuid: str,
-        thread_map: dict[str, tuple[str, str | None]],
+        thread_map: dict[str, tuple[str, tuple[str | None, str] | None]],
     ) -> bool:
         """Apply the per-persona filter.
 
@@ -114,6 +146,10 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         - Filter set + session in threads.json with different persona: drop.
         - Filter set + session NOT in threads.json (local claude_p)
           OR persona=None (pre-routing): pass iff include_unattributed.
+
+        Team match (B4) is enforced only when BOTH the adapter and the
+        record carry a team; otherwise the name alone decides, so a
+        bare-name entry stays compatible with a team-aware adapter.
         """
         if self.persona is None:
             return True
@@ -125,17 +161,25 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         if owner is None:
             # Pre-routing threads.json entry (bare session_id schema).
             return self.include_unattributed
-        return owner == self.persona
+        owner_team, owner_name = owner
+        if owner_name != self.persona:
+            return False
+        if self.team is not None and owner_team is not None:
+            return owner_team == self.team
+        return True
 
-    def _reverse_thread_map(self) -> dict[str, tuple[str, str | None]]:
-        """Build session_id -> (thread_ts, persona | None) from the
-        bridge's threads.json.
+    def _reverse_thread_map(
+        self,
+    ) -> dict[str, tuple[str, tuple[str | None, str] | None]]:
+        """Build session_id -> (thread_ts, owner) from the bridge's
+        threads.json, where ``owner`` is ``(team|None, name)`` or ``None``.
 
-        Tolerates both schemas:
+        Tolerates every attribution schema:
 
-        Pre-PR4: ``{thread_ts: "session_id"}`` -> persona is ``None``.
-        Post-PR4: ``{thread_ts: {session_id, persona}}`` -> persona
-        preserved (or ``None`` if missing/empty).
+        Pre-PR4: ``{thread_ts: "session_id"}`` -> owner ``None``.
+        Post-PR4: ``{thread_ts: {session_id, persona}}`` where ``persona``
+        is a bare name, a ``team/name`` string, or a ``{team, name}`` dict
+        (B4). See ``_normalize_owner``.
         """
         if not self.threads_json or not self.threads_json.exists():
             return {}
@@ -145,7 +189,7 @@ class ClaudeTranscriptAdapter(SourceAdapter):
             return {}
         if not isinstance(data, dict):
             return {}
-        result: dict[str, tuple[str, str | None]] = {}
+        result: dict[str, tuple[str, tuple[str | None, str] | None]] = {}
         for tts, val in data.items():
             if isinstance(val, str) and val:
                 # Pre-routing: bare session_id string.
@@ -154,21 +198,23 @@ class ClaudeTranscriptAdapter(SourceAdapter):
                 sid = val.get("session_id")
                 if not isinstance(sid, str) or not sid:
                     continue
-                persona = val.get("persona")
-                result[sid] = (
-                    str(tts),
-                    persona if isinstance(persona, str) and persona else None,
-                )
+                result[sid] = (str(tts), _normalize_owner(val.get("persona")))
         return result
 
     def _record_for(
         self,
         jsonl: Path,
-        thread_map: dict[str, tuple[str, str | None]],
+        thread_map: dict[str, tuple[str, tuple[str | None, str] | None]],
     ) -> SourceRecord | None:
         session_uuid = jsonl.stem  # filename minus .jsonl
-        # Parse JSONL — gather timestamps + content
-        events = list(_iter_events(jsonl))
+        # Parse JSONL — gather timestamps + content. B7: drop sub-agent
+        # (sidechain) rows up front — they are the Task-tool/summarizer's
+        # own context, never the persona's conversation. This handles both
+        # shapes: nested sidechain rows fall out of a parent session, and
+        # an all-sidechain file collapses to empty -> skipped just below.
+        events = [
+            e for e in _iter_events(jsonl) if e.get("isSidechain") is not True
+        ]
         if not events:
             return None
 

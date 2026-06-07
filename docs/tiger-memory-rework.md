@@ -591,6 +591,27 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   summarization skill via the `subagent` isolation strategy (B1, B8) +
   roster sweep (B3) + team-qualified IDs (B4) + the summarized-watermark
   safeguard (B5).
+  - **Status (2026-06-07): adapter hardening landed (B7 + B4 reader + B5
+    noted).** **B7** — `sources/claude_transcript.py:_record_for` now
+    drops every `isSidechain == true` row up front, so sub-agent turns
+    are never ingested (nested rows fall out of a parent session; an
+    all-sidechain file collapses to empty → skipped). *Runtime check
+    resolved:* `isSidechain` is a real per-row field across the corpus,
+    but **0 rows are `true`** in the current 774-file project dir — so
+    today this is pure defense-in-depth, independent of the persona
+    filter, exactly as designed. **B4** — `_normalize_owner` upgrades a
+    threads.json `persona` to `(team|None, name)`, accepting a bare name,
+    a `team/name` string, or a `{team, name}` dict; `_allowed` enforces
+    the team only when BOTH the adapter (`team=` source field) and the
+    record carry one, else name-only — fully backward compatible.
+    *Reader-side only*: nothing writes the `{team,name}` shape yet (the
+    bridge still writes bare names), so this is forward-compat insurance
+    as the design intended. **B5** — preventive only; P0 confirmed
+    nothing prunes `threads.json` (`ThreadStore.set()` is append/update),
+    so there is **no code to add today** — the invariant holds by
+    construction and only needs a guard if pruning is ever introduced.
+    **Next:** the big architectural piece — **B1/B8** in-session
+    summarization via a Claude Code sub-agent — plus **B3** roster sweep.
 - **P3 — Lever 2 (read-side diet).** Lean core briefing + on-demand
   drill, measured before/after.
 
@@ -690,3 +711,15 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   opt-in. Full suite green (2885). Next: P2 (Lever 3) — in-session
   summarization via the `subagent` strategy (B1/B8), roster sweep (B3),
   team-qualified IDs (B4), summarized-watermark (B5).
+- **2026-06-07 — P2 adapter hardening (Anzai).** First P2 session: the
+  contained, low-risk items. **B7** — explicit `isSidechain` skip in
+  `claude_transcript.py:_record_for` (defense-in-depth vs sub-agent
+  transcript re-ingestion; runtime check found the field present but 0
+  `true` rows in the corpus). **B4** — `_normalize_owner` + team-aware
+  `_allowed` make persona attribution `(team, name)`-qualified, backward
+  compatible with bare-name entries and team-less adapters; reader-side
+  only (no writer yet). **B5** — confirmed no-op today (nothing prunes
+  `threads.json`); documented as a guard-if-pruning-added invariant.
+  Full suite green (2902); 100% coverage. Next: B1/B8 (in-session
+  summarization via sub-agent — needs an Operator call on skill
+  placement) + B3 (roster sweep).

@@ -292,12 +292,16 @@ def _build_adapters(
             # claude-p sessions (no bridge attribution) as well.
             persona = s.fields.get("persona")
             persona = persona.strip() if isinstance(persona, str) and persona.strip() else None
+            # B4 — optional team qualifier; defaults None (name-only match).
+            team = s.fields.get("team")
+            team = team.strip() if isinstance(team, str) and team.strip() else None
             include_unattributed = bool(s.fields.get("include_unattributed", False))
             adapters.append(
                 ClaudeTranscriptAdapter(
                     project_path=Path(s.fields["project_path"]),
                     threads_json=threads_json,
                     persona=persona,
+                    team=team,
                     include_unattributed=include_unattributed,
                     max_age_days=max_age_days,
                 )
