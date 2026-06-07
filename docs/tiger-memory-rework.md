@@ -689,6 +689,22 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
     summarization via a Claude Code sub-agent — plus **B3** roster sweep.
 - **P3 — Lever 2 (read-side diet).** Lean core briefing + on-demand
   drill, measured before/after.
+  - **Status (2026-06-07): measurement hook landed.** `briefing.py` now
+    sizes the assembled briefing — `_briefing_stats` totals chars/words
+    over the memory-bearing files (`must_memorize.md`, `longer_memory.md`,
+    and the recent/daily/weekly/monthly layers), written as a
+    `.briefing_metrics.json` sidecar (atomic with the briefing swap, like
+    `.fingerprint`) plus a "Briefing size: N words / M chars" line in
+    `MANIFEST.md`. Mirrors the P1.2 write-side metrics so the read-side
+    diet is provable before/after; the per-section breakdown pinpoints the
+    weight (the design's baseline: `must_memorize.md` ≈ 60% of Anzai's
+    briefing). **Sequencing note:** P3 was started ahead of P2's
+    completion because P2's remaining work (B1 stage-2 executor + B3) is
+    blocked on the Operator's skill-placement decision; read-side (Lever 2,
+    `briefing.py`) and write-side (Lever 3, `lifecycle.py`) are independent
+    levers, so there's no coupling. **Next P3:** the lean-core cut itself
+    (trim `must_memorize` budget / walking window where the measurement
+    shows slack) + don't-regress-recall checks.
 
 ## Non-goals
 
@@ -819,3 +835,11 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   validator deferred to stage 2 (avoid speculative unused code). Full
   suite green (2902); 100% coverage held (existing tests cover the
   helper; lifecycle.py −8 statements).
+- **2026-06-07 — P3 read-side measurement hook (Anzai).** With P2's
+  remaining work (stage-2 executor + B3) blocked on the Operator's
+  skill-placement decision, pivoted to the decision-independent read-side
+  lever. Added `briefing._briefing_stats` + a `.briefing_metrics.json`
+  sidecar + a MANIFEST size line, sizing the assembled briefing (total +
+  per-section). Measurement-first, mirroring P1.2, so the upcoming
+  lean-core cut is provable and recall-safe. Independent of P2 (different
+  file/lever). Full suite green (2904); 100% coverage held.
