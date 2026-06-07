@@ -244,6 +244,13 @@ active speaker.**
 
 ### B3 — Roster sweep, piggybacked on the human session
 
+> **Trigger RESOLVED (2026-06-07):** the sweep fires at **persona-session
+> bootstrap, shared by all personas** (any persona conversation start),
+> NOT a config-gated trigger-set defaulting off. The "Configurable trigger
+> set / `slack_bridge_dm` opt-in default off" paragraph below is
+> superseded — broadening the trigger is safe because the executor is
+> always the Task-tool sub-agent (B8). See "B3 — implementation design".
+
 A **team memory sweep** enumerates the team roster and rebuilds, in
 turn, each persona **that has a memory store configured** — skipping
 personas with no memory config. Two things were pinned in P0, both now
@@ -511,15 +518,15 @@ A `summarizer.strategy` config selects it; `subagent` is a no-op from the
 bare CLI (it needs an interactive host) and raises a clear "run via the
 memory-sweep skill" error if invoked headless.
 
-**OPEN — Operator decision (open-Q2): stage-2 host / skill placement.**
-The executor is a vendor-neutral `OPERATING.md`-style contract; the only
-question is its trigger surface:
-- **(A)** its **own** `memory-sweep` skill — explicit/composable, but
-  users must remember to run it;
-- **(B)** **folded into the drive-journal wake sweep** — every drive
-  opportunistically refreshes stale stores for free (the B3 invariant
-  "any contact keeps the roster fresh"). **Recommended: (B)**, gated by
-  the B3 staleness floor + atomic team claim so it doesn't run every drive.
+**RESOLVED — stage-2 host / skill placement (2026-06-07, Operator).** The
+executor is a vendor-neutral `OPERATING.md`-style contract; its trigger
+surface is **persona-session bootstrap, shared by all personas** — NOT a
+bespoke skill and NOT drive-journal-only. Any persona conversation start
+calls the same gated hook; drive-journal and `slack_bridge` are two
+callers. The executor is always the Task-tool sub-agent, so the trigger
+context's billing is irrelevant (subscription-safe by construction). See
+the "B3 — implementation design" subsection below and the resolved
+open-Q2.
 
 Stages 1 + 3 (plan, finalize) are **decision-independent** and can be
 built first. **Build order once unblocked:** (i) `plan_rebuild` +
@@ -528,6 +535,59 @@ tests; (iii) the `subagent` strategy + the in-session skill per the
 placement decision; (iv) **B3** roster sweep (atomic team claim, staleness
 floor, per-wake cap, per-persona resumable) wrapping the
 plan→execute→finalize loop over the `configs/personas.yaml` roster.
+
+### B3 — implementation design (2026-06-07, Anzai)
+
+**The shared persona-session bootstrap hook.** One function — call it
+`tiger_memory.sweep.maybe_sweep_roster(team_root, *, now, trigger)` — is
+THE hook. Every persona-session-bootstrap caller invokes it; today's
+known callers:
+- **`slack_bridge`** — already fires `_trigger_tiger_memory_rebuild` on
+  each new thread (`bridge.py:469`). Generalize it: instead of
+  `tiger-memory rebuild --background` for the *active* persona via
+  `claude -p`, call the shared hook (roster-wide, sub-agent executor).
+- **`drive-journal`** — its wake sweep calls the same hook opportunistically.
+- (Future callers — any other interactive persona entrypoint — plug in
+  the same one-liner.)
+
+**Gating (non-AI bookkeeping, exactly the journal-sweep mold).** The hook
+returns a decision without doing any AI work itself:
+1. **Team `last_sweep_at` watermark + staleness floor.** Team-scoped state
+   file at **`<team_root>/.tiger-memory/sweep-state.json`** (team_root =
+   the persona config's `…/memories/` parent — i.e. `memories/<persona>/
+   tiger-memory.config.yaml` → `team_root = parent.parent.parent`). If
+   `now - last_sweep_at < floor` (default **24h**), return "not due" — no
+   sweep, cheap no-op on every trigger.
+2. **Atomic claim (team-scoped lease).** Reuse the drive-journal
+   heartbeat-as-soft-lease pattern: write a claim token + timestamp into
+   the sweep-state file with a compare-and-set re-read. If another session
+   holds a fresh claim, return "busy" and skip — only one session sweeps
+   per floor window. (A per-store lock alone is insufficient — it
+   serializes writes but still lets two sessions do redundant work.)
+3. **Per-wake cap.** Cap personas-per-wake (default **N** = small) so a
+   large backlog spreads across several wakes; reuse the P1.2
+   `_cap_reason` per-session cap *inside* each persona's rebuild.
+4. **Roster walk.** Enumerate `configs/personas.yaml` (the authoritative
+   roster, P0-verified), resolve each persona's store via the
+   `memories/<persona>/tiger-memory.config.yaml` convention, skip personas
+   with no memory config, and run the **plan → execute (sub-agent) →
+   finalize** loop per persona. Commit each persona atomically and advance
+   a **per-persona** progress marker so an interrupted sweep resumes where
+   it stopped; advance the team watermark only when all due personas
+   completed (or the per-wake cap is hit).
+
+**Executor billing (the load-bearing invariant).** Stage-2 summarization
+is always the Task-tool sub-agent (B1/B8), so broadening the trigger to
+any persona session does NOT reintroduce API billing — the trigger
+context's billing is irrelevant.
+
+**Build slices (s11–s14):** (a) `sweep.py` gating — watermark read/write +
+staleness floor + atomic claim, pure-Python + tests; (b) the roster walk +
+per-persona resumable progress; (c) the `subagent` strategy + in-session
+executor contract (reusing `combined_summary.md` + `parse_collapsed` +
+`finalize_rebuild`); (d) wire the two callers (`slack_bridge` generalized,
+drive-journal) to the shared hook. Each slice: test-first, 100% cov,
+`anzai:` commit, Slack.
 
 ---
 
@@ -539,9 +599,21 @@ plan→execute→finalize loop over the `configs/personas.yaml` roster.
    billing fact (is *your* bridge subscription- or API-authed?) still
    informs whether you flip it on — but the design no longer needs the
    answer to proceed. Remaining input wanted: your default preference.
-2. **Skill placement.** Memory sweep as its **own** human-triggered
-   skill, or **folded into** the drive-journal wake-up sweep so users
-   get it for free without remembering a separate command?
+2. **Skill placement — RESOLVED (2026-06-07, Operator).** Neither framing
+   was right; the answer is broader. The in-session rebuild is triggered
+   by **ANY persona conversation**, not only the journal driver ("not all
+   work is done in the journal driver"). The trigger hook lives at
+   **persona-session bootstrap** — the point where any Shohoku persona
+   conversation begins — and is **shared by all personas**; drive-journal
+   is just *one* caller. This is the B3 invariant ("any human contact with
+   any teammate keeps the whole roster fresh") realized as a shared hook,
+   not a bespoke skill. Subscription-safety is preserved because the
+   executor is **always** the Task-tool sub-agent (B8) regardless of which
+   conversation triggered it — the trigger context's billing is
+   irrelevant. (The existing `slack_bridge._trigger_tiger_memory_rebuild`,
+   which today fires `tiger-memory rebuild --background` for the *active*
+   persona via `claude -p`, becomes one caller of the shared hook,
+   generalized to a gated roster sweep with the sub-agent executor.)
 3. **Staleness floor & per-wake cap values.** Starting points to tune
    (e.g. 24h floor, cap of N sessions/wake).
 4. **In-session summarization context budget — RESOLVED (see B8).** The
@@ -865,3 +937,17 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   always resident. Data-grounded via the new sidecar (real Anzai briefing
   = 2559 resident words; win scales as weekly/monthly accrue). Full suite
   green (2910); 100% coverage held.
+- **2026-06-07 — open-Q2 resolved + B3 design (Anzai).** Design session
+  (s10): folded the Operator's skill-placement answer into the doc —
+  open-Q2 RESOLVED (trigger = persona-session bootstrap, shared by all
+  personas; executor always the sub-agent → subscription-safe), the
+  B1/B8 "stage-2 host" item RESOLVED, the original B3 trigger-set
+  paragraph marked superseded, and a concrete **"B3 — implementation
+  design"** subsection added: the shared `maybe_sweep_roster` hook,
+  team `last_sweep_at` watermark + 24h staleness floor + atomic team
+  claim + per-wake cap, roster walk over `configs/personas.yaml` with
+  per-persona resumable progress, and the existing
+  `slack_bridge._trigger_tiger_memory_rebuild` (active-persona /
+  `claude -p`) named as one caller to generalize. Build slices for
+  s11–s14 enumerated. Doc-only (no code; team-root path layout flagged to
+  pin during the s11 build, like `_load_defaults`); suite unchanged.
