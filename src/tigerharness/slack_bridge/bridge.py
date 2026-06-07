@@ -108,6 +108,9 @@ class TeamBridgeContext:
     default_persona: str               # must be in personas
     tiger_memory_cli: str = ""
     persona_aliases: dict[str, list[str]] | None = None  # name -> aliases
+    # "rebuild" (legacy claude -p, default) | "off" (in-session sweep
+    # protocol owns it). See config.normalize_tiger_memory_trigger.
+    tiger_memory_trigger: str = "rebuild"
 
     @property
     def is_multi_persona(self) -> bool:
@@ -466,11 +469,15 @@ class SlackBridge:
             else:
                 state = _ThreadState(session=session, persona=persona_name)
                 self._threads[key] = state
-                _trigger_tiger_memory_rebuild(
-                    self._team.personas[persona_name],
-                    self._team.tiger_memory_cli,
-                    key,
-                )
+                # "off" -> the in-session sweep protocol owns the rebuild;
+                # the daemon fires no legacy claude -p. Default "rebuild"
+                # keeps the legacy trigger so existing deploys are unchanged.
+                if self._team.tiger_memory_trigger == "rebuild":
+                    _trigger_tiger_memory_rebuild(
+                        self._team.personas[persona_name],
+                        self._team.tiger_memory_cli,
+                        key,
+                    )
 
         if loser_session is not None:  # pragma: no cover — concurrency race
             try:
@@ -683,6 +690,7 @@ def _single_persona_team_context(
         personas={_SINGLE_PERSONA_NAME: slot},
         default_persona=_SINGLE_PERSONA_NAME,
         tiger_memory_cli=cfg.tiger_memory_cli,
+        tiger_memory_trigger=cfg.tiger_memory_trigger,
     )
 
 

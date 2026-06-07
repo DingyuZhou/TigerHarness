@@ -342,6 +342,47 @@ class TestLoadMultiFragmentValidation:
 
 
 # ---------------------------------------------------------------------------
+# tiger_memory_trigger override
+# ---------------------------------------------------------------------------
+
+class TestLoadMultiTigerMemoryTrigger:
+    def _fragment(self, root: Path, state: str, trigger_line: str = "") -> str:
+        return (
+            "default_persona: ayako\n"
+            "allowed_user_ids:\n  - U0CEO\n"
+            f"state_dir: {root / state}\n"
+            f"{trigger_line}"
+        )
+
+    def test_default_is_rebuild(self, tmp_path: Path):
+        # _make_valid_team writes a fragment with no trigger line.
+        _make_valid_team(tmp_path, "shohoku")
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        assert cfg.lanes[0].team_ctx.tiger_memory_trigger == "rebuild"
+
+    def test_explicit_off(self, tmp_path: Path):
+        team_dir = _make_valid_team(tmp_path, "shohoku")
+        _write_fragment(
+            team_dir,
+            self._fragment(tmp_path, "state/shohoku", "tiger_memory_trigger: off\n"),
+        )
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        assert cfg.lanes[0].team_ctx.tiger_memory_trigger == "off"
+
+    def test_bad_value_raises_with_lane_context(self, tmp_path: Path):
+        team_dir = _make_valid_team(tmp_path, "shohoku")
+        _write_fragment(
+            team_dir,
+            self._fragment(tmp_path, "state/shohoku", "tiger_memory_trigger: bogus\n"),
+        )
+        idx = _write_index(tmp_path, ["shohoku"])
+        with pytest.raises(ValueError, match="lane 'shohoku'.*unknown tiger_memory_trigger"):
+            load_multi(idx)
+
+
+# ---------------------------------------------------------------------------
 # allowed_user_ids validation
 # ---------------------------------------------------------------------------
 
