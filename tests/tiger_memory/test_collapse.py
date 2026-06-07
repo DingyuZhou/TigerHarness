@@ -30,6 +30,36 @@ def test_none_must_memorize_section_is_allowed() -> None:
     assert must == "NONE"
 
 
+def test_marker_token_inside_prose_does_not_missplit() -> None:
+    # B7 injection guard: a transcript that mentions a marker token may
+    # make the model echo it INLINE in a section body. Markers are matched
+    # as whole lines, so an inline mention must not split the bundle.
+    text = (
+        "@@SHORT@@\n"
+        "- discusses the @@DETAILED@@ marker contract inline\n"
+        "@@DETAILED@@\n## Intent\nthe real detailed section.\n"
+        "@@MUST_MEMORIZE@@\nNONE\n"
+    )
+    short, detailed, must = parse_collapsed(text)
+    # The inline mention stays in the short body; the standalone marker
+    # is the real boundary.
+    assert "@@DETAILED@@ marker contract inline" in short
+    assert detailed.startswith("## Intent")
+    assert must == "NONE"
+
+
+def test_marker_must_be_standalone_line() -> None:
+    # A marker that only ever appears inline (never on its own line) is
+    # treated as absent -> malformed -> caller falls back.
+    text = (
+        "@@SHORT@@\n- x\n"
+        "talking about @@DETAILED@@ but never on its own line\n"
+        "@@MUST_MEMORIZE@@\nNONE\n"
+    )
+    with pytest.raises(CollapseParseError, match="missing"):
+        parse_collapsed(text)
+
+
 def test_empty_text_raises() -> None:
     with pytest.raises(CollapseParseError, match="empty output"):
         parse_collapsed("")

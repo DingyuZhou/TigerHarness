@@ -60,6 +60,15 @@ summarize work is the two CLIs `tiger-memory plan` + `ingest-summary`.
       - `ingest-summary` exit codes: `0` ok; `1` malformed bundle
         (re-ask the sub-agent once, then skip); `2` operator error
         (unknown uuid / no manifest — a planning bug, surface it).
+      - **Serialize ingest per persona.** `ingest-summary` does a
+        read-modify-write merge into the persona's single
+        `must_memorize.md`, so for ONE persona the sub-agents' bundles
+        must be ingested **one at a time** (the sub-agents may *run* in
+        parallel, but pipe their bundles to `ingest-summary`
+        sequentially), or two concurrent merges will lose updates.
+        Different personas are independent (separate stores) and may
+        ingest in parallel. (A future hardening could defer the merge to
+        the finalize step via per-uuid pending files.)
    c. After the persona's items are all ingested, `tiger-memory --config
       <target.config_path> rebuild` is **not** needed for summaries (the
       sub-agents wrote them); run the **finalize** tail — rollups, decay,

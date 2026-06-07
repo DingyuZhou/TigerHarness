@@ -55,6 +55,17 @@ def ingest_collapsed_summary(
     Raises ``CollapseParseError`` (from ``parse_collapsed``) on a malformed
     bundle — parsing happens *before* any write, so the store is left
     untouched and the caller can fall back / re-ask the sub-agent.
+
+    **Concurrency — serialize per persona.** short/archive are written
+    per-uuid (atomic, collision-free), but the must-memorize merge is a
+    read-modify-write on the persona's single ``must_memorize.md``. Calls
+    for the SAME persona's store must therefore be **serialized** — do not
+    pipe multiple sub-agent bundles to ``tiger-memory ingest-summary``
+    concurrently for one persona (a parallel run would lose must-memorize
+    updates). Different personas are independent (separate stores). The
+    live driver should ingest a persona's transcripts serially, or defer
+    the merge to a single finalize step. See
+    ``docs/tiger-memory-sweep-protocol.md``.
     """
     short_body, detailed_body, mm_section = parse_collapsed(bundle_text)
 

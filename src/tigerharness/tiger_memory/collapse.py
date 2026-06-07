@@ -33,23 +33,36 @@ class CollapseParseError(ValueError):
 def parse_collapsed(text: str) -> tuple[str, str, str]:
     """Split a collapsed summary into ``(short, detailed, must_memorize)``.
 
-    Raises ``CollapseParseError`` if any marker is missing, the markers
-    are out of order, or the short / detailed sections are empty. The
-    must-memorize section is allowed to be empty (it may legitimately be
-    ``NONE`` / zero candidates), so the caller validates it separately.
+    Markers are matched as **whole lines** (``line.strip() == marker``),
+    taking the first standalone-line occurrence of each — which is exactly
+    what the prompt's output contract emits. Matching whole lines (rather
+    than any substring) means a marker token *mentioned inline* in a
+    section body — e.g. echoed from an untrusted transcript (B7) — does
+    NOT split the bundle, so it can't silently mis-split into a garbled
+    summary.
+
+    Raises ``CollapseParseError`` if any marker is missing (or only ever
+    appears inline), the markers are out of order, or the short / detailed
+    sections are empty. The must-memorize section is allowed to be empty
+    (it may legitimately be ``NONE`` / zero candidates), so the caller
+    validates it separately.
     """
     if not text:
         raise CollapseParseError("empty output")
-    i_s = text.find(_SHORT)
-    i_d = text.find(_DETAILED)
-    i_m = text.find(_MUST)
-    if i_s < 0 or i_d < 0 or i_m < 0:
+    lines = text.split("\n")
+    pos: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped in (_SHORT, _DETAILED, _MUST) and stripped not in pos:
+            pos[stripped] = i
+    if _SHORT not in pos or _DETAILED not in pos or _MUST not in pos:
         raise CollapseParseError("missing one or more section markers")
+    i_s, i_d, i_m = pos[_SHORT], pos[_DETAILED], pos[_MUST]
     if not (i_s < i_d < i_m):
         raise CollapseParseError("section markers out of order")
-    short = text[i_s + len(_SHORT):i_d].strip()
-    detailed = text[i_d + len(_DETAILED):i_m].strip()
-    must = text[i_m + len(_MUST):].strip()
+    short = "\n".join(lines[i_s + 1:i_d]).strip()
+    detailed = "\n".join(lines[i_d + 1:i_m]).strip()
+    must = "\n".join(lines[i_m + 1:]).strip()
     if not short or not detailed:
         raise CollapseParseError("empty short or detailed section")
     return short, detailed, must
