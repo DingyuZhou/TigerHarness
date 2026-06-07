@@ -351,6 +351,10 @@ class TestProcessDecisionsDemoted:
         # record, which only works on a real dataclass. Prefilter behavior
         # is covered separately in test_lifecycle_prefilter.py.
         cfg.prefilter.enabled = False
+        # Likewise route through the legacy 3-call path (a truthy mock
+        # would enter the collapsed path); collapse is covered in
+        # test_lifecycle_collapse.py.
+        cfg.collapse.enabled = False
 
         with patch("tigerharness.tiger_memory.lifecycle._write_short_and_archive"), \
              patch("tigerharness.tiger_memory.lifecycle._extract_must_memorize", return_value=[new_candidate]), \

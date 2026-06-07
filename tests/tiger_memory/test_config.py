@@ -414,3 +414,22 @@ def test_cap_explicit_overrides(tmp_path: Path) -> None:
     cfg = load_config(cfg_path)
     assert cfg.cap.max_sessions_per_rebuild == 3
     assert cfg.cap.max_usd_per_rebuild == 1.5
+
+
+def test_collapse_defaults_off(minimal_config_yaml: Path) -> None:
+    """No collapse block -> default OFF (legacy 3-call path stays default)."""
+    cfg = load_config(minimal_config_yaml)
+    assert cfg.collapse.enabled is False
+
+
+def test_collapse_explicit_on(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "collapse.yaml"
+    cfg_path.write_text(
+        f"agent:\n  name: T\n  role: t\n"
+        f"store:\n  root: {tmp_path}/memory\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+        f"collapse:\n  enabled: true\n"
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.collapse.enabled is True

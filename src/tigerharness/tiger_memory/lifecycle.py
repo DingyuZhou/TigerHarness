@@ -16,6 +16,7 @@ from typing import Callable, Iterable
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from . import frontmatter, must_memorize as mm
+from .collapse import CollapseParseError, parse_collapsed
 from .config import Config
 from .metrics import RebuildMetrics
 from .prefilter import filter_transcript
@@ -451,14 +452,21 @@ def _process_decisions(
                 _write_addendum(store, cfg, summarizer, rec)
                 heuristic_fallback += _approx_cost(cfg, rec.content,
                                                    n_short=1, n_detailed=0)
+                candidates = _extract_must_memorize(cfg, summarizer, rec)
                 calls = 2  # short + extractor
-            else:  # SUMMARIZE_NEW or RE_SUMMARIZE
+            elif cfg.collapse.enabled:  # SUMMARIZE_NEW / RE_SUMMARIZE, collapsed
+                candidates, calls = _write_session_collapsed(
+                    store, cfg, summarizer, rec
+                )
+                heuristic_fallback += _approx_cost(cfg, rec.content,
+                                                   n_short=1, n_detailed=1)
+            else:  # SUMMARIZE_NEW / RE_SUMMARIZE, legacy 3-call
                 _write_short_and_archive(store, cfg, summarizer, rec)
                 heuristic_fallback += _approx_cost(cfg, rec.content,
                                                    n_short=1, n_detailed=1)
+                candidates = _extract_must_memorize(cfg, summarizer, rec)
                 calls = 3  # short + detailed + extractor
 
-            candidates = _extract_must_memorize(cfg, summarizer, rec)
             rows, demoted = mm.merge_candidates(
                 rows,
                 candidates,
@@ -526,6 +534,22 @@ def _write_short_and_archive(
         prompt=detailed_prompt, max_words=cfg.budgets.detailed_summary_words
     )
 
+    return _write_short_archive_bodies(
+        store, cfg, summarizer, rec, short_body, detailed_body
+    )
+
+
+def _write_short_archive_bodies(
+    store: Store,
+    cfg: Config,
+    summarizer: Summarizer,
+    rec: SourceRecord,
+    short_body: str,
+    detailed_body: str,
+) -> int:
+    """Write the short + detailed-archive files for *rec*. Shared by the
+    legacy 3-call path and the collapsed single-call path so both emit
+    identical on-disk artifacts."""
     filename = Store.short_filename(rec.first_event_at, rec.conversation_uuid)
     short_path = store.paths.journal / filename
     archive_path = store.paths.archive / filename
@@ -544,6 +568,52 @@ def _write_short_and_archive(
     store.atomic_write(short_path, frontmatter.render(short_fm, short_body))
     store.atomic_write(archive_path, frontmatter.render(archive_fm, detailed_body))
     return 2
+
+
+def _write_session_collapsed(
+    store: Store,
+    cfg: Config,
+    summarizer: Summarizer,
+    rec: SourceRecord,
+) -> tuple[list[mm.Row], int]:
+    """Collapsed single-pass summarize (P1.3): one call emits short +
+    detailed + must-memorize. Falls back to the legacy 3-call path on a
+    ``CollapseParseError`` so a malformed response never corrupts the
+    store. Returns ``(must_memorize_candidates, n_calls)`` — ``n_calls``
+    is 1 on success, 4 on fallback (the spent collapse call plus 3).
+    """
+    prompts_root = _prompts_root(cfg)
+    prompt = _fill_prompt(
+        prompts_root / "combined_summary.md",
+        agent_name=cfg.agent.name,
+        short_max_words=cfg.budgets.short_summary_words,
+        detailed_max_words=cfg.budgets.detailed_summary_words,
+        memo_max_words=cfg.budgets.must_memorize_memo_words,
+        source=rec.source,
+        source_id=rec.source_id,
+        first_event_at=rec.first_event_at.isoformat(),
+        last_event_at=rec.last_event_at.isoformat(),
+        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars),
+    )
+    # One generous cap covering both bodies; per-section budgets are stated
+    # in the template itself.
+    max_words = (
+        cfg.budgets.short_summary_words + cfg.budgets.detailed_summary_words + 100
+    )
+    raw = summarizer.summarize(prompt=prompt, max_words=max_words)
+    try:
+        short_body, detailed_body, mm_section = parse_collapsed(raw)
+    except CollapseParseError:
+        log.warning(
+            "collapsed summary parse failed for %s; falling back to 3-call path",
+            rec.conversation_uuid,
+        )
+        _write_short_and_archive(store, cfg, summarizer, rec)
+        return _extract_must_memorize(cfg, summarizer, rec), 4
+    _write_short_archive_bodies(
+        store, cfg, summarizer, rec, short_body, detailed_body
+    )
+    return mm.parse_extractor_output(mm_section), 1
 
 
 def _write_addendum(

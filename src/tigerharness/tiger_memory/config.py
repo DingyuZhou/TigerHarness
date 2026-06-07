@@ -144,6 +144,19 @@ class CapConfig:
 
 
 @dataclass(frozen=True)
+class CollapseConfig:
+    """Collapse the 3 per-session summarize calls into 1 (P1.3 / Lever 1.1).
+
+    Default **off**: the legacy 3-call path stays the default (and the
+    automatic fallback on any parse drift). The collapsed pass only helps
+    the legacy API-spawn path — P2's in-session read-once subsumes it for
+    free — so it ships opt-in. See ``collapse.py``.
+    """
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     agent: AgentConfig
     store: StoreConfig
@@ -155,6 +168,7 @@ class Config:
     briefing: BriefingConfig
     prefilter: PrefilterConfig = field(default_factory=PrefilterConfig)
     cap: CapConfig = field(default_factory=CapConfig)
+    collapse: CollapseConfig = field(default_factory=CollapseConfig)
     env_var: str = "TIGER_MEMORY_CONFIG"
     # Resolved at load time so tests can introspect.
     source_path: Path | None = None
@@ -394,6 +408,11 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         max_usd_per_rebuild=float(cap_raw.get("max_usd_per_rebuild", 20.0)),
     )
 
+    collapse_raw = raw.get("collapse") or {}
+    collapse = CollapseConfig(
+        enabled=bool(collapse_raw.get("enabled", False)),
+    )
+
     return Config(
         agent=agent,
         store=store,
@@ -405,6 +424,7 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         briefing=briefing,
         prefilter=prefilter,
         cap=cap,
+        collapse=collapse,
         env_var=str(raw.get("env_var", "TIGER_MEMORY_CONFIG")),
         source_path=source_path,
     )

@@ -568,9 +568,25 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
     surfaces a cap hit. **Scope:** caps apply to `rebuild` only;
     `bootstrap` (`--limit`) and `resummarize` (`--since`) are user-scoped
     and exempt. This answers the `anthropic.py:32-35` TODO's "cost cap +
-    scope cutoff" half. **Still TODO in P1:** the 3→1 call-collapse
-    (legacy API path only) and model tiering — both optional / API-path
-    specific, deferred behind P2's in-session read-once.
+    scope cutoff" half.
+  - **Status (2026-06-07): 3→1 call-collapse SHIPPED (default OFF).** A
+    `combined_summary.md` prompt emits {short, detailed, must-memorize}
+    behind a strict `@@SHORT@@`/`@@DETAILED@@`/`@@MUST_MEMORIZE@@`
+    delimiter contract; `collapse.py` `parse_collapsed` validates it
+    (all markers present, in order, short+detailed non-empty) and
+    `lifecycle._write_session_collapsed` issues ONE call, writes the
+    artifacts, and parses must-memorize from the same output —
+    `metrics.summarize_calls` drops 3→1. On any `CollapseParseError` it
+    **falls back to the legacy 3-call path** (no store corruption; the
+    spent attempt + 3 fallback calls are counted honestly as 4). Gated
+    by `collapse.enabled` **default false**: the design downgrades
+    call-collapse to the legacy API-spawn path (P2's in-session
+    read-once subsumes it for free), so it ships opt-in with the safe
+    3-call path remaining the default and the fallback. **P1 floor
+    COMPLETE:** pre-filter + cost/scope cap + metrics + call-collapse all
+    landed, tested, 100% coverage, doc synced. Model-tiering (Lever 1.3)
+    stays optional/API-specific and is deferred to P2's context-budget
+    framing.
 - **P2 — Lever 3 (subscription-safe multi-persona).** In-session
   summarization skill via the `subagent` isolation strategy (B1, B8) +
   roster sweep (B3) + team-qualified IDs (B4) + the summarized-watermark
@@ -663,3 +679,14 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   surfaced via `metrics.stopped_reason`. `bootstrap`/`resummarize` stay
   uncapped (user-scoped). Closes the "cost cap + scope cutoff" half of the
   `anthropic.py:32-35` TODO. 100% coverage held; full suite green (2872).
+- **2026-06-07 — P1.3 implementation + P1 floor complete (Anzai).**
+  Shipped the 3→1 **call-collapse** (`collapse.py` `parse_collapsed` +
+  `combined_summary.md` + `lifecycle._write_session_collapsed`), behind
+  `collapse.enabled` **default OFF** with automatic fallback to the
+  legacy 3-call path on any parse drift. With this, the **P1 floor is
+  complete** (pre-filter + cost/scope cap + metrics + call-collapse, all
+  tested at 100% coverage, doc synced). The collapse only benefits the
+  legacy API-spawn path — P2's in-session read-once subsumes it — so it's
+  opt-in. Full suite green (2885). Next: P2 (Lever 3) — in-session
+  summarization via the `subagent` strategy (B1/B8), roster sweep (B3),
+  team-qualified IDs (B4), summarized-watermark (B5).
