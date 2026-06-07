@@ -364,3 +364,30 @@ class TestTeamDefaults:
         )
         with pytest.raises(ConfigError, match="defaults YAML"):
             load_config(cfg_path)
+
+
+def test_prefilter_defaults_on(minimal_config_yaml: Path) -> None:
+    """No prefilter block -> conservative-on defaults."""
+    cfg = load_config(minimal_config_yaml)
+    assert cfg.prefilter.enabled is True
+    assert cfg.prefilter.drop_tool_results is True
+    assert cfg.prefilter.drop_system_reminders is True
+
+
+def test_prefilter_explicit_overrides(tmp_path: Path) -> None:
+    """An explicit prefilter block overrides each knob independently."""
+    cfg_path = tmp_path / "pf.yaml"
+    cfg_path.write_text(
+        f"agent:\n  name: T\n  role: t\n"
+        f"store:\n  root: {tmp_path}/memory\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+        f"prefilter:\n"
+        f"  enabled: false\n"
+        f"  drop_tool_results: false\n"
+        f"  drop_system_reminders: true\n"
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.prefilter.enabled is False
+    assert cfg.prefilter.drop_tool_results is False
+    assert cfg.prefilter.drop_system_reminders is True

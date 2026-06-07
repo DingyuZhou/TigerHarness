@@ -115,6 +115,19 @@ class BriefingConfig:
 
 
 @dataclass(frozen=True)
+class PrefilterConfig:
+    """Transcript pre-filter knobs (P1.1 / Lever 1.2).
+
+    Conservative-on by default: every flag is an independent off-switch
+    so aggressiveness is tunable per persona. See ``prefilter.py``.
+    """
+
+    enabled: bool = True
+    drop_tool_results: bool = True
+    drop_system_reminders: bool = True
+
+
+@dataclass(frozen=True)
 class Config:
     agent: AgentConfig
     store: StoreConfig
@@ -124,6 +137,7 @@ class Config:
     decay: DecayConfig
     rebuild: RebuildConfig
     briefing: BriefingConfig
+    prefilter: PrefilterConfig = field(default_factory=PrefilterConfig)
     env_var: str = "TIGER_MEMORY_CONFIG"
     # Resolved at load time so tests can introspect.
     source_path: Path | None = None
@@ -346,6 +360,15 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         order=str(briefing_raw.get("order", "oldest_to_newest")),
     )
 
+    prefilter_raw = raw.get("prefilter") or {}
+    prefilter = PrefilterConfig(
+        enabled=bool(prefilter_raw.get("enabled", True)),
+        drop_tool_results=bool(prefilter_raw.get("drop_tool_results", True)),
+        drop_system_reminders=bool(
+            prefilter_raw.get("drop_system_reminders", True)
+        ),
+    )
+
     return Config(
         agent=agent,
         store=store,
@@ -355,6 +378,7 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         decay=decay,
         rebuild=rebuild,
         briefing=briefing,
+        prefilter=prefilter,
         env_var=str(raw.get("env_var", "TIGER_MEMORY_CONFIG")),
         source_path=source_path,
     )

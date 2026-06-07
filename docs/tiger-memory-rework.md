@@ -539,6 +539,24 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   move to in-session. (Collapse/prefix-cache applies only to the legacy
   API-spawn path; it is subsumed by P2's in-session read-once.) Lowest
   risk, no change to what the agent reads.
+  - **Status (2026-06-07): pre-filter + thin metrics hook SHIPPED.**
+    `tiger_memory/prefilter.py` (`filter_transcript`) elides
+    `[tool_result]` payloads (→ `[tool_result elided: N chars]`) and
+    strips `<system-reminder>` blocks from the *rendered* transcript,
+    keeping all prose + `[tool_use: …]` intents. It runs **once per
+    record** in `lifecycle._process_decisions` (via
+    `dataclasses.replace` on the `SourceRecord`), *above* the summarizer
+    interface, so every short/detailed/addendum/extractor call reuses the
+    de-noised content and the win survives the P2 in-session move. Config
+    knobs: `prefilter.{enabled,drop_tool_results,drop_system_reminders}`
+    (all default-on; conservative). The thin metrics hook
+    (`tiger_memory/metrics.py` `RebuildMetrics`) accumulates
+    `sessions_processed`, `summarize_calls` (3 new / 2 addendum — the
+    P1.3-collapse baseline), and `content_chars_raw` vs.
+    `content_chars_filtered`, stamped into `state.json["metrics"]` so the
+    reduction is provable across rebuilds. **Still TODO in P1:** the
+    cost/scope cap (Lever 1.4 — `summarizers/anthropic.py:32-35`), the
+    3→1 call-collapse (legacy API path only), and model tiering.
 - **P2 — Lever 3 (subscription-safe multi-persona).** In-session
   summarization skill via the `subagent` isolation strategy (B1, B8) +
   roster sweep (B3) + team-qualified IDs (B4) + the summarized-watermark
@@ -612,3 +630,14 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   filter excludes it, but single-tenant/permissive mode would re-ingest,
   and the adapter reads no sidechain marker (P2 fix + a runtime check
   still open). Done on a `main`-based branch in an isolated worktree.
+- **2026-06-07 — P1.1 implementation (Anzai).** First build session of
+  the rework: shipped the transcript **pre-filter** (`prefilter.py`,
+  pure `filter_transcript`) and a **thin metrics hook** (`metrics.py`,
+  `RebuildMetrics` → `state.json["metrics"]`), wired once-per-record into
+  `lifecycle._process_decisions` ahead of `_clip`, with
+  `prefilter.{enabled,drop_tool_results,drop_system_reminders}` config
+  knobs (default-on). Landed the metrics scaffold first so the
+  pre-filter's char reduction is measurable; both kept above the
+  summarizer interface so they survive the P2 in-session move. 100%
+  coverage held; full suite green. See the P1 status note in **Phasing**.
+  Next: the Lever 1.4 cost/scope cap on top of the metrics hook.

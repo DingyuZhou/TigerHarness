@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
@@ -17,6 +17,8 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from . import frontmatter, must_memorize as mm
 from .config import Config
+from .metrics import RebuildMetrics
+from .prefilter import filter_transcript
 from .sources import (
     ClaudeTranscriptAdapter,
     DocsAdapter,
@@ -121,7 +123,8 @@ def bootstrap(
             print(f"DRY-RUN: estimated total cost: ${est:.2f}")
             return 0
 
-        cost = _process_decisions(new_or_resum, store, cfg, summarizer)
+        metrics = RebuildMetrics()
+        cost = _process_decisions(new_or_resum, store, cfg, summarizer, metrics)
         _cascade_all_rollups(store, cfg, summarizer)
         _refresh_longer_memory(store, cfg, summarizer)
         _apply_decay(store, cfg)
@@ -129,7 +132,7 @@ def bootstrap(
         # Write state BEFORE building the briefing so the manifest
         # shows the current rebuild's timestamp, not the prior one.
         _write_state(store, cfg, decisions=decisions, cost_usd=cost,
-                    last_op="bootstrap")
+                    last_op="bootstrap", metrics=metrics)
 
         from .briefing import rebuild_briefing
         rebuild_briefing(cfg, store)
@@ -169,7 +172,8 @@ def rebuild(
             if d.action in (SUMMARIZE_NEW, RE_SUMMARIZE, ADDENDUM)
         ]
 
-        cost = _process_decisions(new_or_resum, store, cfg, summarizer)
+        metrics = RebuildMetrics()
+        cost = _process_decisions(new_or_resum, store, cfg, summarizer, metrics)
         _cascade_all_rollups(store, cfg, summarizer)
         _refresh_longer_memory(store, cfg, summarizer)
         _apply_decay(store, cfg)
@@ -178,7 +182,7 @@ def rebuild(
         # Write state BEFORE building the briefing (so the manifest's
         # last_rebuild_at reflects THIS rebuild, not the previous one).
         _write_state(store, cfg, decisions=decisions, cost_usd=cost,
-                    duration_sec=duration, last_op="rebuild")
+                    duration_sec=duration, last_op="rebuild", metrics=metrics)
 
         from .briefing import rebuild_briefing
         rebuild_briefing(cfg, store)
@@ -233,13 +237,14 @@ def resummarize(
             )
         print(f"resummarize: {len(forced)} sessions since {since}")
 
-        cost = _process_decisions(forced, store, cfg, summarizer_obj)
+        metrics = RebuildMetrics()
+        cost = _process_decisions(forced, store, cfg, summarizer_obj, metrics)
         _cascade_all_rollups(store, cfg, summarizer_obj)
         _refresh_longer_memory(store, cfg, summarizer_obj)
         _apply_decay(store, cfg)
 
         _write_state(store, cfg, decisions=forced, cost_usd=cost,
-                    last_op="resummarize")
+                    last_op="resummarize", metrics=metrics)
 
         from .briefing import rebuild_briefing
         rebuild_briefing(cfg, store)
@@ -359,12 +364,19 @@ def _process_decisions(
     store: Store,
     cfg: Config,
     summarizer: Summarizer,
+    metrics: RebuildMetrics | None = None,
 ) -> float:
     """Run the summarizer for each decision and write archive/short.
 
     Returns total cost in USD — from ``summarizer.cost_so_far`` when
     the backend reports real numbers (Anthropic does), or a rough
     char-count heuristic for backends that don't (MockSummarizer reports 0).
+
+    The transcript pre-filter (P1.1) runs once per record here, *before*
+    any summarize call, so all of short/detailed/addendum/extractor reuse
+    the same de-noised content. When *metrics* is supplied, the raw vs.
+    filtered char counts and the per-session call count are accumulated
+    into it for the rebuild's ``state.json`` snapshot.
     """
     cost_at_start = summarizer.cost_so_far
     heuristic_fallback = 0.0
@@ -374,15 +386,28 @@ def _process_decisions(
         if d.action == SKIP_ACTIVE or d.action == SKIP_CLEAN:
             continue
         rec = d.record
+        raw_chars = len(rec.content)
+        if cfg.prefilter.enabled:
+            rec = replace(
+                rec,
+                content=filter_transcript(
+                    rec.content,
+                    drop_tool_results=cfg.prefilter.drop_tool_results,
+                    drop_system_reminders=cfg.prefilter.drop_system_reminders,
+                ),
+            )
+        filtered_chars = len(rec.content)
         try:
             if d.action == ADDENDUM:
                 _write_addendum(store, cfg, summarizer, rec)
                 heuristic_fallback += _approx_cost(cfg, rec.content,
                                                    n_short=1, n_detailed=0)
+                calls = 2  # short + extractor
             else:  # SUMMARIZE_NEW or RE_SUMMARIZE
                 _write_short_and_archive(store, cfg, summarizer, rec)
                 heuristic_fallback += _approx_cost(cfg, rec.content,
                                                    n_short=1, n_detailed=1)
+                calls = 3  # short + detailed + extractor
 
             candidates = _extract_must_memorize(cfg, summarizer, rec)
             rows, demoted = mm.merge_candidates(
@@ -394,6 +419,12 @@ def _process_decisions(
             )
             if demoted:
                 mm.append_dropped(store, demoted)
+            if metrics is not None:
+                metrics.record_session(
+                    chars_raw=raw_chars,
+                    chars_filtered=filtered_chars,
+                    calls=calls,
+                )
         except Exception:
             log.exception(
                 "failed to process %s (%s)", rec.conversation_uuid, d.action
@@ -793,6 +824,7 @@ def _write_state(
     cost_usd: float,
     duration_sec: float | None = None,
     last_op: str = "rebuild",
+    metrics: RebuildMetrics | None = None,
 ) -> None:
     counts = {"active": 0, "clean": 0, "dirty": 0, "frozen": 0}
     for d in decisions:
@@ -824,6 +856,8 @@ def _write_state(
         "total_cost_usd": prev_total + cost_usd,     # running total since bootstrap
         "last_bootstrap_cost_usd": bootstrap_cost,
     }
+    if metrics is not None:
+        payload["metrics"] = metrics.as_dict()
     store.write_state(payload)
 
 
