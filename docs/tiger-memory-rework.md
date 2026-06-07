@@ -702,9 +702,23 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
     completion because P2's remaining work (B1 stage-2 executor + B3) is
     blocked on the Operator's skill-placement decision; read-side (Lever 2,
     `briefing.py`) and write-side (Lever 3, `lifecycle.py`) are independent
-    levers, so there's no coupling. **Next P3:** the lean-core cut itself
-    (trim `must_memorize` budget / walking window where the measurement
-    shows slack) + don't-regress-recall checks.
+    levers, so there's no coupling.
+  - **Status (2026-06-07): lean-core cut landed.** New config
+    `briefing.resident_layers` (subset of recent/daily/weekly/monthly,
+    **default all four**) selects which walking-window layers are copied
+    into the always-resident briefing. Non-resident layers are NOT
+    deleted — they stay in `journal/` and are listed in a MANIFEST
+    "Drill on demand" section (reachable via `tiger-memory drill` /
+    search, which the README already documents). `must_memorize.md` +
+    `longer_memory.md` are always resident (load-bearing). This is the
+    design's "lean core + lazy-load deeper via drill", config-driven and
+    **recall-safe by default** (default = no change). Operators set e.g.
+    `resident_layers: [recent, daily]` per persona to realize the diet as
+    weekly/monthly rollups accumulate; the `.briefing_metrics.json`
+    sidecar measures the resident size so the drop is provable. *(Measured
+    on the real Anzai store: 2559 resident words today — recent 38% /
+    must_memorize 32% / daily 30% / weekly+monthly empty — so the win is
+    forward-looking as deeper rollups grow.)*
 
 ## Non-goals
 
@@ -843,3 +857,11 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   per-section). Measurement-first, mirroring P1.2, so the upcoming
   lean-core cut is provable and recall-safe. Independent of P2 (different
   file/lever). Full suite green (2904); 100% coverage held.
+- **2026-06-07 — P3 lean-core cut (Anzai).** Landed `briefing.resident_layers`
+  (default all four → backward compatible): non-resident walking-window
+  layers are left in `journal/` and listed as MANIFEST "Drill on demand"
+  rather than copied into the resident briefing — the design's "lean core
+  + lazy drill", recall-safe by default. `must_memorize`/`longer_memory`
+  always resident. Data-grounded via the new sidecar (real Anzai briefing
+  = 2559 resident words; win scales as weekly/monthly accrue). Full suite
+  green (2910); 100% coverage held.

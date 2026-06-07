@@ -107,11 +107,20 @@ class WalkingConfig:
     monthlies_working_days: int = 90
 
 
+VALID_RESIDENT_LAYERS = ("recent", "daily", "weekly", "monthly")
+
+
 @dataclass(frozen=True)
 class BriefingConfig:
     walking: WalkingConfig = field(default_factory=WalkingConfig)
     always_first: str = "must_memorize.md"
     order: str = "oldest_to_newest"
+    # P3 / Lever 2 — which walking-window layers are COPIED into the
+    # always-resident briefing. Layers omitted here stay in the journal
+    # and are listed as drill-on-demand in MANIFEST.md (recall-safe).
+    # ``must_memorize.md`` + ``longer_memory.md`` are always resident.
+    # Default = all four (no diet; backward compatible).
+    resident_layers: tuple[str, ...] = VALID_RESIDENT_LAYERS
 
 
 @dataclass(frozen=True)
@@ -385,10 +394,12 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         monthlies_working_days=int(walking_raw.get("monthlies_working_days", 90)),
     )
     _validate_walking(walking)
+    resident_layers = _parse_resident_layers(briefing_raw)
     briefing = BriefingConfig(
         walking=walking,
         always_first=str(briefing_raw.get("always_first", "must_memorize.md")),
         order=str(briefing_raw.get("order", "oldest_to_newest")),
+        resident_layers=resident_layers,
     )
 
     prefilter_raw = raw.get("prefilter") or {}
@@ -464,6 +475,33 @@ def _expand_path_if_pathy(value: Any) -> Any:
     if isinstance(value, str) and (value.startswith("~") or "/" in value):
         return str(Path(value).expanduser())
     return value
+
+
+def _parse_resident_layers(briefing_raw: dict[str, Any]) -> tuple[str, ...]:
+    """Parse + validate ``briefing.resident_layers`` (P3 lean core).
+
+    Absent -> all four layers resident (backward compatible). Present ->
+    a list whose entries must each be one of ``VALID_RESIDENT_LAYERS``;
+    an empty list is allowed (only ``must_memorize`` / ``longer_memory``
+    stay resident, everything else drill-on-demand).
+    """
+    raw = briefing_raw.get("resident_layers")
+    if raw is None:
+        return VALID_RESIDENT_LAYERS
+    if not isinstance(raw, list):
+        raise ConfigError(
+            "briefing.resident_layers must be a list of layer names "
+            f"(subset of {list(VALID_RESIDENT_LAYERS)})."
+        )
+    out: list[str] = []
+    for item in raw:
+        if item not in VALID_RESIDENT_LAYERS:
+            raise ConfigError(
+                f"briefing.resident_layers: unknown layer {item!r}; "
+                f"allowed: {list(VALID_RESIDENT_LAYERS)}."
+            )
+        out.append(item)
+    return tuple(out)
 
 
 def _validate_walking(w: WalkingConfig) -> None:

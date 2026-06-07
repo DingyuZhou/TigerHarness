@@ -73,12 +73,24 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
             working, cfg
         )
 
-        layer1_files = _copy_layer1(store, layer1_dates, tmp)
-        layer2_files = _copy_layer2(store, layer2_dates, tmp)
-        layer3_files = _copy_layer3(store, layer3_dates, tmp)
-        layer4_files = _copy_layer4(store, layer4_dates, tmp)
+        # P3 lean core: only copy the walking-window layers configured as
+        # resident; the rest stay in the journal and are listed as
+        # drill-on-demand in the MANIFEST (recall-safe — nothing deleted).
+        resident = cfg.briefing.resident_layers
+        layer1_files = (
+            _copy_layer1(store, layer1_dates, tmp) if "recent" in resident else []
+        )
+        layer2_files = (
+            _copy_layer2(store, layer2_dates, tmp) if "daily" in resident else []
+        )
+        layer3_files = (
+            _copy_layer3(store, layer3_dates, tmp) if "weekly" in resident else []
+        )
+        layer4_files = (
+            _copy_layer4(store, layer4_dates, tmp) if "monthly" in resident else []
+        )
 
-        # P3 read-side measurement: size the assembled briefing (total +
+        # P3 read-side measurement: size the *resident* briefing (total +
         # per-section) before the swap, so the read-side diet is provable.
         stats = _briefing_stats(tmp)
 
@@ -92,6 +104,7 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
             has_longer=lm_src.exists(),
             has_mm=mm_src.exists(),
             stats=stats,
+            resident_layers=resident,
         )
         (tmp / "MANIFEST.md").write_text(manifest_text, encoding="utf-8")
         (tmp / ".fingerprint").write_text(_compute_fingerprint(store),
@@ -288,6 +301,7 @@ def _render_manifest(
     has_longer: bool,
     has_mm: bool,
     stats: dict,
+    resident_layers: tuple[str, ...],
 ) -> str:
     """Generate the MANIFEST.md per §8.3."""
     saved = store.read_state() or {}
@@ -336,6 +350,16 @@ def _render_manifest(
         for f in sorted(layer1):
             parts.append(f"- `recent/{f.name}` — {_one_line_preview(f)}")
         parts.append("")
+    non_resident = [n for n in _LAYER_DIRS if n not in resident_layers]
+    if non_resident:
+        parts.append("## Drill on demand (not loaded into context)")
+        parts.append(
+            "These layers stay in the journal; pull them with "
+            "`tiger-memory drill` / search when a turn needs them:"
+        )
+        for name in non_resident:
+            parts.append(f"- `{name}/` — {_LAYER_LABELS[name]}")
+        parts.append("")
     parts.append(
         "**Read order**: must_memorize → longer_memory → monthlies → weeklies "
         "→ dailies → shorts. Last mention wins on factual conflict."
@@ -378,6 +402,12 @@ def _one_line_preview(path: Path) -> str:
 # MANIFEST are scaffolding and excluded from the content measure.
 _CORE_FILES = ("must_memorize.md", "longer_memory.md")
 _LAYER_DIRS = ("recent", "daily", "weekly", "monthly")
+_LAYER_LABELS = {
+    "recent": "recent full short summaries",
+    "daily": "daily rollups",
+    "weekly": "weekly rollups",
+    "monthly": "monthly rollups",
+}
 
 
 def _wordcount(path: Path) -> tuple[int, int]:

@@ -114,9 +114,11 @@ class TestRenderManifest:
             layer3=layer3, layer4=layer4,
             has_longer=True, has_mm=True,
             stats={"total_words": 12, "total_chars": 80, "sections": {}},
+            resident_layers=("recent", "daily", "weekly", "monthly"),
         )
         assert "# Briefing manifest" in text
         assert "Briefing size: 12 words / 80 chars" in text
+        assert "Drill on demand" not in text  # all layers resident
         assert "Agent: T" in text
         assert "Must memorize" in text
         assert "Longer memory" in text
@@ -132,6 +134,7 @@ class TestRenderManifest:
             layer1=[], layer2=[], layer3=[], layer4=[],
             has_longer=False, has_mm=False,
             stats={"total_words": 0, "total_chars": 0, "sections": {}},
+            resident_layers=("recent", "daily", "weekly", "monthly"),
         )
         assert "Must memorize" not in text
         assert "Longer memory" not in text
