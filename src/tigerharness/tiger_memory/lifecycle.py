@@ -126,17 +126,11 @@ def bootstrap(
 
         metrics = RebuildMetrics()
         cost = _process_decisions(new_or_resum, store, cfg, summarizer, metrics)
-        _cascade_all_rollups(store, cfg, summarizer)
-        _refresh_longer_memory(store, cfg, summarizer)
-        _apply_decay(store, cfg)
-
-        # Write state BEFORE building the briefing so the manifest
-        # shows the current rebuild's timestamp, not the prior one.
-        _write_state(store, cfg, decisions=decisions, cost_usd=cost,
-                    last_op="bootstrap", metrics=metrics)
-
-        from .briefing import rebuild_briefing
-        rebuild_briefing(cfg, store)
+        _finalize_rebuild(
+            store, cfg, summarizer,
+            decisions=decisions, cost=cost, metrics=metrics,
+            last_op="bootstrap",
+        )
         print(f"bootstrap done. cost: ${cost:.2f}")
     return 0
 
@@ -179,18 +173,12 @@ def rebuild(
             max_sessions=cfg.cap.max_sessions_per_rebuild,
             max_usd=cfg.cap.max_usd_per_rebuild,
         )
-        _cascade_all_rollups(store, cfg, summarizer)
-        _refresh_longer_memory(store, cfg, summarizer)
-        _apply_decay(store, cfg)
-
         duration = time.time() - start
-        # Write state BEFORE building the briefing (so the manifest's
-        # last_rebuild_at reflects THIS rebuild, not the previous one).
-        _write_state(store, cfg, decisions=decisions, cost_usd=cost,
-                    duration_sec=duration, last_op="rebuild", metrics=metrics)
-
-        from .briefing import rebuild_briefing
-        rebuild_briefing(cfg, store)
+        _finalize_rebuild(
+            store, cfg, summarizer,
+            decisions=decisions, cost=cost, metrics=metrics,
+            last_op="rebuild", duration_sec=duration,
+        )
     return 0
 
 
@@ -244,17 +232,49 @@ def resummarize(
 
         metrics = RebuildMetrics()
         cost = _process_decisions(forced, store, cfg, summarizer_obj, metrics)
-        _cascade_all_rollups(store, cfg, summarizer_obj)
-        _refresh_longer_memory(store, cfg, summarizer_obj)
-        _apply_decay(store, cfg)
-
-        _write_state(store, cfg, decisions=forced, cost_usd=cost,
-                    last_op="resummarize", metrics=metrics)
-
-        from .briefing import rebuild_briefing
-        rebuild_briefing(cfg, store)
+        _finalize_rebuild(
+            store, cfg, summarizer_obj,
+            decisions=forced, cost=cost, metrics=metrics,
+            last_op="resummarize",
+        )
         print(f"resummarize done. cost: ${cost:.2f}")
     return 0
+
+
+# ----- finalize stage (shared non-AI tail) ---------------------------------
+
+
+def _finalize_rebuild(
+    store: Store,
+    cfg: Config,
+    summarizer: Summarizer,
+    *,
+    decisions: list[Decision],
+    cost: float,
+    metrics: RebuildMetrics,
+    last_op: str,
+    duration_sec: float | None = None,
+) -> None:
+    """The non-AI tail shared by every rebuild entry point
+    (bootstrap / rebuild / resummarize): cascade rollups, fold
+    longer-memory, decay must-memorize, write state, rebuild the briefing.
+
+    This is the ``finalize`` stage of the P2 plan -> execute -> finalize
+    split (see ``docs/tiger-memory-rework.md``, "B1/B8 — implementation
+    design"): the in-session summarization path will call this same tail
+    once its sub-agents have written the per-session artifacts.
+    """
+    _cascade_all_rollups(store, cfg, summarizer)
+    _refresh_longer_memory(store, cfg, summarizer)
+    _apply_decay(store, cfg)
+    # Write state BEFORE building the briefing so the manifest's
+    # last_rebuild_at reflects THIS run, not the previous one.
+    _write_state(
+        store, cfg, decisions=decisions, cost_usd=cost,
+        duration_sec=duration_sec, last_op=last_op, metrics=metrics,
+    )
+    from .briefing import rebuild_briefing
+    rebuild_briefing(cfg, store)
 
 
 # ----- adapter / summarizer factories --------------------------------------

@@ -489,6 +489,13 @@ middle to run inside an interactive session.
    summarized-watermark (B5) so the next sweep retries. Then the existing
    non-AI tail unchanged: `_cascade_all_rollups`, `_refresh_longer_memory`,
    `_apply_decay`, `_write_state` (+ metrics), `rebuild_briefing`.
+   - **Landed (2026-06-07):** the non-AI tail is now factored into
+     `lifecycle._finalize_rebuild(...)`, shared verbatim by `bootstrap` /
+     `rebuild` / `resummarize` (behavior-preserving DRY refactor). The
+     in-session path will call the same helper after its sub-agents write
+     the per-session artifacts. The structural re-check + manifest
+     plumbing are deferred until the stage-2 executor exists (building
+     them now would be unused/speculative).
 
 **P1.3 is reused, not wasted.** The stage-2 *contract* IS P1.3's
 `combined_summary.md` + `parse_collapsed` — the in-session read-once is
@@ -802,3 +809,13 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   finalizer are decision-independent and slated first; only the stage-2
   host depends on the open skill-placement decision (recommend folding
   into drive-journal). No suite/coverage change (doc only).
+- **2026-06-07 — finalize-stage refactor (Anzai).** First *code* step of
+  the B1 split, decision-independent: extracted the non-AI tail (rollups,
+  longer-memory fold, decay, state, briefing) — duplicated verbatim
+  across `bootstrap`/`rebuild`/`resummarize` — into a single
+  `lifecycle._finalize_rebuild(...)`. Behavior-preserving (bootstrap/
+  resummarize keep `duration_sec=None`; order unchanged); the in-session
+  path will reuse this exact tail. `plan_rebuild` + the structural
+  validator deferred to stage 2 (avoid speculative unused code). Full
+  suite green (2902); 100% coverage held (existing tests cover the
+  helper; lifecycle.py −8 statements).
