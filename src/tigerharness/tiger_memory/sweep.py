@@ -132,6 +132,23 @@ def try_claim_sweep(
     if held_by_other:
         return ClaimResult(False, "busy")
 
+    # Bound a sweep RUN to the staleness floor. A run spans several wakes
+    # (per-wake cap → release → resume), and `progress` carries the
+    # already-done personas across them. But if the run is abandoned
+    # mid-sweep (team silent past the floor), its stale `progress` must
+    # NOT skip personas in the next window — that would leave a persona
+    # swept long ago unrefreshed ("no persona left behind", B3). So a
+    # claim whose in-flight run is older than the floor starts a FRESH
+    # run: clear `progress` + restamp `run_started_at`.
+    run_started = _parse_iso(state.get("run_started_at"))
+    run_abandoned = (
+        run_started is not None
+        and (now - run_started).total_seconds() >= floor_hours * 3600
+    )
+    if run_started is None or run_abandoned:
+        state["run_started_at"] = now.isoformat()
+        state.pop("progress", None)
+
     state["claim_token"] = token
     state["claim_at"] = now.isoformat()
     write_sweep_state(team_memories_dir, state)
@@ -158,6 +175,7 @@ def mark_sweep_complete(team_memories_dir: Path, now: datetime) -> None:
     state.pop("claim_token", None)
     state.pop("claim_at", None)
     state.pop("progress", None)
+    state.pop("run_started_at", None)
     write_sweep_state(team_memories_dir, state)
 
 

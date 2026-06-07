@@ -242,6 +242,43 @@ def test_complete_clears_progress(tmp_path: Path) -> None:
     assert sweep_progress(tmp_path) == set()
 
 
+# ----- run lifecycle: abandoned partial sweep must not poison freshness ----
+
+
+def test_claim_stamps_run_started_at(tmp_path: Path) -> None:
+    try_claim_sweep(tmp_path, now=NOW, token="A")
+    assert read_sweep_state(tmp_path)["run_started_at"] == NOW.isoformat()
+
+
+def test_resume_within_floor_keeps_progress(tmp_path: Path) -> None:
+    # Start a run, do Ayako, release (cap hit); a wake an hour later
+    # resumes the SAME run and must keep Ayako done.
+    try_claim_sweep(tmp_path, now=NOW, token="A")
+    record_persona_done(tmp_path, "Ayako")
+    release_sweep_claim(tmp_path)
+    try_claim_sweep(tmp_path, now=NOW + timedelta(hours=1), token="B")
+    assert sweep_progress(tmp_path) == {"Ayako"}  # resumed, not reset
+
+
+def test_abandoned_run_past_floor_resets_progress(tmp_path: Path) -> None:
+    # Start a run, do Ayako, release; team goes silent > floor mid-run.
+    try_claim_sweep(tmp_path, now=NOW, token="A")
+    record_persona_done(tmp_path, "Ayako")
+    release_sweep_claim(tmp_path)
+    much_later = NOW + timedelta(hours=25)  # > 24h floor -> abandoned
+    res = try_claim_sweep(tmp_path, now=much_later, token="B")
+    assert res.claimed is True
+    # The abandoned run's progress is cleared so Ayako is re-swept.
+    assert sweep_progress(tmp_path) == set()
+    assert read_sweep_state(tmp_path)["run_started_at"] == much_later.isoformat()
+
+
+def test_complete_clears_run_started_at(tmp_path: Path) -> None:
+    try_claim_sweep(tmp_path, now=NOW, token="A")
+    mark_sweep_complete(tmp_path, NOW)
+    assert "run_started_at" not in read_sweep_state(tmp_path)
+
+
 # ----- maybe_sweep_roster (the shared hook) --------------------------------
 
 

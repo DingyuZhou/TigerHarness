@@ -72,7 +72,11 @@ summarize work is the two CLIs `tiger-memory plan` + `ingest-summary`.
 3. **Close the run.**
    - All due personas processed → `sweep.mark_sweep_complete(
      team_memories_dir, now=<utcnow>)` (advances the watermark, clears the
-     claim + progress).
+     claim + progress). **This includes the empty case:** if
+     `decision.plan.targets` is empty and `plan.remaining == 0` (idle team,
+     or every persona already done), call `mark_sweep_complete`
+     immediately — do NOT leave the claim dangling, or other sessions see
+     `busy` until the lease expires.
    - Per-wake cap hit, more remain (`decision.plan.remaining > 0`) →
      `sweep.release_sweep_claim(team_memories_dir)` (clears the claim,
      **keeps** progress + the stale watermark) so the next wake resumes
