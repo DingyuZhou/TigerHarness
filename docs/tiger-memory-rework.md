@@ -552,18 +552,25 @@ known callers:
 
 **Gating (non-AI bookkeeping, exactly the journal-sweep mold).** The hook
 returns a decision without doing any AI work itself:
-1. **Team `last_sweep_at` watermark + staleness floor.** Team-scoped state
-   file at **`<team_root>/.tiger-memory/sweep-state.json`** (team_root =
-   the persona config's `…/memories/` parent — i.e. `memories/<persona>/
-   tiger-memory.config.yaml` → `team_root = parent.parent.parent`). If
-   `now - last_sweep_at < floor` (default **24h**), return "not due" — no
-   sweep, cheap no-op on every trigger.
-2. **Atomic claim (team-scoped lease).** Reuse the drive-journal
-   heartbeat-as-soft-lease pattern: write a claim token + timestamp into
-   the sweep-state file with a compare-and-set re-read. If another session
-   holds a fresh claim, return "busy" and skip — only one session sweeps
-   per floor window. (A per-store lock alone is insufficient — it
-   serializes writes but still lets two sessions do redundant work.)
+1. **Team `last_sweep_at` watermark + staleness floor.** **LANDED (s11,
+   `tiger_memory/sweep.py`).** Team-scoped state file at
+   **`<team>/memories/.tiger-memory-sweep.json`** — anchored at
+   `cfg.store.root.parent` (a persona store resolves to
+   `<team>/memories/<persona>/`, so its parent is the shared memories dir,
+   the same path for every persona — cleaner than walking three parents up
+   from the config). `sweep_due(last_sweep_at, now, floor_hours=24)`
+   returns "not due" inside the floor — a cheap no-op on every trigger.
+2. **Soft-lease claim (team-scoped). LANDED (s11).**
+   `try_claim_sweep(team_memories_dir, *, now, token, floor_hours,
+   lease_seconds=1800)` stamps a claim token + timestamp into the
+   sweep-state file (atomic tmp+replace). A *fresh* claim by another token
+   → `busy`; a *stale* one (crashed owner) is stolen; re-claiming our own
+   token is allowed. `mark_sweep_complete` bumps `last_sweep_at` and clears
+   the claim. This is a soft lease (read-check-write, not a hard OS lock):
+   simultaneous first-triggers are rare given the floor + watermark, the
+   per-store lock serialises writes downstream, and per-persona atomic
+   commits bound redundant work; a hard `O_EXCL` lock can harden it later
+   if contention is observed.
 3. **Per-wake cap.** Cap personas-per-wake (default **N** = small) so a
    large backlog spreads across several wakes; reuse the P1.2
    `_cap_reason` per-session cap *inside* each persona's rebuild.
@@ -951,3 +958,12 @@ needs an instrumented run — deferred to the P1/P2 measurement harness.
   `claude -p`) named as one caller to generalize. Build slices for
   s11–s14 enumerated. Doc-only (no code; team-root path layout flagged to
   pin during the s11 build, like `_load_defaults`); suite unchanged.
+- **2026-06-07 — B3 slice a: sweep.py gating (Anzai).** Built
+  `tiger_memory/sweep.py` (pure non-AI): team sweep-state IO (tolerant
+  read, atomic write), `sweep_due` staleness floor (default 24h), the
+  `try_claim_sweep` soft-lease claim (claimed / not_due / busy, with
+  stale-steal + re-entrant own-token), and `mark_sweep_complete`
+  (watermark bump + claim clear). Team anchor pinned to
+  `cfg.store.root.parent` (= `<team>/memories/`), cleaner than the
+  three-parents-up walk. Full suite green (2925); 100% coverage. Next
+  (s12): the roster walk + per-persona resumable progress on top.
