@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tigerharness.journal import worklog
+from tigerharness.journal import drive_sessions, worklog
 from tigerharness.journal.cli import build_parser, main
 from tigerharness.journal.models import State, Status
 from tigerharness.journal.paths import JournalPaths
@@ -1256,6 +1256,62 @@ class TestClaimDriverWorklog:
         rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
                    "--driver", "Anzai"])
         # The claim itself still succeeds; the trace is best-effort.
+        assert rc == 0
+        assert "warning" in capsys.readouterr().err.lower()
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+
+
+class TestClaimDriveThreadRegistry:
+    """``--drive-thread`` records the drive's Slack thread to the
+    drive-session registry so tiger-memory skips its transcript; without
+    it, no registry is written."""
+
+    def test_no_drive_thread_writes_no_registry(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1",
+                     "--driver", "Anzai"]) == 0
+        assert not paths.drive_sessions_json.exists()
+
+    def test_drive_thread_registers(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--driver", "Anzai", "--drive-thread", "171.99"])
+        assert rc == 0
+        assert drive_sessions.registered_threads(
+            paths.drive_sessions_json
+        ) == {"171.99"}
+        rec = json.loads(paths.drive_sessions_json.read_text())["171.99"]
+        assert rec["task_id"] == "t1"
+        assert rec["driver"] == "Anzai"
+
+    def test_drive_thread_without_driver_registers_null_driver(
+        self, journal_dir,
+    ):
+        # The two flags are orthogonal: a thread can be registered even
+        # without a --driver trace (driver recorded as null).
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1",
+                     "--drive-thread", "171.99"]) == 0
+        rec = json.loads(paths.drive_sessions_json.read_text())["171.99"]
+        assert rec["driver"] is None
+
+    def test_registry_write_failure_is_warned_not_fatal(
+        self, journal_dir, capsys, monkeypatch,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(drive_sessions, "register", _boom)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--driver", "Anzai", "--drive-thread", "171.99"])
+        # The claim itself still succeeds; registration is best-effort.
         assert rc == 0
         assert "warning" in capsys.readouterr().err.lower()
         s = Status.from_json(paths.status_json("t1").read_text())

@@ -46,7 +46,7 @@ from tigerharness.journal.sweep import (
     stuck_timeout_from_env,
     sweep,
 )
-from tigerharness.journal import walk, worklog
+from tigerharness.journal import drive_sessions, walk, worklog
 
 
 def _paths_from_args(args: argparse.Namespace) -> JournalPaths:
@@ -627,6 +627,24 @@ def cmd_claim(args: argparse.Namespace) -> int:
     if getattr(args, "driver", None):
         _write_driver_claim_entry(paths, status, claim_reason, args.driver)
 
+    # Drive context only: register this drive session's Slack thread so
+    # tiger-memory's claude_transcript adapter skips its (fat) transcript
+    # -- the per-persona worklog now owns that content (see
+    # docs/per-persona-journal-memory.md section 4). Best-effort: a
+    # registry write failure must not fail an otherwise-successful claim.
+    if getattr(args, "drive_thread", None):
+        try:
+            drive_sessions.register(
+                paths, args.drive_thread,
+                task_id=status.id, driver=args.driver,
+            )
+        except OSError as exc:
+            print(
+                f"warning: could not register drive session "
+                f"{args.drive_thread} for {status.id}: {exc}",
+                file=sys.stderr,
+            )
+
     if getattr(args, "format", "text") == "json":
         print(json.dumps({
             "task_id": status.id,
@@ -1172,6 +1190,16 @@ def build_parser() -> argparse.ArgumentParser:
             "thin driver worklog entry (the 'I drove this' record) is "
             "written to that persona's memory. Omit for the plain "
             "subscription backend (no worklog side-effect)."
+        ),
+    )
+    cl.add_argument(
+        "--drive-thread", default=None,
+        help=(
+            "Slack thread_ts of the drive-journal session (from the "
+            "[bridge-context] block in the prompt). When given, the thread "
+            "is recorded to the drive-session registry so tiger-memory "
+            "skips this drive's transcript (the per-persona worklog owns "
+            "that content). Omit outside a Slack-driven drive."
         ),
     )
     cl.set_defaults(func=cmd_claim)
