@@ -509,15 +509,29 @@ def _write_task_work_entry(
             file=sys.stderr,
         )
         return 1
-    worklog.write_entry(paths, worklog.WorklogEntry(
-        task_id=status.id,
-        persona=status.persona,
-        step="task-work",
-        kind="task",
-        objective=status.title,
-        ended_at=_utcnow_iso(),
-        body=output_text,
-    ))
+    # Write the note BEFORE cmd_release mutates state to done. A disk
+    # failure here must refuse cleanly (return 1) -- matching the
+    # step-done gate -- rather than escape as a traceback out of an
+    # un-guarded main(): the task then stays in_progress and resumable,
+    # and the driver gets an actionable message instead of a stack trace.
+    try:
+        worklog.write_entry(paths, worklog.WorklogEntry(
+            task_id=status.id,
+            persona=status.persona,
+            step="task-work",
+            kind="task",
+            objective=status.title,
+            ended_at=_utcnow_iso(),
+            body=output_text,
+        ))
+    except OSError as exc:
+        print(
+            f"error: could not write the work note for {status.id}: {exc}. "
+            "Refusing to mark done (the task stays in_progress and "
+            "resumable).",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

@@ -1385,6 +1385,28 @@ class TestReleaseTaskCompletionGate:
         s = Status.from_json(paths.status_json("t1").read_text())
         assert s.state is State.IN_PROGRESS
 
+    def test_done_with_note_write_failure_refused(
+        self, journal_dir, tmp_path, capsys, monkeypatch,
+    ):
+        # A disk failure writing the work note must refuse CLEANLY (rc=1),
+        # leaving the task in_progress + resumable -- not escape as a
+        # traceback out of an un-guarded main(). Mirrors the step-done gate.
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              persona="Rukawa")
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(worklog, "write_entry", _boom)
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "done", "--driver", "Anzai",
+                   "--output", self._note(tmp_path)])
+        assert rc == 1
+        assert "could not write the work note" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS   # NOT marked done -> resumable
+
     def test_clean_stop_in_progress_needs_no_output(self, journal_dir):
         paths = JournalPaths(root=journal_dir)
         _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
