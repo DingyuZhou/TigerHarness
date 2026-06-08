@@ -127,3 +127,22 @@ class TestRegister:
         rec = json.loads(paths.drive_sessions_json.read_text())["111.222"]
         assert rec["task_id"] == "y"
         assert rec["registered_at"]
+
+
+# ---------------------------------------------------------------------------
+# cross-reader agreement: the journal-side canonical reader and the
+# claude_transcript adapter's inline mirror must see the same threads, so
+# the suppression hook can't silently drift from what claim writes.
+# ---------------------------------------------------------------------------
+
+class TestCrossReaderAgreement:
+    def test_claude_transcript_reader_matches(self, paths: JournalPaths):
+        from tigerharness.tiger_memory.sources.claude_transcript import (
+            _load_drive_threads,
+        )
+
+        ds.register(paths, "a", task_id="t1", driver="Anzai")
+        ds.register(paths, "b", task_id="t2")
+        canonical = ds.registered_threads(paths.drive_sessions_json)
+        mirror = _load_drive_threads(paths.drive_sessions_json)
+        assert set(mirror) == canonical == {"a", "b"}

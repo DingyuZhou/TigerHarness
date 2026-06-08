@@ -290,6 +290,46 @@ class TestBuildAdaptersMultiKind:
         assert jw.journal_root == (tmp_path / "team" / "journal").resolve()
         assert jw.team == "team"
 
+    def test_no_journal_source_means_no_drive_suppression(self, tmp_path: Path):
+        # A claude_code-only config: no drive-session registry wired ->
+        # the adapter's drive_sessions_json stays None (suppression off).
+        from tigerharness.tiger_memory.sources.claude_transcript import (
+            ClaudeTranscriptAdapter,
+        )
+        cfg = self._basic_cfg(tmp_path)
+        adapters = _build_adapters(cfg)
+        ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
+        assert ct.drive_sessions_json is None
+
+    def test_journal_source_wires_drive_registry_into_transcript(
+        self, tmp_path: Path,
+    ):
+        # claude_code + journal_worklog co-configured: the transcript
+        # adapter learns the drive-session registry path (derived from the
+        # journal root) so it can suppress this team's drives.
+        from tigerharness.tiger_memory.sources.claude_transcript import (
+            ClaudeTranscriptAdapter,
+        )
+        cfg_path = tmp_path / "cfg_both.yaml"
+        cfg_path.write_text(dedent(f"""\
+            agent: {{name: T, role: T}}
+            store: {{root: {tmp_path}/memory}}
+            sources:
+              - kind: claude_code
+                project_path: {tmp_path}/proj/
+              - kind: journal_worklog
+                journal_root: {tmp_path}/myteam/journal/
+                persona: Rukawa
+            summarizer: {{backend: anthropic, model: claude-sonnet-4-6, prompts: default/v1}}
+            rebuild: {{lock_path: {tmp_path}/lock}}
+        """))
+        cfg = load_config(cfg_path)
+        adapters = _build_adapters(cfg)
+        ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
+        assert ct.drive_sessions_json == (
+            tmp_path / "myteam" / "journal" / ".drive-sessions.json"
+        )
+
 
 class TestCascadeExceptions:
     def test_daily_rollup_exception_continues(self, tmp_path: Path):

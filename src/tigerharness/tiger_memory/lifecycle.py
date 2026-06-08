@@ -378,6 +378,21 @@ def plan_rebuild(
 # ----- adapter / summarizer factories --------------------------------------
 
 
+def _resolve_journal_root(field_root: str, repo_root: Path) -> Path:
+    """Resolve a ``journal_worklog`` source's ``journal_root`` field.
+
+    A relative root is anchored to the config's directory (``repo_root``,
+    like ``store.root`` and the docs ``repo_root``) so a per-persona
+    config can say ``../../journal/`` and a headless sweep still finds it
+    regardless of the working directory. Shared by the adapter
+    construction and the drive-sessions registry-path derivation so the
+    two never diverge."""
+    jr = Path(field_root).expanduser()
+    if not jr.is_absolute():
+        jr = (repo_root / jr).resolve()
+    return jr
+
+
 def _build_adapters(
     cfg: Config, *, max_age_days: int | None = 7,
 ) -> list[SourceAdapter]:
@@ -392,15 +407,23 @@ def _build_adapters(
     default in ``ClaudeTranscriptAdapter``; keep them in sync.
     """
     adapters: list[SourceAdapter] = []
-    # Find slack threads.json (if a slack_thread source is configured)
+    repo_root = (
+        cfg.source_path.parent if cfg.source_path else Path.cwd()
+    )
+    # Pre-scan for cross-source wiring the claude_code adapter needs:
+    #   - threads.json (slack_thread)        -> persona attribution
+    #   - .drive-sessions.json (journal_worklog) -> drive suppression
     threads_json: Path | None = None
+    drive_sessions_json: Path | None = None
     for s in cfg.sources:
         if s.kind == "slack_thread":
             raw = s.fields.get("threads_json", "")
             threads_json = Path(raw).expanduser() if raw else None
-    repo_root = (
-        cfg.source_path.parent if cfg.source_path else Path.cwd()
-    )
+        elif s.kind == "journal_worklog":
+            drive_sessions_json = (
+                _resolve_journal_root(s.fields["journal_root"], repo_root)
+                / ".drive-sessions.json"
+            )
     for s in cfg.sources:
         if s.kind == "claude_code":
             # Per-persona filtering (added after multi-bridge introduced
@@ -422,6 +445,7 @@ def _build_adapters(
                     team=team,
                     include_unattributed=include_unattributed,
                     max_age_days=max_age_days,
+                    drive_sessions_json=drive_sessions_json,
                 )
             )
         elif s.kind == "slack_thread":
@@ -444,13 +468,9 @@ def _build_adapters(
             # conversation_uuid namespace; default it from the journal
             # root's grandparent (``<team>/journal/`` -> ``<team>``) so a
             # config that omits it still namespaces correctly.
-            journal_root = Path(s.fields["journal_root"]).expanduser()
-            # Anchor a relative root to the config's directory (like
-            # ``store.root`` and the docs ``repo_root``) so a per-persona
-            # config can say ``../../journal/`` and a headless sweep still
-            # finds it regardless of the working directory.
-            if not journal_root.is_absolute():
-                journal_root = (repo_root / journal_root).resolve()
+            journal_root = _resolve_journal_root(
+                s.fields["journal_root"], repo_root
+            )
             team = s.fields.get("team")
             team = (
                 team.strip()
