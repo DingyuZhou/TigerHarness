@@ -45,8 +45,10 @@ summarize work is the two CLIs `tiger-memory plan` + `ingest-summary`.
    b. For each manifest item, spawn **one constrained sub-agent** (Task
       tool) — the B7 trust boundary:
       - **Read**: the item's `prompt_path` (it already embeds the
-        prefiltered, clipped transcript — the bulky content never enters
-        *your* context) **and** the persona's store.
+        prefiltered transcript — staged in full up to the
+        `max_staged_content_chars` ceiling, clipped only beyond it — so
+        the bulky content never enters *your* context) **and** the
+        persona's store.
       - **Write**: that persona's store path **only**. **No shell, no
         network.**
       - **Instruction**: read the prompt file; emit ONLY the
