@@ -48,13 +48,25 @@ from .base import SourceAdapter, SourceRecord
 
 def _parse_dt(ts: str | None) -> datetime | None:
     """Parse an ISO worklog timestamp; ``None`` on missing/garbage. The
-    ``Z`` suffix is normalised so ``...T12:00:00Z`` parses on 3.11."""
+    ``Z`` suffix is normalised so ``...T12:00:00Z`` parses on 3.11.
+
+    The result is ALWAYS timezone-aware: a naive timestamp (e.g. a
+    hand-edited ``...T12:00:00`` with no offset) is assumed UTC, matching
+    the journal's UTC convention (:func:`journal.models._utcnow_iso`).
+    Without this, a worklog mixing aware and naive stamps would make the
+    ``min()``/``max()`` in :meth:`JournalWorklogAdapter._record_for` raise
+    ``TypeError`` -- an error that escapes the per-task guard and aborts
+    the persona's whole sweep, violating this adapter's "one bad file
+    never aborts discovery" contract."""
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _format_entry(entry: WorklogEntry) -> str:

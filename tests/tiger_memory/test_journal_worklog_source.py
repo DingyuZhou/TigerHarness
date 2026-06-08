@@ -47,6 +47,19 @@ class TestParseDt:
         got = jw._parse_dt("2026-06-08T12:00:00Z")
         assert got == datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc)
 
+    def test_naive_timestamp_is_assumed_utc(self):
+        # A hand-edited stamp with no offset must come back tz-aware
+        # (UTC), so it can be compared against our normal ``...Z`` stamps
+        # without raising. See test_mixed_naive_and_aware_stamps_no_crash.
+        got = jw._parse_dt("2026-06-08T12:00:00")
+        assert got == datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc)
+        assert got.tzinfo is not None
+
+    def test_explicit_offset_is_preserved(self):
+        got = jw._parse_dt("2026-06-08T12:00:00+05:00")
+        assert got is not None and got.utcoffset() is not None
+        assert got.utcoffset().total_seconds() == 5 * 3600
+
     def test_garbage_returns_none(self):
         assert jw._parse_dt("not-a-date") is None
 
@@ -249,3 +262,29 @@ class TestRecordForStatFailure:
             journal_root=paths.root, persona="Rukawa", team="tigers",
         )
         assert adapter._record_for(paths, TASK_A, archived=False) is None
+
+    def test_mixed_naive_and_aware_stamps_no_crash(self, paths: JournalPaths):
+        # Regression: a task whose worklog mixes an aware ``...Z`` stamp
+        # with a hand-edited naive one must not raise TypeError out of
+        # discover() (which would abort the persona's whole sweep). The
+        # event window is computed over both, treating naive as UTC.
+        worklog.write_entry(paths, WorklogEntry(
+            task_id=TASK_A, persona="Rukawa", step="build",
+            ended_at="2026-06-08T12:00:00Z", body="aware turn",
+        ))
+        worklog.write_entry(paths, WorklogEntry(
+            task_id=TASK_A, persona="Rukawa", step="review",
+            ended_at="2026-06-08T11:00:00", body="naive turn",
+        ))
+        adapter = JournalWorklogAdapter(
+            journal_root=paths.root, persona="Rukawa", team="tigers",
+        )
+        rec = next(
+            r for r in adapter.discover() if r.source_id == f"{TASK_A}/Rukawa"
+        )
+        assert rec.first_event_at == datetime(
+            2026, 6, 8, 11, 0, tzinfo=timezone.utc
+        )
+        assert rec.last_event_at == datetime(
+            2026, 6, 8, 12, 0, tzinfo=timezone.utc
+        )
