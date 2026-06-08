@@ -124,6 +124,7 @@ def test_mark_complete_advances_watermark_and_clears_claim(tmp_path: Path) -> No
 def test_module_exposes_defaults() -> None:
     assert sweep.DEFAULT_STALENESS_FLOOR_HOURS == 24.0
     assert sweep.DEFAULT_LEASE_SECONDS == 1800.0
+    assert sweep.DEFAULT_MAX_PERSONAS == 3
 
 
 # ----- roster walk (slice b) -----------------------------------------------
@@ -148,6 +149,14 @@ _ROSTER = (
     "  - name: Ayako\n"
     "  - name: Anzai\n"
     "  - name: Sakuragi\n"
+)
+
+_ROSTER4 = (
+    "personas:\n"
+    "  - name: Ayako\n"
+    "  - name: Anzai\n"
+    "  - name: Sakuragi\n"
+    "  - name: Rukawa\n"
 )
 
 
@@ -189,9 +198,10 @@ def test_enumerate_skips_bad_entries(tmp_path: Path) -> None:
     assert [t.name for t in enumerate_persona_configs(team)] == ["Ayako"]
 
 
-def test_plan_no_cap_returns_all_pending(tmp_path: Path) -> None:
+def test_plan_unbounded_returns_all_pending(tmp_path: Path) -> None:
+    # max_personas=None -> unbounded (the old default); still reachable.
     team = _make_team(tmp_path, _ROSTER, with_config=["Ayako", "Anzai"])
-    plan = plan_team_sweep(team)
+    plan = plan_team_sweep(team, max_personas=None)
     assert [t.name for t in plan.targets] == ["Ayako", "Anzai"]
     assert plan.remaining == 0 and plan.all_personas == 2
 
@@ -201,6 +211,18 @@ def test_plan_cap_limits_and_reports_remaining(tmp_path: Path) -> None:
     plan = plan_team_sweep(team, max_personas=1)
     assert [t.name for t in plan.targets] == ["Ayako"]
     assert plan.remaining == 1
+
+
+def test_plan_default_caps_at_three(tmp_path: Path) -> None:
+    # No max_personas arg -> DEFAULT_MAX_PERSONAS (3); a 4-persona backlog
+    # yields 3 this wake, 1 remaining for the next.
+    team = _make_team(
+        tmp_path, _ROSTER4,
+        with_config=["Ayako", "Anzai", "Sakuragi", "Rukawa"],
+    )
+    plan = plan_team_sweep(team)
+    assert [t.name for t in plan.targets] == ["Ayako", "Anzai", "Sakuragi"]
+    assert plan.remaining == 1 and plan.all_personas == 4
 
 
 def test_plan_skips_already_done(tmp_path: Path) -> None:
@@ -288,6 +310,19 @@ def test_maybe_sweep_claims_and_plans(tmp_path: Path) -> None:
     dec = maybe_sweep_roster(team, now=NOW, token="A")
     assert dec.ran is True and dec.reason == "claimed"
     assert [t.name for t in dec.plan.targets] == ["Ayako", "Anzai"]
+
+
+def test_maybe_sweep_default_caps_at_three(tmp_path: Path) -> None:
+    # The DEFAULT_MAX_PERSONAS cap propagates through maybe_sweep_roster.
+    from tigerharness.tiger_memory.sweep import maybe_sweep_roster
+    team = _make_team(
+        tmp_path, _ROSTER4,
+        with_config=["Ayako", "Anzai", "Sakuragi", "Rukawa"],
+    )
+    dec = maybe_sweep_roster(team, now=NOW, token="A")
+    assert dec.ran is True
+    assert len(dec.plan.targets) == 3
+    assert dec.plan.remaining == 1
 
 
 def test_maybe_sweep_noop_when_not_due(tmp_path: Path) -> None:

@@ -77,6 +77,16 @@ def test_sweep_plan_respects_max_personas(tmp_path: Path, capsys) -> None:
     assert out["all_personas"] == 2
 
 
+def test_sweep_plan_default_caps_at_three(tmp_path: Path, capsys) -> None:
+    # No --max-personas -> the CLI default (DEFAULT_MAX_PERSONAS == 3).
+    cfg = _setup(tmp_path, personas=("anzai", "ayako", "sakuragi", "miyagi"))
+    out = _run(cfg, "sweep-plan", capsys=capsys)
+    assert out["ran"] is True
+    assert len(out["targets"]) == 3
+    assert out["remaining"] == 1
+    assert out["all_personas"] == 4
+
+
 def test_sweep_plan_busy_when_other_holds_fresh_claim(
     tmp_path: Path, capsys
 ) -> None:
