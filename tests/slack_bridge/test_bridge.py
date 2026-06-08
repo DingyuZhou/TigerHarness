@@ -939,3 +939,70 @@ class TestGetOrOpenThreadConcurrency:
         kept = [s for s in sessions if not s.closed]
         assert len(kept) == 1
         assert kept[0].id == s1.session.id
+
+
+class TestTigerMemoryTriggerGating:
+    """A new thread fires the legacy ``tiger-memory rebuild`` only when
+    ``tiger_memory_trigger == "rebuild"`` (the default). With ``"off"``,
+    the daemon stays silent -- the in-session sweep protocol owns the
+    rebuild."""
+
+    def _bridge(self, tmp_path: Path, *, trigger: str):
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, SlackBridge, TeamBridgeContext,
+        )
+
+        @dataclass
+        class _Sess:
+            id: str = "sess"
+            async def close(self):
+                return None
+
+        backend = AsyncMock()
+        backend.open_session = AsyncMock(return_value=_Sess())
+        personas = {
+            "Ayako": PersonaSlot(
+                name="Ayako",
+                agent_config=AgentConfig(name="Ayako", instructions="x"),
+                tiger_memory_config_path="/tmp/config.yaml",
+            )
+        }
+        team_ctx = TeamBridgeContext(
+            team_name="t", slack_app_token="xapp", slack_bot_token="xoxb",
+            allowed_user_ids=frozenset({"U0CEO"}), agent_cwd=str(tmp_path),
+            personas=personas, default_persona="Ayako",
+            tiger_memory_cli="/usr/bin/tiger-memory",
+            tiger_memory_trigger=trigger,
+        )
+        store = ThreadStore(tmp_path / "threads.json")
+        downloader = MagicMock()
+        downloader.download = AsyncMock(return_value=None)
+        return SlackBridge(
+            team_ctx=team_ctx, backend=backend, store=store, downloader=downloader,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rebuild_trigger_fires_on_new_thread(self, tmp_path: Path):
+        from unittest.mock import patch as _patch
+        b = self._bridge(tmp_path, trigger="rebuild")
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona",
+            new=AsyncMock(return_value=("Ayako", 0.0)),
+        ), _patch(
+            "tigerharness.slack_bridge.bridge._trigger_tiger_memory_rebuild",
+        ) as mock_trigger:
+            await b._get_or_open_thread("thread-1", "Hi")
+        mock_trigger.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_off_trigger_stays_silent_on_new_thread(self, tmp_path: Path):
+        from unittest.mock import patch as _patch
+        b = self._bridge(tmp_path, trigger="off")
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona",
+            new=AsyncMock(return_value=("Ayako", 0.0)),
+        ), _patch(
+            "tigerharness.slack_bridge.bridge._trigger_tiger_memory_rebuild",
+        ) as mock_trigger:
+            await b._get_or_open_thread("thread-1", "Hi")
+        mock_trigger.assert_not_called()
