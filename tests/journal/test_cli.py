@@ -28,6 +28,75 @@ def _seed(paths: JournalPaths, task_id: str, **over) -> None:
     paths.status_json(task_id).write_text(s.to_json())
 
 
+def _sf(id, persona, role, on_approve, on_revise, on_block):
+    """A minimal valid StepFrontmatter for graph seeding."""
+    from tigerharness.workflow_runner.models import StepFrontmatter
+    return StepFrontmatter(
+        id=id, persona=persona, role=role,
+        on_approve=on_approve, on_revise=on_revise, on_block=on_block,
+        max_iters=3, timeout_sec=600,
+    )
+
+
+def _seed_workflow_graph(
+    paths: JournalPaths, task_id: str, steps, entrypoint,
+    *, state=State.IN_PROGRESS, session_ref="tok",
+):
+    """Seed a fully-landed kind=workflow task: status.json
+    (compile_phase=complete), orchestration.json, and one steps/<id>.md
+    per step. ``steps`` is a list of StepFrontmatter; edges are derived
+    from each step's own routing triple. Mirrors what land-compile
+    writes, so step-done's readers see real on-disk shapes."""
+    from tigerharness.journal.compile_cli import _render_frontmatter
+    from tigerharness.journal.models import CompilePhase
+    from tigerharness.workflow_runner.models import (
+        Orchestration,
+        WorkflowConfig,
+    )
+    paths.ensure()
+    tdir = paths.active / task_id
+    (tdir / "steps").mkdir(parents=True, exist_ok=True)
+    st = Status.new_workflow(
+        id=task_id, title=f"WF {task_id}", playbook_name="default",
+    )
+    st.state = state
+    st.session_ref = session_ref
+    st.compile_pending = False
+    st.compile_phase = CompilePhase.COMPLETE
+    paths.status_json(task_id).write_text(st.to_json())
+    for sf in steps:
+        (tdir / "steps" / f"{sf.id}.md").write_text(
+            f"---\n{_render_frontmatter(sf)}---\n"
+        )
+    orch = Orchestration(
+        task_id=task_id, team="Shohoku", playbook="default",
+        playbook_sha256="0" * 64,
+        steps=[sf.id for sf in steps], entrypoint=entrypoint,
+        compiled_at="2026-06-02T08:00:00Z", compiled_by="Anzai",
+        edges={sf.id: sf.edges for sf in steps},
+        workflow_config=WorkflowConfig(human_gate=False),
+    )
+    (tdir / "orchestration.json").write_text(
+        json.dumps(orch.to_dict(), indent=2) + "\n"
+    )
+
+
+def _linear_steps():
+    """A 2-step linear graph: plan(Akagi) -> build(Rukawa) -> __done__.
+    REVISE self-loops; BLOCK escalates."""
+    return [
+        _sf("plan", "Akagi", "planner", "build", "plan", "__escalate__"),
+        _sf("build", "Rukawa", "developer", "__done__", "build",
+            "__escalate__"),
+    ]
+
+
+def _note(tmp_path, text="Did the step; notes here.\n", name="note.md"):
+    p = tmp_path / name
+    p.write_text(text)
+    return str(p)
+
+
 @pytest.fixture
 def journal_dir(tmp_path):
     return tmp_path / "journal"
@@ -1284,14 +1353,13 @@ class TestReleaseTaskCompletionGate:
 
     def test_workflow_done_not_gated_by_output(self, journal_dir):
         # The kind=task --output gate must NOT fire for workflows (their
-        # per-step notes come from step-done in Phase 1c).
+        # per-step notes come from step-done). A workflow done is instead
+        # gated on the walk having reached __done__ (Phase 1c) -- so seed
+        # a completed walk and confirm done succeeds with no --output.
+        from tigerharness.journal import walk
         paths = JournalPaths(root=journal_dir)
-        paths.ensure()
-        (paths.active / "wf1").mkdir()
-        st = Status.new_workflow(id="wf1", title="W", playbook_name="default")
-        st.state = State.IN_PROGRESS
-        st.session_ref = "tok"
-        paths.status_json("wf1").write_text(st.to_json())
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        walk.write(paths, walk.WalkState(task_id="wf1", current="__done__"))
         rc = main(["--journal-dir", str(journal_dir), "release", "wf1",
                    "--state", "done", "--driver", "Anzai"])
         assert rc == 0
@@ -1312,4 +1380,357 @@ class TestReleaseTaskCompletionGate:
         assert [(e.seq, e.persona, e.step) for e in entries] == [
             (1, "Anzai", "drive"),
             (2, "Rukawa", "task-work"),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1c: step-done graph-walk gate
+# ---------------------------------------------------------------------------
+
+class TestStepDone:
+    """``journal step-done`` writes the acting persona's worklog entry
+    (attributed from the compiled step file) and advances the walk cursor
+    in-order. The per-step counterpart to the kind=task release gate."""
+
+    def _run(self, journal_dir, task, step, verdict, output, **extra):
+        argv = ["--journal-dir", str(journal_dir), "step-done",
+                "--task", task, "--step", step, "--verdict", verdict,
+                "--output", output]
+        for k, v in extra.items():
+            argv += [f"--{k.replace('_', '-')}", v]
+        return main(argv)
+
+    def test_writes_persona_entry_and_advances(self, journal_dir, tmp_path):
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                       _note(tmp_path))
+        assert rc == 0
+        [e] = worklog.list_entries(paths, "wf1")
+        assert e.persona == "Akagi"          # from the step file, not a flag
+        assert e.role == "planner"
+        assert e.step == "plan"
+        assert e.kind == "workflow"
+        assert e.verdict == "APPROVE"
+        assert "Did the step" in e.body
+        # cursor moved to the on_approve target
+        assert walk.read(paths, "wf1").current == "build"
+
+    def test_json_output(self, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                       _note(tmp_path), format="json")
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["next"] == "build"
+        assert payload["terminal"] is False
+        assert payload["persona"] == "Akagi"
+        assert payload["worklog_seq"] == 1
+
+    def test_revise_self_loops_then_approves(self, journal_dir, tmp_path):
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        assert self._run(journal_dir, "wf1", "plan", "REVISE",
+                         _note(tmp_path, name="r1.md")) == 0
+        # REVISE routes plan -> plan; cursor stays, entry recorded.
+        assert walk.read(paths, "wf1").current == "plan"
+        assert len(worklog.list_entries(paths, "wf1")) == 1
+        assert self._run(journal_dir, "wf1", "plan", "APPROVE",
+                         _note(tmp_path, name="r2.md")) == 0
+        assert walk.read(paths, "wf1").current == "build"
+        assert len(worklog.list_entries(paths, "wf1")) == 2
+
+    def test_walk_to_done_terminal(self, journal_dir, tmp_path, capsys):
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        assert self._run(journal_dir, "wf1", "plan", "APPROVE",
+                         _note(tmp_path, name="a.md")) == 0
+        rc = self._run(journal_dir, "wf1", "build", "APPROVE",
+                       _note(tmp_path, name="b.md"))
+        assert rc == 0
+        assert walk.read(paths, "wf1").current == "__done__"
+        assert "walk complete" in capsys.readouterr().out
+
+    def test_block_escalates(self, journal_dir, tmp_path, capsys):
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = self._run(journal_dir, "wf1", "plan", "BLOCK", _note(tmp_path))
+        assert rc == 0
+        assert walk.read(paths, "wf1").current == "__escalate__"
+        assert "escalated" in capsys.readouterr().out
+
+    def test_out_of_order_refused(self, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        # The walk hasn't started; entrypoint is plan, so build is wrong.
+        rc = self._run(journal_dir, "wf1", "build", "APPROVE",
+                       _note(tmp_path))
+        assert rc == 1
+        assert "out-of-order" in capsys.readouterr().err
+        assert worklog.list_entries(paths, "wf1") == []
+
+    def test_unknown_step_refused(self, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = self._run(journal_dir, "wf1", "ghost", "APPROVE",
+                       _note(tmp_path))
+        assert rc == 1
+        assert "not in the compiled graph" in capsys.readouterr().err
+
+    def test_terminal_walk_refuses_further(
+        self, journal_dir, tmp_path, capsys,
+    ):
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        walk.write(paths, walk.WalkState(task_id="wf1", current="__done__"))
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                       _note(tmp_path))
+        assert rc == 1
+        assert "already terminal" in capsys.readouterr().err
+
+    def test_empty_output_refused(self, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                       _note(tmp_path, "   \n"))
+        assert rc == 1
+        assert "empty" in capsys.readouterr().err
+        assert worklog.list_entries(paths, "wf1") == []
+
+    def test_unreadable_output_refused(self, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                       str(tmp_path / "nope.md"))
+        assert rc == 1
+        assert "cannot read --output" in capsys.readouterr().err
+
+    def test_non_workflow_refused(self, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS)
+        rc = self._run(journal_dir, "t1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "workflow-only" in capsys.readouterr().err
+
+    def test_not_landed_refused(self, journal_dir, tmp_path, capsys):
+        from tigerharness.journal.models import CompilePhase
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        (paths.active / "wf1").mkdir()
+        st = Status.new_workflow(id="wf1", title="W", playbook_name="default")
+        st.state = State.IN_PROGRESS
+        st.compile_phase = CompilePhase.DRAFTING
+        paths.status_json("wf1").write_text(st.to_json())
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "compile_phase=drafting" in capsys.readouterr().err
+
+    def test_no_such_task(self, journal_dir, tmp_path, capsys):
+        rc = self._run(journal_dir, "ghost", "plan", "APPROVE",
+                       _note(tmp_path))
+        assert rc == 1
+        assert "no task" in capsys.readouterr().err
+
+    def test_session_ref_mismatch_refused(
+        self, journal_dir, tmp_path, capsys,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan",
+                             session_ref="real")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                       _note(tmp_path), session_ref="stray")
+        assert rc == 1
+        assert "does not match" in capsys.readouterr().err
+
+    def test_session_ref_match_allows(self, journal_dir, tmp_path):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan",
+                             session_ref="real")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                       _note(tmp_path), session_ref="real")
+        assert rc == 0
+
+    def test_missing_orchestration_refused(
+        self, journal_dir, tmp_path, capsys,
+    ):
+        from tigerharness.journal.models import CompilePhase
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        (paths.active / "wf1").mkdir()
+        st = Status.new_workflow(id="wf1", title="W", playbook_name="default")
+        st.state = State.IN_PROGRESS
+        st.compile_pending = False
+        st.compile_phase = CompilePhase.COMPLETE
+        paths.status_json("wf1").write_text(st.to_json())
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "no orchestration.json" in capsys.readouterr().err
+
+    def test_malformed_orchestration_refused(
+        self, journal_dir, tmp_path, capsys,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        (paths.active / "wf1" / "orchestration.json").write_text("{bad")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "cannot read orchestration.json" in capsys.readouterr().err
+
+    def test_invalid_orchestration_shape_refused(
+        self, journal_dir, tmp_path, capsys,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        # Valid JSON, invalid Orchestration (entrypoint not in steps).
+        (paths.active / "wf1" / "orchestration.json").write_text(
+            json.dumps({"task_id": "wf1", "steps": ["plan"],
+                        "entrypoint": "ghost"})
+        )
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "malformed" in capsys.readouterr().err
+
+    def test_corrupt_walk_json_refused(self, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        paths.walk_json("wf1").write_text("{not json")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "cannot read walk.json" in capsys.readouterr().err
+
+    def test_step_file_unreadable_refused(
+        self, journal_dir, tmp_path, capsys,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        (paths.active / "wf1" / "steps" / "plan.md").unlink()
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "cannot read step file" in capsys.readouterr().err
+
+    def test_no_edges_for_step_refused(self, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        # Strip the edges map (valid Orchestration: edges may be a subset
+        # of steps). step-done can then find no route for the step.
+        orch_path = paths.active / "wf1" / "orchestration.json"
+        data = json.loads(orch_path.read_text())
+        data["edges"] = {}
+        orch_path.write_text(json.dumps(data))
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "no edges for step" in capsys.readouterr().err
+
+    def test_worklog_write_failure_does_not_advance(
+        self, journal_dir, tmp_path, capsys, monkeypatch,
+    ):
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(worklog, "write_entry", _boom)
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE", _note(tmp_path))
+        assert rc == 1
+        assert "could not write worklog" in capsys.readouterr().err
+        # Walk not advanced -- no cursor written at all.
+        assert walk.read(paths, "wf1") is None
+
+
+class TestReleaseWorkflowGate:
+    """Marking a kind=workflow DONE in a drive requires the walk to have
+    reached __done__: every step that ran left its memory via step-done."""
+
+    def test_done_with_complete_walk_allowed(self, journal_dir):
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        walk.write(paths, walk.WalkState(task_id="wf1", current="__done__"))
+        rc = main(["--journal-dir", str(journal_dir), "release", "wf1",
+                   "--state", "done", "--driver", "Anzai"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("wf1").read_text())
+        assert s.state is State.DONE
+
+    def test_done_refused_when_walk_incomplete(self, journal_dir, capsys):
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        walk.write(paths, walk.WalkState(task_id="wf1", current="build"))
+        rc = main(["--journal-dir", str(journal_dir), "release", "wf1",
+                   "--state", "done", "--driver", "Anzai"])
+        assert rc == 1
+        assert "not __done__" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("wf1").read_text())
+        assert s.state is State.IN_PROGRESS
+
+    def test_done_refused_when_no_walk(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = main(["--journal-dir", str(journal_dir), "release", "wf1",
+                   "--state", "done", "--driver", "Anzai"])
+        assert rc == 1
+        assert "no walk state" in capsys.readouterr().err
+
+    def test_done_refused_when_walk_corrupt(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        paths.walk_json("wf1").write_text("{bad")
+        rc = main(["--journal-dir", str(journal_dir), "release", "wf1",
+                   "--state", "done", "--driver", "Anzai"])
+        assert rc == 1
+        assert "cannot read walk.json" in capsys.readouterr().err
+
+    def test_blocked_not_gated(self, journal_dir):
+        # Escalation (release --state blocked) needs no walk-complete: the
+        # steps that ran already left their notes via step-done.
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = main(["--journal-dir", str(journal_dir), "release", "wf1",
+                   "--state", "blocked", "--driver", "Anzai"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("wf1").read_text())
+        assert s.state is State.BLOCKED
+
+    def test_no_driver_done_not_gated(self, journal_dir):
+        # The plain subscription backend (no --driver) keeps its behaviour:
+        # no walk-complete requirement, no worklog side-effect.
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        rc = main(["--journal-dir", str(journal_dir), "release", "wf1",
+                   "--state", "done"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("wf1").read_text())
+        assert s.state is State.DONE
+
+    def test_full_workflow_walk_then_done(self, journal_dir, tmp_path):
+        # End-to-end: claim (driver trace) -> step plan -> step build ->
+        # release done. Memory: 1 driver entry + 2 step entries, each
+        # attributed to the right persona.
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan",
+                             state=State.PENDING, session_ref=None)
+        assert main(["--journal-dir", str(journal_dir), "claim", "wf1",
+                     "--driver", "Anzai"]) == 0
+        assert main(["--journal-dir", str(journal_dir), "step-done",
+                     "--task", "wf1", "--step", "plan", "--verdict",
+                     "APPROVE", "--output", _note(tmp_path, name="p.md")]) == 0
+        assert main(["--journal-dir", str(journal_dir), "step-done",
+                     "--task", "wf1", "--step", "build", "--verdict",
+                     "APPROVE", "--output", _note(tmp_path, name="b.md")]) == 0
+        assert main(["--journal-dir", str(journal_dir), "release", "wf1",
+                     "--state", "done", "--driver", "Anzai"]) == 0
+        entries = worklog.list_entries(paths, "wf1")
+        assert [(e.persona, e.step) for e in entries] == [
+            ("Anzai", "drive"),
+            ("Akagi", "plan"),
+            ("Rukawa", "build"),
         ]

@@ -118,6 +118,17 @@ class JournalPaths:
         because it hangs off ``task_dir``."""
         return self.task_dir(task_id, archived=archived) / "worklog"
 
+    def walk_json(self, task_id: str, *, archived: bool = False) -> Path:
+        """Graph-walk cursor sidecar for a kind=workflow task. Tracks the
+        step the walk is currently at so ``journal step-done`` can enforce
+        in-order advancement and the release completion-check can require
+        the walk reached ``__done__`` before a workflow is marked done.
+
+        A sidecar -- *not* status.json, whose schema rejects unknown keys
+        (see ``journal.models.Status.from_dict``). Survives archival
+        because it hangs off ``task_dir``. See ``journal.walk``."""
+        return self.task_dir(task_id, archived=archived) / "walk.json"
+
     # ---- ensure / inspect ----
 
     def ensure(self) -> "JournalPaths":
