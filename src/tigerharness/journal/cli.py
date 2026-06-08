@@ -46,6 +46,7 @@ from tigerharness.journal.sweep import (
     stuck_timeout_from_env,
     sweep,
 )
+from tigerharness.journal import worklog
 
 
 def _paths_from_args(args: argparse.Namespace) -> JournalPaths:
@@ -442,6 +443,84 @@ def _write_status_atomic(paths: JournalPaths, status: Status) -> None:
     _write_atomic(paths.status_json(status.id), status.to_json())
 
 
+def _write_driver_claim_entry(
+    paths: JournalPaths, status: Status, reason: str, driver: str,
+) -> None:
+    """Write the thin DRIVER worklog entry for a real claim (the "I drove
+    this" record that lands in the driver persona's memory). Best-effort:
+    a disk hiccup here must not fail an otherwise-successful claim, so an
+    ``OSError`` is warned-and-swallowed. The substantive per-persona work
+    note is written later (release / step-done) and IS hard-gated."""
+    try:
+        worklog.write_entry(paths, worklog.WorklogEntry(
+            task_id=status.id,
+            persona=driver,
+            step="drive",
+            kind=status.kind,
+            role="driver",
+            objective=status.title,
+            reason=reason,
+            started_at=_utcnow_iso(),
+            body=(
+                f"Drove `{status.id}` ({reason}); "
+                f"session {status.sessions}/{status.max_sessions}; "
+                f"kind={status.kind}."
+            ),
+        ))
+    except OSError as exc:
+        print(
+            f"warning: could not write driver worklog entry for "
+            f"{status.id}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _write_task_work_entry(
+    paths: JournalPaths, status: Status, output_path: str | None,
+) -> int:
+    """Write the assigned persona's kind=task work note from
+    ``--output``, returning 0 on success or a non-zero CLI code on
+    refusal. Unlike the driver claim trace, this is a HARD gate: a
+    missing, unreadable, or empty note refuses the done-transition so a
+    task cannot be marked done without leaving the persona's memory
+    record. Stamps ``persona`` from ``status.persona`` (the assigned
+    persona) so the attribution can't be wrong."""
+    if not output_path:
+        print(
+            "error: --output <file> is required to mark a kind=task done "
+            "in a drive (the assigned persona's work note is the ticket to "
+            "advance). Refusing to mark done.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        output_text = Path(output_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"error: cannot read --output {output_path!r}: {exc}. "
+            f"Refusing to mark done.",
+            file=sys.stderr,
+        )
+        return 1
+    if not output_text.strip():
+        print(
+            f"error: --output {output_path!r} is empty; the work note "
+            f"cannot be blank. Refusing to mark done.",
+            file=sys.stderr,
+        )
+        return 1
+    worklog.write_entry(paths, worklog.WorklogEntry(
+        task_id=status.id,
+        persona=status.persona,
+        step="task-work",
+        kind="task",
+        objective=status.title,
+        ended_at=_utcnow_iso(),
+        body=output_text,
+    ))
+    return 0
+
+
 def cmd_claim(args: argparse.Namespace) -> int:
     """Atomically claim a task for this session (the pickup).
 
@@ -486,6 +565,16 @@ def cmd_claim(args: argparse.Namespace) -> int:
             )
             return 1
         # idle or crashed -> claimable (resume / rescue)
+
+    # Classify the pickup for the driver's thin worklog entry (only used
+    # when --driver is given). Captured BEFORE the state mutation below.
+    # DONE/BLOCKED already returned, so the state is PENDING or
+    # IN_PROGRESS (idle/crashed); the ternary short-circuits so ``klass``
+    # is only read when it is defined.
+    claim_reason = (
+        "new" if status.state is State.PENDING
+        else ("resume" if klass == "idle" else "rescue")
+    )
 
     # Budget guard: a task already at its session cap must not be run
     # past it. A crash/clean-stop that left an at-cap task in_progress
@@ -532,6 +621,11 @@ def cmd_claim(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Drive context only: leave the thin driver trace. No --driver (the
+    # plain subscription backend) -> no worklog side-effect at all.
+    if getattr(args, "driver", None):
+        _write_driver_claim_entry(paths, status, claim_reason, args.driver)
 
     if getattr(args, "format", "text") == "json":
         print(json.dumps({
@@ -587,6 +681,18 @@ def cmd_release(args: argparse.Namespace) -> int:
         # already restricts --state to valid State values.
         print(f"error: invalid --state {args.state!r}", file=sys.stderr)
         return 2
+
+    # Completion gate (drive context only). Marking a kind=task DONE
+    # requires the assigned persona's work note via --output: the note is
+    # the ticket to advance. The note is written to that persona's memory
+    # as the task-work worklog entry. Refusals happen BEFORE any state
+    # mutation, so the task stays in_progress and remains resumable.
+    if (getattr(args, "driver", None)
+            and status.kind == "task"
+            and new_state is State.DONE):
+        rc = _write_task_work_entry(paths, status, args.output)
+        if rc != 0:
+            return rc
 
     status.state = new_state
     status.session_ref = None  # detach -> instantly resumable if still in_progress
@@ -773,6 +879,15 @@ def build_parser() -> argparse.ArgumentParser:
             "(and thus claimable). Defaults like sweep's."
         ),
     )
+    cl.add_argument(
+        "--driver", default=None,
+        help=(
+            "Persona name of the drive-journal session. When given, a "
+            "thin driver worklog entry (the 'I drove this' record) is "
+            "written to that persona's memory. Omit for the plain "
+            "subscription backend (no worklog side-effect)."
+        ),
+    )
     cl.set_defaults(func=cmd_claim)
 
     rl = sub.add_parser(
@@ -793,6 +908,23 @@ def build_parser() -> argparse.ArgumentParser:
     rl.add_argument(
         "--session-ref", default=None,
         help="If given, must match the current holder before releasing.",
+    )
+    rl.add_argument(
+        "--driver", default=None,
+        help=(
+            "Persona name of the drive-journal session. Enables the "
+            "per-persona memory side-effects: marking a kind=task done "
+            "then requires --output (the assigned persona's work note). "
+            "Omit for the plain subscription backend."
+        ),
+    )
+    rl.add_argument(
+        "--output", default=None,
+        help=(
+            "Path to the assigned persona's work note (markdown). Required "
+            "to mark a kind=task done in a drive; written to that "
+            "persona's memory as the task-work worklog entry."
+        ),
     )
     rl.set_defaults(func=cmd_release)
 

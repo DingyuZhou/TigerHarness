@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tigerharness.journal import worklog
 from tigerharness.journal.cli import build_parser, main
 from tigerharness.journal.models import State, Status
 from tigerharness.journal.paths import JournalPaths
@@ -1109,3 +1110,206 @@ class TestCmdClaimRelease:
         rc = main(["--journal-dir", str(journal_dir), "claim", "t1"])
         assert rc == 2
         assert "TIGERHARNESS_JOURNAL_STUCK_TIMEOUT" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Phase 1b: per-persona worklog side-effects on claim / release
+# ---------------------------------------------------------------------------
+
+class TestClaimDriverWorklog:
+    """``--driver`` makes ``claim`` leave a thin driver trace; without it
+    the plain subscription backend keeps its no-worklog behaviour."""
+
+    def test_no_driver_writes_no_worklog(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1"]) == 0
+        assert worklog.list_entries(paths, "t1") == []
+        assert not paths.worklog("t1").exists()
+
+    def test_pending_claim_records_new(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--driver", "Anzai"])
+        assert rc == 0
+        [e] = worklog.list_entries(paths, "t1")
+        assert e.persona == "Anzai"
+        assert e.step == "drive"
+        assert e.reason == "new"
+        assert e.role == "driver"
+        assert e.kind == "task"
+        assert "Drove" in e.body
+
+    def test_idle_resume_records_resume(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, sessions=1,
+              updated_at="2026-06-02T08:00:00Z")
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--driver", "Anzai"])
+        assert rc == 0
+        [e] = worklog.list_entries(paths, "t1")
+        assert e.reason == "resume"
+
+    def test_crashed_rescue_records_rescue(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="dead",
+              updated_at="2026-06-02T08:00:00Z")
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--driver", "Anzai", "--stuck-timeout", "1"])
+        assert rc == 0
+        [e] = worklog.list_entries(paths, "t1")
+        assert e.reason == "rescue"
+
+    def test_workflow_claim_records_driver_entry(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        (paths.active / "wf1").mkdir()
+        st = Status.new_workflow(id="wf1", title="W", playbook_name="default")
+        paths.status_json("wf1").write_text(st.to_json())
+        rc = main(["--journal-dir", str(journal_dir), "claim", "wf1",
+                   "--driver", "Anzai"])
+        assert rc == 0
+        [e] = worklog.list_entries(paths, "wf1")
+        assert e.kind == "workflow"
+        assert e.reason == "new"
+
+    def test_worklog_write_failure_is_warned_not_fatal(
+        self, journal_dir, capsys, monkeypatch,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(worklog, "write_entry", _boom)
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1",
+                   "--driver", "Anzai"])
+        # The claim itself still succeeds; the trace is best-effort.
+        assert rc == 0
+        assert "warning" in capsys.readouterr().err.lower()
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+
+
+class TestReleaseTaskCompletionGate:
+    """Marking a kind=task DONE in a drive requires the assigned persona's
+    work note (--output): the note is the ticket to advance."""
+
+    def _note(self, tmp_path, text="Implemented X; tests green.\n"):
+        p = tmp_path / "note.md"
+        p.write_text(text)
+        return str(p)
+
+    def test_done_with_output_writes_persona_entry(
+        self, journal_dir, tmp_path,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              persona="Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "done", "--driver", "Anzai",
+                   "--output", self._note(tmp_path)])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.DONE
+        [e] = worklog.list_entries(paths, "t1")
+        assert e.persona == "Rukawa"          # the assignee, not the driver
+        assert e.step == "task-work"
+        assert "Implemented X" in e.body
+
+    def test_done_without_output_refused(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              persona="Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "done", "--driver", "Anzai"])
+        assert rc == 1
+        assert "--output" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS   # NOT marked done
+        assert worklog.list_entries(paths, "t1") == []
+
+    def test_done_with_empty_output_refused(
+        self, journal_dir, tmp_path, capsys,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              persona="Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "done", "--driver", "Anzai",
+                   "--output", self._note(tmp_path, "   \n")])
+        assert rc == 1
+        assert "empty" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+
+    def test_done_with_unreadable_output_refused(
+        self, journal_dir, tmp_path, capsys,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              persona="Rukawa")
+        missing = str(tmp_path / "nope.md")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "done", "--driver", "Anzai",
+                   "--output", missing])
+        assert rc == 1
+        assert "cannot read" in capsys.readouterr().err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+
+    def test_clean_stop_in_progress_needs_no_output(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              persona="Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--driver", "Anzai"])
+        assert rc == 0
+        assert worklog.list_entries(paths, "t1") == []  # no note on a pause
+
+    def test_no_driver_done_keeps_plain_behaviour(self, journal_dir):
+        # The plain subscription backend (no --driver) marks done with no
+        # note requirement and no worklog side-effect.
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              persona="Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "done"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.DONE
+        assert worklog.list_entries(paths, "t1") == []
+
+    def test_workflow_done_not_gated_by_output(self, journal_dir):
+        # The kind=task --output gate must NOT fire for workflows (their
+        # per-step notes come from step-done in Phase 1c).
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        (paths.active / "wf1").mkdir()
+        st = Status.new_workflow(id="wf1", title="W", playbook_name="default")
+        st.state = State.IN_PROGRESS
+        st.session_ref = "tok"
+        paths.status_json("wf1").write_text(st.to_json())
+        rc = main(["--journal-dir", str(journal_dir), "release", "wf1",
+                   "--state", "done", "--driver", "Anzai"])
+        assert rc == 0
+        s = Status.from_json(paths.status_json("wf1").read_text())
+        assert s.state is State.DONE
+
+    def test_full_drive_cycle_two_entries(self, journal_dir, tmp_path):
+        # claim (driver trace) + release done (assignee work note) leave
+        # two correctly-attributed entries for the one task.
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING, persona="Rukawa")
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1",
+                     "--driver", "Anzai"]) == 0
+        assert main(["--journal-dir", str(journal_dir), "release", "t1",
+                     "--state", "done", "--driver", "Anzai",
+                     "--output", self._note(tmp_path)]) == 0
+        entries = worklog.list_entries(paths, "t1")
+        assert [(e.seq, e.persona, e.step) for e in entries] == [
+            (1, "Anzai", "drive"),
+            (2, "Rukawa", "task-work"),
+        ]
