@@ -30,12 +30,46 @@ Non-interactive use::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+
+# Hashes of *prior shipped* versions of a bundled skill, keyed by skill
+# dir name. On ``tigerharness init --refresh-skills``, an on-disk skill
+# whose content matches one of these (an unmodified earlier ship) is
+# overwritten with the current bundled version; a hand-edited skill (no
+# match) is left alone. **When you change a bundled SKILL.md, append the
+# OLD content's sha256 here** so existing teams pick the update up on
+# refresh without losing a customized copy.
+_PRIOR_SKILL_HASHES: dict[str, set[str]] = {
+    # drive-journal cascade-first redesign (2026-06-08): prior = the
+    # version shipped through origin/main before the rewrite.
+    "drive-journal": {
+        "e9fabddd6be40ceffe739a22c71480da25d073b8feb35da091f9e66aed2a82f1",
+    },
+}
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class SkillSync:
+    """Outcome of installing/refreshing bundled skills."""
+
+    created: list[Path] = field(default_factory=list)        # newly written
+    updated: list[Path] = field(default_factory=list)        # unmodified -> refreshed
+    kept_handedited: list[Path] = field(default_factory=list)  # diverged -> left alone
+
+    @property
+    def changed(self) -> list[Path]:
+        return self.created + self.updated
 
 # Valid persona/team names: letters, digits, dash, underscore. The
 # folder names show up in paths and shell commands, so we keep them
@@ -625,7 +659,14 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
             created.append(settings_path)
     else:
         settings: dict = {
-            "env": {"TIGERHARNESS_PERSONAS_CONFIG": personas_cfg_abs},
+            "env": {
+                "TIGERHARNESS_PERSONAS_CONFIG": personas_cfg_abs,
+                # Auto-compact at ~50% of the context window so a
+                # long-cascading drive-journal session compacts proactively
+                # (and resumes from progress.md) instead of handing off for
+                # "context heavy". Tune per team; integer percent 1-100.
+                "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",
+            },
         }
         _ensure_journal_guard_hook(settings, project_root)
         settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -637,33 +678,51 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     # Skills: copy from tigerharness package's _bundled_skills/ directory.
     # Each skill lives at _bundled_skills/<name>/SKILL.md, shipped as
     # package data so they're available in installed wheels too.
-    created.extend(install_bundled_skills(team_dir))
+    created.extend(install_bundled_skills(team_dir).created)
 
     return created
 
 
-def install_bundled_skills(team_dir: Path) -> list[Path]:
+def install_bundled_skills(team_dir: Path, *, refresh: bool = False) -> SkillSync:
     """Copy the tigerharness package's ``_bundled_skills/`` into the
-    team's ``.claude/skills/``. Idempotent -- skills that already
-    exist on disk are left untouched (so a team's hand-edited skill
-    is never clobbered). Returns the list of paths actually created.
+    team's ``.claude/skills/``.
 
-    Called from :func:`create_team` during initial scaffolding AND
-    by ``tigerharness init --refresh-skills`` so a team set up before
-    a new skill was added can pick it up without re-scaffolding.
+    Always **installs missing** skills (so a team set up before a skill
+    was added picks it up). With ``refresh=True``
+    (``tigerharness init --refresh-skills``), it also **updates an
+    on-disk skill that is byte-identical to a previously-shipped version**
+    (``_PRIOR_SKILL_HASHES``) -- i.e. the team never customized it, so a
+    protocol update propagates -- while a **hand-edited** skill (content
+    matching neither the current nor any prior ship) is left untouched.
+    Without ``refresh``, existing skills are never rewritten.
+
+    Called from :func:`create_team` (initial scaffold; ``refresh=False``)
+    and the ``--refresh-skills`` CLI (``refresh=True``).
     """
-    created: list[Path] = []
+    result = SkillSync()
     pkg_skills_dir = Path(__file__).resolve().parent / "_bundled_skills"
     if not pkg_skills_dir.is_dir():
-        return created
+        return result
     for skill_dir in sorted(pkg_skills_dir.iterdir()):
         skill_src = skill_dir / "SKILL.md"
         if not skill_src.is_file():
             continue
+        content = skill_src.read_text(encoding="utf-8")
         dest = team_dir / ".claude" / "skills" / skill_dir.name / "SKILL.md"
-        if _write_if_missing(dest, skill_src.read_text(encoding="utf-8")):
-            created.append(dest)
-    return created
+        if not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+            result.created.append(dest)
+        elif refresh:
+            on_disk = dest.read_text(encoding="utf-8")
+            if on_disk == content:
+                continue  # already current
+            if _sha256_text(on_disk) in _PRIOR_SKILL_HASHES.get(skill_dir.name, set()):
+                dest.write_text(content, encoding="utf-8")  # unmodified -> refresh
+                result.updated.append(dest)
+            else:
+                result.kept_handedited.append(dest)  # customized -> leave
+    return result
 
 
 def create_team(
@@ -1355,19 +1414,38 @@ def main(argv: list[str] | None = None) -> int:
         team_dir = _resolve_refresh_target(args, search_root)
         if team_dir is None:
             return 1
-        created = install_bundled_skills(team_dir)
-        if not created:
-            print(
-                f"Nothing to do -- all bundled skills already present "
-                f"under {_format_path(team_dir, search_root)}/.claude/skills/."
+        sync = install_bundled_skills(team_dir, refresh=True)
+        if not sync.changed:
+            msg = (
+                f"Nothing to do -- all bundled skills already present and "
+                f"up to date under "
+                f"{_format_path(team_dir, search_root)}/.claude/skills/."
             )
+            if sync.kept_handedited:
+                msg += (
+                    f" ({len(sync.kept_handedited)} hand-edited skill(s) "
+                    f"left unchanged.)"
+                )
+            print(msg)
             return 0
-        print(
-            f"Installed {len(created)} skill(s) under "
-            f"{_format_path(team_dir, search_root)}/:"
-        )
-        for p in created:
-            print(f"  {_format_path(p, search_root)}")
+        if sync.created:
+            print(f"Installed {len(sync.created)} new skill(s):")
+            for p in sync.created:
+                print(f"  {_format_path(p, search_root)}")
+        if sync.updated:
+            print(
+                f"Refreshed {len(sync.updated)} unmodified skill(s) to the "
+                f"current shipped version:"
+            )
+            for p in sync.updated:
+                print(f"  {_format_path(p, search_root)}")
+        if sync.kept_handedited:
+            print(
+                f"Left {len(sync.kept_handedited)} hand-edited skill(s) "
+                f"unchanged (delete to adopt the shipped version):"
+            )
+            for p in sync.kept_handedited:
+                print(f"  {_format_path(p, search_root)}")
         return 0
 
     search_root = Path(args.dir).resolve()

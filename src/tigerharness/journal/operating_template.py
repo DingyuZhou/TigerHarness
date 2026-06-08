@@ -212,9 +212,10 @@ completed task until no actionable tasks remain.
    checkpoints to `progress.md` + `next_action`, so a context
    **compaction loses nothing**: after one, just re-orient from those.
    So do NOT hand off early "to let the loop bridge to fresh context" --
-   keep cascading and rely on **auto-compaction** (recommended threshold
-   ~75% of the window, configured in the team's `.claude/settings.json`)
-   to reclaim room. Hand off (release idle + end the turn) **only** at the
+   keep cascading and rely on **auto-compaction** (triggers at ~50% of the
+   window by default, set via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in the
+   team's `.claude/settings.json`) to reclaim room. Hand off (release idle
+   + end the turn) **only** at the
    true hard ceiling -- and even then a fresh fire resumes the idle task
    instantly. **After any compaction, re-sweep (step 1) and continue.**
 

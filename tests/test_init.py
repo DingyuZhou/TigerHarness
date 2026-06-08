@@ -1706,6 +1706,49 @@ class TestRefreshSkills:
         assert rc == 0
         assert "do not overwrite" in target.read_text()
 
+    def test_refresh_updates_unmodified_prior_and_keeps_handedited(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A skill byte-identical to a *prior shipped* version is refreshed
+        to the current bundled version (the team never customized it);
+        a hand-edited skill is left alone."""
+        import hashlib
+        from pathlib import Path as _Path
+        import tigerharness.init as _init
+
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        skills = tmp_path / "tigers" / ".claude" / "skills"
+        dj = skills / "drive-journal" / "SKILL.md"
+        jn = skills / "journal-new" / "SKILL.md"
+        # drive-journal: overwrite with a synthetic *prior shipped* version.
+        prior = "# drive-journal -- an earlier shipped version\n"
+        dj.write_text(prior)
+        # journal-new: a genuine hand-edit (matches no shipped version).
+        jn.write_text("# hand-edited journal-new\nkeep me\n")
+        monkeypatch.setattr(
+            "tigerharness.init._PRIOR_SKILL_HASHES",
+            {"drive-journal": {hashlib.sha256(prior.encode()).hexdigest()}},
+        )
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        # drive-journal refreshed to the exact current bundled content.
+        bundled = (
+            _Path(_init.__file__).parent / "_bundled_skills"
+            / "drive-journal" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert dj.read_text(encoding="utf-8") == bundled
+        # journal-new hand-edit preserved.
+        assert "keep me" in jn.read_text()
+        out = capsys.readouterr().out
+        assert "Refreshed" in out
+        assert "Left" in out and "hand-edited" in out
+
     def test_explicit_team_flag(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
     ):

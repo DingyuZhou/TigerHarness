@@ -83,3 +83,62 @@ Full suite green in the worktree: **2964 passed, 100% line+branch
 coverage**. `operating_template.py` landmark tests still pass; added the
 continuity-contract pin. (No production logic changed — only the skill
 markdown, the OPERATING template string, and the new test.)
+
+---
+
+## Update (2026-06-08) — (a) compact threshold + (b) refresh auto-update IMPLEMENTED
+
+Both follow-ups are now done in this worktree (commit follows). They
+supersede the "recommended follow-up" + the manual-refresh caveat above.
+
+### (a) Compact threshold = 50%, wired
+
+The lever is the env var **`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`** (integer
+1–100 = % of context window at which auto-compact triggers; Claude Code
+default ~95). It is **env-only — there is no settings.json *key*** for it,
+but it lives fine in the `env` block of settings.json.
+- `init.py` now seeds new teams' `.claude/settings.json` with
+  `"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50"`.
+- Skill + OPERATING docs updated from ~75% → **50%** and now name the env var.
+- **Existing teams**: add that one line to `<team>/.claude/settings.json`
+  `env` (I did NOT build a settings-env auto-merge into `--refresh-skills`
+  — small follow-up if you want it; for now it's a one-line manual add).
+  *(Env changes apply to NEW Claude sessions.)*
+
+### (b) Updates now propagate to existing teams (hash-gated, no clobber)
+
+- **Skills** — `tigerharness init --refresh-skills` now: installs missing
+  skills **+ refreshes any skill that is byte-identical to a previously
+  shipped version** to the current bundled one, **+ leaves hand-edited
+  skills untouched** (reports each bucket). Driven by `_PRIOR_SKILL_HASHES`
+  in `init.py`.
+- **OPERATING.md** — `_ensure_operating_md` now refreshes an unmodified
+  prior-ship OPERATING.md to the current template **on the next
+  `journal new`** (hash-gated via `_PRIOR_OPERATING_HASHES` in
+  `scaffold.py`); hand-edited files are left alone. No init↔journal
+  coupling, self-healing.
+- Recorded the prior (origin/main) hashes — drive-journal SKILL.md
+  `e9fabddd…`, OPERATING.md `fe942cf5…` — so **existing teams (Shohoku)
+  auto-adopt** the new behavior: run `tigerharness init --refresh-skills`
+  for the skill, and the next `journal new` refreshes OPERATING.md. No
+  manual file deletion needed anymore.
+
+### 🔧 MAINTENANCE RULE (important for future protocol edits)
+
+When you next change the bundled `drive-journal/SKILL.md` or `OPERATING_MD`,
+**append the OLD content's sha256 to the matching manifest**
+(`init._PRIOR_SKILL_HASHES` / `scaffold._PRIOR_OPERATING_HASHES`) so the
+then-current-but-now-prior version is recognized as "ours, safe to refresh"
+on the next `--refresh-skills` / `journal new`. (Otherwise existing teams'
+copies look "hand-edited" and won't auto-update.) Each is documented inline
+at its definition.
+
+### To adopt on Shohoku specifically (left for you / your parallel work)
+
+1. `tigerharness init --refresh-skills --team-dir <…>/Shohoku`  → updates the skill.
+2. next `tigerharness journal new …`  → refreshes `journal/OPERATING.md`.
+3. add `"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50"` to Shohoku's
+   `.claude/settings.json` `env`.
+
+Tests: full suite green **2967 passed, 100% line+branch coverage**
+(init.py / scaffold.py / operating_template.py all 100%).

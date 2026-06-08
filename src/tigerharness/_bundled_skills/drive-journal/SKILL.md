@@ -82,8 +82,9 @@ boundary instead.
 7. **Let compaction keep you going — "context heavy" is NOT a stop reason.**
    Every session checkpoints to `progress.md` + `next_action`, so a context
    **compaction loses nothing** here — you simply re-orient from those.
-   Therefore keep cascading and rely on **auto-compaction** (recommended
-   threshold ~75% of the window — see your team `.claude/settings.json`)
+   Therefore keep cascading and rely on **auto-compaction** (triggers at
+   ~50% of the context window by default — set via
+   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in your team `.claude/settings.json`)
    to reclaim context; do **not** hand off early to "let the loop bridge."
    Hand off (release idle + end the turn) **only** at the genuine hard
    ceiling — and even then a fresh fire resumes the idle task instantly.
