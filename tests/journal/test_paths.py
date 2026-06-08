@@ -91,6 +91,7 @@ class TestJournalPathsLayout:
         assert p.active == tmp_path / "active"
         assert p.done == tmp_path / "done"
         assert p.operating_md == tmp_path / "OPERATING.md"
+        assert p.drive_sessions_json == tmp_path / ".drive-sessions.json"
 
     def test_per_task_active(self, tmp_path):
         p = JournalPaths(root=tmp_path)

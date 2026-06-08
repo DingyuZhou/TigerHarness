@@ -508,6 +508,44 @@ class TestRunStreamRejections:
 
 
 # =============================================================================
+# Per-call subprocess env (cfg.extra["env"])
+# =============================================================================
+
+
+class TestRunStreamEnvMerge:
+    """``cfg.extra["env"]`` is merged into the turn's subprocess env,
+    most-specific last (os.environ < backend.env < call env), without
+    touching the shared ``os.environ`` -- the harness-enforced channel
+    the slack bridge uses for ``TIGERHARNESS_SLACK_THREAD_TS``."""
+
+    @asyncio_test
+    async def test_call_env_merged_and_overrides_backend(
+        self, cli_success: Path
+    ) -> None:
+        backend = ClaudePBackend(cli=str(cli_success), env={"FOO": "backend"})
+        cfg = AgentConfig(
+            name="x", extra={"env": {"BAR": "call", "FOO": "override"}}
+        )
+        handle = backend.run_stream(cfg, "hi")
+        async for _ in handle:
+            pass
+        assert handle._env["BAR"] == "call"
+        assert handle._env["FOO"] == "override"   # call beats backend
+        assert "PATH" in handle._env              # os.environ preserved
+
+    @asyncio_test
+    async def test_no_call_env_leaves_backend_env(
+        self, cli_success: Path
+    ) -> None:
+        backend = ClaudePBackend(cli=str(cli_success), env={"FOO": "backend"})
+        cfg = AgentConfig(name="x")  # no extra["env"]
+        handle = backend.run_stream(cfg, "hi")
+        async for _ in handle:
+            pass
+        assert handle._env["FOO"] == "backend"
+
+
+# =============================================================================
 # Full subprocess pipeline (via fake CLIs)
 # =============================================================================
 

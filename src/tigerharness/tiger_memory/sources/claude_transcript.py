@@ -68,6 +68,32 @@ def _normalize_owner(persona_value) -> "tuple[str | None, str] | None":
     return None
 
 
+def _load_drive_threads(path: "Path | None") -> frozenset[str]:
+    """Read the journal drive-session registry's ``thread_ts`` keys.
+
+    A consumer-side mirror of ``journal.drive_sessions.registered_threads``
+    -- kept inline (rather than imported) so this adapter stays
+    independent of the journal package at import time, exactly as it reads
+    the bridge's ``threads.json`` inline via ``_reverse_thread_map``
+    rather than importing the bridge. ``test_drive_sessions`` cross-checks
+    that the two readers agree.
+
+    Tolerant by design: ``None`` path (no registry configured), a missing
+    / unreadable file, corrupt JSON, or a non-object top level all yield
+    the empty set -- "suppress nothing", the safe direction (a degraded
+    registry causes at worst a double-counted driver transcript, never
+    lost persona memory)."""
+    if path is None:
+        return frozenset()
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return frozenset()
+    if not isinstance(data, dict):
+        return frozenset()
+    return frozenset(data)
+
+
 class ClaudeTranscriptAdapter(SourceAdapter):
     kind = "claude_code"  # umbrella; resolves to "slack" per-transcript
 
@@ -80,10 +106,22 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         team: str | None = None,
         include_unattributed: bool = False,
         max_age_days: int | None = 7,
+        drive_sessions_json: Path | None = None,
     ):
         self.project_path = Path(project_path).expanduser()
         self.threads_json = (
             Path(threads_json).expanduser() if threads_json else None
+        )
+        # Journal drive-session registry (``.drive-sessions.json`` under a
+        # co-configured journal_worklog source's journal root). When set,
+        # transcripts whose thread_ts is registered are skipped: the drive's
+        # per-persona worklog already owns that content, so folding the fat
+        # transcript here would double-count the driver. ``None`` (no
+        # registry) disables suppression. See
+        # ``docs/per-persona-journal-memory.md`` section 4.
+        self.drive_sessions_json = (
+            Path(drive_sessions_json).expanduser()
+            if drive_sessions_json else None
         )
         # When set, only sessions owned by *persona* (per threads.json)
         # are emitted. ``None`` preserves the legacy "emit everything"
@@ -111,6 +149,8 @@ class ClaudeTranscriptAdapter(SourceAdapter):
     def discover(self) -> Iterator[SourceRecord]:
         # session_id -> (thread_ts, persona | None)
         thread_map = self._reverse_thread_map()
+        # thread_ts of journal *drive* sessions to suppress (read once).
+        drive_threads = _load_drive_threads(self.drive_sessions_json)
         if not self.project_path.exists():
             return
         cutoff = (
@@ -126,7 +166,7 @@ class ClaudeTranscriptAdapter(SourceAdapter):
                 except OSError:
                     continue
             session_uuid = jsonl.stem
-            if not self._allowed(session_uuid, thread_map):
+            if not self._allowed(session_uuid, thread_map, drive_threads):
                 continue
             rec = self._record_for(jsonl, thread_map)
             if rec is not None:
@@ -138,10 +178,15 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         self,
         session_uuid: str,
         thread_map: dict[str, tuple[str, tuple[str | None, str] | None]],
+        drive_threads: frozenset[str] = frozenset(),
     ) -> bool:
-        """Apply the per-persona filter.
+        """Apply the drive-session suppression + per-persona filter.
 
-        - No filter set (legacy / single-tenant): everything passes.
+        - Session whose thread_ts is a registered journal *drive*: drop
+          (regardless of persona) -- its per-persona worklog owns that
+          content; folding the fat transcript would double-count the
+          driver.
+        - No filter set (legacy / single-tenant): everything else passes.
         - Filter set + session in threads.json with matching persona: pass.
         - Filter set + session in threads.json with different persona: drop.
         - Filter set + session NOT in threads.json (local claude_p)
@@ -151,9 +196,12 @@ class ClaudeTranscriptAdapter(SourceAdapter):
         record carry a team; otherwise the name alone decides, so a
         bare-name entry stays compatible with a team-aware adapter.
         """
+        entry = thread_map.get(session_uuid)
+        if entry is not None and entry[0] in drive_threads:
+            # Journal drive session: the worklog owns this content.
+            return False
         if self.persona is None:
             return True
-        entry = thread_map.get(session_uuid)
         if entry is None:
             # Local claude_p session, never went through the bridge.
             return self.include_unattributed

@@ -15,6 +15,17 @@ sources:
     # ^ Replace with your Claude Code project path.
     #   Find yours under ~/.claude/projects/ -- the directory name
     #   encodes the absolute project path with dashes replacing slashes.
+  - kind: journal_worklog
+    # Per-persona journal memory: ingest the worklog entries THIS persona
+    # ('chief') personally wrote during journal drives -- not the
+    # driver's. One memory per (task, persona). See
+    # docs/per-persona-journal-memory.md.
+    journal_root: ../../journal/
+    # ^ The team's journal/ directory. A relative path is anchored to this
+    #   config file's directory; use an absolute path for a headless sweep
+    #   launched from an arbitrary working directory.
+    persona: chief
+    # team: tigers   # optional; defaults to the journal root's parent dir
 summarizer:
   backend: anthropic
   model: claude-sonnet-4-6

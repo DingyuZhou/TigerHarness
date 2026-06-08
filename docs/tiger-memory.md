@@ -41,7 +41,7 @@ Agent reads briefing/ at session start
 | `drill.py` | Drill-down navigation + search (grep/rag/hybrid) |
 | `rag.py` | SQLite-vec backed RAG for semantic search |
 | `embedders.py` | Embedder backends (fastembed local, OpenAI) |
-| `sources/` | Source adapters (claude_code, slack_thread, docs) |
+| `sources/` | Source adapters (claude_code, slack_thread, docs, journal_worklog) |
 | `summarizers/` | LLM summarization backends (anthropic, mock) |
 | `frontmatter.py` | YAML frontmatter parsing for memory files |
 | `state.py` | Rebuild state tracking (what's been processed) |
@@ -205,6 +205,60 @@ to disambiguate "local work" from "stale pre-routing thread" via
 config — if you need that distinction, manually edit `threads.json`
 to migrate old entries to the new schema, or wait for them to age out
 of your memory window.
+
+## Per-persona journal memory (journal_worklog source)
+
+When the team runs work through the subscription backend's
+`drive-journal` driver, all of it happens inside **one** Claude session
+(the driver's). The driver adopts each persona in-session, so the raw
+transcript would collapse every persona's work into the driver's store.
+The `journal_worklog` source fixes that by ingesting the journal's
+**per-turn worklog records** instead — each one stamped (by harness
+code) with the persona that actually did the work. See
+[`per-persona-journal-memory.md`](per-persona-journal-memory.md) and
+[`subscription-backend.md`](subscription-backend.md) ("Per-persona
+memory") for the write side.
+
+Add the source to each journal-working persona's config:
+
+```yaml
+sources:
+  - kind: journal_worklog
+    journal_root: /home/tigerleap/projects/teams/Shohoku/journal/
+    persona: Rukawa             # only ingest worklog entries stamped Rukawa
+  - kind: claude_code
+    project_path: ~/.claude/projects/-home-tigerleap-projects-teams-shohoku/
+    persona: Rukawa
+```
+
+The adapter discovers `*/worklog/*.md` under `journal_root` (both
+`active/` and `done/`), reads the frontmatter, keeps only entries whose
+`persona` matches, and groups them **per `(task, persona)`** — "Rukawa's
+memory of task X" — with a stable `uuid5("journal:<team>/<task>/<persona>")`
+so the summary grows in place as the task does (the existing
+addendum/re-summarize path handles growth). Individual turn files remain
+the drill-down detail.
+
+**Double-count suppression.** A drive session's own (fat) transcript
+would otherwise be folded whole into the driver's store, double-counting
+work the worklog already captured. At `journal claim`, the drive's Slack
+`thread_ts` is recorded to `journal/.drive-sessions.json`; the
+`claude_code` (`ClaudeTranscriptAdapter`) source reads that registry —
+wired in automatically when a `journal_worklog` source is present in the
+same config — and **skips** any session whose `thread_ts` is a
+registered drive. The registry reader is tolerant: a missing or corrupt
+registry suppresses **nothing** (the safe direction — worst case is a
+double-counted driver transcript, never lost or mis-attributed persona
+memory).
+
+**Roster prerequisite.** Every persona that does journal work needs its
+own tiger-memory config + store listing this source; otherwise the
+team-sweep has nothing to summarize for it. The team-sweep itself
+enumerates **all** roster personas that have a store (it does not
+activity-gate per persona), so a specialist with *only* worklog activity
+and no Slack threads is still swept — its new worklog entries surface at
+`tiger-memory plan` time through this source. See
+[`tiger-memory-sweep-protocol.md`](tiger-memory-sweep-protocol.md).
 
 ## Adding a new summarizer vendor
 

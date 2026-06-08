@@ -66,6 +66,21 @@ version, every invocation:
    re-read. If it exits non-zero ("busy" / "claim lost"), another
    session won -- re-sweep and pick again, or exit.
 
+   **In a Slack-driven drive**, add `--driver` so the work lands in the
+   right persona's store (see OPERATING.md "Per-persona memory"):
+
+   ```bash
+   tigerharness journal claim <task-id> --driver <your-persona>
+   ```
+
+   `--driver` is the persona this session runs as. With it set, the
+   drive's Slack thread is registered automatically (the bridge passes
+   it in the `TIGERHARNESS_SLACK_THREAD_TS` env var), which stops
+   tiger-memory from double-counting the fat drive transcript -- you do
+   not need to copy the thread_ts by hand. (Outside the bridge, pass
+   `--drive-thread <thread_ts>` explicitly to register it; omit
+   `--driver` entirely outside a drive.)
+
    - **NEVER** work a *busy* task -- a live session owns it right now.
    - Skip `blocked` tasks; surface them so the user can unblock.
    - If nothing is actionable, **exit the invocation cleanly** -- the
@@ -87,7 +102,10 @@ version, every invocation:
      graph.
    - `kind=workflow` with `compile_pending=false` -- walk the DAG in
      `orchestration.json` per the **graph-walk sub-protocol** in
-     OPERATING.md.
+     OPERATING.md. End each step at the gate -- `tigerharness journal
+     step-done --task <id> --step <id> --verdict <V> --output <note>` --
+     which writes the step persona's worklog entry and prints the next
+     step. Do NOT follow the edges by hand; the gate routes AND records.
 
    Stop conditions (same for all kinds):
    - The task is `done` per acceptance criteria **and**
@@ -106,13 +124,24 @@ version, every invocation:
 
 5. **On stop**, write a final `progress.md` entry, then
    **`tigerharness journal release <task-id>`** to record the exit and
-   **detach**: clean stop with work left -> `release <id> --next-action
-   "<note>"` (stays `in_progress`, now **idle** so the next drive
-   resumes instantly, no wait); done -> `release <id> --state done`;
-   blocked, or `sessions >= max_sessions` -> `release <id> --state
-   blocked --next-action "<why>"`. `release` clears `session_ref` +
-   refreshes `updated_at`; do NOT bump `sessions` (that happened in
-   `claim` at pickup).
+   **detach**. In a drive, pass the same `--driver <your-persona>` you
+   used at claim -- it activates the completion gates:
+   - clean stop with work left -> `release <id> --driver <p>
+     --next-action "<note>"` (stays `in_progress`, now **idle** so the
+     next drive resumes instantly, no wait);
+   - **`kind=task` done** -> `release <id> --driver <p> --state done
+     --output <work-note.md>` (the assigned persona's work note -- the
+     gate REFUSES `done` without a non-empty `--output`; the note is the
+     ticket);
+   - **`kind=workflow` done** -> `release <id> --driver <p> --state
+     done` (no `--output`; the per-step `step-done` notes are the
+     record, and the walk must have reached `__done__`);
+   - blocked, or `sessions >= max_sessions` -> `release <id> --driver
+     <p> --state blocked --next-action "<why>"`.
+
+   `release` clears `session_ref` + refreshes `updated_at`; do NOT bump
+   `sessions` (that happened in `claim` at pickup). Outside a drive,
+   omit `--driver` (no gate, no `--output` needed).
 
 6. **Cascade / keep going.** After a stop, loop back to step 1
    (re-sweep). **Do not hand the turn back between sessions** -- run
@@ -146,6 +175,15 @@ version, every invocation:
   persona by reading `personas/<name>/prompt.md` and prepending the
   four-line preamble. The compile is in-session; the API budget is
   zero.
+- Don't follow workflow graph edges by hand or mark a task `done`
+  without the note. `kind=task` done needs `release --state done
+  --output <note>`; `kind=workflow` advances via `journal step-done`
+  and needs the walk at `__done__`. The gates refuse otherwise -- they
+  are what write each persona's memory, so skipping them loses the
+  record.
+- Don't hand-write files under a task's `worklog/`. Only the journal
+  gates write there; the `persona` attribution is stamped from the
+  orchestration/compile mapping, never typed free-hand.
 
 ## If you get confused
 

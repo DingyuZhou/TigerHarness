@@ -13,6 +13,7 @@ from tigerharness.tiger_memory.sources.claude_transcript import (
     _extract_text,
     _is_briefing_read,
     _iter_events,
+    _load_drive_threads,
     _parse_ts,
     _path_is_briefing,
 )
@@ -481,3 +482,124 @@ class TestClaudeTranscriptAdapterMaxAge:
         adapter = ClaudeTranscriptAdapter(project_path=proj, max_age_days=2)
         uids = {r.conversation_uuid for r in adapter.discover()}
         assert uids == {d1_uid}
+
+
+class TestLoadDriveThreads:
+    """The inline, tolerant reader of the journal drive-session registry
+    (a consumer-side mirror of journal.drive_sessions.registered_threads)."""
+
+    def test_none_path_is_empty(self):
+        assert _load_drive_threads(None) == frozenset()
+
+    def test_valid_registry_returns_keys(self, tmp_path: Path):
+        reg = tmp_path / ".drive-sessions.json"
+        reg.write_text(json.dumps({
+            "a.ts": {"task_id": "t1", "driver": "Anzai"},
+            "b.ts": {"task_id": "t2", "driver": None},
+        }))
+        assert _load_drive_threads(reg) == frozenset({"a.ts", "b.ts"})
+
+    def test_missing_file_is_empty(self, tmp_path: Path):
+        assert _load_drive_threads(tmp_path / "nope.json") == frozenset()
+
+    def test_corrupt_json_is_empty(self, tmp_path: Path):
+        reg = tmp_path / ".drive-sessions.json"
+        reg.write_text("{not json")
+        assert _load_drive_threads(reg) == frozenset()
+
+    def test_non_object_top_level_is_empty(self, tmp_path: Path):
+        reg = tmp_path / ".drive-sessions.json"
+        reg.write_text(json.dumps(["a", "b"]))
+        assert _load_drive_threads(reg) == frozenset()
+
+
+class TestDriveSessionSuppression:
+    """A transcript whose thread_ts is a registered journal drive is
+    skipped: its per-persona worklog owns that content, so folding the
+    fat transcript would double-count the driver."""
+
+    def _make_jsonl(self, proj: Path, uid: str) -> None:
+        (proj / f"{uid}.jsonl").write_text("\n".join([
+            json.dumps({"type": "human", "timestamp": "2026-06-08T10:00:00Z",
+                        "message": {"content": "x"}}),
+            json.dumps({"type": "assistant", "timestamp": "2026-06-08T10:01:00Z",
+                        "message": {"content": "y"}}),
+        ]) + "\n")
+
+    def _registry(self, tmp_path: Path, *threads: str) -> Path:
+        reg = tmp_path / ".drive-sessions.json"
+        reg.write_text(json.dumps({t: {"task_id": "t"} for t in threads}))
+        return reg
+
+    def test_registered_drive_is_skipped_for_driver(self, tmp_path: Path):
+        # The driver (Anzai) owns both threads; the drive thread is
+        # suppressed, leaving only the driver's non-drive chat.
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        drive_uid = str(uuid4())
+        chat_uid = str(uuid4())
+        for u in (drive_uid, chat_uid):
+            self._make_jsonl(proj, u)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "drive.ts": {"session_id": drive_uid, "persona": "Anzai"},
+            "chat.ts": {"session_id": chat_uid, "persona": "Anzai"},
+        }))
+        adapter = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads, persona="Anzai",
+            drive_sessions_json=self._registry(tmp_path, "drive.ts"),
+        )
+        assert {r.conversation_uuid for r in adapter.discover()} == {chat_uid}
+
+    def test_drive_skipped_even_without_persona_filter(self, tmp_path: Path):
+        # Legacy single-tenant (persona=None): a drive transcript is still
+        # suppressed for everyone, never fat-ingested.
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        drive_uid = str(uuid4())
+        other_uid = str(uuid4())
+        for u in (drive_uid, other_uid):
+            self._make_jsonl(proj, u)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "drive.ts": {"session_id": drive_uid, "persona": "Anzai"},
+            "other.ts": {"session_id": other_uid, "persona": "Rukawa"},
+        }))
+        adapter = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads,
+            drive_sessions_json=self._registry(tmp_path, "drive.ts"),
+        )
+        assert {r.conversation_uuid for r in adapter.discover()} == {other_uid}
+
+    def test_no_registry_suppresses_nothing(self, tmp_path: Path):
+        # drive_sessions_json=None -> the drive transcript is ingested as
+        # usual (suppression disabled). Exercises _load_drive_threads(None)
+        # flowing through discover.
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        drive_uid = str(uuid4())
+        self._make_jsonl(proj, drive_uid)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "drive.ts": {"session_id": drive_uid, "persona": "Anzai"},
+        }))
+        adapter = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads, persona="Anzai",
+        )
+        assert {r.conversation_uuid for r in adapter.discover()} == {drive_uid}
+
+    def test_unregistered_thread_passes(self, tmp_path: Path):
+        # A registry that doesn't list this thread leaves it untouched.
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        chat_uid = str(uuid4())
+        self._make_jsonl(proj, chat_uid)
+        threads = tmp_path / "threads.json"
+        threads.write_text(json.dumps({
+            "chat.ts": {"session_id": chat_uid, "persona": "Anzai"},
+        }))
+        adapter = ClaudeTranscriptAdapter(
+            project_path=proj, threads_json=threads, persona="Anzai",
+            drive_sessions_json=self._registry(tmp_path, "some.other.ts"),
+        )
+        assert {r.conversation_uuid for r in adapter.discover()} == {chat_uid}
