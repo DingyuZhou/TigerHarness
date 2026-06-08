@@ -197,11 +197,36 @@ style, trivial to write atomically per turn.
 Without this, the `claude_transcript` adapter would still fold the whole
 drive into the driver's store (fat) — defeating decision #2.
 
-- At `claim`, record the drive session's `thread_ts` (from
-  bridge-context) to a registry, e.g. `journal/.drive-sessions.json`.
+- At `claim`, record the drive session's `thread_ts` to a registry,
+  `journal/.drive-sessions.json`.
 - `ClaudeTranscriptAdapter` reads the registry and **skips** transcripts
   whose `thread_ts` is a registered drive session; the worklog now owns
   that content (persona slices → specialists, thin trace → driver).
+
+**How the `thread_ts` reaches `claim` (harness-enforced).** The thread
+identifier flows automatically, so suppression does not depend on the
+agent remembering a flag:
+
+1. The slack bridge sets `TIGERHARNESS_SLACK_THREAD_TS=<thread_ts>` in
+   *every* turn's subprocess environment. It does this per-turn via a
+   copy of the persona's `AgentConfig` carrying the value in
+   `extra["env"]`, which the `claude_p` backend merges into the
+   subprocess env — no mutation of the shared `os.environ`, so
+   concurrent turns never race (`slack_bridge.bridge._with_thread_env`,
+   `agent_sdk.backends.claude_p`).
+2. In-session, `journal claim --driver <p>` reads that env var as the
+   fallback for `--drive-thread`. The fallback is **gated on `--driver`**
+   so it only fires inside a real drive (where the per-persona worklog
+   replaces the transcript); a plain turn that claims without `--driver`
+   never suppresses its own transcript. An explicit `--drive-thread`
+   still wins (e.g. a non-bridge driver, or an override).
+
+**Registry growth is bounded.** Each `register()` write prunes entries
+whose `last_seen_at` is older than `_REGISTRY_TTL_DAYS` (30d) — far
+longer than the `claude_transcript` ingestion window (`max_age_days`,
+default 7), so a pruned entry's transcript is itself long past
+ingestion. Entries with an unparseable/absent stamp are kept (fail-safe:
+never drop a live suppression).
 
 ### 5. Roster rollout (prerequisite)
 
@@ -228,7 +253,12 @@ can run first/in parallel.
   **Done:** `f1dae05`.
 - **Phase 3 — Double-count suppression.** Drive-session registry at
   `claim`; `claude_transcript` skip. **Done:** `8a44951` (3a registry
-  at claim), `9b0f98a` (3b claude_transcript skip).
+  at claim), `9b0f98a` (3b claude_transcript skip). **Hardened (3c):**
+  harness-enforced `thread_ts` transport — the bridge sets
+  `TIGERHARNESS_SLACK_THREAD_TS` per turn and `claim` reads it as a
+  `--drive-thread` fallback (gated on `--driver`), so suppression no
+  longer depends on the agent passing a flag; plus a 30-day TTL prune in
+  `register()` to bound registry growth.
 - **Phase 4 — Protocol docs.** `operating_template.py` (so scaffolded
   journals teach the gates), `drive-journal` SKILL.md,
   `subscription-backend.md`, `tiger-memory*.md`. **Done:** `6a4350c`

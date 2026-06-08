@@ -87,13 +87,18 @@ class TestRegister:
         self, paths: JournalPaths,
     ):
         # Seed a prior record with a known, in-the-past registered_at so we
-        # can prove it survives a later claim under the same thread.
+        # can prove it survives a later claim under the same thread. Its
+        # last_seen_at is recent (within the TTL) so the entry isn't pruned
+        # before the merge -- this exercises the normal re-claim case (a
+        # drive resumed across a few sessions, not one idle past the TTL).
+        from tigerharness.journal.models import _utcnow_iso
+
         paths.root.mkdir(parents=True)
         paths.drive_sessions_json.write_text(json.dumps({
             "111.222": {
                 "task_id": "old", "driver": "Anzai",
                 "registered_at": "2020-01-01T00:00:00Z",
-                "last_seen_at": "2020-01-01T00:00:00Z",
+                "last_seen_at": _utcnow_iso(),
             }
         }), encoding="utf-8")
         ds.register(paths, "111.222", task_id="new", driver="Rukawa")
@@ -146,3 +151,104 @@ class TestCrossReaderAgreement:
         canonical = ds.registered_threads(paths.drive_sessions_json)
         mirror = _load_drive_threads(paths.drive_sessions_json)
         assert set(mirror) == canonical == {"a", "b"}
+
+
+# ---------------------------------------------------------------------------
+# TTL pruning: register() bounds registry growth by dropping entries whose
+# last_seen_at is older than _REGISTRY_TTL_DAYS, fail-safe on anything it
+# cannot evaluate (keep, never drop a live suppression).
+# ---------------------------------------------------------------------------
+
+class TestParseIso:
+    def test_non_string_is_none(self):
+        assert ds._parse_iso(None) is None
+        assert ds._parse_iso(123) is None
+
+    def test_malformed_is_none(self):
+        assert ds._parse_iso("not-a-date") is None
+
+    def test_naive_is_none(self):
+        # No offset -> we don't trust it for expiry math.
+        assert ds._parse_iso("2026-01-01T00:00:00") is None
+
+    def test_aware_z_parsed(self):
+        dt = ds._parse_iso("2026-01-01T00:00:00Z")
+        assert dt is not None and dt.tzinfo is not None
+
+    def test_aware_offset_parsed(self):
+        dt = ds._parse_iso("2026-01-01T00:00:00+02:00")
+        assert dt is not None and dt.tzinfo is not None
+
+
+class TestPrune:
+    NOW = "2026-06-08T12:00:00Z"
+
+    def test_empty_stays_empty(self):
+        assert ds._prune({}, self.NOW) == {}
+
+    def test_drops_expired_keeps_fresh(self):
+        data = {
+            "old": {"last_seen_at": "2026-01-01T00:00:00Z"},
+            "fresh": {"last_seen_at": "2026-06-07T00:00:00Z"},
+        }
+        assert set(ds._prune(data, self.NOW, ttl_days=30)) == {"fresh"}
+
+    def test_unparseable_now_keeps_all(self):
+        data = {"x": {"last_seen_at": "2020-01-01T00:00:00Z"}}
+        assert ds._prune(data, "garbage") == data
+
+    def test_keeps_entry_without_last_seen(self):
+        data = {"x": {"task_id": "t"}}
+        assert ds._prune(data, self.NOW) == data
+
+    def test_keeps_non_dict_entry(self):
+        data = {"x": "garbage"}
+        assert ds._prune(data, self.NOW) == data
+
+    def test_keeps_naive_last_seen(self):
+        # Naive stamp is unparseable-as-aware -> kept (fail-safe), even
+        # though the date itself is ancient.
+        data = {"x": {"last_seen_at": "2020-01-01T00:00:00"}}
+        assert ds._prune(data, self.NOW) == data
+
+
+class TestRegisterPrunes:
+    def test_register_prunes_expired_entries(self, paths: JournalPaths):
+        from tigerharness.journal.models import _utcnow_iso
+
+        paths.root.mkdir(parents=True)
+        paths.drive_sessions_json.write_text(json.dumps({
+            "old": {
+                "task_id": "o", "driver": None,
+                "registered_at": "2020-01-01T00:00:00Z",
+                "last_seen_at": "2020-01-01T00:00:00Z",
+            },
+            "fresh": {
+                "task_id": "f", "driver": None,
+                "registered_at": _utcnow_iso(),
+                "last_seen_at": _utcnow_iso(),
+            },
+        }), encoding="utf-8")
+        ds.register(paths, "new", task_id="n", driver="Anzai")
+        # "old" is dropped on write; "fresh" and the new claim remain.
+        assert ds.registered_threads(paths.drive_sessions_json) == {
+            "fresh", "new",
+        }
+
+    def test_reclaiming_expired_thread_restamps_fresh(
+        self, paths: JournalPaths,
+    ):
+        # A thread last seen long ago is pruned, then re-added as new (its
+        # registered_at is "now", not the ancient stamp).
+        paths.root.mkdir(parents=True)
+        paths.drive_sessions_json.write_text(json.dumps({
+            "111.222": {
+                "task_id": "old", "driver": "Anzai",
+                "registered_at": "2019-01-01T00:00:00Z",
+                "last_seen_at": "2019-01-01T00:00:00Z",
+            }
+        }), encoding="utf-8")
+        ds.register(paths, "111.222", task_id="new", driver="Rukawa")
+        rec = json.loads(paths.drive_sessions_json.read_text())["111.222"]
+        assert rec["registered_at"] != "2019-01-01T00:00:00Z"  # restamped
+        assert rec["task_id"] == "new"

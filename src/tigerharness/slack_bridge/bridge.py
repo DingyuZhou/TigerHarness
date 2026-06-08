@@ -39,7 +39,7 @@ import logging
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -331,7 +331,7 @@ class SlackBridge:
                 try:
                     result = await run_with_retry(
                         self._backend,
-                        persona.agent_config,
+                        _with_thread_env(persona.agent_config, thread_key),
                         prompt,
                         session=state.session,
                         max_attempts=3,
@@ -547,6 +547,29 @@ def _append_bridge_context(prompt: str, thread_ts: str, channel: str | None) -> 
     if channel:
         lines.append(f"slack_channel: {channel}")
     return f"{prompt}\n\n[bridge-context]\n" + "\n".join(lines)
+
+
+def _with_thread_env(config: AgentConfig, thread_ts: str) -> AgentConfig:
+    """Return a per-turn copy of *config* carrying this thread's Slack
+    ``thread_ts`` in ``extra["env"]`` so the claude_p backend injects it
+    into the turn's subprocess as ``TIGERHARNESS_SLACK_THREAD_TS``.
+
+    This is the harness-enforced half of drive-transcript suppression:
+    an in-session ``journal claim --driver <p>`` reads that env var as a
+    fallback for ``--drive-thread`` (see ``journal.cli.cmd_claim`` and
+    ``docs/per-persona-journal-memory.md`` section 4), so a Slack-driven
+    drive's transcript is registered for suppression even if the agent
+    omits the flag. Set on every turn (inert unless the turn becomes a
+    drive); a copy, never a mutation, so the persona's shared config and
+    concurrent turns stay independent."""
+    existing_env = config.extra.get("env") or {}
+    return replace(
+        config,
+        extra={
+            **config.extra,
+            "env": {**existing_env, "TIGERHARNESS_SLACK_THREAD_TS": thread_ts},
+        },
+    )
 
 
 def _is_user_dm(event: dict[str, Any]) -> bool:

@@ -249,7 +249,8 @@ class AgentConfig:
 
     # Free-form, backend-specific options. See each backend's docstring for
     # supported keys (e.g. claude_p reads "permission_mode", "add_dirs",
-    # "cli_args", "max_budget_usd").
+    # "cli_args", "max_budget_usd", and "env" -- a dict[str, str] of
+    # per-call subprocess env additions).
     extra: dict[str, Any] = field(default_factory=dict)
 
 

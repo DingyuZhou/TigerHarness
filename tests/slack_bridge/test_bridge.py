@@ -394,6 +394,34 @@ class TestTriggerTigerMemoryRebuild:
             )
 
 
+class TestWithThreadEnv:
+    """``_with_thread_env`` returns a per-turn copy carrying the thread_ts
+    in ``extra["env"]`` (the claude_p backend forwards it to the
+    subprocess as TIGERHARNESS_SLACK_THREAD_TS). The original config must
+    stay untouched so concurrent turns and the persona's shared slot
+    don't leak each other's thread."""
+
+    def test_injects_thread_ts_without_mutating_original(self):
+        from tigerharness.slack_bridge.bridge import _with_thread_env
+        cfg = AgentConfig(name="x")
+        out = _with_thread_env(cfg, "123.456")
+        assert out.extra["env"]["TIGERHARNESS_SLACK_THREAD_TS"] == "123.456"
+        assert "env" not in cfg.extra  # original untouched
+
+    def test_preserves_existing_extra_and_env(self):
+        from tigerharness.slack_bridge.bridge import _with_thread_env
+        cfg = AgentConfig(
+            name="x",
+            extra={"permission_mode": "plan", "env": {"FOO": "bar"}},
+        )
+        out = _with_thread_env(cfg, "9.9")
+        assert out.extra["permission_mode"] == "plan"
+        assert out.extra["env"]["FOO"] == "bar"
+        assert out.extra["env"]["TIGERHARNESS_SLACK_THREAD_TS"] == "9.9"
+        # original's env dict is not mutated
+        assert cfg.extra["env"] == {"FOO": "bar"}
+
+
 class TestSlackBridge:
     @pytest.fixture
     def bridge(self, cfg, store, fake_backend):
@@ -435,6 +463,26 @@ class TestSlackBridge:
         call_kwargs = say.call_args[1]
         assert call_kwargs["thread_ts"] == "1.1"
         assert "Hello from Sai" in call_kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_injects_thread_ts_env(self, bridge):
+        # Harness-enforced suppression: the per-turn AgentConfig handed to
+        # the backend carries this thread's ts so an in-session
+        # `journal claim --driver` registers it for transcript skip.
+        from unittest.mock import patch
+        b, backend, fake_result = bridge
+
+        with patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry",
+            return_value=fake_result,
+        ) as m:
+            say = AsyncMock()
+            event = {"channel_type": "im", "user": "U0CEO",
+                     "text": "hello", "ts": "1.1"}
+            await b.handle_message(event, say)
+
+        cfg_arg = m.call_args[0][1]  # second positional: the per-turn cfg
+        assert cfg_arg.extra["env"]["TIGERHARNESS_SLACK_THREAD_TS"] == "1.1"
 
     @pytest.mark.asyncio
     async def test_shutdown_rejects_new(self, bridge):

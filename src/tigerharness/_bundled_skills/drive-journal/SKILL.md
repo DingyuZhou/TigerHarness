@@ -66,19 +66,20 @@ version, every invocation:
    re-read. If it exits non-zero ("busy" / "claim lost"), another
    session won -- re-sweep and pick again, or exit.
 
-   **In a Slack-driven drive**, add the per-persona memory flags so the
-   work lands in the right persona's store (see OPERATING.md
-   "Per-persona memory"):
+   **In a Slack-driven drive**, add `--driver` so the work lands in the
+   right persona's store (see OPERATING.md "Per-persona memory"):
 
    ```bash
-   tigerharness journal claim <task-id> \
-       --driver <your-persona> --drive-thread <thread_ts>
+   tigerharness journal claim <task-id> --driver <your-persona>
    ```
 
-   `--driver` is the persona this session runs as; `--drive-thread` is
-   the `slack_thread_ts` from your prompt's `[bridge-context]` block
-   (it stops tiger-memory from double-counting the fat drive
-   transcript). Omit both outside a Slack-driven drive.
+   `--driver` is the persona this session runs as. With it set, the
+   drive's Slack thread is registered automatically (the bridge passes
+   it in the `TIGERHARNESS_SLACK_THREAD_TS` env var), which stops
+   tiger-memory from double-counting the fat drive transcript -- you do
+   not need to copy the thread_ts by hand. (Outside the bridge, pass
+   `--drive-thread <thread_ts>` explicitly to register it; omit
+   `--driver` entirely outside a drive.)
 
    - **NEVER** work a *busy* task -- a live session owns it right now.
    - Skip `blocked` tasks; surface them so the user can unblock.

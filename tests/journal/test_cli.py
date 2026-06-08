@@ -1267,12 +1267,52 @@ class TestClaimDriveThreadRegistry:
     drive-session registry so tiger-memory skips its transcript; without
     it, no registry is written."""
 
-    def test_no_drive_thread_writes_no_registry(self, journal_dir):
+    def test_no_drive_thread_writes_no_registry(self, journal_dir, monkeypatch):
+        # Hermetic: no flag AND no env var -> nothing to register.
+        monkeypatch.delenv("TIGERHARNESS_SLACK_THREAD_TS", raising=False)
         paths = JournalPaths(root=journal_dir)
         _seed(paths, "t1", state=State.PENDING)
         assert main(["--journal-dir", str(journal_dir), "claim", "t1",
                      "--driver", "Anzai"]) == 0
         assert not paths.drive_sessions_json.exists()
+
+    def test_env_thread_ts_fallback_when_driver_set(
+        self, journal_dir, monkeypatch,
+    ):
+        # Harness-enforced: the bridge sets TIGERHARNESS_SLACK_THREAD_TS;
+        # with --driver, claim registers it without an explicit flag.
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1",
+                     "--driver", "Anzai"]) == 0
+        assert drive_sessions.registered_threads(
+            paths.drive_sessions_json
+        ) == {"555.42"}
+        rec = json.loads(paths.drive_sessions_json.read_text())["555.42"]
+        assert rec["driver"] == "Anzai"
+
+    def test_env_thread_ts_ignored_without_driver(
+        self, journal_dir, monkeypatch,
+    ):
+        # The env fallback is gated on --driver: a plain (non-drive) turn
+        # must not suppress its own transcript (no worklog replaces it).
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1"]) == 0
+        assert not paths.drive_sessions_json.exists()
+
+    def test_explicit_drive_thread_beats_env(self, journal_dir, monkeypatch):
+        # An explicit --drive-thread overrides the env fallback.
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "999.99")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1",
+                     "--driver", "Anzai", "--drive-thread", "171.99"]) == 0
+        assert drive_sessions.registered_threads(
+            paths.drive_sessions_json
+        ) == {"171.99"}
 
     def test_drive_thread_registers(self, journal_dir):
         paths = JournalPaths(root=journal_dir)

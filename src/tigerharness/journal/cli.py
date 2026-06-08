@@ -646,16 +646,30 @@ def cmd_claim(args: argparse.Namespace) -> int:
     # -- the per-persona worklog now owns that content (see
     # docs/per-persona-journal-memory.md section 4). Best-effort: a
     # registry write failure must not fail an otherwise-successful claim.
-    if getattr(args, "drive_thread", None):
+    #
+    # Two ways the thread_ts arrives, explicit beating implicit:
+    #   1. ``--drive-thread`` -- explicit; honored regardless of --driver
+    #      (a caller asking to register means it).
+    #   2. ``TIGERHARNESS_SLACK_THREAD_TS`` env var -- the harness-enforced
+    #      fallback the slack bridge sets on every turn. Gated on
+    #      ``--driver`` so it only fires inside a real drive (where the
+    #      per-persona worklog replaces the transcript); a plain
+    #      subscription turn that happens to claim without --driver must
+    #      NOT suppress its own transcript (there is no worklog to replace
+    #      it). The agent no longer needs to copy the thread_ts by hand.
+    drive_thread = getattr(args, "drive_thread", None)
+    if not drive_thread and getattr(args, "driver", None):
+        drive_thread = os.environ.get("TIGERHARNESS_SLACK_THREAD_TS") or None
+    if drive_thread:
         try:
             drive_sessions.register(
-                paths, args.drive_thread,
+                paths, drive_thread,
                 task_id=status.id, driver=args.driver,
             )
         except OSError as exc:
             print(
                 f"warning: could not register drive session "
-                f"{args.drive_thread} for {status.id}: {exc}",
+                f"{drive_thread} for {status.id}: {exc}",
                 file=sys.stderr,
             )
 
@@ -1209,11 +1223,14 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument(
         "--drive-thread", default=None,
         help=(
-            "Slack thread_ts of the drive-journal session (from the "
-            "[bridge-context] block in the prompt). When given, the thread "
-            "is recorded to the drive-session registry so tiger-memory "
-            "skips this drive's transcript (the per-persona worklog owns "
-            "that content). Omit outside a Slack-driven drive."
+            "Slack thread_ts of the drive-journal session. When given, the "
+            "thread is recorded to the drive-session registry so "
+            "tiger-memory skips this drive's transcript (the per-persona "
+            "worklog owns that content). Usually unnecessary under the "
+            "slack bridge: with --driver set, the thread_ts is read "
+            "automatically from the TIGERHARNESS_SLACK_THREAD_TS env var "
+            "the bridge sets. Pass it explicitly only to override that or "
+            "outside the bridge."
         ),
     )
     cl.set_defaults(func=cmd_claim)
