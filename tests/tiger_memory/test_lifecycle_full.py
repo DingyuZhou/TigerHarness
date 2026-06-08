@@ -36,8 +36,10 @@ from tigerharness.tiger_memory.lifecycle import (
     _decide,
     _estimate_total_cost,
     _fill_prompt,
+    _fit_content,
     _process_decisions,
     _prompts_root,
+    _split_on_boundaries,
     _refresh_longer_memory,
     _spawn_background,
     _write_state,
@@ -63,8 +65,7 @@ def _cfg(tmp_path: Path, *, extra_yaml: str = ""):
           lock_path: {tmp_path}/lock
           idle_threshold_hours: 2
           resummarize_window_days: 7
-        {extra_yaml}
-    """))
+    """) + extra_yaml)
     return load_config(cfg_path)
 
 
@@ -177,6 +178,26 @@ class TestProcessDecisions:
         shorts = list(store.paths.journal.glob("*-*.md"))
         assert len(archives) == 1
         assert len(shorts) >= 1
+
+    def test_oversized_record_chunk_reduced_before_summary(self, tmp_path: Path):
+        # A real record whose content exceeds max_prompt_content_chars is
+        # chunk-and-reduced in-place ONCE (fit != original → replace), so the
+        # downstream summary sees already-fitted content. Covers the replace
+        # branch in _process_decisions' precompute.
+        cfg = _cfg(
+            tmp_path,
+            extra_yaml="budgets:\n  max_prompt_content_chars: 200\n",
+        )
+        store = Store(cfg.store.root)
+        store.init_layout()
+        big = "".join(f"important fact number {i}\n" for i in range(80))
+        assert len(big) > 200  # genuinely over budget → fit reduces it
+        rec = _make_record(content=big)
+        decisions = [Decision(rec, SUMMARIZE_NEW)]
+        summarizer = _TinySummarizer()  # short digests → reduce converges
+        cost = _process_decisions(decisions, store, cfg, summarizer)
+        assert cost >= 0
+        assert len(list(store.paths.archive.glob("*.md"))) == 1
 
     def test_addendum_writes_short_only(self, tmp_path: Path):
         cfg = _cfg(tmp_path)
@@ -431,6 +452,128 @@ class TestClip:
         result = _clip(text, max_chars=50)
         assert "[...content elided...]" in result
         assert len(result) < 200
+        assert len(result) <= 50  # strict ceiling, marker room reserved
+
+    def test_tiny_budget_smaller_than_marker(self):
+        # Budget too small to fit the elision marker → hard truncate, still
+        # within the ceiling (no crash, no negative slice).
+        result = _clip("a" * 100, max_chars=10)
+        assert result == "a" * 10
+        assert len(result) == 10
+
+
+class TestSplitOnBoundaries:
+    def test_short_text_single_chunk(self):
+        assert _split_on_boundaries("hello\nworld\n", max_chars=100) == [
+            "hello\nworld\n"
+        ]
+
+    def test_splits_on_line_boundaries(self):
+        text = "".join(f"line{i}\n" for i in range(20))  # 20 short lines
+        chunks = _split_on_boundaries(text, max_chars=30)
+        assert len(chunks) > 1
+        # Every chunk fits the budget...
+        assert all(len(c) <= 30 for c in chunks)
+        # ...and the split is lossless (concatenation == original).
+        assert "".join(chunks) == text
+        # No chunk cuts mid-line (each ends on a newline here).
+        assert all(c.endswith("\n") for c in chunks)
+
+    def test_oversized_single_line_hard_split(self):
+        # A single line longer than the budget must still be chopped so the
+        # per-chunk invariant holds (no summarizer can be cheated by a blob).
+        text = "x" * 250  # one "line", no newlines
+        chunks = _split_on_boundaries(text, max_chars=100)
+        assert all(len(c) <= 100 for c in chunks)
+        assert "".join(chunks) == text
+        assert len(chunks) == 3
+
+    def test_oversized_line_after_buffer_flushes_first(self):
+        # A normal line, then an oversized line: the buffer flushes before
+        # the hard-split so ordering is preserved.
+        text = "short\n" + ("y" * 250)
+        chunks = _split_on_boundaries(text, max_chars=100)
+        assert "".join(chunks) == text
+        assert chunks[0] == "short\n"
+        assert all(len(c) <= 100 for c in chunks)
+
+
+class _GrowingSummarizer(MockSummarizer):
+    """A summarizer whose output never shrinks below the budget, to force
+    ``_fit_content`` down to its depth-cap / clip fallback."""
+
+    name = "growing"
+
+    def __init__(self, *, blob_chars: int) -> None:
+        super().__init__()
+        self._blob = "z" * blob_chars
+        self.calls = 0
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        self.calls += 1
+        return self._blob
+
+
+class _TinySummarizer(MockSummarizer):
+    """Returns a short constant digest so a reduce pass clearly converges."""
+
+    name = "tiny"
+
+    def __init__(self, *, digest: str = "digest") -> None:
+        super().__init__()
+        self._digest = digest
+        self.calls = 0
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        self.calls += 1
+        return self._digest
+
+
+class TestFitContent:
+    def test_fits_already_no_model_calls(self, tmp_path: Path):
+        cfg = _cfg(tmp_path)
+        summ = _TinySummarizer()
+        text = "small content"
+        out = _fit_content(text, summarizer=summ, cfg=cfg, max_chars=1000)
+        assert out == text
+        assert summ.calls == 0  # no reduce → no model calls
+
+    def test_chunk_and_reduce_no_lossy_elision(self, tmp_path: Path):
+        cfg = _cfg(tmp_path)
+        summ = _TinySummarizer()
+        # ~60 lines well over a tiny budget → multiple chunks, each mapped.
+        text = "".join(f"important fact number {i}\n" for i in range(60))
+        out = _fit_content(text, summarizer=summ, cfg=cfg, max_chars=200)
+        # Short digests → the combined digest converges under budget.
+        assert len(out) <= 200
+        # It is a real reduction, not a head/tail clip.
+        assert "[...content elided...]" not in out
+        assert "[transcript part 1/" in out
+        # One map call per chunk (at least 2 chunks for this size).
+        assert summ.calls >= 2
+
+    def test_recurses_then_converges(self, tmp_path: Path):
+        cfg = _cfg(tmp_path)
+        # A digest big enough that ONE map pass over many chunks still
+        # exceeds the budget, forcing a second (reduce) pass that then
+        # converges — exercises the recursion without hitting the cap.
+        summ = _TinySummarizer(digest="d" * 40)
+        text = "".join(f"line {i} with some words\n" for i in range(120))
+        out = _fit_content(text, summarizer=summ, cfg=cfg, max_chars=400)
+        assert len(out) <= 400
+        assert "[...content elided...]" not in out
+        assert "[transcript part 1/" in out
+
+    def test_depth_cap_falls_back_to_clip(self, tmp_path: Path):
+        cfg = _cfg(tmp_path)
+        # Each digest is itself over budget, so the reduce can never
+        # converge → depth cap trips → bounded clip as last resort.
+        summ = _GrowingSummarizer(blob_chars=500)
+        text = "a" * 5000
+        out = _fit_content(text, summarizer=summ, cfg=cfg, max_chars=300)
+        assert len(out) <= 300
+        assert "[...content elided...]" in out  # clip fallback marker
+        assert summ.calls > 0
 
 
 class TestFillPrompt:

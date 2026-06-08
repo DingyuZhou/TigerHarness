@@ -71,10 +71,20 @@ class BudgetsConfig:
     must_memorize_rows: int = 60
     must_memorize_memo_words: int = 25
     repeat_detection_similarity: float = 0.7
-    # Max characters of transcript content fed to a single prompt before
-    # head/tail elision kicks in. ~120 KB ≈ ~30 K tokens, well under
-    # Opus 4.7's context window with headroom for the prompt+output.
+    # Max characters of transcript content fed to a single in-process
+    # summarizer prompt. ~120 KB ≈ ~30 K tokens, well under Opus 4.7's
+    # context window with headroom for the prompt+output. A transcript
+    # larger than this is NOT lossily clipped — it is chunk-and-reduced
+    # (map each chunk through the summarizer, then summarize the digests)
+    # so no information in the middle is silently dropped.
     max_prompt_content_chars: int = 120_000
+    # Max characters of transcript content staged into a sub-agent prompt
+    # file (the subscription-billed in-session path, which has no
+    # in-process summarizer to chunk-and-reduce with). The sub-agent owns
+    # the reduce, so this ceiling is sized to its context window (~300 KB
+    # ≈ ~75 K tokens) rather than the smaller per-API-call budget above.
+    # Only a transcript exceeding *this* is clipped, as a last resort.
+    max_staged_content_chars: int = 300_000
 
 
 @dataclass(frozen=True)
@@ -354,6 +364,12 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         must_memorize_memo_words=int(budgets_raw.get("must_memorize_memo_words", 25)),
         repeat_detection_similarity=float(
             budgets_raw.get("repeat_detection_similarity", 0.7)
+        ),
+        max_prompt_content_chars=int(
+            budgets_raw.get("max_prompt_content_chars", 120_000)
+        ),
+        max_staged_content_chars=int(
+            budgets_raw.get("max_staged_content_chars", 300_000)
         ),
     )
 

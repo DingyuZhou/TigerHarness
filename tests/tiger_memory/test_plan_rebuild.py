@@ -38,6 +38,19 @@ def _tool_jsonl(path: Path, uid: str) -> None:
     ]) + "\n")
 
 
+def _big_text_jsonl(path: Path, uid: str, *, chars: int) -> None:
+    """A transcript whose (prefilter-surviving) assistant text is ~*chars*
+    long, for exercising the staged-content ceiling."""
+    ts = "2026-05-14T08:21:36.000Z"
+    big = "facts " * (chars // 6)
+    path.write_text("\n".join(json.dumps(r) for r in [
+        {"type": "user", "timestamp": ts,
+         "message": {"role": "user", "content": "go"}},
+        {"type": "assistant", "timestamp": ts,
+         "message": {"role": "assistant", "content": big}},
+    ]) + "\n")
+
+
 def _backdate(path: Path, hours: float) -> None:
     t = time.time() - hours * 3600
     os.utime(path, (t, t))
@@ -146,6 +159,39 @@ def test_plan_skips_docs_and_active_sessions(tmp_path: Path) -> None:
     _simple_jsonl(project / f"{fresh}.jsonl", fresh)  # mtime ~now -> active
     items = plan_rebuild(cfg, store)
     assert items == []
+
+
+def test_plan_stages_full_content_within_staged_ceiling(tmp_path: Path) -> None:
+    # A transcript over max_prompt_content_chars but under the (larger)
+    # staged ceiling is handed to the sub-agent in FULL — no lossy elision,
+    # because the sub-agent owns the reduce.
+    cfg, store, project = _setup(
+        tmp_path,
+        extra=(
+            "budgets:\n"
+            "  max_prompt_content_chars: 200\n"
+            "  max_staged_content_chars: 20000\n"
+        ),
+    )
+    uid = "77777777-7777-7777-7777-777777777777"
+    _big_text_jsonl(project / f"{uid}.jsonl", uid, chars=2000)
+    _backdate(project / f"{uid}.jsonl", hours=3)
+    body = Path(plan_rebuild(cfg, store)[0]["prompt_path"]).read_text()
+    assert "[...content elided...]" not in body
+    assert "facts facts" in body  # the bulky content is present, intact
+
+
+def test_plan_clips_beyond_staged_ceiling(tmp_path: Path) -> None:
+    # Only a transcript exceeding the staged ceiling is clipped (last resort).
+    cfg, store, project = _setup(
+        tmp_path,
+        extra="budgets:\n  max_staged_content_chars: 300\n",
+    )
+    uid = "88888888-8888-8888-8888-888888888888"
+    _big_text_jsonl(project / f"{uid}.jsonl", uid, chars=3000)
+    _backdate(project / f"{uid}.jsonl", hours=3)
+    body = Path(plan_rebuild(cfg, store)[0]["prompt_path"]).read_text()
+    assert "[...content elided...]" in body
 
 
 def test_plan_caps_at_max_sessions(tmp_path: Path) -> None:

@@ -347,7 +347,12 @@ def plan_rebuild(
             source_id=rec.source_id,
             first_event_at=rec.first_event_at.isoformat(),
             last_event_at=rec.last_event_at.isoformat(),
-            content=_clip(content, max_chars=cfg.budgets.max_prompt_content_chars),
+            # The sub-agent (not an in-process summarizer) owns the reduce
+            # here and has a large context window, so stage the FULL
+            # transcript up to the sub-agent ceiling — no lossy middle
+            # elision in the common case. Only a transcript beyond the
+            # (configurable) staged ceiling is clipped, as a last resort.
+            content=_clip(content, max_chars=cfg.budgets.max_staged_content_chars),
         )
         prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -563,6 +568,20 @@ def _process_decisions(
                 ),
             )
         filtered_chars = len(rec.content)
+        # Fit the (pre-filtered) transcript into the per-prompt budget ONCE
+        # per record via chunk-and-reduce, so an oversized transcript loses
+        # no middle content. A normal-sized transcript fits already → the
+        # fit is a no-op (same object back, no model calls), so we skip the
+        # replace entirely. Downstream call sites re-assert the budget but
+        # see content already within it, adding no cost.
+        fitted = _fit_content(
+            rec.content,
+            summarizer=summarizer,
+            cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars,
+        )
+        if fitted is not rec.content:
+            rec = replace(rec, content=fitted)
         try:
             if d.action == ADDENDUM:
                 _write_addendum(store, cfg, summarizer, rec)
@@ -629,7 +648,10 @@ def _write_short_and_archive(
         source_id=rec.source_id,
         first_event_at=rec.first_event_at.isoformat(),
         last_event_at=rec.last_event_at.isoformat(),
-        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars),
+        content=_fit_content(
+            rec.content, summarizer=summarizer, cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars,
+        ),
     )
     short_body = summarizer.summarize(
         prompt=short_prompt, max_words=cfg.budgets.short_summary_words
@@ -644,7 +666,10 @@ def _write_short_and_archive(
         source_id=rec.source_id,
         first_event_at=rec.first_event_at.isoformat(),
         last_event_at=rec.last_event_at.isoformat(),
-        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars),
+        content=_fit_content(
+            rec.content, summarizer=summarizer, cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars,
+        ),
     )
     detailed_body = summarizer.summarize(
         prompt=detailed_prompt, max_words=cfg.budgets.detailed_summary_words
@@ -711,7 +736,10 @@ def _write_session_collapsed(
         source_id=rec.source_id,
         first_event_at=rec.first_event_at.isoformat(),
         last_event_at=rec.last_event_at.isoformat(),
-        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars),
+        content=_fit_content(
+            rec.content, summarizer=summarizer, cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars,
+        ),
     )
     # One generous cap covering both bodies; per-section budgets are stated
     # in the template itself.
@@ -755,7 +783,10 @@ def _write_addendum(
         content=(
             f"(Addendum to frozen session {rec.conversation_uuid}.\n"
             f"Only NEW activity since the original summary should be reflected.)\n\n"
-            + _clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars // 2)
+            + _fit_content(
+                rec.content, summarizer=summarizer, cfg=cfg,
+                max_chars=cfg.budgets.max_prompt_content_chars // 2,
+            )
         ),
     )
     short_body = summarizer.summarize(
@@ -785,7 +816,10 @@ def _extract_must_memorize(
         prompts_root / "must_memorize_extract.md",
         agent_name=cfg.agent.name,
         memo_max_words=cfg.budgets.must_memorize_memo_words,
-        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars // 2),
+        content=_fit_content(
+            rec.content, summarizer=summarizer, cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars // 2,
+        ),
     )
     try:
         out = summarizer.summarize(
@@ -1161,11 +1195,117 @@ class _SafeFormatDict(dict):
         return "{" + key + "}"
 
 
+_CLIP_MARKER = "\n\n[...content elided...]\n\n"
+
+
 def _clip(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
-    half = max_chars // 2
-    return text[:half] + "\n\n[...content elided...]\n\n" + text[-half:]
+    # Keep the result strictly within max_chars by reserving room for the
+    # elision marker, so callers that promise a hard ceiling can rely on it.
+    if max_chars <= len(_CLIP_MARKER):
+        return text[:max_chars]
+    half = (max_chars - len(_CLIP_MARKER)) // 2
+    return text[:half] + _CLIP_MARKER + text[-half:]
+
+
+# Max times ``_fit_content`` re-summarizes its own digests before giving
+# up and falling back to a bounded clip. Each pass shrinks the text by a
+# large factor, so 4 covers transcripts orders of magnitude over budget;
+# the cap only exists to guarantee termination on pathological input.
+_MAX_REDUCE_DEPTH = 4
+
+
+def _split_on_boundaries(text: str, max_chars: int) -> list[str]:
+    """Split *text* into consecutive chunks each ``<= max_chars``.
+
+    Prefers line boundaries so a chunk never cuts mid-line. A single line
+    longer than *max_chars* (pathological — e.g. a minified blob) is
+    hard-split on character count so the invariant always holds. The
+    concatenation of the returned chunks equals *text* (lossless split).
+    """
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for line in text.splitlines(keepends=True):
+        if len(line) > max_chars:
+            # Flush the buffer, then hard-split the oversized line.
+            if buf:
+                chunks.append("".join(buf))
+                buf, size = [], 0
+            for i in range(0, len(line), max_chars):
+                chunks.append(line[i:i + max_chars])
+            continue
+        if size + len(line) > max_chars and buf:
+            chunks.append("".join(buf))
+            buf, size = [], 0
+        buf.append(line)
+        size += len(line)
+    if buf:
+        chunks.append("".join(buf))
+    return chunks
+
+
+def _fit_content(
+    text: str,
+    *,
+    summarizer: Summarizer,
+    cfg: Config,
+    max_chars: int,
+    _depth: int = 0,
+) -> str:
+    """Fit *text* into *max_chars* WITHOUT lossy middle-elision.
+
+    If the text already fits, return it unchanged — zero model calls, so
+    the common case costs exactly what it does today. Otherwise
+    chunk-and-reduce (map-reduce): split into ``<= max_chars`` chunks,
+    condense each through the summarizer (map), concatenate the digests,
+    and recurse if the concatenation is still over budget (reduce). A
+    depth cap plus a final bounded ``_clip`` guarantee termination and
+    that the result never exceeds the context window, even on
+    pathological input that refuses to shrink.
+    """
+    if len(text) <= max_chars:
+        return text
+    if _depth >= _MAX_REDUCE_DEPTH:
+        # Condensation isn't shrinking the text fast enough; fall back to
+        # a bounded clip so we never overflow the context window.
+        log.warning(
+            "chunk-and-reduce hit depth cap (%d) at %d chars; "
+            "clipping as a last resort", _MAX_REDUCE_DEPTH, len(text),
+        )
+        return _clip(text, max_chars)
+    template = _prompts_root(cfg) / "chunk_condense.md"
+    chunks = _split_on_boundaries(text, max_chars)
+    # Aim each digest small enough that all of them concatenated land
+    # under budget. ~6 chars/word; reserve half the budget so the
+    # "[part i/n]" wrappers and prose overhead still fit.
+    per_chunk_words = max(120, (max_chars // (len(chunks) * 2)) // 6)
+    digests: list[str] = []
+    for i, chunk in enumerate(chunks):
+        prompt = _fill_prompt(
+            template,
+            agent_name=cfg.agent.name,
+            chunk_index=i + 1,
+            chunk_total=len(chunks),
+            max_words=per_chunk_words,
+            content=chunk,
+        )
+        digests.append(
+            summarizer.summarize(prompt=prompt, max_words=per_chunk_words)
+        )
+    combined = "\n\n".join(
+        f"[transcript part {i + 1}/{len(chunks)}]\n{d}"
+        for i, d in enumerate(digests)
+    )
+    if len(combined) <= max_chars:
+        return combined
+    return _fit_content(
+        combined, summarizer=summarizer, cfg=cfg,
+        max_chars=max_chars, _depth=_depth + 1,
+    )
 
 
 # ----- cost estimation -----------------------------------------------------
