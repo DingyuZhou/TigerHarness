@@ -346,6 +346,10 @@ class TestProcessDecisionsDemoted:
         cfg = MagicMock()
         cfg.budgets.repeat_detection_similarity = 0.9
         cfg.budgets.must_memorize_rows = 1  # only 1 allowed → demotes the lower-scored one
+        # _fit_content needs a real int ceiling; the tiny content here is well
+        # under it, so the no-op identity path returns the record unchanged
+        # (no dataclasses.replace() on the MagicMock record).
+        cfg.budgets.max_prompt_content_chars = 120_000
         # This test feeds a MagicMock record (not a real SourceRecord), so
         # keep the pre-filter off — it runs dataclasses.replace() on the
         # record, which only works on a real dataclass. Prefilter behavior
