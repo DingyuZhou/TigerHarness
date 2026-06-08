@@ -18,7 +18,7 @@ from __future__ import annotations
 
 
 OPERATING_MD = """\
-# OPERATING.md -- journal driver protocol (Phase 1 + 1.5)
+# OPERATING.md -- journal driver protocol (Phase 1 + 1.5 + per-persona memory)
 
 This file is the vendor-neutral contract that teaches any file-reading
 agent how to drive the journal. The interactive Claude Code app reads
@@ -48,6 +48,11 @@ sweep / pick / cascade scaffolding is identical for both kinds.
     (kind=workflow) -- the PRD / brief.
   - `status.json` -- the state machine. **Single source of truth.**
   - `progress.md` -- append-only narrative log.
+  - `worklog/` -- per-turn, persona-attributed work notes (one
+    markdown file per turn, `NNNN-<persona>-<step>.md`). Written
+    **only** by the journal gates (`claim` / `release` / `step-done` /
+    `land-compile`), never by hand. These ARE the per-persona memory
+    records tiger-memory ingests, and they survive archival to `done/`.
   - `artifacts/` -- whatever the task produces.
   - `compile/` (kind=workflow only) -- the in-flight compile workspace
     (round files, transcript). Preserved on success and on abort for
@@ -100,6 +105,36 @@ load-bearing fields are:
   walking. `compile_phase` is one of `pending`, `drafting`,
   `tier1_pre`, `critiquing`, `tier1_post`, `complete`, `failed`.
 
+## Per-persona memory (why the gates take --driver / --output)
+
+A drive runs entirely inside **one** session (yours), which adopts each
+persona in-session via the four-line preamble. Left alone, tiger-memory
+would fold the whole drive transcript into a single owner -- so a
+specialist's work would land in the driver's memory, not its own.
+
+The fix is the **worklog**: each persona turn ends by handing its output
+to a journal gate that writes a worklog entry **stamped with that
+persona, from the orchestration/compile mapping or `status.json` -- never
+typed free-hand**, so attribution can't be wrong. *The note is the
+ticket to advance:* the gate refuses to move the work forward without a
+non-empty note. tiger-memory then reads the worklog (not the transcript)
+and files each slice in the right persona's store.
+
+To make this work, a Slack-driven drive passes two pieces of identity it
+already knows:
+
+- `--driver <your-persona>` -- the persona THIS session runs as (your
+  bridge identity, e.g. `Anzai`). Written as a one-line "I drove this"
+  trace to your own memory, and it switches on the completion gates.
+- `--drive-thread <thread_ts>` -- the `slack_thread_ts` from the
+  `[bridge-context]` block at the END of your prompt. It registers this
+  drive so tiger-memory does NOT *also* fold the fat transcript into your
+  store (the worklog already owns that content).
+
+Outside a Slack-driven drive (a plain terminal with no `[bridge-context]`
+and no persona identity), **omit both** -- claim/release behave exactly
+as the plain subscription backend with no memory side-effect.
+
 ## The decision procedure
 
 Run on every `drive-journal` invocation and looped after each
@@ -138,6 +173,18 @@ completed task until no actionable tasks remain.
    If claim exits non-zero ("busy" / "claim lost"), another session won:
    re-sweep and pick again, or exit.
 
+   **In a Slack-driven drive**, add the two memory flags (see
+   "Per-persona memory" above):
+
+   ```bash
+   tigerharness journal claim <task-id> \\
+       --driver <your-persona> --drive-thread <thread_ts>
+   ```
+
+   `--driver` is the persona this session runs as; `--drive-thread` is
+   the `slack_thread_ts` from your prompt's `[bridge-context]` block.
+   Omit both outside a Slack-driven drive.
+
    - **NEVER** work a *busy* task -- the attach token + fresh heartbeat
      means a live session owns it right now.
    - Skip `blocked` tasks; surface them in the summary so the human can
@@ -166,14 +213,27 @@ completed task until no actionable tasks remain.
 
 5. **On stop**, write a final `progress.md` entry summarising the
    session, then run **`tigerharness journal release <task-id>`** to
-   record the exit and **detach** (clear `session_ref`):
-   - Clean stop, work remains: `release <id> --next-action "<handoff
-     note>"` (leaves `state=in_progress`). Detaching makes the task
-     **idle**, so the very next drive resumes it **immediately** -- no
-     30-minute wait.
-   - Done: `release <id> --state done`.
+   record the exit and **detach** (clear `session_ref`). In a drive,
+   pass the same `--driver <your-persona>` you used at `claim` -- it
+   activates the completion gates below. (Outside a drive, omit
+   `--driver`: release is the plain stop with no gate.)
+   - Clean stop, work remains: `release <id> --driver <p> --next-action
+     "<handoff note>"` (leaves `state=in_progress`). Detaching makes the
+     task **idle**, so the very next drive resumes it **immediately** --
+     no 30-minute wait.
+   - **`kind=task` done**: `release <id> --driver <p> --state done
+     --output <work-note.md>`. The note is the **assigned persona's**
+     work record (what was built / decided / produced); the gate stamps
+     it with `status.json`'s assigned `persona` and files it in that
+     persona's memory. **The note is the ticket** -- `release --state
+     done` REFUSES (non-zero, no state change) without a non-empty
+     `--output`. Write the note file first, then release.
+   - **`kind=workflow` done**: `release <id> --driver <p> --state done`
+     -- **no `--output`** here. The per-step notes you already wrote via
+     `journal step-done` ARE the record. The gate refuses unless the
+     graph walk reached `__done__` (every executed step left its note).
    - Blocked (real blocker, or `sessions >= max_sessions`):
-     `release <id> --state blocked --next-action "<why>"`.
+     `release <id> --driver <p> --state blocked --next-action "<why>"`.
 
    `release` refreshes `updated_at` and clears `session_ref` for you.
    Do NOT bump `sessions` here -- that happened atomically in `claim`
@@ -239,6 +299,17 @@ genuine crash, never to a normal hand-off.
   and (on stop) write the final exit state. Anything more invasive
   belongs in the journal layer's CLI, not in the driver session.
 - Do NOT pick multiple tasks in parallel within one invocation.
+- Do NOT follow graph edges by hand in a workflow walk. Run `journal
+  step-done` and drive whatever step it names next -- the gate is what
+  writes each persona's memory. Reading `orchestration.json` to skip
+  ahead bypasses the record.
+- Do NOT mark a task `done` without the note. `kind=task` needs
+  `release --state done --output <note>`; `kind=workflow` needs the
+  walk at `__done__` via `step-done`. The gates refuse otherwise -- by
+  design, so a persona's memory of the work can't go missing.
+- Do NOT hand-write files under `worklog/`. Only the journal gates
+  write there; the frontmatter `persona` is stamped from the
+  orchestration/compile mapping so attribution can't be wrong.
 
 ## Compile sub-protocol (kind=workflow, compile_pending=true)
 
@@ -399,7 +470,12 @@ self-rejects); critics carry the real verdict.
    `Orchestration`, writes step files + `orchestration.json` +
    `compile_critique.md` atomically into the task directory, and
    flips `status.compile_pending=false` +
-   `status.compile_phase=complete` LAST (the visibility gate).
+   `status.compile_phase=complete` LAST (the visibility gate). It also
+   normalises the saved round files (`compile/round-NN-<role>.md`) into
+   per-persona worklog entries -- one per round, attributed via the
+   `compile_personas` role->persona map -- so each compile persona
+   remembers the drafting/critique it did. You do NOT write those by
+   hand; `land-compile` does it.
 
 After step 8 the compile is done. Continue at step 4 of the outer
 protocol -- the graph-walk sub-protocol described next.
@@ -414,24 +490,53 @@ are the resume points.
 
 ## Graph-walk sub-protocol (kind=workflow, compile_pending=false)
 
-Walk the DAG in `orchestration.json`. Each step is a persona turn
-using the same four-line preamble + `WORKFLOW: APPROVE|REVISE|BLOCK`
-trailer. The trailer drives the routing:
+Walk the DAG in `orchestration.json` one step at a time. Each step is a
+persona turn using the same four-line preamble + `WORKFLOW:
+APPROVE|REVISE|BLOCK` trailer. **You do NOT follow the edges yourself --
+the `journal step-done` gate does**, and writing the step's
+persona-attributed worklog note is the ticket to advance (see
+"Per-persona memory" above).
 
-- `APPROVE` -> follow the step's `on_approve` edge.
-- `REVISE` -> follow `on_revise` (typically loops back to the same
-  step with feedback, bounded by `max_iters`).
-- `BLOCK` -> follow `on_block` (typically `__escalate__` -> set
-  `status.state=blocked` with a postmortem `next_action`).
+For each step:
 
-Sentinels: `__done__` ends the walk with `status.state=done`;
-`__escalate__` ends with `status.state=blocked`. Otherwise the next
-edge value is the next step id. Bump `updated_at` after every step.
+1. **Adopt the step's persona** (read from the compiled `steps/<id>.md`)
+   via the preamble and do the work. Save the turn's substantive output
+   to a note file (e.g. `artifacts/<step>-note.md`).
+2. **End the turn at the gate:**
+
+   ```bash
+   tigerharness journal step-done --task <task-id> --step <step-id> \\
+       --verdict <APPROVE|REVISE|BLOCK> --output <note-path>
+   ```
+
+   The gate: validates `<step-id>` is the walk's CURRENT step
+   (out-of-order is refused), reads persona/role from the compiled step
+   file (so the note can't be mis-filed), writes the worklog entry
+   stamped with that persona, advances the walk cursor along the
+   verdict's edge, and prints the NEXT step id (or `__done__` /
+   `__escalate__`). It REFUSES (non-zero, walk **not** advanced) if
+   `--output` is missing or empty -- the note is the ticket.
+3. **Drive whatever step the gate names next.** Repeat until the gate
+   prints `__done__` (walk complete -> `release --state done`) or
+   `__escalate__` (-> `release --state blocked`).
+
+Routing reference (the gate applies this for you, from `--verdict`):
+
+- `APPROVE` -> the step's `on_approve` edge.
+- `REVISE` -> `on_revise` (typically loops back to the same step with
+  feedback, bounded by `max_iters`).
+- `BLOCK` -> `on_block` (typically `__escalate__`).
+
+Sentinels: `__done__` ends the walk (`release --state done`);
+`__escalate__` ends it (`release --state blocked`). Bump `updated_at`
+after every step. Learn the next step **only from `step-done`'s
+output**, never by reading the edges yourself -- the gate is what
+records each persona's memory, so skipping it loses the record.
 
 If a step is in `parallel_with`, the runtime may dispatch the listed
 steps concurrently; the journal driver does NOT need to thread these
-itself -- it asks each step for its trailer in document order and
-honours all `parallel_with` edges as a group barrier.
+itself -- it runs each step's turn (and its `step-done`) in document
+order and honours all `parallel_with` edges as a group barrier.
 
 ## Step-append sub-protocol (kind=workflow, compile_phase=complete)
 
