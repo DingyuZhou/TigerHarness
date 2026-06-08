@@ -105,6 +105,31 @@ summarize work is the two CLIs `tiger-memory plan` + `ingest-summary`.
 - **Subscription-safe** → the executor is always the sub-agent; the
   trigger context's billing is irrelevant.
 
+## Worklog-only personas (journal memory)
+
+Most journal-driven work now lands in **per-persona worklog records**
+(see [`tiger-memory.md`](tiger-memory.md), "Per-persona journal memory",
+and [`per-persona-journal-memory.md`](per-persona-journal-memory.md)). A
+specialist like Rukawa may do all its work inside drives and have **no**
+direct Slack threads of its own — only worklog entries. That persona is
+still swept correctly, by design:
+
+- The roster walk (`enumerate_persona_configs` → `plan_team_sweep`) is
+  **not** activity-gated. It selects **every** roster persona that has a
+  `tiger-memory.config.yaml` store (capped per wake), regardless of
+  whether that persona has new activity. "No persona left behind" (B3).
+- The "is there new work?" decision happens **later**, inside
+  `tiger-memory plan`: its source adapters discover new records and the
+  rebuild state dedupes already-summarized ones. A persona with nothing
+  new yields an empty manifest — a cheap no-op.
+- So the only requirements for a worklog-only persona to be remembered
+  are (a) it has a store + config on the roster, and (b) its config
+  lists a `journal_worklog` source pointing at the team journal. With
+  both, its drive worklog surfaces at `plan` time like any other source.
+
+No special "count worklog files as activity" logic is needed at the
+gating layer — the roster-wide enumeration already covers it.
+
 ## Wiring + status (the remaining follow-up)
 
 The Python + CLI stack above is **complete and 100%-tested**. NOT yet

@@ -1,6 +1,10 @@
 # Per-persona memory from journal-driven work
 
-Status: **proposal / plan** (not yet implemented)
+Status: **implemented** (2026-06-08, branch
+`work/2026-06-08-per-persona-journal-memory`). Phases 1-4 shipped; see
+"Phasing & dependencies" for the per-phase commit trail. Phase 0
+(roster rollout for the 7 personas without a store) is the remaining
+prerequisite for the feature to materialize memory for those personas.
 Author: Anzai (Shohoku)
 Related: [`subscription-backend.md`](subscription-backend.md),
 [`tiger-memory.md`](tiger-memory.md),
@@ -209,20 +213,45 @@ can run first/in parallel.
 ## Phasing & dependencies
 
 - **Phase 0 — Roster rollout.** Configs + stores for the 7 missing
-  personas. Independent; do first or in parallel.
+  personas. Independent; do first or in parallel. **Status: pending.**
+  Without it, those 7 personas have nowhere for their worklog slices to
+  land (the engine writes the worklog regardless; only ingestion is
+  gated on the per-persona store existing).
 - **Phase 1 — Write path.** Worklog format; `claim`/`release` thin
   driver entries; `step-done` gate + graph-walk routing through it;
-  `kind=task` release gate; compile worklog normalization. Tests.
+  `kind=task` release gate; compile worklog normalization. **Done:**
+  `5782606` (1a worklog module), `60e3300` (1b claim/release gate),
+  `4b0c268` (step-done graph-walk gate), `31c7cd3` (1d compile-round
+  normalization).
 - **Phase 2 — Ingestion path.** `JournalWorklogAdapter`; config schema +
-  `_build_adapters` branch; per-(task,persona) grouping + uuid5. Tests.
+  `_build_adapters` branch; per-(task,persona) grouping + uuid5.
+  **Done:** `f1dae05`.
 - **Phase 3 — Double-count suppression.** Drive-session registry at
-  `claim`; `claude_transcript` skip. Tests.
+  `claim`; `claude_transcript` skip. **Done:** `8a44951` (3a registry
+  at claim), `9b0f98a` (3b claude_transcript skip).
 - **Phase 4 — Protocol docs.** `operating_template.py` (so scaffolded
   journals teach the gates), `drive-journal` SKILL.md,
-  `subscription-backend.md`, `tiger-memory*.md`.
+  `subscription-backend.md`, `tiger-memory*.md`. **Done:** `6a4350c`
+  (4a active protocol: OPERATING.md + SKILL.md ×2 + tests), 4b
+  (reference docs + this status flip).
 
 Dependency order: 1 → 2 → 3. Phase 0 and Phase 4 run alongside.
-100% line-coverage floor applies throughout.
+100% line+branch coverage floor held throughout.
+
+### Sweep-staleness verification (resolved)
+
+§3 flagged: "the team-sweep's per-persona due/stale detection must
+count worklog activity, or a worklog-only specialist is never swept."
+Verified against `tiger_memory/sweep.py`: **no code change is needed.**
+The gating layer is **not** activity-gated — `enumerate_persona_configs`
+→ `plan_team_sweep` selects every roster persona that has a store
+(capped per wake), and the "is there new work?" decision happens later
+in `tiger-memory plan` via the source adapters + rebuild state. So a
+worklog-only persona is enumerated like any other, and its worklog
+surfaces at `plan` time through the `journal_worklog` source. The only
+real requirements are Phase 0 (the persona has a store) and the
+`journal_worklog` source in its config (Phase 2). Documented in
+`tiger-memory-sweep-protocol.md` ("Worklog-only personas").
 
 ## Decisions (locked 2026-06-08)
 
