@@ -32,6 +32,7 @@ from pathlib import Path
 
 from .config import Config, ConfigError, load_config
 from .store import Store
+from .sweep import DEFAULT_MAX_PERSONAS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -128,8 +129,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="Stable claim token (default: random uuid). Pass "
                             "the interactive session id so a crashed claim "
                             "stays re-stealable across resumes.")
-    p_swp.add_argument("--max-personas", type=int, default=None,
-                       help="Per-wake cap on personas processed this trigger.")
+    p_swp.add_argument("--max-personas", type=int, default=DEFAULT_MAX_PERSONAS,
+                       help="Per-wake cap on personas processed this trigger "
+                            f"(default {DEFAULT_MAX_PERSONAS}; pass a larger "
+                            "number to process more per wake).")
     p_swp.add_argument("--floor-hours", type=float, default=None,
                        help="Staleness floor override (default 24h).")
     p_swp.add_argument("--lease-seconds", type=float, default=None,
