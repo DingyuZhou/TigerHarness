@@ -111,7 +111,30 @@ def raw(cfg: Config, store: Store, archive_path: Path) -> int:
     if source == "doc":
         print(source_id)  # relative path
         return 0
+    if source == "journal":
+        # source_id is "<task_id>/<persona>"; point at the task's worklog
+        # directory under a configured journal_worklog source's root
+        # (task ids never contain "/", so the first segment is the id).
+        return _print_journal_worklog(cfg, source_id)
     print(f"unknown source: {source}")
+    return 1
+
+
+def _print_journal_worklog(cfg: Config, source_id: str) -> int:
+    """Print the worklog directory for a journal-sourced archive entry.
+    Looks under each configured ``journal_worklog`` root, ``active/``
+    then ``done/``. Returns 1 if no matching directory is found."""
+    task_id = source_id.split("/", 1)[0]
+    for s in cfg.sources:
+        if s.kind != "journal_worklog":
+            continue
+        root = Path(s.fields.get("journal_root", "")).expanduser()
+        for sub in ("active", "done"):
+            cand = root / sub / task_id / "worklog"
+            if cand.is_dir():
+                print(str(cand))
+                return 0
+    print(f"raw worklog not found for {source_id}")
     return 1
 
 

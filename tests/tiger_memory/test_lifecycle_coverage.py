@@ -222,6 +222,74 @@ class TestBuildAdaptersMultiKind:
         ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
         assert ct.max_age_days == 30
 
+    def _journal_cfg(self, tmp_path: Path, *, team_line: str):
+        from tigerharness.tiger_memory.config import load_config
+        cfg_path = tmp_path / "cfg_journal.yaml"
+        cfg_path.write_text(dedent(f"""\
+            agent: {{name: T, role: T}}
+            store: {{root: {tmp_path}/memory}}
+            sources:
+              - kind: journal_worklog
+                journal_root: {tmp_path}/myteam/journal/
+                persona: Rukawa
+                {team_line}
+            summarizer: {{backend: anthropic, model: claude-sonnet-4-6, prompts: default/v1}}
+            rebuild: {{lock_path: {tmp_path}/lock}}
+        """))
+        return load_config(cfg_path)
+
+    def test_builds_journal_worklog_adapter_explicit_team(self, tmp_path: Path):
+        from tigerharness.tiger_memory.sources import JournalWorklogAdapter
+        cfg = self._journal_cfg(tmp_path, team_line='team: tigers')
+        adapters = _build_adapters(cfg)
+        jw = next(a for a in adapters if isinstance(a, JournalWorklogAdapter))
+        assert jw.persona == "Rukawa"
+        assert jw.team == "tigers"
+        assert jw.journal_root == (tmp_path / "myteam" / "journal")
+
+    def test_journal_worklog_team_defaults_from_root_parent(
+        self, tmp_path: Path,
+    ):
+        from tigerharness.tiger_memory.sources import JournalWorklogAdapter
+        cfg = self._journal_cfg(tmp_path, team_line="")
+        adapters = _build_adapters(cfg)
+        jw = next(a for a in adapters if isinstance(a, JournalWorklogAdapter))
+        # journal_root parent is .../myteam/journal -> parent name "myteam".
+        assert jw.team == "myteam"
+
+    def test_journal_worklog_blank_team_defaults_from_root_parent(
+        self, tmp_path: Path,
+    ):
+        from tigerharness.tiger_memory.sources import JournalWorklogAdapter
+        cfg = self._journal_cfg(tmp_path, team_line='team: ""')
+        adapters = _build_adapters(cfg)
+        jw = next(a for a in adapters if isinstance(a, JournalWorklogAdapter))
+        assert jw.team == "myteam"
+
+    def test_journal_worklog_relative_root_anchored_to_config_dir(
+        self, tmp_path: Path,
+    ):
+        from tigerharness.tiger_memory.sources import JournalWorklogAdapter
+        cfg_dir = tmp_path / "team" / "memories" / "p"
+        cfg_dir.mkdir(parents=True)
+        cfg_path = cfg_dir / "cfg.yaml"
+        cfg_path.write_text(dedent(f"""\
+            agent: {{name: p, role: T}}
+            store: {{root: .}}
+            sources:
+              - kind: journal_worklog
+                journal_root: ../../journal/
+                persona: Rukawa
+            summarizer: {{backend: anthropic, model: claude-sonnet-4-6, prompts: default/v1}}
+            rebuild: {{lock_path: {tmp_path}/lock}}
+        """))
+        cfg = load_config(cfg_path)
+        adapters = _build_adapters(cfg)
+        jw = next(a for a in adapters if isinstance(a, JournalWorklogAdapter))
+        # ../../journal/ from .../team/memories/p -> .../team/journal
+        assert jw.journal_root == (tmp_path / "team" / "journal").resolve()
+        assert jw.team == "team"
+
 
 class TestCascadeExceptions:
     def test_daily_rollup_exception_continues(self, tmp_path: Path):

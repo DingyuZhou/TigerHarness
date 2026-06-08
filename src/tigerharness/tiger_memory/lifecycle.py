@@ -25,6 +25,7 @@ from .prefilter import filter_transcript
 from .sources import (
     ClaudeTranscriptAdapter,
     DocsAdapter,
+    JournalWorklogAdapter,
     SourceAdapter,
     SourceRecord,
 )
@@ -431,11 +432,36 @@ def _build_adapters(
             # classify some sessions as `source: slack` via reverse
             # lookup. See HANDOFF.md for the rationale.
             pass
-        elif s.kind == "docs":  # pragma: no branch  # only known kinds: claude_code, slack_thread, docs
+        elif s.kind == "docs":
             adapters.append(
                 DocsAdapter(
                     glob_pattern=s.fields["glob"],
                     repo_root=repo_root,
+                )
+            )
+        elif s.kind == "journal_worklog":  # pragma: no branch  # remaining kind (auto_memory) is handled at bootstrap, not here
+            # Per-persona journal memory. ``team`` qualifies the
+            # conversation_uuid namespace; default it from the journal
+            # root's grandparent (``<team>/journal/`` -> ``<team>``) so a
+            # config that omits it still namespaces correctly.
+            journal_root = Path(s.fields["journal_root"]).expanduser()
+            # Anchor a relative root to the config's directory (like
+            # ``store.root`` and the docs ``repo_root``) so a per-persona
+            # config can say ``../../journal/`` and a headless sweep still
+            # finds it regardless of the working directory.
+            if not journal_root.is_absolute():
+                journal_root = (repo_root / journal_root).resolve()
+            team = s.fields.get("team")
+            team = (
+                team.strip()
+                if isinstance(team, str) and team.strip()
+                else journal_root.parent.name
+            )
+            adapters.append(
+                JournalWorklogAdapter(
+                    journal_root=journal_root,
+                    persona=s.fields["persona"],
+                    team=team,
                 )
             )
     return adapters
