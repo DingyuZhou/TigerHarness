@@ -48,3 +48,47 @@ non-object/non-dict-env), 2 refresh tests (tops-up-existing-team,
 no-settings-file-is-fine), and the `_scaffold_claude_dir` additive test
 updated. Full suite: **2976 passed, 100% line+branch coverage**. NOTE
 reconciled (the "manual one-line add" caveat is gone).
+
+## Round 2 — skill/OPERATING divergence + edge-case clarity
+
+### MAJOR-4 (fixed) — the rewritten skill dropped the busy-blocks-pending guard
+
+The lazy-loaded skill rewrite collapsed step 2's pick logic from **three**
+branches to **two**. OPERATING.md (the contract) still resolves candidates
+as: (a) resumable `in_progress` → resume; (b) **else if a *busy*
+`in_progress` task exists → do NOT start new work, exit cleanly** (soft
+lease, finish-before-start — a later task may depend on the in-flight one);
+(c) else oldest `pending`. The skill's step 2 became just (a) resumable →
+(b) pending, **silently deleting branch (b)** — the busy-blocks-pending
+guard.
+
+Why it bites despite "OPERATING.md wins": the whole point of the lazy-load
+design is that OPERATING.md is read in **step 3**, *after* step 2 has
+already picked **and `claim`ed**. So at pick time the skill's logic is
+authoritative. With `[1 busy + 1 pending]`, the step-1 cheap-exit does
+**not** fire (a pending exists), and the truncated step 2 would `claim` the
+pending task and drive it **concurrently** with the busy one — exactly the
+"never multiple tasks in parallel" / finish-before-start invariant the
+design protects, and a direct contradiction of the user's own optimization
+#2 ("if a task is running and healthy, do nothing else").
+
+**Fix:** restored branch (b) verbatim-in-spirit in the skill's step 2
+(busy `in_progress` present → exit cleanly), so the checklist now matches
+OPERATING.md's three-branch order. Applied to both the bundled skill and
+its byte-identical repo mirror (`skills/drive-journal/SKILL.md`); verified
+identical by sha256. No `_PRIOR_SKILL_HASHES` bump needed — the only
+*shipped* prior version is origin/main's `e9fabddd…` (still recorded), and
+the interim redesign skill was never released to any team.
+
+### MINOR-5 (note, no code) — the propagation transient is benign
+
+An existing team adopts the new skill (via `--refresh-skills`) before the
+new OPERATING.md (refreshed on the next `journal new`), so briefly runs
+**new skill + origin/main OPERATING**. That's safe: the pick logic now
+*agrees* (both are three-branch — this was the whole point of MAJOR-4), and
+the skill's only net-new guidance (step-1 cheap-exit, step-7 compaction) is
+something the old OPERATING is **silent** on, not contradicted — and
+"OPERATING.md wins" resolves *contradictions*, it doesn't suppress guidance
+OPERATING simply omits. So no anti-cascade regression during the window. No
+fix; deliberately did **not** wire OPERATING refresh into `--refresh-skills`
+(it's journal-scoped, not team-scoped — a team can host several journals).

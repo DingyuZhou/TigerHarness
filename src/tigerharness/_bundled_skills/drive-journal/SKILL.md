@@ -39,10 +39,16 @@ boundary instead.
    Don't read context, don't load OPERATING.md. *(Only a `busy` task
    blocks you — an `idle` one is yours to resume.)*
 
-2. **Pick exactly ONE actionable task** (priority order, finish-before-start):
+2. **Pick exactly ONE actionable task** (priority order, finish-before-start
+   — let an in-flight task and *all* its sessions finish before any new one,
+   since a later task may depend on the one already running):
    (a) a **resumable** `in_progress` task — *idle* → resume **immediately**
-   (no wait), *crashed* → rescue; among several prefer the oldest
-   heartbeat; **else** (b) the oldest **pending** task.
+   (no wait), *crashed* → rescue; among several prefer the oldest heartbeat;
+   (b) **else, if a *busy* `in_progress` task exists → do NOT start new work,
+   exit cleanly** (the soft lease: a live session owns it right now; let it
+   finish before any `pending` task begins — a later fire resumes it once it
+   goes idle or crashed);
+   (c) **else** the oldest **pending** task.
    **Claim it atomically:** `tigerharness journal claim <id>` *before*
    working (sets `session_ref`, bumps `sessions`, refreshes the heartbeat,
    compare-and-set). If claim exits non-zero (another session won the
