@@ -1839,6 +1839,26 @@ class TestRefreshSkills:
         assert "Updated" in out
         assert "compact threshold" in out
 
+    def test_current_bundled_hash_not_in_prior_manifest(self):
+        """Maintenance footgun guard: the CURRENTLY shipped SKILL.md must
+        never appear in _PRIOR_SKILL_HASHES. The manifest records *prior*
+        versions (so an existing team's unmodified copy refreshes); the
+        documented rule is "append the OLD content's hash" on every edit.
+        Appending the NEW hash instead is the classic slip -- it both stops
+        propagation (old copies look hand-edited) and makes the set
+        self-referential. This catches that at CI time."""
+        import tigerharness.init as _init
+        skills_root = Path(_init.__file__).parent / "_bundled_skills"
+        for name, hashes in _init._PRIOR_SKILL_HASHES.items():
+            skill_md = skills_root / name / "SKILL.md"
+            assert skill_md.is_file(), f"manifest names missing skill {name!r}"
+            current = _init._sha256_text(skill_md.read_text(encoding="utf-8"))
+            assert current not in hashes, (
+                f"{name}: the current bundled SKILL.md hash is listed in "
+                f"_PRIOR_SKILL_HASHES -- you likely appended the NEW hash "
+                f"instead of the OLD one."
+            )
+
     def test_refresh_with_no_settings_file_is_fine(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
     ):

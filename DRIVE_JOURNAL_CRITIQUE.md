@@ -92,3 +92,50 @@ something the old OPERATING is **silent** on, not contradicted — and
 OPERATING simply omits. So no anti-cascade regression during the window. No
 fix; deliberately did **not** wire OPERATING refresh into `--refresh-skills`
 (it's journal-scoped, not team-scoped — a team can host several journals).
+
+## Round 3 — test-quality hardening + invariant pins
+
+### MINOR-3 (fixed) — the hand-maintained hash manifests had no CI guard
+
+`_PRIOR_SKILL_HASHES` / `_PRIOR_OPERATING_HASHES` are appended-to by hand on
+every protocol edit (the documented maintenance rule). The dangerous slip
+is appending the **NEW** content's hash instead of the **OLD** one — which
+both halts propagation (existing teams' unmodified copies then look
+"hand-edited") *and* makes the set self-referential. Nothing caught it.
+
+**Fix:** two cheap self-reference guards —
+`test_current_bundled_hash_not_in_prior_manifest` (test_init) and
+`test_current_template_not_in_prior_hash_manifest` (test_operating_template)
+— each asserts the **currently shipped** content's sha256 is **not** in its
+prior-hash set. Verified non-vacuous: current skill `de412e0d…` ≠ prior
+`e9fabddd…`; current OPERATING `b05da60b…` ≠ prior `fe942cf5…`.
+
+### Bonus pin — finish-before-start guarded at the contract level
+
+To stop MAJOR-4 from recurring on the *other* side, added
+`test_finish_before_start_guard_pinned`: it asserts OPERATING.md still
+carries branch (b) ("do NOT start new" + "finish before any … pending").
+Since the skill defers to OPERATING.md on conflict, pinning the invariant
+in the contract is the durable backstop — a future edit can't silently
+delete it from OPERATING the way the skill rewrite once dropped it.
+
+---
+
+## Summary — 3 rounds
+
+| # | Finding | Severity | Outcome |
+|---|---------|----------|---------|
+| 1 | 50% compact env reached only NEW teams | MAJOR | **Fixed** — `_ensure_compact_env_in_file` wired into re-init **and** `--refresh-skills` (no-clobber) |
+| 2 | env var name is research-sourced | MINOR | Noted — graceful degradation (compaction-safe resume is load-bearing, not the exact %) |
+| 3 | hash manifests hand-maintained, no guard | MINOR | **Fixed** in R3 — two self-reference guard tests |
+| 4 | skill dropped the busy-blocks-pending guard | MAJOR | **Fixed** — branch (b) restored; matches OPERATING.md |
+| 5 | new-skill / stale-OPERATING propagation window | MINOR | Noted — benign (pick logic agrees; skill additions are silent-not-contradicted) |
+| — | finish-before-start now pinned in the contract | — | **Added** — regression guard for #4 |
+
+**Net code change across the three rounds:** one new no-clobber helper
+(`_ensure_compact_env_in_file`) wired into two adoption paths; the skill's
+step-2 pick logic realigned to the contract; six new tests (the helper's 7
+unit + 2 refresh, plus 3 guard/pin tests across two files). Throughout:
+**100% line+branch coverage held** (final: 2979 passed). No production
+*behavior* regressions introduced — the two MAJORs were both gaps in the
+redesign caught and closed here.

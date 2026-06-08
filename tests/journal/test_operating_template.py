@@ -85,3 +85,25 @@ def test_continuity_contract_pinned():
     assert "same turn" in low                      # cascade is same-turn
     assert "compaction" in low                     # compact, don't hand off
     assert "TIGERHARNESS_JOURNAL_STUCK_TIMEOUT" in text  # configurable
+
+
+def test_finish_before_start_guard_pinned():
+    """Priority branch (b): a *busy* `in_progress` task defers any `pending`
+    pickup (finish-before-start). The lazy-loaded skill once dropped this
+    (critique R2) -- pin it in the contract so it can't silently vanish here
+    too, since the skill defers to OPERATING.md on conflict."""
+    assert "do NOT start new" in OPERATING_MD       # busy -> defer pending
+    assert "finish before any" in OPERATING_MD.lower()
+
+
+def test_current_template_not_in_prior_hash_manifest():
+    """Maintenance footgun guard (mirror of the skill manifest test in
+    test_init): the CURRENT OPERATING_MD must never be listed in
+    scaffold._PRIOR_OPERATING_HASHES. The manifest records *prior* shipped
+    templates (so an unmodified earlier ship refreshes); listing the
+    current one stops propagation and is the 'appended the new hash instead
+    of the old one' slip."""
+    import hashlib
+    from tigerharness.journal import scaffold
+    current = hashlib.sha256(OPERATING_MD.encode("utf-8")).hexdigest()
+    assert current not in scaffold._PRIOR_OPERATING_HASHES
