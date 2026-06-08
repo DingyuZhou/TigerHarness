@@ -68,3 +68,20 @@ def test_attach_signal_claim_release_documented():
     assert "journal claim" in text
     assert "journal release" in text
     assert "immediately" in text
+
+
+def test_continuity_contract_pinned():
+    """The continuity rules (2026-06-08) are load-bearing — pin them so a
+    future edit can't silently re-introduce one-session-per-loop-fire.
+
+    1) a busy-only queue is a cheap no-op (don't read further); 2) cascade
+    is a hard, same-turn loop, never one-per-fire; 3) "context heavy" is
+    answered by compaction, not a hand-off; 4) the stuck-timeout is
+    operator-configurable."""
+    text = OPERATING_MD
+    low = text.lower()
+    assert "cheap no-op fast path" in low          # busy-only -> stop cheaply
+    assert "one-session-per-loop-fire" in low      # the named anti-pattern
+    assert "same turn" in low                      # cascade is same-turn
+    assert "compaction" in low                     # compact, don't hand off
+    assert "TIGERHARNESS_JOURNAL_STUCK_TIMEOUT" in text  # configurable

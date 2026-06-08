@@ -109,8 +109,16 @@ completed task until no actionable tasks remain.
    a. Archive any `done` task (`active/<id>/` -> `done/<id>/`).
    b. Classify every `in_progress` task as **idle** (detached),
       **busy** (attached + fresh), or **crashed** (attached + stale).
+      "Fresh" means the heartbeat is within the stuck-timeout (default
+      30 min; override `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT`, seconds).
    c. Print the summary (pending / resumable / busy / crashed / blocked
       counts) into the session.
+   d. **Cheap no-op fast path.** If every `in_progress` task is **busy**
+      and nothing is idle / crashed / pending, you are done -- **stop the
+      invocation here, without reading any task context or this file's
+      later sections.** A healthy live session already owns the work; a
+      frequent loop (every few minutes) is *designed* to no-op cheaply at
+      this point. Only an **idle** task (detached) is yours to resume.
 
 2. **Pick exactly ONE actionable task** -- never multiple in parallel.
    Resolve candidates in this **priority order (finish before you
@@ -181,9 +189,11 @@ completed task until no actionable tasks remain.
    `progress.md` and refresh `updated_at`; keep `session_ref` set while
    you are still driving.
 
-6. **Cascade / keep going** -- after a stop, loop back to step 1
-   (re-sweep) and pick up the next actionable task. **Do not hand the
-   turn back between sessions** -- run them back-to-back:
+6. **Cascade / keep going -- the hard loop. THIS is the driver's whole
+   job.** After a stop, **immediately** loop back to step 1 (re-sweep) and
+   pick up the next actionable task **in the SAME turn**. ⛔ Do **NOT** hand
+   the turn back between sessions -- do not end your turn, write a "drive
+   summary", or wait for the next loop fire:
    - If you moved a task to `done` / `blocked`, the next pick is a
      different task.
    - If you cleanly stopped a task that is NOT done (a natural
@@ -191,15 +201,25 @@ completed task until no actionable tasks remain.
      **idle** -- re-`claim` it and continue **immediately**, no wait.
 
    Drive a task through its whole session budget *in this one sitting*:
-   a task scaffolded with `max_sessions=10` should run its sessions one
-   after another here, **not** one-per-invocation. Stop the loop only
-   when the task is `done` / `blocked`, `sessions >= max_sessions`, step
-   1 reports nothing actionable, the human ends the session, or your own
-   context window is genuinely full -- and in that last case hand off,
-   because a fresh drive resumes the idle task instantly (no wait).
+   a task scaffolded with `max_sessions=10` runs its sessions one after
+   another here, **NEVER one-session-per-loop-fire** (that anti-pattern
+   stretches a day of work across a day of 30-min waits). Stop the loop
+   only when the task is `done` / `blocked`, `sessions >= max_sessions`,
+   step 1 reports nothing actionable, the human ends the session, or you
+   hit the genuine **context ceiling** (see below).
 
-   Don't manufacture a stopping point just because one task finished
-   -- drain the queue while the session is hot.
+   **Context is NOT a stop reason -- compact instead.** Every session
+   checkpoints to `progress.md` + `next_action`, so a context
+   **compaction loses nothing**: after one, just re-orient from those.
+   So do NOT hand off early "to let the loop bridge to fresh context" --
+   keep cascading and rely on **auto-compaction** (recommended threshold
+   ~75% of the window, configured in the team's `.claude/settings.json`)
+   to reclaim room. Hand off (release idle + end the turn) **only** at the
+   true hard ceiling -- and even then a fresh fire resumes the idle task
+   instantly. **After any compaction, re-sweep (step 1) and continue.**
+
+   Don't manufacture a stopping point just because one task finished or
+   the conversation feels long -- drain the queue while the session is hot.
 
 ## Stop conditions for step 4
 
@@ -223,10 +243,13 @@ checkpoint mid-task.
 ## Heartbeat cadence
 
 Bump `updated_at` on every `progress.md` append. Append progress at
-least every 10 minutes of wall-clock active work. A wedged session that
-never released will show as **crashed** once `updated_at` exceeds
-`stuck_timeout` (default 1800 seconds = 30 min) *while still attached*,
-and a *later* invocation rescues it via step 2. A session that stops
+least every 10 minutes of wall-clock active work -- this is also what
+keeps a healthy long-cascading drive classified **busy** (not crashed) so
+a concurrent loop fire correctly no-ops on it (step 1d). A wedged session
+that never released will show as **crashed** once `updated_at` exceeds the
+`stuck_timeout` (default 1800 seconds = 30 min; override
+`TIGERHARNESS_JOURNAL_STUCK_TIMEOUT`) *while still attached*, and a *later*
+invocation rescues it via step 2. A session that stops
 cleanly should `release` instead (detach) -- a detached task is **idle**
 and resumes with no wait, so the 30-minute window only ever applies to a
 genuine crash, never to a normal hand-off.
