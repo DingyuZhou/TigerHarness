@@ -199,6 +199,26 @@ class TestProcessDecisions:
         assert cost >= 0
         assert len(list(store.paths.archive.glob("*.md"))) == 1
 
+    def test_oversized_record_summarizer_error_is_skipped(self, tmp_path: Path):
+        # A giant transcript whose chunk-and-reduce map call errors must be
+        # logged-and-skipped (the fit runs INSIDE the try), never crashing
+        # the whole rebuild. Before the fix this raised out of the loop.
+        cfg = _cfg(
+            tmp_path,
+            extra_yaml="budgets:\n  max_prompt_content_chars: 200\n",
+        )
+        store = Store(cfg.store.root)
+        store.init_layout()
+        big = "".join(f"fact {i}\n" for i in range(200))
+        assert len(big) > 200  # forces the fit path → a map call
+        rec = _make_record(content=big)
+        decisions = [Decision(rec, SUMMARIZE_NEW)]
+        summarizer = MockSummarizer()
+        summarizer.summarize = MagicMock(side_effect=RuntimeError("boom"))
+        cost = _process_decisions(decisions, store, cfg, summarizer)  # no raise
+        assert cost == 0
+        assert list(store.paths.archive.glob("*.md")) == []
+
     def test_addendum_writes_short_only(self, tmp_path: Path):
         cfg = _cfg(tmp_path)
         store = Store(cfg.store.root)
@@ -574,6 +594,15 @@ class TestFitContent:
         assert len(out) <= 300
         assert "[...content elided...]" in out  # clip fallback marker
         assert summ.calls > 0
+
+    def test_tiny_budget_clips_without_model_calls(self, tmp_path: Path):
+        # A budget smaller than the per-part wrappers can never converge and
+        # would feed range() a zero step; guard clips directly, no map calls.
+        cfg = _cfg(tmp_path)
+        summ = _TinySummarizer()
+        out = _fit_content("X" * 100, summarizer=summ, cfg=cfg, max_chars=10)
+        assert len(out) <= 10
+        assert summ.calls == 0
 
 
 class TestFillPrompt:

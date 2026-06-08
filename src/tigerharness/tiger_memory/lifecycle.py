@@ -568,21 +568,30 @@ def _process_decisions(
                 ),
             )
         filtered_chars = len(rec.content)
-        # Fit the (pre-filtered) transcript into the per-prompt budget ONCE
-        # per record via chunk-and-reduce, so an oversized transcript loses
-        # no middle content. A normal-sized transcript fits already → the
-        # fit is a no-op (same object back, no model calls), so we skip the
-        # replace entirely. Downstream call sites re-assert the budget but
-        # see content already within it, adding no cost.
-        fitted = _fit_content(
-            rec.content,
-            summarizer=summarizer,
-            cfg=cfg,
-            max_chars=cfg.budgets.max_prompt_content_chars,
-        )
-        if fitted is not rec.content:
-            rec = replace(rec, content=fitted)
         try:
+            # Fit the (pre-filtered) transcript into the budget ONCE per
+            # record via chunk-and-reduce, so an oversized transcript loses
+            # no middle content (vs. the old lossy head/tail clip). This sits
+            # INSIDE the try on purpose: the fit makes summarizer calls, and a
+            # backend error on one giant session must be logged-and-skipped
+            # like any other failure here — never crash the whole rebuild.
+            #
+            # The addendum path's only two consumers both want half-budget
+            # content, so fit straight to half there and skip a wasted
+            # full-budget reduce they would each re-reduce. A normal-sized
+            # transcript fits already → no-op (same object, no model calls),
+            # so we skip the replace and downstream sites add no cost.
+            fit_budget = (
+                cfg.budgets.max_prompt_content_chars // 2
+                if d.action == ADDENDUM
+                else cfg.budgets.max_prompt_content_chars
+            )
+            fitted = _fit_content(
+                rec.content, summarizer=summarizer, cfg=cfg,
+                max_chars=fit_budget,
+            )
+            if fitted is not rec.content:
+                rec = replace(rec, content=fitted)
             if d.action == ADDENDUM:
                 _write_addendum(store, cfg, summarizer, rec)
                 heuristic_fallback += _approx_cost(cfg, rec.content,
@@ -1269,6 +1278,13 @@ def _fit_content(
     """
     if len(text) <= max_chars:
         return text
+    if max_chars <= len(_CLIP_MARKER):
+        # Budget too small to map-reduce into: even the per-part wrappers
+        # wouldn't fit, so condensing can never converge. Also guards
+        # _split_on_boundaries against a non-positive range() step (a
+        # max_chars of 0 is reachable via `max_prompt_content_chars: 1`,
+        # whose // 2 is 0). Clip directly — bounded, never overflows.
+        return _clip(text, max_chars)
     if _depth >= _MAX_REDUCE_DEPTH:
         # Condensation isn't shrinking the text fast enough; fall back to
         # a bounded clip so we never overflow the context window.
