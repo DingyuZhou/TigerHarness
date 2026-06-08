@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tigerharness.journal import compile_cli
+from tigerharness.journal import compile_cli, worklog
 from tigerharness.journal.compile_cli import (
     _compile_dir,
     _guess_team_for_status,
@@ -726,6 +726,198 @@ class TestLandCompile:
         # status still flipped despite cleanup failure.
         s = Status.from_json(paths.status_json(task_id).read_text())
         assert s.compile_phase == CompilePhase.COMPLETE
+
+
+# ---------------------------------------------------------------------------
+# Phase 1d: compile worklog normalisation
+# ---------------------------------------------------------------------------
+
+class TestExtractVerdict:
+    """``_extract_verdict`` pulls the WORKFLOW: trailer best-effort."""
+
+    def test_none_when_absent(self):
+        assert compile_cli._extract_verdict("just prose\n") is None
+
+    def test_last_match_wins(self):
+        body = "WORKFLOW: REVISE -- a\nmore text\nWORKFLOW: APPROVE\n"
+        assert compile_cli._extract_verdict(body) == "APPROVE"
+
+    def test_block(self):
+        assert compile_cli._extract_verdict(
+            "verdict below\nWORKFLOW: BLOCK -- unsalvageable\n"
+        ) == "BLOCK"
+
+
+class TestEmitCompileWorklog:
+    """``_emit_compile_worklog`` turns compile/round-NN-<token>.md files
+    into persona-attributed worklog entries (Phase 1d)."""
+
+    _PERSONAS = {"drafter": "Anzai", "akagi": "Akagi", "ayako": "Ayako"}
+
+    def _status(self, paths, task_id):
+        return Status.from_json(paths.status_json(task_id).read_text())
+
+    def _round(self, paths, task_id, name, text):
+        cd = _compile_dir(paths, task_id)
+        cd.mkdir(parents=True, exist_ok=True)
+        (cd / name).write_text(text, encoding="utf-8")
+        return cd
+
+    def test_no_compile_dir_returns_zero(self, scaffolded):
+        task_id, paths = scaffolded
+        cd = _compile_dir(paths, task_id)
+        if cd.exists():
+            import shutil
+            shutil.rmtree(cd)
+        n = compile_cli._emit_compile_worklog(
+            paths, self._status(paths, task_id), self._PERSONAS,
+        )
+        assert n == 0
+
+    def test_writes_one_entry_per_round_file(self, scaffolded):
+        task_id, paths = scaffolded
+        self._round(paths, task_id, "round-01-draft.md",
+                    "draft body\nWORKFLOW: APPROVE\n")
+        self._round(paths, task_id, "round-01-akagi.md",
+                    "akagi review\nWORKFLOW: REVISE -- fix it\n")
+        self._round(paths, task_id, "round-01-ayako.md",
+                    "ayako review\nWORKFLOW: APPROVE\n")
+        n = compile_cli._emit_compile_worklog(
+            paths, self._status(paths, task_id), self._PERSONAS,
+        )
+        assert n == 3
+        entries = worklog.list_entries(paths, task_id)
+        # Ordered draft -> akagi -> ayako within the round; attribution
+        # + verdict stamped from the mapping and the trailer.
+        assert [
+            (e.persona, e.role, e.step, e.verdict, e.kind) for e in entries
+        ] == [
+            ("Anzai", "drafter", "compile-draft", "APPROVE", "workflow"),
+            ("Akagi", "akagi", "compile-akagi", "REVISE", "workflow"),
+            ("Ayako", "ayako", "compile-ayako", "APPROVE", "workflow"),
+        ]
+        # Body preserved verbatim; objective carries the round number.
+        assert "draft body" in entries[0].body
+        assert entries[0].objective == "Compile round 01 drafter turn"
+        assert entries[0].ended_at  # land-time stamp present
+
+    def test_multiple_rounds_ordered_by_round_then_turn(self, scaffolded):
+        task_id, paths = scaffolded
+        # Write out of order to prove the deterministic sort.
+        self._round(paths, task_id, "round-02-draft.md", "r2 draft")
+        self._round(paths, task_id, "round-01-ayako.md", "r1 ayako")
+        self._round(paths, task_id, "round-01-draft.md", "r1 draft")
+        n = compile_cli._emit_compile_worklog(
+            paths, self._status(paths, task_id), self._PERSONAS,
+        )
+        assert n == 3
+        entries = worklog.list_entries(paths, task_id)
+        assert [e.objective for e in entries] == [
+            "Compile round 01 drafter turn",
+            "Compile round 01 ayako turn",
+            "Compile round 02 drafter turn",
+        ]
+
+    def test_ignores_non_round_files_and_dirs(self, scaffolded):
+        task_id, paths = scaffolded
+        cd = self._round(paths, task_id, "round-01-draft.md", "draft")
+        (cd / "transcript.md").write_text("full transcript")
+        (cd / "round-01.json").write_text("{}")
+        (cd / "final").mkdir()  # a directory -- must be skipped
+        n = compile_cli._emit_compile_worklog(
+            paths, self._status(paths, task_id), self._PERSONAS,
+        )
+        assert n == 1
+
+    def test_unmapped_role_skipped(self, scaffolded, capsys):
+        task_id, paths = scaffolded
+        self._round(paths, task_id, "round-01-akagi.md", "akagi review")
+        n = compile_cli._emit_compile_worklog(
+            paths, self._status(paths, task_id), {"drafter": "Anzai"},
+        )
+        assert n == 0
+        assert "no compile persona mapped for role 'akagi'" \
+            in capsys.readouterr().err
+
+    def test_unreadable_round_file_skipped(
+        self, scaffolded, monkeypatch, capsys,
+    ):
+        task_id, paths = scaffolded
+        self._round(paths, task_id, "round-01-draft.md", "draft")
+        status = self._status(paths, task_id)  # capture before patch
+        real_read = Path.read_text
+
+        def boom(self, *a, **k):
+            if self.name == "round-01-draft.md":
+                raise OSError("nope")
+            return real_read(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", boom)
+        n = compile_cli._emit_compile_worklog(paths, status, self._PERSONAS)
+        assert n == 0
+        assert "cannot read compile round file" in capsys.readouterr().err
+
+    def test_write_failure_skipped(self, scaffolded, monkeypatch, capsys):
+        task_id, paths = scaffolded
+        self._round(paths, task_id, "round-01-draft.md", "draft")
+        status = self._status(paths, task_id)
+
+        def boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(compile_cli.worklog, "write_entry", boom)
+        n = compile_cli._emit_compile_worklog(paths, status, self._PERSONAS)
+        assert n == 0
+        assert "failed to write worklog entry" in capsys.readouterr().err
+
+
+class TestLandCompileWorklog:
+    """Phase 1d integration: land-compile emits the compile worklog."""
+
+    def test_land_emits_drafter_worklog(self, scaffolded, tmp_path, capsys):
+        task_id, paths = scaffolded
+        # Seed a round file as the in-session compile loop would have.
+        cd = _compile_dir(paths, task_id)
+        cd.mkdir(parents=True, exist_ok=True)
+        (cd / "round-01-draft.md").write_text(
+            _VALID_BUNDLE + "\nWORKFLOW: APPROVE\n", encoding="utf-8")
+        d = tmp_path / "draft.md"
+        d.write_text(_VALID_BUNDLE)
+        t = tmp_path / "transcript.md"
+        t.write_text("Round 1: APPROVE.\n")
+        rc = cmd_land_compile(argparse.Namespace(
+            journal_dir=str(paths.root), task=task_id,
+            draft=str(d), transcript=str(t), rounds=1,
+        ))
+        assert rc == 0
+        entries = worklog.list_entries(paths, task_id)
+        assert [(e.persona, e.step) for e in entries] == [
+            ("Anzai", "compile-draft"),
+        ]
+        assert "worklog entries: 1" in capsys.readouterr().out
+
+    def test_land_worklog_failure_does_not_break_landing(
+        self, scaffolded, tmp_path, monkeypatch, capsys,
+    ):
+        task_id, paths = scaffolded
+        d = tmp_path / "draft.md"
+        d.write_text(_VALID_BUNDLE)
+        t = tmp_path / "transcript.md"
+        t.write_text("x")
+
+        def boom(*a, **k):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(compile_cli, "_emit_compile_worklog", boom)
+        rc = cmd_land_compile(argparse.Namespace(
+            journal_dir=str(paths.root), task=task_id,
+            draft=str(d), transcript=str(t), rounds=1,
+        ))
+        assert rc == 0
+        s = Status.from_json(paths.status_json(task_id).read_text())
+        assert s.compile_phase == CompilePhase.COMPLETE
+        assert "compile worklog normalisation failed" \
+            in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

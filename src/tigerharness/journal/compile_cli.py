@@ -51,12 +51,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
+from tigerharness.journal import worklog
 from tigerharness.journal.models import (
     CompilePhase,
     JournalModelError,
@@ -76,6 +78,25 @@ from tigerharness.journal.scaffold import (
     resolve_team_root,
     validate_personas,
 )
+
+
+# Phase 1d (per-persona journal memory): normalising the saved compile
+# round files into worklog entries. A round file is named
+# ``round-NN-<token>.md`` where ``<token>`` is the drafter ``draft`` or a
+# critic role (``akagi`` / ``ayako``). The drafter's bundle uses the
+# token ``draft`` but the role -> persona mapping keys it as ``drafter``,
+# so we translate. ``_TOKEN_ORDER`` keeps a round's entries in turn order
+# (draft -> akagi -> ayako) when allocating worklog sequence numbers.
+_COMPILE_ROLE_TOKENS: dict[str, str] = {
+    "draft": "drafter",
+    "akagi": "akagi",
+    "ayako": "ayako",
+}
+_TOKEN_ORDER: dict[str, int] = {"draft": 0, "akagi": 1, "ayako": 2}
+_ROUND_FILE_RE = re.compile(r"^round-(\d+)-(draft|akagi|ayako)\.md$")
+# The machine-readable verdict trailer a compile turn ends with
+# (``WORKFLOW: APPROVE`` / ``REVISE -- ...`` / ``BLOCK -- ...``).
+_VERDICT_RE = re.compile(r"WORKFLOW:\s*(APPROVE|REVISE|BLOCK)\b")
 
 
 # ---------------------------------------------------------------------------
@@ -586,9 +607,26 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
     status.updated_at = _utcnow_iso()
     _write_atomic(paths.status_json(status.id), status.to_json())
 
+    # Phase 1d: normalise the saved compile round files into
+    # persona-attributed worklog entries so each compile persona's
+    # memory gets its own record. Done AFTER the status flip and wrapped
+    # so a memory-normalisation hiccup can never roll back an
+    # already-committed landing -- the round files under compile/ remain
+    # the durable source. See docs/per-persona-journal-memory.md.
+    try:
+        compile_personas = _compile_personas_for_task(paths, status.id)
+        n_worklog = _emit_compile_worklog(paths, status, compile_personas)
+    except Exception as exc:  # never let memory normalisation break landing
+        print(
+            f"warning: compile worklog normalisation failed: {exc}",
+            file=sys.stderr,
+        )
+        n_worklog = 0
+
     print(f"landed: {status.id}")
     print(f"  steps: {len(steps)}")
     print(f"  orchestration: {canonical_orchestration}")
+    print(f"  worklog entries: {n_worklog}")
     return 0
 
 
@@ -616,6 +654,99 @@ def _guess_team_for_status() -> str:
     if (cwd / "configs" / "personas.yaml").is_file():
         return cwd.name
     return "unknown"
+
+
+def _extract_verdict(body: str) -> str | None:
+    """Best-effort: pull the **last** ``WORKFLOW: <verdict>`` trailer out
+    of a compile round file. Returns ``None`` when none is present so a
+    hand-edited or truncated round file still normalises into a worklog
+    entry -- just without a recorded verdict."""
+    matches = _VERDICT_RE.findall(body)
+    return matches[-1] if matches else None
+
+
+def _emit_compile_worklog(
+    paths: JournalPaths,
+    status: Status,
+    compile_personas: dict[str, str],
+) -> int:
+    """Normalise the saved ``compile/round-NN-<token>.md`` files into
+    persona-attributed worklog entries -- one per round file -- so each
+    compile persona's tiger-memory store gets its own record of the
+    drafting / critiquing it personally did (Phase 1d of
+    ``docs/per-persona-journal-memory.md``).
+
+    Attribution is stamped from *compile_personas* (the role -> persona
+    map), never typed free-hand, so a turn cannot mis-file its memory.
+    The body is the round file's verbatim text; the verdict is parsed
+    best-effort from the ``WORKFLOW:`` trailer.
+
+    Best-effort per file: an unreadable round file, an unmapped role, or
+    a failed worklog write is warned about and skipped rather than
+    aborting the rest (one corrupt round file must not erase the others'
+    memory). Returns the count of entries written. The caller treats
+    the whole call as best-effort -- the landing has already committed,
+    and the round files remain the durable source.
+    """
+    from tigerharness.journal.models import _utcnow_iso
+
+    compile_dir = _compile_dir(paths, status.id)
+    if not compile_dir.is_dir():
+        return 0
+
+    found: list[tuple[int, str, Path]] = []
+    for child in compile_dir.iterdir():
+        if not child.is_file():
+            continue
+        m = _ROUND_FILE_RE.match(child.name)
+        if m is None:
+            continue
+        found.append((int(m.group(1)), m.group(2), child))
+    # Deterministic order: by round, then turn order within a round.
+    found.sort(key=lambda t: (t[0], _TOKEN_ORDER[t[1]]))
+
+    now = _utcnow_iso()
+    written = 0
+    for round_no, token, path in found:
+        role = _COMPILE_ROLE_TOKENS[token]
+        persona = compile_personas.get(role)
+        if not persona:
+            print(
+                f"warning: no compile persona mapped for role {role!r}; "
+                f"skipping worklog for {path.name}",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(
+                f"warning: cannot read compile round file {path.name}: "
+                f"{exc}; skipping worklog entry",
+                file=sys.stderr,
+            )
+            continue
+        entry = worklog.WorklogEntry(
+            task_id=status.id,
+            persona=persona,
+            step=f"compile-{token}",
+            kind="workflow",
+            role=role,
+            objective=f"Compile round {round_no:02d} {role} turn",
+            verdict=_extract_verdict(body),
+            ended_at=now,
+            body=body,
+        )
+        try:
+            worklog.write_entry(paths, entry)
+            written += 1
+        except OSError as exc:
+            print(
+                f"warning: failed to write worklog entry for {persona} "
+                f"({path.name}): {exc}",
+                file=sys.stderr,
+            )
+    return written
 
 
 # ---------------------------------------------------------------------------
