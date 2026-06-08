@@ -100,10 +100,13 @@ but it lives fine in the `env` block of settings.json.
 - `init.py` now seeds new teams' `.claude/settings.json` with
   `"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50"`.
 - Skill + OPERATING docs updated from ~75% → **50%** and now name the env var.
-- **Existing teams**: add that one line to `<team>/.claude/settings.json`
-  `env` (I did NOT build a settings-env auto-merge into `--refresh-skills`
-  — small follow-up if you want it; for now it's a one-line manual add).
-  *(Env changes apply to NEW Claude sessions.)*
+- **Existing teams**: the env is now auto-merged — `_ensure_compact_env_in_file`
+  additively sets the key (never clobbering an operator-chosen value, never
+  touching a malformed/non-dict file) and is called from BOTH
+  `_scaffold_claude_dir`'s existing-settings branch (re-init) AND the
+  `tigerharness init --refresh-skills` path. So the one adoption command tops
+  up skills **and** settings together. *(Env changes apply to NEW Claude
+  sessions.)* — supersedes the earlier "one-line manual add" note.
 
 ### (b) Updates now propagate to existing teams (hash-gated, no clobber)
 
@@ -135,10 +138,11 @@ at its definition.
 
 ### To adopt on Shohoku specifically (left for you / your parallel work)
 
-1. `tigerharness init --refresh-skills --team-dir <…>/Shohoku`  → updates the skill.
+1. `tigerharness init --refresh-skills --team-dir <…>/Shohoku`  → updates the
+   skill **and** tops up `.claude/settings.json` (compact threshold +
+   guard hook). One command now does both.
 2. next `tigerharness journal new …`  → refreshes `journal/OPERATING.md`.
-3. add `"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50"` to Shohoku's
-   `.claude/settings.json` `env`.
+   *(The compact-env step from the old 3-step list is folded into step 1.)*
 
 Tests: full suite green **2967 passed, 100% line+branch coverage**
 (init.py / scaffold.py / operating_template.py all 100%).

@@ -10,10 +10,13 @@ from unittest.mock import patch
 import pytest
 
 from tigerharness.init import (
+    _AUTOCOMPACT_DEFAULT_PCT,
+    _AUTOCOMPACT_ENV_KEY,
     _append_lane_to_slack_bridge_index,
     _append_persona_to_yaml,
     _auto_init_tiger_memory,
     _command_prefix,
+    _ensure_compact_env_in_file,
     _ensure_journal_guard_hook,
     _format_path,
     _inject_allowed_user_ids,
@@ -546,6 +549,63 @@ class TestJournalGuardHelpers:
         assert _GUARD_MODULE in json.dumps(merged["hooks"])
 
 
+class TestEnsureCompactEnvInFile:
+    """Unit coverage for the additive compact-threshold env merge."""
+
+    def test_adds_key_to_envless_file(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        assert _ensure_compact_env_in_file(path) is True
+        env = json.loads(path.read_text())["env"]
+        assert env[_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+
+    def test_adds_key_beside_existing_env(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text(
+            json.dumps({"env": {"FOO": "bar"}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        assert _ensure_compact_env_in_file(path) is True
+        env = json.loads(path.read_text())["env"]
+        assert env["FOO"] == "bar"  # pre-existing key preserved
+        assert env[_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+
+    def test_respects_operator_chosen_value(self, tmp_path: Path):
+        """If the operator already set the key, their value is kept."""
+        path = tmp_path / "settings.json"
+        path.write_text(
+            json.dumps({"env": {_AUTOCOMPACT_ENV_KEY: "70"}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        assert _ensure_compact_env_in_file(path) is False
+        env = json.loads(path.read_text())["env"]
+        assert env[_AUTOCOMPACT_ENV_KEY] == "70"  # untouched
+
+    def test_missing_file_returns_false(self, tmp_path: Path):
+        missing = tmp_path / "nope" / "settings.json"
+        assert _ensure_compact_env_in_file(missing) is False
+
+    def test_malformed_json_left_untouched(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text("{ not json", encoding="utf-8")
+        assert _ensure_compact_env_in_file(path) is False
+        assert path.read_text() == "{ not json"
+
+    def test_non_object_json_left_untouched(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert _ensure_compact_env_in_file(path) is False
+        assert path.read_text() == "[1, 2, 3]"
+
+    def test_non_dict_env_left_untouched(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text(
+            json.dumps({"env": "not-a-dict"}) + "\n", encoding="utf-8"
+        )
+        assert _ensure_compact_env_in_file(path) is False
+        assert json.loads(path.read_text())["env"] == "not-a-dict"
+
+
 class TestScaffoldGuardHook:
     """_scaffold_claude_dir wires the guard hook on create and on merge."""
 
@@ -576,7 +636,9 @@ class TestScaffoldGuardHook:
         created = _scaffold_claude_dir(team)
         assert settings_path in created
         merged = json.loads(settings_path.read_text())
-        assert merged["env"] == {"CUSTOM": "1"}  # not clobbered
+        assert merged["env"]["CUSTOM"] == "1"  # pre-existing key not clobbered
+        # The recommended compact threshold is topped up alongside the hook.
+        assert merged["env"][_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
         assert _GUARD_MODULE in json.dumps(merged["hooks"])
 
     def test_existing_settings_merge_is_idempotent(self, tmp_path: Path):
@@ -1748,6 +1810,51 @@ class TestRefreshSkills:
         out = capsys.readouterr().out
         assert "Refreshed" in out
         assert "Left" in out and "hand-edited" in out
+
+    def test_refresh_tops_up_existing_team_settings(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """A team scaffolded before the compact-threshold default existed
+        (its settings.json has no CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) adopts it
+        on --refresh-skills, even when no skills changed."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        settings_path = tmp_path / "tigers" / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        # Simulate a pre-feature team: strip the compact key but keep the
+        # guard hook already wired (so the top-up is compact-env-only).
+        del settings["env"][_AUTOCOMPACT_ENV_KEY]
+        settings_path.write_text(
+            json.dumps(settings, indent=2) + "\n", encoding="utf-8"
+        )
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        refreshed = json.loads(settings_path.read_text())
+        assert refreshed["env"][_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+        out = capsys.readouterr().out
+        assert "Updated" in out
+        assert "compact threshold" in out
+
+    def test_refresh_with_no_settings_file_is_fine(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """A team dir with no .claude/settings.json (only skills) refreshes
+        without crashing -- the settings top-up is simply skipped."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        (tmp_path / "tigers" / ".claude" / "settings.json").unlink()
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Nothing to do" in out
 
     def test_explicit_team_flag(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,

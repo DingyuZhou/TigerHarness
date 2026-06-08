@@ -472,6 +472,43 @@ def _merge_journal_guard_into(settings_path: Path, project_root: Path) -> bool:
     )
     return True
 
+
+# Default proactive auto-compact threshold (% of context window) seeded
+# into a team's settings so a long-cascading drive-journal session compacts
+# instead of handing off for "context heavy". Env-only lever (no
+# settings.json key); lives in the ``env`` block. See
+# docs/.../drive-journal SKILL.md step 7.
+_AUTOCOMPACT_ENV_KEY = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+_AUTOCOMPACT_DEFAULT_PCT = "50"
+
+
+def _ensure_compact_env_in_file(settings_path: Path) -> bool:
+    """Additively set ``env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`` in an existing
+    settings.json. Returns True iff the file was rewritten.
+
+    Never clobbers: if the key is already present (operator chose a value)
+    it's left alone. A file we can't parse as a JSON object, or whose
+    ``env`` is a non-dict, is left untouched.
+    """
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(settings, dict):
+        return False
+    env = settings.get("env")
+    if env is None:
+        env = settings["env"] = {}
+    elif not isinstance(env, dict):
+        return False
+    if _AUTOCOMPACT_ENV_KEY in env:
+        return False  # operator already set it -> respect their value
+    env[_AUTOCOMPACT_ENV_KEY] = _AUTOCOMPACT_DEFAULT_PCT
+    settings_path.write_text(
+        json.dumps(settings, indent=2) + "\n", encoding="utf-8"
+    )
+    return True
+
 # Multi-lane slack-bridge fragment. Generated only when a top-level
 # slack-bridge.yaml index exists in the search root -- i.e., the user
 # has opted into multi-team mode. See `multi.load_multi` for the loader.
@@ -655,7 +692,12 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     project_root = _tigerharness_project_root()
     settings_path = team_dir / ".claude" / "settings.json"
     if settings_path.exists():
-        if _merge_journal_guard_into(settings_path, project_root):
+        # Existing team: additively top up BOTH the journal-guard hook and
+        # the recommended compact-threshold env (so an already-scaffolded
+        # team adopts them on re-init / --refresh-skills, not just new ones).
+        changed = _merge_journal_guard_into(settings_path, project_root)
+        changed = _ensure_compact_env_in_file(settings_path) or changed
+        if changed:
             created.append(settings_path)
     else:
         settings: dict = {
@@ -665,7 +707,7 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
                 # long-cascading drive-journal session compacts proactively
                 # (and resumes from progress.md) instead of handing off for
                 # "context heavy". Tune per team; integer percent 1-100.
-                "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",
+                _AUTOCOMPACT_ENV_KEY: _AUTOCOMPACT_DEFAULT_PCT,
             },
         }
         _ensure_journal_guard_hook(settings, project_root)
@@ -1415,11 +1457,25 @@ def main(argv: list[str] | None = None) -> int:
         if team_dir is None:
             return 1
         sync = install_bundled_skills(team_dir, refresh=True)
-        if not sync.changed:
+        # Bring an existing team's settings current too (idempotent /
+        # no-clobber): the journal-guard hook + the recommended compact
+        # threshold. So one command adopts both the new skills AND the
+        # recommended config.
+        settings_path = team_dir / ".claude" / "settings.json"
+        settings_changed = False
+        if settings_path.exists():
+            project_root = _tigerharness_project_root()
+            settings_changed = _merge_journal_guard_into(
+                settings_path, project_root
+            )
+            settings_changed = (
+                _ensure_compact_env_in_file(settings_path) or settings_changed
+            )
+        if not sync.changed and not settings_changed:
             msg = (
-                f"Nothing to do -- all bundled skills already present and "
-                f"up to date under "
-                f"{_format_path(team_dir, search_root)}/.claude/skills/."
+                f"Nothing to do -- all bundled skills + settings already "
+                f"present and up to date under "
+                f"{_format_path(team_dir, search_root)}/.claude/."
             )
             if sync.kept_handedited:
                 msg += (
@@ -1446,6 +1502,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             for p in sync.kept_handedited:
                 print(f"  {_format_path(p, search_root)}")
+        if settings_changed:
+            print(
+                f"Updated {_format_path(settings_path, search_root)} "
+                f"(journal-guard hook / compact threshold)."
+            )
         return 0
 
     search_root = Path(args.dir).resolve()
