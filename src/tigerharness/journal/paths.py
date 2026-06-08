@@ -110,6 +110,14 @@ class JournalPaths:
     def artifacts(self, task_id: str, *, archived: bool = False) -> Path:
         return self.task_dir(task_id, archived=archived) / "artifacts"
 
+    def worklog(self, task_id: str, *, archived: bool = False) -> Path:
+        """Per-turn worklog directory for a task. Holds the
+        persona-attributed ``NNNN-<persona>-<step>.md`` entries that
+        tiger-memory ingests (see ``journal.worklog`` and
+        ``docs/per-persona-journal-memory.md``). Survives archival
+        because it hangs off ``task_dir``."""
+        return self.task_dir(task_id, archived=archived) / "worklog"
+
     # ---- ensure / inspect ----
 
     def ensure(self) -> "JournalPaths":
