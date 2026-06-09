@@ -1,16 +1,22 @@
 # tiger-memory rework — Phase-0 design
 
-> **Status:** Draft / spec phase. No code yet. This is the decision
-> scaffold we iterate on before implementation.
+> **Status:** SHIPPED — this design has been implemented. Kept as the
+> historical design record (intent + rationale + rounds), not as a
+> description of current behavior. For shipped behavior see
+> [`tiger-memory.md`](tiger-memory.md) (module overview),
+> [`tiger-memory-sweep-protocol.md`](tiger-memory-sweep-protocol.md)
+> (the in-session subscription-rail sweep contract), and
+> [`per-persona-journal-memory.md`](per-persona-journal-memory.md)
+> (per-persona worklog memory, deployed & live-verified 2026-06-08).
 > **Date:** 2026-06-05 (rounds 1-2) · 2026-06-06 (round 3).
 > **Decision-makers:** Operator + Anzai.
 > **Thread:** Slack DM 2026-06-05 → 2026-06-06 (Operator ↔ Anzai).
 >
-> This document captures intent, not shipped behavior. Specific
-> numbers cited from the current implementation (call counts, config
-> defaults) are marked *(verify in P0)* where they came from a code
-> survey rather than a line I quote directly — confirm them against
-> `src/tigerharness/tiger_memory/` before building on them.
+> This document captures original intent, not current shipped behavior.
+> Specific numbers cited from the implementation-of-the-day (call counts,
+> config defaults) were marked *(verify in P0)* where they came from a
+> code survey rather than a line quoted directly — for live values always
+> confirm against `src/tigerharness/tiger_memory/`.
 
 ## Why this exists
 

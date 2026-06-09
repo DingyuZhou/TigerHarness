@@ -14,7 +14,7 @@ through daily/weekly/monthly rollups. Critical facts are pinned in a
 ## Architecture
 
 ```
-Sources (Claude transcripts, Slack threads, docs)
+Sources (Claude transcripts, Slack threads, docs, journal worklogs)
     |
     v
 Lifecycle (extract new sessions, summarize, rollup)
@@ -32,7 +32,7 @@ Agent reads briefing/ at session start
 
 | Module | Purpose |
 |---|---|
-| `cli.py` | CLI: init, bootstrap, rebuild, pin, resummarize, drill, tree, raw, search, state |
+| `cli.py` | CLI. Writers: init, bootstrap, rebuild, pin, resummarize. Readers: drill, tree, raw, search, state. Stage-2 executor (subscription rail): plan, ingest-summary. Team sweep gating: sweep-plan, sweep-done, sweep-complete, sweep-release |
 | `config.py` | YAML config loading + validation |
 | `lifecycle.py` | The core engine: extract, summarize, rollup, rebuild |
 | `briefing.py` | Assemble the briefing/ directory from the store |
@@ -226,6 +226,8 @@ sources:
   - kind: journal_worklog
     journal_root: /home/tigerleap/projects/teams/Shohoku/journal/
     persona: Rukawa             # only ingest worklog entries stamped Rukawa
+    # team: Shohoku             # optional; defaults to the journal root's
+    #                           # parent dir name (set it for non-standard layouts)
   - kind: claude_code
     project_path: ~/.claude/projects/-home-tigerleap-projects-teams-shohoku/
     persona: Rukawa
@@ -259,6 +261,21 @@ activity-gate per persona), so a specialist with *only* worklog activity
 and no Slack threads is still swept — its new worklog entries surface at
 `tiger-memory plan` time through this source. See
 [`tiger-memory-sweep-protocol.md`](tiger-memory-sweep-protocol.md).
+
+## The auto_memory source (legacy)
+
+One more source kind the config validator accepts is `auto_memory`. It
+concatenates the `*.md` files under a `path:` directory into a single
+synthetic record (Claude Code's auto-memory dir), summarized like any
+other source. It has no adapter under `sources/` — it's assembled in the
+lifecycle bootstrap — and is retained for backward compatibility; new
+setups should prefer the explicit sources above.
+
+```yaml
+sources:
+  - kind: auto_memory
+    path: ~/.claude/projects/<slug>/memory/
+```
 
 ## Adding a new summarizer vendor
 

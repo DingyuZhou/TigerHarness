@@ -1,10 +1,14 @@
 # Per-persona memory from journal-driven work
 
-Status: **implemented** (2026-06-08, branch
-`work/2026-06-08-per-persona-journal-memory`). Phases 1-4 shipped; see
-"Phasing & dependencies" for the per-phase commit trail. Phase 0
-(roster rollout for the 7 personas without a store) is the remaining
-prerequisite for the feature to materialize memory for those personas.
+Status: **shipped & live** (2026-06-08). Merged to `main` (PR #43) and
+deployed to the running multi-team Slack bridge; phases 1-4 shipped (see
+"Phasing & dependencies" for the per-phase commit trail). Phase 0
+(roster rollout) is complete — all 9 Shohoku personas now carry a
+tiger-memory store, so journal-driven work materializes per-persona
+memory across the roster. Live-verified 2026-06-08: a real bridge turn
+carries `TIGERHARNESS_SLACK_THREAD_TS` into the agent's subprocess env
+(the harness-enforced suppression transport), and both lanes register
+cleanly on restart.
 Author: Anzai (Shohoku)
 Related: [`subscription-backend.md`](subscription-backend.md),
 [`tiger-memory.md`](tiger-memory.md),
@@ -238,10 +242,12 @@ can run first/in parallel.
 ## Phasing & dependencies
 
 - **Phase 0 — Roster rollout.** Configs + stores for the 7 missing
-  personas. Independent; do first or in parallel. **Status: pending.**
-  Without it, those 7 personas have nowhere for their worklog slices to
-  land (the engine writes the worklog regardless; only ingestion is
-  gated on the per-persona store existing).
+  personas. Independent; do first or in parallel. **Done (2026-06-08):**
+  all 9 Shohoku personas now carry a `tiger-memory.config.yaml`, so every
+  persona's worklog slices have a store to land in. (Without it, a
+  persona has nowhere for its slices to go — the engine writes the
+  worklog regardless; only ingestion is gated on the per-persona store
+  existing.)
 - **Phase 1 — Write path.** Worklog format; `claim`/`release` thin
   driver entries; `step-done` gate + graph-walk routing through it;
   `kind=task` release gate; compile worklog normalization. **Done:**
@@ -258,7 +264,11 @@ can run first/in parallel.
   `TIGERHARNESS_SLACK_THREAD_TS` per turn and `claim` reads it as a
   `--drive-thread` fallback (gated on `--driver`), so suppression no
   longer depends on the agent passing a flag; plus a 30-day TTL prune in
-  `register()` to bound registry growth.
+  `register()` to bound registry growth. **Deployed & live-verified
+  (2026-06-08):** bridge restarted onto merged `main` (PR #43); a real
+  turn was confirmed to carry `TIGERHARNESS_SLACK_THREAD_TS` in its
+  subprocess env. Organic suppression (worklog → per-persona store,
+  driver's fat transcript skipped) exercises on the next real drive.
 - **Phase 4 — Protocol docs.** `operating_template.py` (so scaffolded
   journals teach the gates), `drive-journal` SKILL.md,
   `subscription-backend.md`, `tiger-memory*.md`. **Done:** `6a4350c`
