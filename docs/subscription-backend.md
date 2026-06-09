@@ -319,9 +319,11 @@ records** instead of the raw transcript:
   be wrong. *The note is the ticket to advance:* the gate refuses to
   move the work forward without a non-empty note, so a persona's memory
   of the work it did can't go missing.
-- **The gates.** `journal claim --driver <p> --drive-thread <ts>`
-  writes a thin "I drove this" trace to the driver's store and
-  registers the drive. `journal release --driver <p> --state done
+- **The gates.** `journal claim --driver <p>` writes a thin "I drove
+  this" trace to the driver's store and registers the drive — the drive's
+  `thread_ts` is read automatically from the `TIGERHARNESS_SLACK_THREAD_TS`
+  env var the bridge stamps on every turn (an explicit `--drive-thread
+  <ts>` still wins if passed). `journal release --driver <p> --state done
   --output <note>` files the assigned persona's work note (`kind=task`).
   `journal step-done --task ... --step ... --verdict ... --output
   <note>` files each step persona's note and advances the graph walk
@@ -330,11 +332,12 @@ records** instead of the raw transcript:
   `OPERATING.md` (next section) and
   [`per-persona-journal-memory.md`](per-persona-journal-memory.md).
 - **Double-count suppression.** At `claim`, the drive's Slack
-  `thread_ts` (from the bridge-context block) is recorded to
-  `journal/.drive-sessions.json`. tiger-memory's `claude_transcript`
-  adapter reads that registry and **skips** a registered drive's
-  transcript — the worklog already owns that content, so the driver
-  doesn't *also* get a fat summary of the whole drive.
+  `thread_ts` — harness-enforced via the `TIGERHARNESS_SLACK_THREAD_TS`
+  env var the bridge sets per turn, so the agent never copies it by hand
+  — is recorded to `journal/.drive-sessions.json`. tiger-memory's
+  `claude_transcript` adapter reads that registry and **skips** a
+  registered drive's transcript — the worklog already owns that content,
+  so the driver doesn't *also* get a fat summary of the whole drive.
 - **Ingestion.** A `journal_worklog` tiger-memory source discovers
   `*/worklog/*.md` under the journal root, groups them per `(task,
   persona)`, and feeds the existing summarize → ingest machinery. Each

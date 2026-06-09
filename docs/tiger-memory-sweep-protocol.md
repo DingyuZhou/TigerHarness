@@ -1,10 +1,11 @@
 # tiger-memory team sweep — in-session sub-agent protocol (B1/B3)
 
-> **Status:** contract for the **live trigger**. The full Python + CLI
-> stack this protocol drives is shipped and tested (see
-> `tiger-memory-rework.md`, B1/B3 sections). Wiring this contract into a
-> real persona-session bootstrap (slack-bridge / drive-journal) + a
-> live verification is the remaining follow-up — see "Wiring + status".
+> **Status:** wired & shipped. The full Python + CLI stack this protocol
+> drives is shipped and tested (see `tiger-memory-rework.md`, B1/B3
+> sections), and the bridge wiring + convenience CLIs that activate it are
+> live (see "Wiring + status"). The only outstanding item is an
+> end-to-end live sweep run in a real persona session for final
+> acceptance.
 
 This is the vendor-neutral contract an **interactive persona session**
 executes to keep the whole team's tiger-memory fresh on the
@@ -130,26 +131,31 @@ still swept correctly, by design:
 No special "count worklog files as activity" logic is needed at the
 gating layer — the roster-wide enumeration already covers it.
 
-## Wiring + status (the remaining follow-up)
+## Wiring + status
 
-The Python + CLI stack above is **complete and 100%-tested**. NOT yet
-done (needs a real interactive session to build + verify, so it was held
-out of the autonomous library work):
+The Python + CLI stack above is **complete and 100%-tested**, and the
+bridge wiring + convenience CLIs that activate it have **shipped**:
 
-1. **Activate the trigger.** Today `slack_bridge.
-   _trigger_tiger_memory_rebuild` (`bridge.py:469`) fires `tiger-memory
-   rebuild --background` (legacy `claude -p`, API-billed) for the active
-   persona. Replace/augment it so a persona session runs THIS protocol
-   instead. **Do not remove the working legacy trigger until the
-   in-session loop is verified live** — they can coexist behind a config
-   flag.
-2. **Convenience CLIs (optional but recommended):** `tiger-memory
-   sweep-plan` (wraps `maybe_sweep_roster` for `cfg.store.root.parent`,
-   prints the decision + targets) and `tiger-memory sweep-complete` /
-   `sweep-release` so the interactive session drives gating without inline
-   Python.
-3. **Live verification:** run an end-to-end sweep in a real persona
-   session — confirm the sub-agent (a) bills to the subscription, (b)
-   writes the store directly, (c) returns only a short confirmation, and
-   (d) its own transcript is excluded next sweep (B7). This is the
-   acceptance for "subscription-safe rebuild is LIVE".
+1. **Trigger — done (config flag).** `TeamBridgeContext.
+   tiger_memory_trigger` (`bridge.py:113`) selects the mechanism. Default
+   `"rebuild"` keeps the legacy `tiger-memory rebuild --background`
+   (`claude -p`, API-billed) so existing deploys are unchanged; setting it
+   to `"off"` suppresses the daemon trigger (`bridge.py:475`) so the
+   in-session sweep protocol — driven by the persona's `sweep-memory`
+   skill over the gating CLIs below — owns the rebuild on the
+   subscription rail. The two coexist behind the flag exactly as planned.
+2. **Convenience CLIs — done (shipped).** `tiger-memory sweep-plan`
+   (wraps `maybe_sweep_roster` for the team's memories root —
+   `cfg.store.root.parent` — and prints the decision + targets),
+   `sweep-done`, `sweep-complete`, and `sweep-release` are in
+   `tiger_memory.cli`, so the interactive session drives gating without
+   inline Python.
+3. **Live verification — outstanding.** Run an end-to-end sweep in a real
+   persona session — confirm the sub-agent (a) bills to the subscription,
+   (b) writes the store directly, (c) returns only a short confirmation,
+   and (d) its own transcript is excluded next sweep (B7). This is the
+   acceptance for "subscription-safe rebuild is LIVE". (The related
+   per-persona journal-memory transport — the bridge stamping
+   `TIGERHARNESS_SLACK_THREAD_TS` into each turn's subprocess env so the
+   driver's fat transcript is suppressed — was deployed and live-verified
+   on 2026-06-08; see `per-persona-journal-memory.md`.)

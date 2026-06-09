@@ -120,20 +120,25 @@ ticket to advance:* the gate refuses to move the work forward without a
 non-empty note. tiger-memory then reads the worklog (not the transcript)
 and files each slice in the right persona's store.
 
-To make this work, a Slack-driven drive passes two pieces of identity it
-already knows:
+To make this work, a Slack-driven drive identifies itself with **one
+flag** it already knows:
 
 - `--driver <your-persona>` -- the persona THIS session runs as (your
-  bridge identity, e.g. `Anzai`). Written as a one-line "I drove this"
-  trace to your own memory, and it switches on the completion gates.
-- `--drive-thread <thread_ts>` -- the `slack_thread_ts` from the
-  `[bridge-context]` block at the END of your prompt. It registers this
-  drive so tiger-memory does NOT *also* fold the fat transcript into your
-  store (the worklog already owns that content).
+  bridge identity, e.g. `Anzai`). It writes a one-line "I drove this"
+  trace to your own memory, switches on the completion gates, AND tells
+  `claim` to register this drive so tiger-memory does NOT *also* fold the
+  fat transcript into your store (the worklog already owns that content).
+
+You do **not** copy the thread id by hand. The slack bridge exports
+`TIGERHARNESS_SLACK_THREAD_TS` (the `slack_thread_ts` from the
+`[bridge-context]` block) into every turn's environment, and `claim`
+reads it automatically when `--driver` is present. An explicit
+`--drive-thread <thread_ts>` still overrides it if you ever need to (a
+non-bridge driver, or a manual run).
 
 Outside a Slack-driven drive (a plain terminal with no `[bridge-context]`
-and no persona identity), **omit both** -- claim/release behave exactly
-as the plain subscription backend with no memory side-effect.
+and no persona identity), **omit `--driver`** -- claim/release behave
+exactly as the plain subscription backend with no memory side-effect.
 
 ## The decision procedure
 
@@ -173,17 +178,18 @@ completed task until no actionable tasks remain.
    If claim exits non-zero ("busy" / "claim lost"), another session won:
    re-sweep and pick again, or exit.
 
-   **In a Slack-driven drive**, add the two memory flags (see
-   "Per-persona memory" above):
+   **In a Slack-driven drive**, add the driver flag (see "Per-persona
+   memory" above):
 
    ```bash
-   tigerharness journal claim <task-id> \\
-       --driver <your-persona> --drive-thread <thread_ts>
+   tigerharness journal claim <task-id> --driver <your-persona>
    ```
 
-   `--driver` is the persona this session runs as; `--drive-thread` is
-   the `slack_thread_ts` from your prompt's `[bridge-context]` block.
-   Omit both outside a Slack-driven drive.
+   `--driver` is the persona this session runs as; the drive's
+   `thread_ts` is picked up automatically from the
+   `TIGERHARNESS_SLACK_THREAD_TS` env var the bridge sets (pass
+   `--drive-thread <thread_ts>` only to override). Omit `--driver`
+   outside a Slack-driven drive.
 
    - **NEVER** work a *busy* task -- the attach token + fresh heartbeat
      means a live session owns it right now.
