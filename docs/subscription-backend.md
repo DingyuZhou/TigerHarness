@@ -244,10 +244,8 @@ bookkeeping or human-facing labels.
 > idle/busy/crashed classification, the `journal claim` / `release`
 > CLIs, and the compare-and-set claim — live in
 > [`journal-instant-resume.md`](journal-instant-resume.md) and the
-> on-disk `OPERATING.md`. Some older "fresh/stale" prose elsewhere in
-> *this* document still reflects the pre-change framing and is being
-> migrated; where they differ, journal-instant-resume.md + OPERATING.md
-> win.
+> on-disk `OPERATING.md`; this document has been brought in line with
+> them. Where any detail still differs, those two sources win.
 
 ### State transitions
 
@@ -255,7 +253,7 @@ bookkeeping or human-facing labels.
 |---|---|---|---|---|
 | (none) | `pending` | scaffolder | `tigerharness journal new --prd ...` succeeds | full status.json initialized |
 | `pending` | `in_progress` | driver | sweep step 2 picks this task | `sessions += 1`, `updated_at` bumped, `session_ref` set to a fresh attach token by `journal claim` |
-| `in_progress`-stale | `in_progress` | driver | **rescue** -- the sweep classified the task as stale (heartbeat older than `stuck_timeout`) and step 2 picked it up; the previous owner is presumed wedged or crashed | `sessions += 1`, `updated_at` bumped, `session_ref` re-set to a fresh attach token by `journal claim`. The driver reads the tail of `progress.md` to figure out where the previous owner left off |
+| `in_progress`-crashed | `in_progress` | driver | **rescue** -- the sweep classified the task as crashed (attached but heartbeat older than `stuck_timeout`) and step 2 picked it up; the previous owner is presumed wedged or crashed | `sessions += 1`, `updated_at` bumped, `session_ref` re-set to a fresh attach token by `journal claim`. The driver reads the tail of `progress.md` to figure out where the previous owner left off |
 | `in_progress` | `in_progress` | driver | mid-task progress (clean stop, max_sessions not hit) | `updated_at` bumped, `next_action` rewritten. **No** `sessions` change -- the counter was already incremented on pickup |
 | `in_progress` | `done` | driver | task complete per acceptance criteria | `state=done`, `next_action` cleared, sweep will archive on next invocation |
 | `in_progress` | `blocked` | driver | real blocker (need human / another agent / external input) OR `sessions >= max_sessions` | `state=blocked`, `next_action` names the blocker |
@@ -365,15 +363,26 @@ records** instead of the raw transcript:
   so the driver doesn't *also* get a fat summary of the whole drive.
 - **Ingestion.** A `journal_worklog` tiger-memory source discovers
   `*/worklog/*.md` under the journal root, groups them per `(task,
-  persona)`, and feeds the existing summarize → ingest machinery. Each
-  journal-working persona needs a tiger-memory config + store listing
-  that source (the roster prerequisite).
+  persona)`, and feeds the existing summarize → ingest machinery. It
+  reads **only** `worklog/` — `progress.md` is the narrative/continuity
+  log and is **never** ingested. Each journal-working persona needs a
+  tiger-memory config + store listing that source (the roster
+  prerequisite).
 
 The enforcement lives in **harness code**, not a prompt: a turn that
 skips its note simply cannot advance. The worst case is a *thin* note,
 never a missing or mis-attributed one. Note **prose quality** is not
 enforced (code can guarantee a note exists and is correctly attributed,
 not that it is well-written).
+
+**Cascade × compaction caveat.** A `kind=task`'s worklog note is written
+**once, at `done`**, so it is the assigned persona's *only* ingested
+memory of the whole task. Because the cascade-first protocol relies on
+auto-compaction across a long task, the driver must build that note from
+the **durable record** (`progress.md` + `artifacts/`), not from
+possibly-compacted in-context memory. (`kind=workflow` is unaffected:
+`step-done` writes each step's note immediately, before any later
+compaction.)
 
 ## OPERATING.md — the protocol
 
@@ -552,15 +561,17 @@ it.
    seeds `status.json` as `pending`.
 3. **Drive.** Open Claude Code, invoke `drive-journal`. The skill
    first runs the lazy sweep (archive any `done`, classify
-   `in_progress` tasks as fresh-or-stale, summarize what's actionable
-   in-session); then it picks **one** actionable task — never a
-   *fresh* `in_progress` task, since that belongs to another active
-   session — and runs it continuously, appending to `progress.md` and
-   bumping the heartbeat in `status.json` as it goes, until the task
-   is `done`, hits a blocker, or you stop the session. When that task
-   finishes, the skill **cascades**: re-runs the sweep and picks up
-   the next actionable task. One invocation drains as much of the
-   queue as it can in one sitting.
+   `in_progress` tasks as **idle / busy / crashed**, summarize what's
+   actionable in-session — and stop cheaply if everything is busy);
+   then it picks **one** actionable task — never a *busy* `in_progress`
+   task, since that belongs to another active session — and runs it
+   continuously, appending to `progress.md` and bumping the heartbeat
+   in `status.json` as it goes, until a stop condition fires. Then it
+   **cascades** — the hard loop: re-sweep and pick up the next
+   session/task **back-to-back in the same turn**. One invocation
+   drains the whole queue (and each task's whole `max_sessions` budget)
+   in one sitting, never one-session-per-loop-fire; context pressure is
+   handled by compaction, not by handing off.
 4. **Resume if needed.** If the task isn't `done` (you stopped, it
    blocked, or it hit `max_sessions`), come back later and invoke
    `drive-journal` again — a fresh session resumes the idle task
