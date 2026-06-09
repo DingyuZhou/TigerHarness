@@ -178,6 +178,63 @@ is byte-for-byte equal. (Confirmed all 5 shared skills identical today.)
 line+branch coverage** on the merged tree. No production behavior changed —
 one skill-copy clarity edit + three guards.
 
+---
+
+## Round 5 — cascade × compaction × per-persona memory
+
+A round on the **memory-system integration specifically**: how the
+cascade-first / auto-compaction redesign interacts with the revamp's
+`--driver` / `--output` / worklog gates. Grounded in the actual code
+(`drive_sessions.py`, `cli.py` claim/release/step-done,
+`tiger_memory/sources/journal_worklog.py`).
+
+### Verified sound (no change)
+
+- **Cascade does not double-count transcripts.** `drive_sessions.register`
+  is keyed by `thread_ts` with an idempotent upsert, so one cascading drive
+  (one thread, many `claim`s) registers **once** and refreshes
+  `last_seen_at`; the `claude_transcript` adapter suppresses that one
+  thread. No per-task leak, no N-fold registration.
+- **Attribution is right.** `_write_task_work_entry` stamps
+  `persona=status.persona` (the **assigned** persona, never the
+  `--driver`); the thin "I drove this" claim trace stamps the driver. A
+  task assigned to the driver simply gets both entries — no double-count
+  (distinct worklog files), transcript still suppressed.
+- **`--driver` consistency is already instructed.** Both OPERATING step 5
+  and the skill already say "pass the **same** `--driver` you used at
+  `claim`." (The hazard if you don't: `claim` registered the thread →
+  transcript suppressed, but a `--driver`-less `release` skips the worklog
+  → the work vanishes from memory. The instruction covers it; left as-is.)
+
+### MINOR-9 (fixed) — compaction can thin a `kind=task`'s only memory record
+
+tiger-memory's `journal_worklog` source ingests **only** `worklog/*.md` —
+**never `progress.md`**. And for a `kind=task`, the substantive worklog
+note is written **once, at done** (`release --output`), *deferred* to the
+end of the whole task — unlike `kind=workflow`, where `step-done` writes
+each step's note immediately. So in an aggressive cascade that auto-compacts
+mid-task (exactly what the redesign encourages), the end-of-task note can be
+assembled from **post-compaction** context that has elided earlier sessions
+— silently thinning the assigned persona's *only* memory of the task.
+`progress.md` survives compaction and is the natural source to rebuild from,
+but it is **not itself ingested**, so it has to be *used to write the note*,
+not relied on as the memory.
+
+**Fix:** at the `kind=task` done-note (OPERATING step 5 + skill step 5) and
+from the compaction guidance (OPERATING/skill step 6/7), instruct the driver
+to **build the note from the durable record** (`progress.md` + `artifacts/`
++ prior worklog), naming why: it is written once, a long cascade may have
+compacted earlier detail, and only `worklog/` is ingested. `kind=workflow`
+is called out as inherently safe (per-step notes land immediately). Pinned
+the landmark with `test_task_done_note_durable_record_guidance_pinned`
+(`"durable record"` + `"ingests only"`) so it can't be silently dropped.
+
+**Round 5 verified:** 1 new pin test; full suite **3194 passed, 100%
+line+branch coverage**. Doc-only change to the protocol (OPERATING template
++ skill, mirror byte-identical) — no Python behavior change; the revamp's
+gate code is correct as-is, the gap was in the *driver's* note-building
+guidance under compaction.
+
 **Net code change across the three rounds:** one new no-clobber helper
 (`_ensure_compact_env_in_file`) wired into two adoption paths; the skill's
 step-2 pick logic realigned to the contract; six new tests (the helper's 7

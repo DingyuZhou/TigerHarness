@@ -96,6 +96,18 @@ def test_finish_before_start_guard_pinned():
     assert "finish before any" in OPERATING_MD.lower()
 
 
+def test_task_done_note_durable_record_guidance_pinned():
+    """The cascade x compaction x per-persona-memory interaction: a
+    `kind=task`'s only ingested memory is the single done-note, written at
+    the end, so it must be assembled from the durable record (progress.md /
+    artifacts) -- a long cascade may have compacted earlier sessions away,
+    and tiger-memory ingests only worklog/, never progress.md. Pin this
+    landmark so the guidance can't be silently dropped (critique R5)."""
+    low = OPERATING_MD.lower()
+    assert "durable record" in low
+    assert "ingests only" in low   # ...worklog/ (never progress.md)
+
+
 def test_current_template_not_in_prior_hash_manifest():
     """Maintenance footgun guard (mirror of the skill manifest test in
     test_init): the CURRENT OPERATING_MD must never be listed in

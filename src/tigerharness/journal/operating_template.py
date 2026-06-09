@@ -242,6 +242,14 @@ completed task until no actionable tasks remain.
      persona's memory. **The note is the ticket** -- `release --state
      done` REFUSES (non-zero, no state change) without a non-empty
      `--output`. Write the note file first, then release.
+     **Build the note from the durable record** -- `progress.md`, the
+     task's `artifacts/`, prior worklog entries -- *not* from in-context
+     memory alone. For a `kind=task` this single done-note is written
+     **once, at the end**, so across a long cascade the early sessions may
+     have been **compacted away**; and tiger-memory ingests only
+     `worklog/` (never `progress.md`), so this note is the assigned
+     persona's *only* substantive memory of the whole task. Reconstruct
+     it from what survived on disk.
    - **`kind=workflow` done**: `release <id> --driver <p> --state done`
      -- **no `--output`** here. The per-step notes you already wrote via
      `journal step-done` ARE the record. The gate refuses unless the
@@ -284,6 +292,13 @@ completed task until no actionable tasks remain.
    + end the turn) **only** at the
    true hard ceiling -- and even then a fresh fire resumes the idle task
    instantly. **After any compaction, re-sweep (step 1) and continue.**
+
+   Compaction loses nothing **for continuity** (you re-orient from
+   `progress.md`) -- and nothing **for memory** *either*, **provided** a
+   `kind=task` done-note is assembled from the durable record (step 5),
+   since that note is written once at the end and is the only thing
+   ingested. (`kind=workflow` is inherently safe: `step-done` writes each
+   step's note immediately, before any later compaction.)
 
    Don't manufacture a stopping point just because one task finished or
    the conversation feels long -- drain the queue while the session is hot.

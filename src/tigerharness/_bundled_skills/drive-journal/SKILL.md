@@ -92,10 +92,14 @@ boundary instead.
    claim** — it activates the completion gates: a **`kind=task` done** needs
    `--state done --output <work-note.md>` (the assigned persona's work note;
    the gate REFUSES `done` without a non-empty `--output` — **the note is
-   the ticket**); a **`kind=workflow` done** needs `--state done` with **no
-   `--output`** (the per-step `step-done` notes are the record, and the walk
-   must have reached `__done__`). Outside a drive, omit `--driver` (no gate,
-   no `--output`).
+   the ticket**). Build that note from the **durable record**
+   (`progress.md` + `artifacts/`), not in-context memory — it's written
+   once at the end, a long cascade may have **compacted** earlier sessions
+   away, and tiger-memory ingests only `worklog/` (never `progress.md`), so
+   this note is the persona's *only* memory of the task. A **`kind=workflow`
+   done** needs `--state done` with **no `--output`** (the per-step
+   `step-done` notes are the record, and the walk must have reached
+   `__done__`). Outside a drive, omit `--driver` (no gate, no `--output`).
 
 6. **CASCADE — the hard loop. THIS is the driver's whole job.** If you
    released a NOT-done task (it's now idle) **OR** the queue still has any
@@ -117,7 +121,9 @@ boundary instead.
    to reclaim context; do **not** hand off early to "let the loop bridge."
    Hand off (release idle + end the turn) **only** at the genuine hard
    ceiling — and even then a fresh fire resumes the idle task instantly.
-   **After any compaction: re-sweep (step 1) and continue.**
+   **After any compaction: re-sweep (step 1) and continue.** Compaction is
+   safe for *memory* too — as long as a `kind=task` done note is built from
+   the durable record (step 5), since that note is the only thing ingested.
 
 ## If you get confused
 
