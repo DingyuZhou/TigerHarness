@@ -14,6 +14,13 @@ Conversation transcript:
 {content}
 ---
 
+**Large transcripts:** this transcript may be long and span more than one
+read window. Read it in FULL before summarizing — page through to the end
+rather than summarizing only the opening. Never silently skip the middle:
+if it is too large to hold at once, condense it in sections and combine
+those into one faithful summary. No important decision, file, number, or
+owner-explicit directive should be lost to length.
+
 **Ignore memory boilerplate.** If the conversation includes the agent
 reading or restating its own tiger-memory briefing
 (`memory/.../briefing/*`, `must_memorize.md`, `longer_memory.md`,

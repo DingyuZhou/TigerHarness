@@ -53,6 +53,16 @@ boundary instead.
    working (sets `session_ref`, bumps `sessions`, refreshes the heartbeat,
    compare-and-set). If claim exits non-zero (another session won the
    race), re-sweep and pick again, or stop. Skip `blocked` — surface them.
+   **In a Slack-driven drive,** add `--driver <your-persona>` so the work
+   lands in the right persona's store (see OPERATING.md "Per-persona
+   memory"): `tigerharness journal claim <id> --driver <your-persona>`.
+   `--driver` is the persona this session runs as; with it set, the drive's
+   Slack thread registers automatically (the bridge passes it via the
+   `TIGERHARNESS_SLACK_THREAD_TS` env var), so tiger-memory does **not**
+   double-count the fat drive transcript — no copying the thread_ts by
+   hand. (`--drive-thread <thread_ts>` overrides it; **omit `--driver`
+   entirely outside a drive** — claim/release then behave as the plain
+   backend with no memory side-effect.)
 
 3. **Load the procedure + context** (reached only when there's real work).
    Read `<journal>/OPERATING.md` for the full procedure, **then** the
@@ -62,17 +72,29 @@ boundary instead.
 
 4. **Work the task continuously** per OPERATING.md — branch on
    `status.kind` (for `kind=workflow`, follow the compile / graph-walk
-   sub-protocols *in OPERATING.md*). **Heartbeat** every ~10 min of work
-   (append to `progress.md` + refresh `updated_at`), so a concurrent loop
-   correctly sees you as *busy*. Stop the session only on a real **stop
-   condition**: task `done` *and* `early_exit=true`; a real blocker; or the
-   human ends it. *(`early_exit=false` runs the full `max_sessions`.)*
+   sub-protocols *in OPERATING.md*; end each step at the gate —
+   `tigerharness journal step-done --task <id> --step <id> --verdict <V>
+   --output <note>` — which writes that step persona's worklog entry and
+   prints the next step. Do **not** follow the edges by hand: the gate
+   routes AND records). **Heartbeat** every ~10 min of work (append to
+   `progress.md` + refresh `updated_at`), so a concurrent loop correctly
+   sees you as *busy*. Stop the session only on a real **stop condition**:
+   task `done` *and* `early_exit=true`; a real blocker; or the human ends
+   it. *(`early_exit=false` runs the full `max_sessions`.)*
 
 5. **On stop, release** (never hand-edit `status.json`):
    `tigerharness journal release <id>` — work remains →
    `--next-action "<note>"` (stays `in_progress`, now **idle**); done →
    `--state done`; blocked or `sessions >= max_sessions` →
    `--state blocked --next-action "<why>"`.
+   **In a drive, pass the same `--driver <your-persona>` you used at
+   claim** — it activates the completion gates: a **`kind=task` done** needs
+   `--state done --output <work-note.md>` (the assigned persona's work note;
+   the gate REFUSES `done` without a non-empty `--output` — **the note is
+   the ticket**); a **`kind=workflow` done** needs `--state done` with **no
+   `--output`** (the per-step `step-done` notes are the record, and the walk
+   must have reached `__done__`). Outside a drive, omit `--driver` (no gate,
+   no `--output`).
 
 6. **CASCADE — the hard loop. THIS is the driver's whole job.** If you
    released a NOT-done task (it's now idle) **OR** the queue still has any
@@ -103,4 +125,7 @@ seems to contradict it, **OPERATING.md wins** (it shipped with this
 specific journal; this skill is generic guidance). Common reminders the
 full contract spells out: don't skip the sweep; never work a *busy* task;
 one task at a time; use `claim`/`release` (never hand-edit state); the
-in-session compile is `claude -p`-free (API budget zero).
+in-session compile is `claude -p`-free (API budget zero). In a drive, mark
+`done` only through the gate (`kind=task` → `release --state done --output
+<note>`; `kind=workflow` → walk to `__done__` via `step-done`) and never
+hand-write `worklog/` — the gate stamps each entry's persona attribution.

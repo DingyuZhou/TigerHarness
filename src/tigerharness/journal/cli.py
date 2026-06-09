@@ -46,6 +46,7 @@ from tigerharness.journal.sweep import (
     stuck_timeout_from_env,
     sweep,
 )
+from tigerharness.journal import drive_sessions, walk, worklog
 
 
 def _paths_from_args(args: argparse.Namespace) -> JournalPaths:
@@ -442,6 +443,98 @@ def _write_status_atomic(paths: JournalPaths, status: Status) -> None:
     _write_atomic(paths.status_json(status.id), status.to_json())
 
 
+def _write_driver_claim_entry(
+    paths: JournalPaths, status: Status, reason: str, driver: str,
+) -> None:
+    """Write the thin DRIVER worklog entry for a real claim (the "I drove
+    this" record that lands in the driver persona's memory). Best-effort:
+    a disk hiccup here must not fail an otherwise-successful claim, so an
+    ``OSError`` is warned-and-swallowed. The substantive per-persona work
+    note is written later (release / step-done) and IS hard-gated."""
+    try:
+        worklog.write_entry(paths, worklog.WorklogEntry(
+            task_id=status.id,
+            persona=driver,
+            step="drive",
+            kind=status.kind,
+            role="driver",
+            objective=status.title,
+            reason=reason,
+            started_at=_utcnow_iso(),
+            body=(
+                f"Drove `{status.id}` ({reason}); "
+                f"session {status.sessions}/{status.max_sessions}; "
+                f"kind={status.kind}."
+            ),
+        ))
+    except OSError as exc:
+        print(
+            f"warning: could not write driver worklog entry for "
+            f"{status.id}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _write_task_work_entry(
+    paths: JournalPaths, status: Status, output_path: str | None,
+) -> int:
+    """Write the assigned persona's kind=task work note from
+    ``--output``, returning 0 on success or a non-zero CLI code on
+    refusal. Unlike the driver claim trace, this is a HARD gate: a
+    missing, unreadable, or empty note refuses the done-transition so a
+    task cannot be marked done without leaving the persona's memory
+    record. Stamps ``persona`` from ``status.persona`` (the assigned
+    persona) so the attribution can't be wrong."""
+    if not output_path:
+        print(
+            "error: --output <file> is required to mark a kind=task done "
+            "in a drive (the assigned persona's work note is the ticket to "
+            "advance). Refusing to mark done.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        output_text = Path(output_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"error: cannot read --output {output_path!r}: {exc}. "
+            f"Refusing to mark done.",
+            file=sys.stderr,
+        )
+        return 1
+    if not output_text.strip():
+        print(
+            f"error: --output {output_path!r} is empty; the work note "
+            f"cannot be blank. Refusing to mark done.",
+            file=sys.stderr,
+        )
+        return 1
+    # Write the note BEFORE cmd_release mutates state to done. A disk
+    # failure here must refuse cleanly (return 1) -- matching the
+    # step-done gate -- rather than escape as a traceback out of an
+    # un-guarded main(): the task then stays in_progress and resumable,
+    # and the driver gets an actionable message instead of a stack trace.
+    try:
+        worklog.write_entry(paths, worklog.WorklogEntry(
+            task_id=status.id,
+            persona=status.persona,
+            step="task-work",
+            kind="task",
+            objective=status.title,
+            ended_at=_utcnow_iso(),
+            body=output_text,
+        ))
+    except OSError as exc:
+        print(
+            f"error: could not write the work note for {status.id}: {exc}. "
+            "Refusing to mark done (the task stays in_progress and "
+            "resumable).",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def cmd_claim(args: argparse.Namespace) -> int:
     """Atomically claim a task for this session (the pickup).
 
@@ -486,6 +579,16 @@ def cmd_claim(args: argparse.Namespace) -> int:
             )
             return 1
         # idle or crashed -> claimable (resume / rescue)
+
+    # Classify the pickup for the driver's thin worklog entry (only used
+    # when --driver is given). Captured BEFORE the state mutation below.
+    # DONE/BLOCKED already returned, so the state is PENDING or
+    # IN_PROGRESS (idle/crashed); the ternary short-circuits so ``klass``
+    # is only read when it is defined.
+    claim_reason = (
+        "new" if status.state is State.PENDING
+        else ("resume" if klass == "idle" else "rescue")
+    )
 
     # Budget guard: a task already at its session cap must not be run
     # past it. A crash/clean-stop that left an at-cap task in_progress
@@ -532,6 +635,43 @@ def cmd_claim(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Drive context only: leave the thin driver trace. No --driver (the
+    # plain subscription backend) -> no worklog side-effect at all.
+    if getattr(args, "driver", None):
+        _write_driver_claim_entry(paths, status, claim_reason, args.driver)
+
+    # Drive context only: register this drive session's Slack thread so
+    # tiger-memory's claude_transcript adapter skips its (fat) transcript
+    # -- the per-persona worklog now owns that content (see
+    # docs/per-persona-journal-memory.md section 4). Best-effort: a
+    # registry write failure must not fail an otherwise-successful claim.
+    #
+    # Two ways the thread_ts arrives, explicit beating implicit:
+    #   1. ``--drive-thread`` -- explicit; honored regardless of --driver
+    #      (a caller asking to register means it).
+    #   2. ``TIGERHARNESS_SLACK_THREAD_TS`` env var -- the harness-enforced
+    #      fallback the slack bridge sets on every turn. Gated on
+    #      ``--driver`` so it only fires inside a real drive (where the
+    #      per-persona worklog replaces the transcript); a plain
+    #      subscription turn that happens to claim without --driver must
+    #      NOT suppress its own transcript (there is no worklog to replace
+    #      it). The agent no longer needs to copy the thread_ts by hand.
+    drive_thread = getattr(args, "drive_thread", None)
+    if not drive_thread and getattr(args, "driver", None):
+        drive_thread = os.environ.get("TIGERHARNESS_SLACK_THREAD_TS") or None
+    if drive_thread:
+        try:
+            drive_sessions.register(
+                paths, drive_thread,
+                task_id=status.id, driver=args.driver,
+            )
+        except OSError as exc:
+            print(
+                f"warning: could not register drive session "
+                f"{drive_thread} for {status.id}: {exc}",
+                file=sys.stderr,
+            )
 
     if getattr(args, "format", "text") == "json":
         print(json.dumps({
@@ -588,6 +728,30 @@ def cmd_release(args: argparse.Namespace) -> int:
         print(f"error: invalid --state {args.state!r}", file=sys.stderr)
         return 2
 
+    # Completion gate (drive context only). Marking a kind=task DONE
+    # requires the assigned persona's work note via --output: the note is
+    # the ticket to advance. The note is written to that persona's memory
+    # as the task-work worklog entry. Refusals happen BEFORE any state
+    # mutation, so the task stays in_progress and remains resumable.
+    if (getattr(args, "driver", None)
+            and status.kind == "task"
+            and new_state is State.DONE):
+        rc = _write_task_work_entry(paths, status, args.output)
+        if rc != 0:
+            return rc
+
+    # Completion gate for kind=workflow (drive context only). Marking a
+    # workflow DONE requires the graph walk to have reached __done__ --
+    # i.e. every step that ran left its persona-attributed worklog entry
+    # via `journal step-done`. The per-step notes ARE the gate; --output
+    # is task-only. Refusal happens before any state mutation.
+    if (getattr(args, "driver", None)
+            and status.kind == "workflow"
+            and new_state is State.DONE):
+        rc = _check_workflow_walk_complete(paths, status)
+        if rc != 0:
+            return rc
+
     status.state = new_state
     status.session_ref = None  # detach -> instantly resumable if still in_progress
     if args.next_action is not None:
@@ -596,6 +760,280 @@ def cmd_release(args: argparse.Namespace) -> int:
     _write_status_atomic(paths, status)
 
     print(f"Released {status.id} (state={new_state.value}, detached)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# step-done  (kind=workflow graph-walk gate)
+# See docs/per-persona-journal-memory.md.
+# ---------------------------------------------------------------------------
+
+def _load_orchestration(paths: JournalPaths, task_id: str):
+    """Load + parse a workflow's orchestration.json. Returns the
+    ``Orchestration`` on success or a human-readable error string. The
+    workflow_runner import is lazy (mirrors the compile CLIs) so the
+    pure-task journal paths never pull it in."""
+    from tigerharness.workflow_runner.models import (
+        Orchestration,
+        WorkflowModelError,
+    )
+
+    orch_path = paths.task_dir(task_id) / "orchestration.json"
+    try:
+        data = json.loads(orch_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return (
+            f"no orchestration.json for {task_id!r}; the graph is not "
+            "landed (run the compile sub-protocol first)"
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"cannot read orchestration.json for {task_id!r}: {exc}"
+    try:
+        return Orchestration.from_dict(data)
+    except WorkflowModelError as exc:
+        return f"orchestration.json for {task_id!r} is malformed: {exc}"
+
+
+def _read_step_persona_role(
+    paths: JournalPaths, task_id: str, step_id: str,
+) -> tuple[str | None, str | None]:
+    """Read ``(persona, role)`` from a compiled step file. Returns
+    ``(None, None)`` and prints an error on failure. Reuses the compile
+    machinery's step-file reader (yaml-backed) -- acceptable because
+    step-done is workflow-only, which already requires the compile
+    path. The persona/role come from the compiled file, never from a
+    flag, so a turn cannot mis-file its own memory."""
+    from tigerharness.journal.compile_cli import _read_existing_step
+
+    task_dir = paths.task_dir(task_id)
+    try:
+        step = _read_existing_step(task_dir, step_id)
+    except Exception as exc:  # ValueError / WorkflowModelError / OSError
+        print(
+            f"error: cannot read step file for {step_id!r}: {exc}",
+            file=sys.stderr,
+        )
+        return None, None
+    return step.persona, step.role
+
+
+def cmd_step_done(args: argparse.Namespace) -> int:
+    """Advance a kind=workflow graph walk by one step (the per-step gate).
+
+    The workflow analogue of the kind=task release gate: a step turn
+    cannot advance the walk without leaving the acting persona's worklog
+    entry. The persona/role are read from the compiled step file
+    (``steps/<id>.md``), never typed free-hand, so a turn can't mis-file
+    its own memory. The walk cursor in ``walk.json`` is validated
+    in-order, so a session can't skip a step or fabricate progress.
+
+    Flow: validate kind=workflow + compile_phase=complete + (optional)
+    session-ref; require a non-empty ``--output`` (the note is the
+    ticket); load orchestration.json + walk.json (lazy-init the cursor to
+    the entrypoint on the first call); verify ``--step`` is the expected
+    current step and the walk isn't already terminal; resolve the edge
+    target for ``--verdict``; read the step's persona/role; write the
+    worklog entry FIRST (so a crash can't advance without a note), then
+    advance the cursor.
+    """
+    paths = _paths_from_args(args)
+    status = _read_status_or_none(paths, args.task)
+    if status is None:
+        print(f"error: no task with id {args.task!r} in {paths.active}",
+              file=sys.stderr)
+        return 1
+    if status.kind != "workflow":
+        print(
+            f"error: step-done is workflow-only; task {status.id!r} is "
+            f"kind={status.kind} (use `release` for a kind=task).",
+            file=sys.stderr,
+        )
+        return 1
+    from tigerharness.journal.models import CompilePhase
+    if status.compile_phase != CompilePhase.COMPLETE:
+        phase = status.compile_phase.value if status.compile_phase else "n/a"
+        print(
+            f"error: task {status.id!r} is compile_phase={phase}; step-done "
+            "needs a landed graph (compile_phase=complete).",
+            file=sys.stderr,
+        )
+        return 1
+    if args.session_ref is not None and status.session_ref != args.session_ref:
+        print(
+            f"error: --session-ref {args.session_ref!r} does not match the "
+            f"current holder {status.session_ref!r}; refusing to advance.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # The note is the ticket: require a non-empty --output before any
+    # walk mutation. (--output is argparse-required, so it is never None.)
+    try:
+        output_text = Path(args.output).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"error: cannot read --output {args.output!r}: {exc}. Refusing "
+            "to advance.",
+            file=sys.stderr,
+        )
+        return 1
+    if not output_text.strip():
+        print(
+            f"error: --output {args.output!r} is empty; the step note "
+            "cannot be blank. Refusing to advance.",
+            file=sys.stderr,
+        )
+        return 1
+
+    orch_or_err = _load_orchestration(paths, status.id)
+    if isinstance(orch_or_err, str):
+        print(f"error: {orch_or_err}", file=sys.stderr)
+        return 1
+    orchestration = orch_or_err
+    if args.step not in orchestration.steps:
+        print(
+            f"error: step {args.step!r} is not in the compiled graph "
+            f"({sorted(orchestration.steps)}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Load or lazy-init the walk cursor.
+    try:
+        state = walk.read(paths, status.id)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            f"error: cannot read walk.json for {status.id}: {exc}. Refusing "
+            "to advance.",
+            file=sys.stderr,
+        )
+        return 1
+    if state is None:
+        state = walk.initial(status.id, orchestration.entrypoint)
+
+    if state.current in walk.SENTINELS:
+        print(
+            f"error: walk already terminal (current={state.current!r}); "
+            "refusing further step-done.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.step != state.current:
+        print(
+            f"error: out-of-order step: the walk is at {state.current!r} but "
+            f"--step is {args.step!r}; drive the current step (or check the "
+            "graph).",
+            file=sys.stderr,
+        )
+        return 1
+
+    edge = orchestration.edges.get(args.step)
+    if edge is None:
+        print(
+            f"error: the compiled graph has no edges for step {args.step!r}; "
+            "orchestration.json may be malformed.",
+            file=sys.stderr,
+        )
+        return 1
+    next_step = {
+        "APPROVE": edge.on_approve,
+        "REVISE": edge.on_revise,
+        "BLOCK": edge.on_block,
+    }[args.verdict]
+
+    persona, role = _read_step_persona_role(paths, status.id, args.step)
+    if persona is None:
+        return 1  # _read_step_persona_role printed the error
+
+    # Write the worklog entry FIRST (the note is the ticket); only then
+    # advance the cursor. If the worklog write fails we do NOT advance, so
+    # the session retries the same step rather than losing the note. The
+    # reverse window (note written, advance fails) at worst duplicates a
+    # note on retry -- preferable to a missed one.
+    try:
+        stamped = worklog.write_entry(paths, worklog.WorklogEntry(
+            task_id=status.id,
+            persona=persona,
+            step=args.step,
+            kind="workflow",
+            role=role,
+            objective=status.title,
+            verdict=args.verdict,
+            ended_at=_utcnow_iso(),
+            body=output_text,
+        ))
+    except OSError as exc:
+        print(
+            f"error: could not write worklog entry for step {args.step!r}: "
+            f"{exc}. Walk not advanced.",
+            file=sys.stderr,
+        )
+        return 1
+
+    new_state = walk.advance(
+        state, step=args.step, verdict=args.verdict, next_step=next_step,
+    )
+    walk.write(paths, new_state)
+
+    terminal = next_step in walk.SENTINELS
+    if getattr(args, "format", "text") == "json":
+        print(json.dumps({
+            "task_id": status.id,
+            "step": args.step,
+            "verdict": args.verdict,
+            "persona": persona,
+            "role": role,
+            "next": next_step,
+            "terminal": terminal,
+            "worklog_seq": stamped.seq,
+            "worklog_path": str(stamped.path),
+        }, indent=2))
+    else:
+        print(f"step-done: {args.step} ({args.verdict}) by {persona}")
+        print(f"  worklog: {stamped.path}")
+        if next_step == walk.DONE:
+            print("  next: __done__ (walk complete -- release --state done)")
+        elif next_step == walk.ESCALATE:
+            print(
+                "  next: __escalate__ (escalated -- release --state blocked)"
+            )
+        else:
+            print(f"  next: {next_step}")
+    return 0
+
+
+def _check_workflow_walk_complete(
+    paths: JournalPaths, status: Status,
+) -> int:
+    """Backstop for marking a kind=workflow done in a drive: the graph
+    walk must have reached ``__done__`` (every step that ran left its
+    persona-attributed worklog entry via step-done). Returns 0 to allow,
+    non-zero to refuse (with the error already printed) so a workflow
+    can't be closed with steps' memory unrecorded."""
+    try:
+        state = walk.read(paths, status.id)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            f"error: cannot read walk.json for {status.id}: {exc}. Refusing "
+            "to mark done.",
+            file=sys.stderr,
+        )
+        return 1
+    if state is None:
+        print(
+            "error: workflow has no walk state (no `journal step-done` calls "
+            "yet); refusing to mark done. Drive the graph to __done__ first.",
+            file=sys.stderr,
+        )
+        return 1
+    if state.current != walk.DONE:
+        print(
+            f"error: workflow walk is at {state.current!r}, not __done__; "
+            "refusing to mark done. Finish the remaining steps via `journal "
+            "step-done`, or release --state blocked to escalate.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -773,6 +1211,28 @@ def build_parser() -> argparse.ArgumentParser:
             "(and thus claimable). Defaults like sweep's."
         ),
     )
+    cl.add_argument(
+        "--driver", default=None,
+        help=(
+            "Persona name of the drive-journal session. When given, a "
+            "thin driver worklog entry (the 'I drove this' record) is "
+            "written to that persona's memory. Omit for the plain "
+            "subscription backend (no worklog side-effect)."
+        ),
+    )
+    cl.add_argument(
+        "--drive-thread", default=None,
+        help=(
+            "Slack thread_ts of the drive-journal session. When given, the "
+            "thread is recorded to the drive-session registry so "
+            "tiger-memory skips this drive's transcript (the per-persona "
+            "worklog owns that content). Usually unnecessary under the "
+            "slack bridge: with --driver set, the thread_ts is read "
+            "automatically from the TIGERHARNESS_SLACK_THREAD_TS env var "
+            "the bridge sets. Pass it explicitly only to override that or "
+            "outside the bridge."
+        ),
+    )
     cl.set_defaults(func=cmd_claim)
 
     rl = sub.add_parser(
@@ -794,7 +1254,64 @@ def build_parser() -> argparse.ArgumentParser:
         "--session-ref", default=None,
         help="If given, must match the current holder before releasing.",
     )
+    rl.add_argument(
+        "--driver", default=None,
+        help=(
+            "Persona name of the drive-journal session. Enables the "
+            "per-persona memory side-effects: marking a kind=task done "
+            "then requires --output (the assigned persona's work note). "
+            "Omit for the plain subscription backend."
+        ),
+    )
+    rl.add_argument(
+        "--output", default=None,
+        help=(
+            "Path to the assigned persona's work note (markdown). Required "
+            "to mark a kind=task done in a drive; written to that "
+            "persona's memory as the task-work worklog entry."
+        ),
+    )
     rl.set_defaults(func=cmd_release)
+
+    sd = sub.add_parser(
+        "step-done",
+        help=(
+            "Advance a kind=workflow graph walk by one step: write the "
+            "acting persona's worklog entry (persona/role read from the "
+            "compiled step file) and move the walk cursor to the verdict's "
+            "edge target. The per-step counterpart to the kind=task release "
+            "completion gate."
+        ),
+    )
+    sd.add_argument("--task", required=True)
+    sd.add_argument(
+        "--step", required=True,
+        help=(
+            "The step id just completed. Must be the walk's current step "
+            "(the entrypoint on the first call); out-of-order is refused."
+        ),
+    )
+    sd.add_argument(
+        "--verdict", required=True, choices=["APPROVE", "REVISE", "BLOCK"],
+        help=(
+            "Routing verdict; selects the edge "
+            "(on_approve / on_revise / on_block) to the next step."
+        ),
+    )
+    sd.add_argument(
+        "--output", required=True,
+        help=(
+            "Path to the acting persona's step note (markdown). Required "
+            "and must be non-empty: the note is the ticket to advance. "
+            "Written to that persona's memory as the worklog entry."
+        ),
+    )
+    sd.add_argument(
+        "--session-ref", default=None,
+        help="If given, must match the current holder before advancing.",
+    )
+    sd.add_argument("--format", choices=["text", "json"], default="text")
+    sd.set_defaults(func=cmd_step_done)
 
     _build_compile_subparsers(sub)
 

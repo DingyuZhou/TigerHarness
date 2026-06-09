@@ -39,7 +39,7 @@ import logging
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +108,9 @@ class TeamBridgeContext:
     default_persona: str               # must be in personas
     tiger_memory_cli: str = ""
     persona_aliases: dict[str, list[str]] | None = None  # name -> aliases
+    # "rebuild" (legacy claude -p, default) | "off" (in-session sweep
+    # protocol owns it). See config.normalize_tiger_memory_trigger.
+    tiger_memory_trigger: str = "rebuild"
 
     @property
     def is_multi_persona(self) -> bool:
@@ -328,7 +331,7 @@ class SlackBridge:
                 try:
                     result = await run_with_retry(
                         self._backend,
-                        persona.agent_config,
+                        _with_thread_env(persona.agent_config, thread_key),
                         prompt,
                         session=state.session,
                         max_attempts=3,
@@ -466,11 +469,15 @@ class SlackBridge:
             else:
                 state = _ThreadState(session=session, persona=persona_name)
                 self._threads[key] = state
-                _trigger_tiger_memory_rebuild(
-                    self._team.personas[persona_name],
-                    self._team.tiger_memory_cli,
-                    key,
-                )
+                # "off" -> the in-session sweep protocol owns the rebuild;
+                # the daemon fires no legacy claude -p. Default "rebuild"
+                # keeps the legacy trigger so existing deploys are unchanged.
+                if self._team.tiger_memory_trigger == "rebuild":
+                    _trigger_tiger_memory_rebuild(
+                        self._team.personas[persona_name],
+                        self._team.tiger_memory_cli,
+                        key,
+                    )
 
         if loser_session is not None:  # pragma: no cover — concurrency race
             try:
@@ -540,6 +547,29 @@ def _append_bridge_context(prompt: str, thread_ts: str, channel: str | None) -> 
     if channel:
         lines.append(f"slack_channel: {channel}")
     return f"{prompt}\n\n[bridge-context]\n" + "\n".join(lines)
+
+
+def _with_thread_env(config: AgentConfig, thread_ts: str) -> AgentConfig:
+    """Return a per-turn copy of *config* carrying this thread's Slack
+    ``thread_ts`` in ``extra["env"]`` so the claude_p backend injects it
+    into the turn's subprocess as ``TIGERHARNESS_SLACK_THREAD_TS``.
+
+    This is the harness-enforced half of drive-transcript suppression:
+    an in-session ``journal claim --driver <p>`` reads that env var as a
+    fallback for ``--drive-thread`` (see ``journal.cli.cmd_claim`` and
+    ``docs/per-persona-journal-memory.md`` section 4), so a Slack-driven
+    drive's transcript is registered for suppression even if the agent
+    omits the flag. Set on every turn (inert unless the turn becomes a
+    drive); a copy, never a mutation, so the persona's shared config and
+    concurrent turns stay independent."""
+    existing_env = config.extra.get("env") or {}
+    return replace(
+        config,
+        extra={
+            **config.extra,
+            "env": {**existing_env, "TIGERHARNESS_SLACK_THREAD_TS": thread_ts},
+        },
+    )
 
 
 def _is_user_dm(event: dict[str, Any]) -> bool:
@@ -683,6 +713,7 @@ def _single_persona_team_context(
         personas={_SINGLE_PERSONA_NAME: slot},
         default_persona=_SINGLE_PERSONA_NAME,
         tiger_memory_cli=cfg.tiger_memory_cli,
+        tiger_memory_trigger=cfg.tiger_memory_trigger,
     )
 
 

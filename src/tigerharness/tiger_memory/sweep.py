@@ -38,6 +38,10 @@ DEFAULT_STALENESS_FLOOR_HOURS = 24.0
 # How long a claim is honoured before a later session may steal it (a
 # crashed claimant). Mirrors the drive-journal stuck-timeout default.
 DEFAULT_LEASE_SECONDS = 1800.0
+# Per-wake cap on how many stale personas one trigger processes, so a big
+# backlog spreads across several session-bootstrap wakes instead of making
+# one user wait. Pass ``max_personas=None`` for unbounded (all pending).
+DEFAULT_MAX_PERSONAS = 3
 
 
 @dataclass(frozen=True)
@@ -247,10 +251,11 @@ def record_persona_done(team_memories_dir: Path, persona: str) -> None:
 def plan_team_sweep(
     team_memories_dir: Path,
     *,
-    max_personas: int | None = None,
+    max_personas: int | None = DEFAULT_MAX_PERSONAS,
 ) -> SweepPlan:
     """Sequence the roster for THIS wake: skip personas already done in the
-    in-flight run, then take at most *max_personas* of the rest.
+    in-flight run, then take at most *max_personas* of the rest
+    (default ``DEFAULT_MAX_PERSONAS``; ``None`` for unbounded).
 
     Pure sequencing (non-AI): the per-persona rebuild — a no-op when the
     persona has no new sessions — runs in the executor (slice c).
@@ -280,7 +285,7 @@ def maybe_sweep_roster(
     token: str,
     floor_hours: float = DEFAULT_STALENESS_FLOOR_HOURS,
     lease_seconds: float = DEFAULT_LEASE_SECONDS,
-    max_personas: int | None = None,
+    max_personas: int | None = DEFAULT_MAX_PERSONAS,
 ) -> SweepDecision:
     """The shared persona-session-bootstrap hook (B3). Tries to claim the
     team sweep; on success returns the roster `plan` for the caller to

@@ -24,6 +24,7 @@ def test_loads_minimal(minimal_config_yaml: Path) -> None:
     assert cfg.store.root.is_absolute()
     # Default budgets exposed for callers
     assert cfg.budgets.max_prompt_content_chars == 120_000
+    assert cfg.budgets.max_staged_content_chars == 300_000
     assert len(cfg.sources) == 1 and cfg.sources[0].kind == "claude_code"
     # Defaults take effect.
     assert cfg.briefing.walking.dailies_working_days == 7
@@ -414,6 +415,24 @@ def test_cap_explicit_overrides(tmp_path: Path) -> None:
     cfg = load_config(cfg_path)
     assert cfg.cap.max_sessions_per_rebuild == 3
     assert cfg.cap.max_usd_per_rebuild == 1.5
+
+
+def test_content_budgets_explicit_overrides(tmp_path: Path) -> None:
+    """Both transcript-size budgets are read from YAML (previously
+    ``max_prompt_content_chars`` had a default but was never read)."""
+    cfg_path = tmp_path / "budgets.yaml"
+    cfg_path.write_text(
+        f"agent:\n  name: T\n  role: t\n"
+        f"store:\n  root: {tmp_path}/memory\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+        f"budgets:\n"
+        f"  max_prompt_content_chars: 50000\n"
+        f"  max_staged_content_chars: 90000\n"
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.budgets.max_prompt_content_chars == 50_000
+    assert cfg.budgets.max_staged_content_chars == 90_000
 
 
 def test_collapse_defaults_off(minimal_config_yaml: Path) -> None:

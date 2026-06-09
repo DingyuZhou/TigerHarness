@@ -46,6 +46,7 @@ from .bridge import (
     TeamBridgeContext,
     build_persona_agent_config,
 )
+from .config import normalize_tiger_memory_trigger
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +285,9 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
     # Optional overrides
     env_rel = str(spec.get("env") or "configs/.env")
     agent_cwd = str(spec.get("agent_cwd") or ".")
+    tiger_memory_trigger = normalize_tiger_memory_trigger(
+        spec.get("tiger_memory_trigger"), where=where
+    )
 
     # Tokens
     env_path = _resolve(env_rel, team_dir)
@@ -311,6 +315,7 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
         default_persona=default_persona,
         tiger_memory_cli=env_vars.get("TIGER_MEMORY_CLI", ""),
         persona_aliases=persona_aliases or None,
+        tiger_memory_trigger=tiger_memory_trigger,
     )
     return LaneConfig(name=lane_name, team_ctx=team_ctx, state_path=state_path)
 

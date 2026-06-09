@@ -11,6 +11,10 @@ Capabilities
   ``--allowedTools``.
 - Cancellation by SIGINT to the subprocess.
 - Permission modes via ``cfg.extra["permission_mode"]``.
+- Per-call subprocess env additions via ``cfg.extra["env"]`` (a
+  ``dict[str, str]``), merged over ``os.environ`` and the backend's
+  own ``env`` so a caller can pass turn-scoped context without touching
+  the shared process environment.
 
 Limitations
 -----------
@@ -134,10 +138,17 @@ class ClaudePBackend:
         argv = self._build_argv(config, session)
         stdin_payload = self._build_stdin_payload(prompt, session)
         seed_transcript = _input_to_transcript(prompt)
+        # Per-call env, most-specific last: process env < backend env <
+        # this call's ``cfg.extra["env"]``. The per-call layer is how a
+        # caller passes turn-scoped context (e.g. the slack bridge's
+        # ``TIGERHARNESS_SLACK_THREAD_TS``) into the subprocess without
+        # mutating the shared ``os.environ`` -- each subprocess gets its
+        # own dict, so concurrent turns never race.
+        call_env = config.extra.get("env") or {}
         return _ClaudePStreamHandle(
             argv=argv,
             stdin_payload=stdin_payload,
-            env={**os.environ, **(self.env or {})},
+            env={**os.environ, **(self.env or {}), **call_env},
             cwd=self.cwd,
             session=session,
             seed_transcript=seed_transcript,

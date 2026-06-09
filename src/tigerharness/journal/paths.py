@@ -89,6 +89,18 @@ class JournalPaths:
     def operating_md(self) -> Path:
         return self.root / "OPERATING.md"
 
+    @property
+    def drive_sessions_json(self) -> Path:
+        """Registry of journal *drive* sessions' Slack ``thread_ts`` values,
+        for tiger-memory double-count suppression. A top-level dotfile
+        under the journal root -- not per-task, because a single drive
+        session spans many tasks. Written best-effort at ``journal claim``;
+        read by the ``claude_transcript`` source adapter to skip a drive's
+        own transcript (the worklog already owns that content). See
+        ``journal.drive_sessions`` and
+        ``docs/per-persona-journal-memory.md`` (section 4)."""
+        return self.root / ".drive-sessions.json"
+
     # ---- per-task ----
 
     def task_dir(self, task_id: str, *, archived: bool = False) -> Path:
@@ -109,6 +121,25 @@ class JournalPaths:
 
     def artifacts(self, task_id: str, *, archived: bool = False) -> Path:
         return self.task_dir(task_id, archived=archived) / "artifacts"
+
+    def worklog(self, task_id: str, *, archived: bool = False) -> Path:
+        """Per-turn worklog directory for a task. Holds the
+        persona-attributed ``NNNN-<persona>-<step>.md`` entries that
+        tiger-memory ingests (see ``journal.worklog`` and
+        ``docs/per-persona-journal-memory.md``). Survives archival
+        because it hangs off ``task_dir``."""
+        return self.task_dir(task_id, archived=archived) / "worklog"
+
+    def walk_json(self, task_id: str, *, archived: bool = False) -> Path:
+        """Graph-walk cursor sidecar for a kind=workflow task. Tracks the
+        step the walk is currently at so ``journal step-done`` can enforce
+        in-order advancement and the release completion-check can require
+        the walk reached ``__done__`` before a workflow is marked done.
+
+        A sidecar -- *not* status.json, whose schema rejects unknown keys
+        (see ``journal.models.Status.from_dict``). Survives archival
+        because it hangs off ``task_dir``. See ``journal.walk``."""
+        return self.task_dir(task_id, archived=archived) / "walk.json"
 
     # ---- ensure / inspect ----
 

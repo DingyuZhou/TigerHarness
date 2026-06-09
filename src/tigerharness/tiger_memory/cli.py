@@ -15,17 +15,24 @@ Subcommands (see design doc §3.3):
         raw           raw-transcript locator
         search        grep (default) or rag mode
         state         show JSON state snapshot
+
+    Team sweep (B3 gating, non-AI -- drive the in-session protocol):
+        sweep-plan      claim the team sweep; print targets for this wake
+        sweep-done      mark one persona done in the in-flight run
+        sweep-complete  advance the watermark + end the run
+        sweep-release   drop the claim without advancing the watermark
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config, ConfigError, load_config
 from .store import Store
+from .sweep import DEFAULT_MAX_PERSONAS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,6 +116,51 @@ def main(argv: list[str] | None = None) -> int:
     p_ing.add_argument("--uuid", required=True,
                        help="conversation_uuid from the plan manifest.")
 
+    # ----- B3 team-sweep gating convenience CLIs (non-AI) -----
+    # Thin wrappers over tiger_memory.sweep so an interactive persona
+    # session drives the gating (see docs/tiger-memory-sweep-protocol.md)
+    # without inline Python. team_memories_dir = cfg.store.root.parent.
+    p_swp = sub.add_parser(
+        "sweep-plan",
+        help="Try to claim the team sweep at session bootstrap; print the "
+             "decision + roster targets to process this wake (non-AI).",
+    )
+    p_swp.add_argument("--token", default=None,
+                       help="Stable claim token (default: random uuid). Pass "
+                            "the interactive session id so a crashed claim "
+                            "stays re-stealable across resumes.")
+    p_swp.add_argument("--max-personas", type=int, default=DEFAULT_MAX_PERSONAS,
+                       help="Per-wake cap on personas processed this trigger "
+                            f"(default {DEFAULT_MAX_PERSONAS}; pass a larger "
+                            "number to process more per wake).")
+    p_swp.add_argument("--floor-hours", type=float, default=None,
+                       help="Staleness floor override (default 24h).")
+    p_swp.add_argument("--lease-seconds", type=float, default=None,
+                       help="Soft-lease seconds before a claim is stealable.")
+    p_swp.add_argument("--now", default=None,
+                       help="ISO timestamp override (testing/determinism).")
+
+    p_swd = sub.add_parser(
+        "sweep-done",
+        help="Mark one persona completed in the in-flight sweep run.",
+    )
+    p_swd.add_argument("--persona", required=True,
+                       help="Persona name that was just summarized.")
+
+    p_swc = sub.add_parser(
+        "sweep-complete",
+        help="Advance the team watermark + end the run (all due personas "
+             "processed). Makes the next trigger a cheap no-op.",
+    )
+    p_swc.add_argument("--now", default=None,
+                       help="ISO timestamp override (testing/determinism).")
+
+    sub.add_parser(
+        "sweep-release",
+        help="Drop the claim WITHOUT advancing the watermark (per-wake cap "
+             "hit; the next wake resumes the remaining personas).",
+    )
+
     args = parser.parse_args(argv)
 
     try:
@@ -151,6 +203,21 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_plan(cfg, store, args.max_sessions)
     if args.cmd == "ingest-summary":
         return _cmd_ingest_summary(cfg, store, args.uuid)
+    if args.cmd == "sweep-plan":
+        return _cmd_sweep_plan(
+            cfg,
+            token=args.token,
+            max_personas=args.max_personas,
+            floor_hours=args.floor_hours,
+            lease_seconds=args.lease_seconds,
+            now=args.now,
+        )
+    if args.cmd == "sweep-done":
+        return _cmd_sweep_done(cfg, args.persona)
+    if args.cmd == "sweep-complete":
+        return _cmd_sweep_complete(cfg, now=args.now)
+    if args.cmd == "sweep-release":
+        return _cmd_sweep_release(cfg)
 
     parser.print_help()
     return 2
@@ -228,6 +295,91 @@ def _cmd_ingest_summary(cfg: Config, store: Store, uuid: str) -> int:
     Path(item["prompt_path"]).unlink(missing_ok=True)
     print(f"ingested {result.conversation_uuid} "
           f"(+{result.must_memorize_added} must-memorize)")
+    return 0
+
+
+# ----- B3 team-sweep gating helpers ----------------------------------------
+
+
+def _team_memories_dir(cfg: Config) -> Path:
+    """The team-scoped sweep-state dir = the parent of this persona's store
+    (``<team>/memories/``). It is the same path for every persona on the
+    team, which is what makes the sweep claim team-scoped."""
+    return cfg.store.root.parent
+
+
+def _parse_now(raw: str | None) -> datetime:
+    """UTC now, or an ISO override (tolerant of a trailing ``Z``)."""
+    if not raw:
+        return datetime.now(timezone.utc)
+    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
+def _cmd_sweep_plan(
+    cfg: Config,
+    *,
+    token: str | None,
+    max_personas: int | None,
+    floor_hours: float | None,
+    lease_seconds: float | None,
+    now: str | None,
+) -> int:
+    import uuid
+
+    from . import sweep
+
+    kwargs: dict[str, float] = {}
+    if floor_hours is not None:
+        kwargs["floor_hours"] = floor_hours
+    if lease_seconds is not None:
+        kwargs["lease_seconds"] = lease_seconds
+    claim_token = token or uuid.uuid4().hex
+    decision = sweep.maybe_sweep_roster(
+        _team_memories_dir(cfg),
+        now=_parse_now(now),
+        token=claim_token,
+        max_personas=max_personas,
+        **kwargs,
+    )
+    plan = decision.plan
+    payload = {
+        "ran": decision.ran,
+        "reason": decision.reason,
+        # Echo the token actually used so a session that let us mint a
+        # uuid can re-claim its own hold on a later wake within the run.
+        "token": claim_token,
+        "targets": [
+            {"name": t.name, "config_path": str(t.config_path)}
+            for t in (plan.targets if plan else [])
+        ],
+        "remaining": plan.remaining if plan else 0,
+        "all_personas": plan.all_personas if plan else 0,
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _cmd_sweep_done(cfg: Config, persona: str) -> int:
+    from . import sweep
+
+    sweep.record_persona_done(_team_memories_dir(cfg), persona)
+    print(f"recorded {persona} done")
+    return 0
+
+
+def _cmd_sweep_complete(cfg: Config, *, now: str | None) -> int:
+    from . import sweep
+
+    sweep.mark_sweep_complete(_team_memories_dir(cfg), _parse_now(now))
+    print("sweep complete; watermark advanced")
+    return 0
+
+
+def _cmd_sweep_release(cfg: Config) -> int:
+    from . import sweep
+
+    sweep.release_sweep_claim(_team_memories_dir(cfg))
+    print("claim released; watermark unchanged")
     return 0
 
 

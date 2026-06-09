@@ -222,6 +222,114 @@ class TestBuildAdaptersMultiKind:
         ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
         assert ct.max_age_days == 30
 
+    def _journal_cfg(self, tmp_path: Path, *, team_line: str):
+        from tigerharness.tiger_memory.config import load_config
+        cfg_path = tmp_path / "cfg_journal.yaml"
+        cfg_path.write_text(dedent(f"""\
+            agent: {{name: T, role: T}}
+            store: {{root: {tmp_path}/memory}}
+            sources:
+              - kind: journal_worklog
+                journal_root: {tmp_path}/myteam/journal/
+                persona: Rukawa
+                {team_line}
+            summarizer: {{backend: anthropic, model: claude-sonnet-4-6, prompts: default/v1}}
+            rebuild: {{lock_path: {tmp_path}/lock}}
+        """))
+        return load_config(cfg_path)
+
+    def test_builds_journal_worklog_adapter_explicit_team(self, tmp_path: Path):
+        from tigerharness.tiger_memory.sources import JournalWorklogAdapter
+        cfg = self._journal_cfg(tmp_path, team_line='team: tigers')
+        adapters = _build_adapters(cfg)
+        jw = next(a for a in adapters if isinstance(a, JournalWorklogAdapter))
+        assert jw.persona == "Rukawa"
+        assert jw.team == "tigers"
+        assert jw.journal_root == (tmp_path / "myteam" / "journal")
+
+    def test_journal_worklog_team_defaults_from_root_parent(
+        self, tmp_path: Path,
+    ):
+        from tigerharness.tiger_memory.sources import JournalWorklogAdapter
+        cfg = self._journal_cfg(tmp_path, team_line="")
+        adapters = _build_adapters(cfg)
+        jw = next(a for a in adapters if isinstance(a, JournalWorklogAdapter))
+        # journal_root parent is .../myteam/journal -> parent name "myteam".
+        assert jw.team == "myteam"
+
+    def test_journal_worklog_blank_team_defaults_from_root_parent(
+        self, tmp_path: Path,
+    ):
+        from tigerharness.tiger_memory.sources import JournalWorklogAdapter
+        cfg = self._journal_cfg(tmp_path, team_line='team: ""')
+        adapters = _build_adapters(cfg)
+        jw = next(a for a in adapters if isinstance(a, JournalWorklogAdapter))
+        assert jw.team == "myteam"
+
+    def test_journal_worklog_relative_root_anchored_to_config_dir(
+        self, tmp_path: Path,
+    ):
+        from tigerharness.tiger_memory.sources import JournalWorklogAdapter
+        cfg_dir = tmp_path / "team" / "memories" / "p"
+        cfg_dir.mkdir(parents=True)
+        cfg_path = cfg_dir / "cfg.yaml"
+        cfg_path.write_text(dedent(f"""\
+            agent: {{name: p, role: T}}
+            store: {{root: .}}
+            sources:
+              - kind: journal_worklog
+                journal_root: ../../journal/
+                persona: Rukawa
+            summarizer: {{backend: anthropic, model: claude-sonnet-4-6, prompts: default/v1}}
+            rebuild: {{lock_path: {tmp_path}/lock}}
+        """))
+        cfg = load_config(cfg_path)
+        adapters = _build_adapters(cfg)
+        jw = next(a for a in adapters if isinstance(a, JournalWorklogAdapter))
+        # ../../journal/ from .../team/memories/p -> .../team/journal
+        assert jw.journal_root == (tmp_path / "team" / "journal").resolve()
+        assert jw.team == "team"
+
+    def test_no_journal_source_means_no_drive_suppression(self, tmp_path: Path):
+        # A claude_code-only config: no drive-session registry wired ->
+        # the adapter's drive_sessions_json stays None (suppression off).
+        from tigerharness.tiger_memory.sources.claude_transcript import (
+            ClaudeTranscriptAdapter,
+        )
+        cfg = self._basic_cfg(tmp_path)
+        adapters = _build_adapters(cfg)
+        ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
+        assert ct.drive_sessions_json is None
+
+    def test_journal_source_wires_drive_registry_into_transcript(
+        self, tmp_path: Path,
+    ):
+        # claude_code + journal_worklog co-configured: the transcript
+        # adapter learns the drive-session registry path (derived from the
+        # journal root) so it can suppress this team's drives.
+        from tigerharness.tiger_memory.sources.claude_transcript import (
+            ClaudeTranscriptAdapter,
+        )
+        cfg_path = tmp_path / "cfg_both.yaml"
+        cfg_path.write_text(dedent(f"""\
+            agent: {{name: T, role: T}}
+            store: {{root: {tmp_path}/memory}}
+            sources:
+              - kind: claude_code
+                project_path: {tmp_path}/proj/
+              - kind: journal_worklog
+                journal_root: {tmp_path}/myteam/journal/
+                persona: Rukawa
+            summarizer: {{backend: anthropic, model: claude-sonnet-4-6, prompts: default/v1}}
+            rebuild: {{lock_path: {tmp_path}/lock}}
+        """))
+        cfg = load_config(cfg_path)
+        adapters = _build_adapters(cfg)
+        ct = next(a for a in adapters if isinstance(a, ClaudeTranscriptAdapter))
+        assert ct.drive_sessions_json == (
+            tmp_path / "myteam" / "journal" / ".drive-sessions.json"
+        )
+
 
 class TestCascadeExceptions:
     def test_daily_rollup_exception_continues(self, tmp_path: Path):

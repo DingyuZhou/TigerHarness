@@ -54,9 +54,15 @@ from tigerharness.journal.paths import JournalPaths
 # (matching neither current nor a prior ship) is left untouched. **When
 # you change OPERATING_MD, append the OLD rendered content's sha256 here.**
 _PRIOR_OPERATING_HASHES = {
-    # cascade-first redesign (2026-06-08): prior = the template shipped
-    # through origin/main before the rewrite.
+    # Each entry is a previously-shipped rendered OPERATING.md an existing
+    # journal may still have on disk; all refresh to the current (merged
+    # cascade + per-persona-memory) template.
+    # pre-redesign template (origin/main before the cascade rewrite) --
+    # what Shohoku's journal has on disk now.
     "fe942cf538e662ce7fd4de854e38023c64f11a4a197e14caff2594ed4dfbbf1c",
+    # per-persona-memory template (origin/main after PR #43/#44, before the
+    # cascade redesign merged in).
+    "7446e45e52745ae31548a192801173bacb01e36368b713dd8250eae1d1838ce8",
 }
 
 

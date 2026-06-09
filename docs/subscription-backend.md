@@ -19,6 +19,12 @@ subscription instead of token-billed API usage.
 > follow-ups section near the end). User-facing summary lives in
 > [`docs/journal.md`](journal.md); workflow-mode details in
 > [`docs/journal-workflow-mode.md`](journal-workflow-mode.md).
+>
+> **Per-persona memory (2026-06-08).** Journal-driven work now feeds
+> **each persona's own** tiger-memory store, not just the driver's, via
+> per-turn worklog records written by the journal gates. See the
+> "Per-persona memory" section below and the design doc
+> [`per-persona-journal-memory.md`](per-persona-journal-memory.md).
 
 ## Why this exists
 
@@ -147,14 +153,16 @@ separate process, cron job, or systemd unit.
 ```
 teams/<Team>/journal/
     OPERATING.md              # the protocol (committed, vendor-neutral)
+    .drive-sessions.json      # drive-session registry: thread_ts -> task; tells tiger-memory to skip a drive's fat transcript
     active/
         <task-id>/
             task.md           # your PRD, verbatim
             status.json       # the state machine (single source of truth)
             progress.md       # append-only log, human + AI readable
+            worklog/          # per-turn, persona-attributed notes -- the per-persona memory record (gates-only writer)
             artifacts/        # whatever the task produces or references
     done/
-        <task-id>/            # finished tasks moved here by the next drive-journal sweep
+        <task-id>/            # finished tasks moved here by the next drive-journal sweep (worklog/ travels with it)
 ```
 
 This is the `kind=task` shape. A `kind=workflow` task instead carries
@@ -292,6 +300,55 @@ or crashed session shows up as stale — and so a *fresh* heartbeat
 signals to a *later* invocation that another session owns this task
 right now and should be left alone. The heartbeat doubles as a soft
 lease without an explicit lease field.
+
+## Per-persona memory (the worklog)
+
+A drive runs entirely inside **one** interactive session, which adopts
+each persona in-session via the four-line preamble. Left alone,
+tiger-memory would attribute that whole transcript to a single owner —
+so a specialist's work would land in the **driver's** store, never its
+own. The fix is to drive memory off the journal's **structured
+records** instead of the raw transcript:
+
+- **Worklog.** Every persona turn ends by handing its output to a
+  journal gate, which writes one markdown file under
+  `active/<task-id>/worklog/NNNN-<persona>-<step>.md`. The frontmatter
+  `persona` is **stamped by code** — from `status.json`'s assigned
+  persona (`kind=task`) or the compiled step file / `compile_personas`
+  map (`kind=workflow`) — never typed free-hand, so attribution can't
+  be wrong. *The note is the ticket to advance:* the gate refuses to
+  move the work forward without a non-empty note, so a persona's memory
+  of the work it did can't go missing.
+- **The gates.** `journal claim --driver <p>` writes a thin "I drove
+  this" trace to the driver's store and registers the drive — the drive's
+  `thread_ts` is read automatically from the `TIGERHARNESS_SLACK_THREAD_TS`
+  env var the bridge stamps on every turn (an explicit `--drive-thread
+  <ts>` still wins if passed). `journal release --driver <p> --state done
+  --output <note>` files the assigned persona's work note (`kind=task`).
+  `journal step-done --task ... --step ... --verdict ... --output
+  <note>` files each step persona's note and advances the graph walk
+  (`kind=workflow`). `land-compile` normalizes the saved compile rounds
+  into per-persona worklog entries. The vendor-neutral details live in
+  `OPERATING.md` (next section) and
+  [`per-persona-journal-memory.md`](per-persona-journal-memory.md).
+- **Double-count suppression.** At `claim`, the drive's Slack
+  `thread_ts` — harness-enforced via the `TIGERHARNESS_SLACK_THREAD_TS`
+  env var the bridge sets per turn, so the agent never copies it by hand
+  — is recorded to `journal/.drive-sessions.json`. tiger-memory's
+  `claude_transcript` adapter reads that registry and **skips** a
+  registered drive's transcript — the worklog already owns that content,
+  so the driver doesn't *also* get a fat summary of the whole drive.
+- **Ingestion.** A `journal_worklog` tiger-memory source discovers
+  `*/worklog/*.md` under the journal root, groups them per `(task,
+  persona)`, and feeds the existing summarize → ingest machinery. Each
+  journal-working persona needs a tiger-memory config + store listing
+  that source (the roster prerequisite).
+
+The enforcement lives in **harness code**, not a prompt: a turn that
+skips its note simply cannot advance. The worst case is a *thin* note,
+never a missing or mis-attributed one. Note **prose quality** is not
+enforced (code can guarantee a note exists and is correctly attributed,
+not that it is well-written).
 
 ## OPERATING.md — the protocol
 

@@ -39,3 +39,12 @@ rebuild:
 budgets:
   must_memorize_rows: 150       # max rows in must_memorize.md
   repeat_detection_similarity: 0.9
+  # Max transcript chars fed to a single in-process summarizer call. A
+  # transcript over this is chunk-and-reduced (map-reduce), NOT clipped,
+  # so no middle content is lost. ~120 KB is well under Opus's window.
+  max_prompt_content_chars: 120000
+  # Max transcript chars staged into a sub-agent prompt on the live
+  # subscription path (no in-process summarizer there — the sub-agent
+  # owns the reduce, so this is sized to its window). Only a transcript
+  # beyond this is clipped, as a last resort.
+  max_staged_content_chars: 300000

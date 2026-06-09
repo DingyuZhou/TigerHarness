@@ -134,6 +134,62 @@ class TestRaw:
         assert rc == 0
         assert "docs/design.md" in capsys.readouterr().out
 
+    def _setup_journal(self, tmp_path: Path):
+        journal_root = tmp_path / "team" / "journal"
+        cfg_path = tmp_path / "cfg.yaml"
+        cfg_path.write_text(dedent(f"""\
+            agent: {{name: T, role: T}}
+            store: {{root: {tmp_path}/memory}}
+            sources:
+              - kind: claude_code
+                project_path: {tmp_path}/proj/
+              - kind: journal_worklog
+                journal_root: {journal_root}
+                persona: Rukawa
+            summarizer: {{backend: anthropic, model: claude-opus-4-7, prompts: default/v1}}
+            rebuild: {{lock_path: {tmp_path}/lock}}
+        """))
+        cfg = load_config(cfg_path)
+        store = Store(cfg.store.root)
+        store.init_layout()
+        return cfg, store, journal_root
+
+    def _journal_archive(self, store, task_id: str) -> Path:
+        uid = str(uuid4())
+        archive_file = store.paths.archive / f"20260608-090000-{uid}.md"
+        archive_file.write_text(dedent(f"""\
+            ---
+            source: journal
+            source_id: "{task_id}/Rukawa"
+            ---
+            # Journal memory
+        """))
+        return archive_file
+
+    def test_journal_source_active(self, tmp_path: Path, capsys):
+        cfg, store, journal_root = self._setup_journal(tmp_path)
+        task_id = "20260608-task-a-aaaa1111"
+        wl = journal_root / "active" / task_id / "worklog"
+        wl.mkdir(parents=True)
+        rc = raw(cfg, store, self._journal_archive(store, task_id))
+        assert rc == 0
+        assert str(wl) in capsys.readouterr().out
+
+    def test_journal_source_done(self, tmp_path: Path, capsys):
+        cfg, store, journal_root = self._setup_journal(tmp_path)
+        task_id = "20260608-task-d-dddd4444"
+        wl = journal_root / "done" / task_id / "worklog"
+        wl.mkdir(parents=True)
+        rc = raw(cfg, store, self._journal_archive(store, task_id))
+        assert rc == 0
+        assert str(wl) in capsys.readouterr().out
+
+    def test_journal_source_not_found(self, tmp_path: Path, capsys):
+        cfg, store, _ = self._setup_journal(tmp_path)
+        rc = raw(cfg, store, self._journal_archive(store, "20260608-gone-ffff9999"))
+        assert rc == 1
+        assert "raw worklog not found" in capsys.readouterr().out
+
     def test_unknown_source(self, tmp_path: Path, capsys):
         cfg, store = _setup(tmp_path)
         uid = str(uuid4())

@@ -146,3 +146,37 @@ at its definition.
 
 Tests: full suite green **2967 passed, 100% line+branch coverage**
 (init.py / scaffold.py / operating_template.py all 100%).
+
+---
+
+## Update (2026-06-08) — merged `main`'s per-persona-memory revamp
+
+`main` advanced (PRs #40–#44) with the **per-persona journal memory**
+revamp (worklog/, `--driver`/`--output`, `journal step-done` gates,
+`JournalWorklogAdapter`, chunk-and-reduce). Merged it into this branch and
+reconciled the overlap — the two feature sets are orthogonal and now
+coexist:
+
+- **OPERATING.md template** — auto-merged cleanly: my edits (step-1d cheap
+  exit, hardened step-6 cascade, step-7 compaction, heartbeat env) touch
+  disjoint regions from the revamp's (worklog/, "Per-persona memory"
+  section, `--driver`/`--output` at claim/release, graph-walk gate). Both
+  sides' pin tests pass on the merged string.
+- **drive-journal skill** — real 3-way conflict (the revamp also edited the
+  skill, against the old long form, while I'd rewritten it). Hand-merged:
+  kept the short cascade-first checklist and **wove the memory gates in** —
+  `--driver` at claim (step 2), `step-done` at the workflow branch (step 4),
+  `--driver`/`--output` + "the note is the ticket" at release (step 5), and
+  the worklog/`done`-gate reminders. This closes a latent bug: the
+  lazy-load skill `claim`s in step 2 *before* reading OPERATING.md in step
+  3, so without the woven `--driver` a Slack drive would have silently
+  skipped per-persona memory. Bundled + mirror kept byte-identical.
+- **Hash manifests** — measured Shohoku's **actual on-disk** files: skill =
+  the per-persona-memory ship (`25d2c223…`), OPERATING = the pre-redesign
+  template (`fe942cf5…`). Added `25d2c223…` to `_PRIOR_SKILL_HASHES` and
+  `7446e45e…` (pure-revamp OPERATING) to `_PRIOR_OPERATING_HASHES`, so a
+  real `--refresh-skills` / `journal new` on Shohoku now refreshes **both**
+  to the merged version (verified True at runtime). The footgun-guard tests
+  still hold (current hashes are in neither prior set).
+
+Tests after merge: **3190 passed, 100% line+branch coverage** held.

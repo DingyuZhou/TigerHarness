@@ -25,6 +25,7 @@ from .prefilter import filter_transcript
 from .sources import (
     ClaudeTranscriptAdapter,
     DocsAdapter,
+    JournalWorklogAdapter,
     SourceAdapter,
     SourceRecord,
 )
@@ -347,7 +348,12 @@ def plan_rebuild(
             source_id=rec.source_id,
             first_event_at=rec.first_event_at.isoformat(),
             last_event_at=rec.last_event_at.isoformat(),
-            content=_clip(content, max_chars=cfg.budgets.max_prompt_content_chars),
+            # The sub-agent (not an in-process summarizer) owns the reduce
+            # here and has a large context window, so stage the FULL
+            # transcript up to the sub-agent ceiling — no lossy middle
+            # elision in the common case. Only a transcript beyond the
+            # (configurable) staged ceiling is clipped, as a last resort.
+            content=_clip(content, max_chars=cfg.budgets.max_staged_content_chars),
         )
         prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -372,6 +378,21 @@ def plan_rebuild(
 # ----- adapter / summarizer factories --------------------------------------
 
 
+def _resolve_journal_root(field_root: str, repo_root: Path) -> Path:
+    """Resolve a ``journal_worklog`` source's ``journal_root`` field.
+
+    A relative root is anchored to the config's directory (``repo_root``,
+    like ``store.root`` and the docs ``repo_root``) so a per-persona
+    config can say ``../../journal/`` and a headless sweep still finds it
+    regardless of the working directory. Shared by the adapter
+    construction and the drive-sessions registry-path derivation so the
+    two never diverge."""
+    jr = Path(field_root).expanduser()
+    if not jr.is_absolute():
+        jr = (repo_root / jr).resolve()
+    return jr
+
+
 def _build_adapters(
     cfg: Config, *, max_age_days: int | None = 7,
 ) -> list[SourceAdapter]:
@@ -386,15 +407,23 @@ def _build_adapters(
     default in ``ClaudeTranscriptAdapter``; keep them in sync.
     """
     adapters: list[SourceAdapter] = []
-    # Find slack threads.json (if a slack_thread source is configured)
+    repo_root = (
+        cfg.source_path.parent if cfg.source_path else Path.cwd()
+    )
+    # Pre-scan for cross-source wiring the claude_code adapter needs:
+    #   - threads.json (slack_thread)        -> persona attribution
+    #   - .drive-sessions.json (journal_worklog) -> drive suppression
     threads_json: Path | None = None
+    drive_sessions_json: Path | None = None
     for s in cfg.sources:
         if s.kind == "slack_thread":
             raw = s.fields.get("threads_json", "")
             threads_json = Path(raw).expanduser() if raw else None
-    repo_root = (
-        cfg.source_path.parent if cfg.source_path else Path.cwd()
-    )
+        elif s.kind == "journal_worklog":
+            drive_sessions_json = (
+                _resolve_journal_root(s.fields["journal_root"], repo_root)
+                / ".drive-sessions.json"
+            )
     for s in cfg.sources:
         if s.kind == "claude_code":
             # Per-persona filtering (added after multi-bridge introduced
@@ -416,6 +445,7 @@ def _build_adapters(
                     team=team,
                     include_unattributed=include_unattributed,
                     max_age_days=max_age_days,
+                    drive_sessions_json=drive_sessions_json,
                 )
             )
         elif s.kind == "slack_thread":
@@ -426,11 +456,32 @@ def _build_adapters(
             # classify some sessions as `source: slack` via reverse
             # lookup. See HANDOFF.md for the rationale.
             pass
-        elif s.kind == "docs":  # pragma: no branch  # only known kinds: claude_code, slack_thread, docs
+        elif s.kind == "docs":
             adapters.append(
                 DocsAdapter(
                     glob_pattern=s.fields["glob"],
                     repo_root=repo_root,
+                )
+            )
+        elif s.kind == "journal_worklog":  # pragma: no branch  # remaining kind (auto_memory) is handled at bootstrap, not here
+            # Per-persona journal memory. ``team`` qualifies the
+            # conversation_uuid namespace; default it from the journal
+            # root's grandparent (``<team>/journal/`` -> ``<team>``) so a
+            # config that omits it still namespaces correctly.
+            journal_root = _resolve_journal_root(
+                s.fields["journal_root"], repo_root
+            )
+            team = s.fields.get("team")
+            team = (
+                team.strip()
+                if isinstance(team, str) and team.strip()
+                else journal_root.parent.name
+            )
+            adapters.append(
+                JournalWorklogAdapter(
+                    journal_root=journal_root,
+                    persona=s.fields["persona"],
+                    team=team,
                 )
             )
     return adapters
@@ -564,6 +615,29 @@ def _process_decisions(
             )
         filtered_chars = len(rec.content)
         try:
+            # Fit the (pre-filtered) transcript into the budget ONCE per
+            # record via chunk-and-reduce, so an oversized transcript loses
+            # no middle content (vs. the old lossy head/tail clip). This sits
+            # INSIDE the try on purpose: the fit makes summarizer calls, and a
+            # backend error on one giant session must be logged-and-skipped
+            # like any other failure here — never crash the whole rebuild.
+            #
+            # The addendum path's only two consumers both want half-budget
+            # content, so fit straight to half there and skip a wasted
+            # full-budget reduce they would each re-reduce. A normal-sized
+            # transcript fits already → no-op (same object, no model calls),
+            # so we skip the replace and downstream sites add no cost.
+            fit_budget = (
+                cfg.budgets.max_prompt_content_chars // 2
+                if d.action == ADDENDUM
+                else cfg.budgets.max_prompt_content_chars
+            )
+            fitted = _fit_content(
+                rec.content, summarizer=summarizer, cfg=cfg,
+                max_chars=fit_budget,
+            )
+            if fitted is not rec.content:
+                rec = replace(rec, content=fitted)
             if d.action == ADDENDUM:
                 _write_addendum(store, cfg, summarizer, rec)
                 heuristic_fallback += _approx_cost(cfg, rec.content,
@@ -629,7 +703,10 @@ def _write_short_and_archive(
         source_id=rec.source_id,
         first_event_at=rec.first_event_at.isoformat(),
         last_event_at=rec.last_event_at.isoformat(),
-        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars),
+        content=_fit_content(
+            rec.content, summarizer=summarizer, cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars,
+        ),
     )
     short_body = summarizer.summarize(
         prompt=short_prompt, max_words=cfg.budgets.short_summary_words
@@ -644,7 +721,10 @@ def _write_short_and_archive(
         source_id=rec.source_id,
         first_event_at=rec.first_event_at.isoformat(),
         last_event_at=rec.last_event_at.isoformat(),
-        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars),
+        content=_fit_content(
+            rec.content, summarizer=summarizer, cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars,
+        ),
     )
     detailed_body = summarizer.summarize(
         prompt=detailed_prompt, max_words=cfg.budgets.detailed_summary_words
@@ -711,7 +791,10 @@ def _write_session_collapsed(
         source_id=rec.source_id,
         first_event_at=rec.first_event_at.isoformat(),
         last_event_at=rec.last_event_at.isoformat(),
-        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars),
+        content=_fit_content(
+            rec.content, summarizer=summarizer, cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars,
+        ),
     )
     # One generous cap covering both bodies; per-section budgets are stated
     # in the template itself.
@@ -755,7 +838,10 @@ def _write_addendum(
         content=(
             f"(Addendum to frozen session {rec.conversation_uuid}.\n"
             f"Only NEW activity since the original summary should be reflected.)\n\n"
-            + _clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars // 2)
+            + _fit_content(
+                rec.content, summarizer=summarizer, cfg=cfg,
+                max_chars=cfg.budgets.max_prompt_content_chars // 2,
+            )
         ),
     )
     short_body = summarizer.summarize(
@@ -785,7 +871,10 @@ def _extract_must_memorize(
         prompts_root / "must_memorize_extract.md",
         agent_name=cfg.agent.name,
         memo_max_words=cfg.budgets.must_memorize_memo_words,
-        content=_clip(rec.content, max_chars=cfg.budgets.max_prompt_content_chars // 2),
+        content=_fit_content(
+            rec.content, summarizer=summarizer, cfg=cfg,
+            max_chars=cfg.budgets.max_prompt_content_chars // 2,
+        ),
     )
     try:
         out = summarizer.summarize(
@@ -1161,11 +1250,124 @@ class _SafeFormatDict(dict):
         return "{" + key + "}"
 
 
+_CLIP_MARKER = "\n\n[...content elided...]\n\n"
+
+
 def _clip(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
-    half = max_chars // 2
-    return text[:half] + "\n\n[...content elided...]\n\n" + text[-half:]
+    # Keep the result strictly within max_chars by reserving room for the
+    # elision marker, so callers that promise a hard ceiling can rely on it.
+    if max_chars <= len(_CLIP_MARKER):
+        return text[:max_chars]
+    half = (max_chars - len(_CLIP_MARKER)) // 2
+    return text[:half] + _CLIP_MARKER + text[-half:]
+
+
+# Max times ``_fit_content`` re-summarizes its own digests before giving
+# up and falling back to a bounded clip. Each pass shrinks the text by a
+# large factor, so 4 covers transcripts orders of magnitude over budget;
+# the cap only exists to guarantee termination on pathological input.
+_MAX_REDUCE_DEPTH = 4
+
+
+def _split_on_boundaries(text: str, max_chars: int) -> list[str]:
+    """Split *text* into consecutive chunks each ``<= max_chars``.
+
+    Prefers line boundaries so a chunk never cuts mid-line. A single line
+    longer than *max_chars* (pathological — e.g. a minified blob) is
+    hard-split on character count so the invariant always holds. The
+    concatenation of the returned chunks equals *text* (lossless split).
+    """
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for line in text.splitlines(keepends=True):
+        if len(line) > max_chars:
+            # Flush the buffer, then hard-split the oversized line.
+            if buf:
+                chunks.append("".join(buf))
+                buf, size = [], 0
+            for i in range(0, len(line), max_chars):
+                chunks.append(line[i:i + max_chars])
+            continue
+        if size + len(line) > max_chars and buf:
+            chunks.append("".join(buf))
+            buf, size = [], 0
+        buf.append(line)
+        size += len(line)
+    if buf:
+        chunks.append("".join(buf))
+    return chunks
+
+
+def _fit_content(
+    text: str,
+    *,
+    summarizer: Summarizer,
+    cfg: Config,
+    max_chars: int,
+    _depth: int = 0,
+) -> str:
+    """Fit *text* into *max_chars* WITHOUT lossy middle-elision.
+
+    If the text already fits, return it unchanged — zero model calls, so
+    the common case costs exactly what it does today. Otherwise
+    chunk-and-reduce (map-reduce): split into ``<= max_chars`` chunks,
+    condense each through the summarizer (map), concatenate the digests,
+    and recurse if the concatenation is still over budget (reduce). A
+    depth cap plus a final bounded ``_clip`` guarantee termination and
+    that the result never exceeds the context window, even on
+    pathological input that refuses to shrink.
+    """
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= len(_CLIP_MARKER):
+        # Budget too small to map-reduce into: even the per-part wrappers
+        # wouldn't fit, so condensing can never converge. Also guards
+        # _split_on_boundaries against a non-positive range() step (a
+        # max_chars of 0 is reachable via `max_prompt_content_chars: 1`,
+        # whose // 2 is 0). Clip directly — bounded, never overflows.
+        return _clip(text, max_chars)
+    if _depth >= _MAX_REDUCE_DEPTH:
+        # Condensation isn't shrinking the text fast enough; fall back to
+        # a bounded clip so we never overflow the context window.
+        log.warning(
+            "chunk-and-reduce hit depth cap (%d) at %d chars; "
+            "clipping as a last resort", _MAX_REDUCE_DEPTH, len(text),
+        )
+        return _clip(text, max_chars)
+    template = _prompts_root(cfg) / "chunk_condense.md"
+    chunks = _split_on_boundaries(text, max_chars)
+    # Aim each digest small enough that all of them concatenated land
+    # under budget. ~6 chars/word; reserve half the budget so the
+    # "[part i/n]" wrappers and prose overhead still fit.
+    per_chunk_words = max(120, (max_chars // (len(chunks) * 2)) // 6)
+    digests: list[str] = []
+    for i, chunk in enumerate(chunks):
+        prompt = _fill_prompt(
+            template,
+            agent_name=cfg.agent.name,
+            chunk_index=i + 1,
+            chunk_total=len(chunks),
+            max_words=per_chunk_words,
+            content=chunk,
+        )
+        digests.append(
+            summarizer.summarize(prompt=prompt, max_words=per_chunk_words)
+        )
+    combined = "\n\n".join(
+        f"[transcript part {i + 1}/{len(chunks)}]\n{d}"
+        for i, d in enumerate(digests)
+    )
+    if len(combined) <= max_chars:
+        return combined
+    return _fit_content(
+        combined, summarizer=summarizer, cfg=cfg,
+        max_chars=max_chars, _depth=_depth + 1,
+    )
 
 
 # ----- cost estimation -----------------------------------------------------

@@ -107,3 +107,32 @@ def test_current_template_not_in_prior_hash_manifest():
     from tigerharness.journal import scaffold
     current = hashlib.sha256(OPERATING_MD.encode("utf-8")).hexdigest()
     assert current not in scaffold._PRIOR_OPERATING_HASHES
+
+
+def test_per_persona_memory_gates_documented():
+    """Per-persona memory protocol: the CLI gates that route each
+    persona's worklog note exist, but they only fire if the driver
+    learns to call them. Pin the landmarks so a doc edit can't silently
+    drop the contract that activates Phases 1-3 in a live drive:
+
+    - claim takes --driver (attribution + double-count suppression); the
+      drive thread_ts flows automatically via TIGERHARNESS_SLACK_THREAD_TS,
+      with --drive-thread retained as an explicit override;
+    - a kind=task `done` requires --output (the note is the ticket);
+    - a kind=workflow walk advances via `journal step-done`;
+    - the worklog is named as the per-persona memory record.
+    """
+    text = OPERATING_MD
+    assert "--driver" in text
+    # The thread_ts is harness-supplied, not hand-copied -- pin both the
+    # env-var transport and the override flag so an edit can't silently
+    # revert to "paste the thread id by hand".
+    assert "TIGERHARNESS_SLACK_THREAD_TS" in text
+    assert "--drive-thread" in text
+    assert "--output" in text
+    assert "journal step-done" in text
+    assert "[bridge-context]" in text
+    assert "worklog" in text.lower()
+    # The "note is the ticket" enforcement phrasing must survive edits --
+    # it is the load-bearing mental model for the gates.
+    assert "the ticket" in text.lower()

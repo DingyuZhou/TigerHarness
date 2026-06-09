@@ -394,6 +394,34 @@ class TestTriggerTigerMemoryRebuild:
             )
 
 
+class TestWithThreadEnv:
+    """``_with_thread_env`` returns a per-turn copy carrying the thread_ts
+    in ``extra["env"]`` (the claude_p backend forwards it to the
+    subprocess as TIGERHARNESS_SLACK_THREAD_TS). The original config must
+    stay untouched so concurrent turns and the persona's shared slot
+    don't leak each other's thread."""
+
+    def test_injects_thread_ts_without_mutating_original(self):
+        from tigerharness.slack_bridge.bridge import _with_thread_env
+        cfg = AgentConfig(name="x")
+        out = _with_thread_env(cfg, "123.456")
+        assert out.extra["env"]["TIGERHARNESS_SLACK_THREAD_TS"] == "123.456"
+        assert "env" not in cfg.extra  # original untouched
+
+    def test_preserves_existing_extra_and_env(self):
+        from tigerharness.slack_bridge.bridge import _with_thread_env
+        cfg = AgentConfig(
+            name="x",
+            extra={"permission_mode": "plan", "env": {"FOO": "bar"}},
+        )
+        out = _with_thread_env(cfg, "9.9")
+        assert out.extra["permission_mode"] == "plan"
+        assert out.extra["env"]["FOO"] == "bar"
+        assert out.extra["env"]["TIGERHARNESS_SLACK_THREAD_TS"] == "9.9"
+        # original's env dict is not mutated
+        assert cfg.extra["env"] == {"FOO": "bar"}
+
+
 class TestSlackBridge:
     @pytest.fixture
     def bridge(self, cfg, store, fake_backend):
@@ -435,6 +463,26 @@ class TestSlackBridge:
         call_kwargs = say.call_args[1]
         assert call_kwargs["thread_ts"] == "1.1"
         assert "Hello from Sai" in call_kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_injects_thread_ts_env(self, bridge):
+        # Harness-enforced suppression: the per-turn AgentConfig handed to
+        # the backend carries this thread's ts so an in-session
+        # `journal claim --driver` registers it for transcript skip.
+        from unittest.mock import patch
+        b, backend, fake_result = bridge
+
+        with patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry",
+            return_value=fake_result,
+        ) as m:
+            say = AsyncMock()
+            event = {"channel_type": "im", "user": "U0CEO",
+                     "text": "hello", "ts": "1.1"}
+            await b.handle_message(event, say)
+
+        cfg_arg = m.call_args[0][1]  # second positional: the per-turn cfg
+        assert cfg_arg.extra["env"]["TIGERHARNESS_SLACK_THREAD_TS"] == "1.1"
 
     @pytest.mark.asyncio
     async def test_shutdown_rejects_new(self, bridge):
@@ -939,3 +987,70 @@ class TestGetOrOpenThreadConcurrency:
         kept = [s for s in sessions if not s.closed]
         assert len(kept) == 1
         assert kept[0].id == s1.session.id
+
+
+class TestTigerMemoryTriggerGating:
+    """A new thread fires the legacy ``tiger-memory rebuild`` only when
+    ``tiger_memory_trigger == "rebuild"`` (the default). With ``"off"``,
+    the daemon stays silent -- the in-session sweep protocol owns the
+    rebuild."""
+
+    def _bridge(self, tmp_path: Path, *, trigger: str):
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, SlackBridge, TeamBridgeContext,
+        )
+
+        @dataclass
+        class _Sess:
+            id: str = "sess"
+            async def close(self):
+                return None
+
+        backend = AsyncMock()
+        backend.open_session = AsyncMock(return_value=_Sess())
+        personas = {
+            "Ayako": PersonaSlot(
+                name="Ayako",
+                agent_config=AgentConfig(name="Ayako", instructions="x"),
+                tiger_memory_config_path="/tmp/config.yaml",
+            )
+        }
+        team_ctx = TeamBridgeContext(
+            team_name="t", slack_app_token="xapp", slack_bot_token="xoxb",
+            allowed_user_ids=frozenset({"U0CEO"}), agent_cwd=str(tmp_path),
+            personas=personas, default_persona="Ayako",
+            tiger_memory_cli="/usr/bin/tiger-memory",
+            tiger_memory_trigger=trigger,
+        )
+        store = ThreadStore(tmp_path / "threads.json")
+        downloader = MagicMock()
+        downloader.download = AsyncMock(return_value=None)
+        return SlackBridge(
+            team_ctx=team_ctx, backend=backend, store=store, downloader=downloader,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rebuild_trigger_fires_on_new_thread(self, tmp_path: Path):
+        from unittest.mock import patch as _patch
+        b = self._bridge(tmp_path, trigger="rebuild")
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona",
+            new=AsyncMock(return_value=("Ayako", 0.0)),
+        ), _patch(
+            "tigerharness.slack_bridge.bridge._trigger_tiger_memory_rebuild",
+        ) as mock_trigger:
+            await b._get_or_open_thread("thread-1", "Hi")
+        mock_trigger.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_off_trigger_stays_silent_on_new_thread(self, tmp_path: Path):
+        from unittest.mock import patch as _patch
+        b = self._bridge(tmp_path, trigger="off")
+        with _patch(
+            "tigerharness.slack_bridge.bridge.detect_persona",
+            new=AsyncMock(return_value=("Ayako", 0.0)),
+        ), _patch(
+            "tigerharness.slack_bridge.bridge._trigger_tiger_memory_rebuild",
+        ) as mock_trigger:
+            await b._get_or_open_thread("thread-1", "Hi")
+        mock_trigger.assert_not_called()

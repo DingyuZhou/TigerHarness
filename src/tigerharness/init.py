@@ -47,10 +47,16 @@ from pathlib import Path
 # OLD content's sha256 here** so existing teams pick the update up on
 # refresh without losing a customized copy.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
-    # drive-journal cascade-first redesign (2026-06-08): prior = the
-    # version shipped through origin/main before the rewrite.
+    # drive-journal: each entry is a previously-shipped SKILL.md an
+    # existing team may still have on disk; all refresh to the current
+    # (merged cascade + per-persona-memory) bundle.
     "drive-journal": {
+        # pre-redesign long-form skill (shipped through origin/main before
+        # the cascade rewrite).
         "e9fabddd6be40ceffe739a22c71480da25d073b8feb35da091f9e66aed2a82f1",
+        # per-persona-memory skill (origin/main after PR #43/#44, before
+        # the cascade redesign merged in) -- what Shohoku has on disk now.
+        "25d2c223c976e14ed4441660d6fb064fbaedb65a898f65250a4fc0bc1447cb6c",
     },
 }
 
