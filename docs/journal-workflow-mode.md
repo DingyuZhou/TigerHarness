@@ -259,9 +259,11 @@ active/<task-id>/
   progress.md             # narrative log (one entry on land/failure); NOT
                           #   ingested by tiger-memory -- the worklog is
   worklog/                # per-persona memory records (the INGESTED record)
-    0001-Anzai-compile.md #   land-compile writes one per compile round,
-    ...                   #   step-done writes one per graph-walk step;
-                          #   tiger-memory's journal_worklog source reads these
+    0001-anzai-compile-draft.md   # NNNN-<persona>-<step>.md, persona+step
+    ...                           #   slugified. land-compile writes one per
+                                  #   compile round/role (step=compile-<token>);
+                                  #   step-done writes one per graph-walk step.
+                                  #   tiger-memory's journal_worklog reads these
 
   compile/                # IN-FLIGHT scratch -- driver never reads it post-land
     round-01-draft.md     # drafter bundle for round 1 (StepFrontmatter list)

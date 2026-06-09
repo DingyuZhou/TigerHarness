@@ -9,10 +9,13 @@ side-effecting only in two precise ways:
 2. Surface a structured summary so the driver can decide what to pick
    up next.
 
-That's it. The sweep does NOT mutate ``status.json`` of stale tasks;
-classifying a task as stale is advisory. The driver may then pick up
-a stale task as a rescue (and at that point the driver bumps
-``sessions`` and ``updated_at`` as it would for any pickup).
+It classifies each ``in_progress`` task as **idle** (detached --
+``session_ref`` cleared), **busy** (attached + heartbeat fresh within
+the stuck-timeout), or **crashed** (attached + heartbeat stale).
+That's it. The sweep does NOT mutate ``status.json``; the
+classification is advisory. The driver may then pick up a **crashed**
+task as a rescue (and at that point the driver bumps ``sessions`` and
+``updated_at`` as it would for any pickup).
 
 The default heartbeat threshold is 1800 seconds (30 min), overridable
 via ``TIGERHARNESS_JOURNAL_STUCK_TIMEOUT``.
