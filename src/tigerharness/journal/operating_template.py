@@ -1,14 +1,19 @@
 """The canonical ``OPERATING.md`` content, shipped as a Python string.
 
-The scaffolder copies this to ``<journal>/OPERATING.md`` on **first
-use only** -- if the file already exists at the journal root,
-``_ensure_operating_md`` leaves it untouched (it has no "is this the
-template we shipped vs. a human edit" detector; it just checks
-existence). That means a tigerharness upgrade that ships a new
-template here does NOT auto-update an existing journal's
-``OPERATING.md``. Operators who want the newer template must delete
-or rename the on-disk file first; the next ``journal new`` then
-installs the fresh content.
+The scaffolder installs this to ``<journal>/OPERATING.md`` via
+``_ensure_operating_md``, which is **hash-gated** (see ``scaffold.py``):
+- no file on disk -> write the current template;
+- on-disk content byte-identical to the current template -> no-op;
+- on-disk content byte-identical to a *previously shipped* template
+  (its sha256 is in ``_PRIOR_OPERATING_HASHES``) -> **refresh** it to the
+  current template, so a tigerharness upgrade propagates to an existing
+  journal on its next ``journal new`` with no manual delete;
+- otherwise (a hand-edited file matching no shipped version) -> leave it
+  untouched, so a human's customization is never clobbered.
+
+When you change this string, append the OLD rendered content's sha256 to
+``scaffold._PRIOR_OPERATING_HASHES`` so the now-prior version is still
+recognized as "ours, safe to refresh" on existing journals.
 
 Keeping the source in Python rather than in ``docs/`` lets us version
 the protocol alongside the model and import it cheaply in tests.

@@ -93,17 +93,22 @@ look at it. That is the whole fix.
 After a clean stop that leaves the task resumable, the driver re-sweeps
 and **continues the same task** (now the highest-priority idle
 `in_progress` task) rather than ending — looping until done / blocked /
-`sessions == max_sessions` / the interactive **context window is
-exhausted**.
+`sessions >= max_sessions` / nothing actionable / the human ends it /
+the **genuine context ceiling**. Context pressure is **not** a routine
+stop: the cascade-first redesign (2026-06-08) relies on **auto-compaction**
+(~50% of the window by default, via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`)
+and re-orients from `progress.md` after a compaction, so a single drive
+keeps going through many sessions rather than handing off when the
+conversation merely feels long.
 
-The one floor we cannot remove: a single interactive session has finite
-context, so the driver must eventually end and a **fresh** drive must
-resume. With this change that hand-off is **instant** (detached →
+The one floor we cannot remove: a single interactive session has a true
+hard context ceiling, so the driver must *eventually* end and a **fresh**
+drive resume. With this change that hand-off is **instant** (detached →
 immediately resumable) instead of a 30-minute stall — a brief
 context-boundary blink, nothing more. Something still has to launch the
 next drive: a loop (now safe at **any** interval — the old "no short
-loop" caveat disappears), a manual run, or optionally the driver
-self-relaunching (open question 4).
+loop" caveat disappears) or a manual run. The driver does **not**
+self-relaunch (see Decisions §4).
 
 ## Interaction with finish-before-start
 

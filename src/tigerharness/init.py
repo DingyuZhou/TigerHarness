@@ -1447,10 +1447,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--refresh-skills",
         action="store_true",
-        help="Don't create a persona; instead, copy any newly-bundled "
-             "skills (e.g. journal-new added after the team was first "
-             "scaffolded) into the team's .claude/skills/. Idempotent. "
-             "Skills already present on disk are left untouched.",
+        help="Don't create a persona; instead bring an existing team's "
+             "bundled skills current: install any missing skill, refresh "
+             "any skill byte-identical to a previously-shipped version to "
+             "the latest, and leave hand-edited skills untouched. Also tops "
+             "up .claude/settings.json (journal-guard hook + compact "
+             "threshold). Idempotent.",
     )
     args = parser.parse_args(argv)
 

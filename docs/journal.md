@@ -46,11 +46,13 @@ Driver (`drive-journal` skill, interactive session)
        - archive done/ tasks
        - classify in_progress as idle/busy/crashed via the `session_ref` attach signal (heartbeat is crash-only; see docs/journal-instant-resume.md)
        - summarise actionable counts in-session
-  2. Pick ONE actionable task, run to done / blocked / stop
-       - reads OPERATING.md
+       - cheap no-op fast path: if all in_progress are busy and nothing is idle/crashed/pending, stop immediately (a frequent loop is meant to no-op here)
+  2. Pick ONE actionable task (finish-before-start: resumable in_progress first; a busy task defers a pending one), run it through its WHOLE max_sessions budget, session-to-session
+       - reads OPERATING.md; claims via `journal claim` (in a drive: `--driver <persona>`)
        - appends progress.md as it goes
        - updates status.json (state, heartbeat, sessions, next_action)
-  3. Cascade: re-sweep and pick the next; drain the queue in one sitting
+  3. Cascade (the hard loop): re-sweep and pick the next back-to-back in the SAME turn; one drive drains the whole queue, never one-session-per-loop-fire
+       - context pressure is not a stop reason: rely on auto-compaction and re-orient from progress.md; hand off only at the true context ceiling
 ```
 
 ## Folder layout
@@ -95,6 +97,7 @@ Task-id format: `<YYYYMMDD>-<slug>-<uuid8>`.
 |---|---|---|
 | `TIGERHARNESS_JOURNAL_DIR` | resolver (below) | Override the journal root. |
 | `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which an *attached* `in_progress` task (`session_ref` set) is treated as **crashed** and reclaimable. A detached task is **idle**/resumable regardless of age — the heartbeat is crash-detection only. |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` | Claude Code auto-compaction threshold (% of context window). `tigerharness init` seeds it into a new team's `.claude/settings.json` `env` (and tops it up on `--refresh-skills`) so a long-cascading drive compacts proactively instead of handing off for "context heavy". A Claude Code env var the harness seeds — not read by tigerharness itself; lives in the `env` block, not as a settings.json key. |
 
 Journal root resolution priority:
 
@@ -182,10 +185,15 @@ narrative prose and ignored.
 # Scaffold a new task from a PRD (kind=task -- single persona).
 # --persona is optional when the team's personas.yaml declares
 # `default_persona:` (see "Team-level defaults" above).
+# --max-sessions defaults to 3 for kind=task, 10 for kind=workflow.
+# --early-exit (default off) lets the driver stop the moment the task
+# is done; with it off, the driver runs the full --max-sessions budget
+# ("N iterations = exactly N").
 tigerharness journal new \
     --prd brief.md \
     --persona Mitsui \
-    --max-sessions 5
+    --max-sessions 5 \
+    --early-exit
 
 # Scaffold a new workflow task (kind=workflow -- multi-persona,
 # compiled from a team playbook). Either --task-brief or --brief-file

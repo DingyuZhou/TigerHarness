@@ -139,18 +139,23 @@ style, trivial to write atomically per turn.
 
 ### 2. Write path (harness code)
 
-- **`claim`** (`journal/cli.py:445`): when claiming a `pending` /
-  `idle` / `crashed` task (i.e. a *real* drive or rescue), write a thin
-  driver worklog entry — `task_id`, `kind`, `reason` (new / resume /
-  rescue), attributed to the **driver persona**. No-op sweeps never
-  call `claim`, so they leave no trace (satisfies decision #2). Driver
-  persona supplied by the drive session via `--driver <name>` (the
-  session knows its own persona), or derived from `thread_ts` →
-  `threads.json` if registered (see §4).
-- **`release`** (`journal/cli.py:552`): append the outcome to the
-  driver's thin entry (done / handed-off-idle / blocked). For
-  `kind=task`, **require** a worklog entry for this session before
-  permitting `--state done`; refuse otherwise (the completion backstop).
+- **`claim`** (`cmd_claim`): when claiming a `pending` / `idle` /
+  `crashed` task (i.e. a *real* drive or rescue) **with `--driver`**,
+  write a thin driver worklog entry — `task_id`, `kind`, `reason` (new /
+  resume / rescue), attributed to the **driver persona**. No-op sweeps
+  never call `claim`, so they leave no trace (satisfies decision #2).
+  Driver persona supplied by the drive session via `--driver <name>`
+  (the session knows its own persona); without `--driver` the claim
+  writes no trace at all.
+- **`release`** (`cmd_release`): release writes **no** driver entry —
+  the thin driver trace is written once at `claim`, never appended to.
+  Its memory role is the **completion gate** (drive context only, i.e.
+  `--driver` given): a `kind=task` `--state done` **requires** a
+  non-empty `--output <note>` (the assigned persona's work note, stamped
+  with `status.persona`) and refuses otherwise; a `kind=workflow`
+  `--state done` requires the graph walk to have reached `__done__`
+  (every executed step left its `step-done` note). Refusals happen
+  before any state change, so the task stays resumable.
 - **Graph-walk gate — NEW CLI** `journal step-done`:
   `--task <id> --step <id> --output <path> --verdict <APPROVE|REVISE|BLOCK>`.
   It (a) validates the step is current, (b) reads `persona`/`role` from
@@ -315,6 +320,15 @@ real requirements are Phase 0 (the persona has a store) and the
 - **Soft-gate residual:** an agent could bypass the graph-walk gate by
   reading `orchestration.json` directly; the `release --state done`
   completion-check is the backstop.
+- **`kind=task` note × compaction:** a `kind=task`'s worklog note is
+  written **once, at `done`**, and is the assigned persona's *only*
+  ingested memory of the task (`progress.md` is never ingested). Under
+  the cascade-first drive protocol a long task may auto-compact across
+  many sessions before that note is written, so the driver must build it
+  from the **durable record** (`progress.md` + `artifacts/`), not from
+  possibly-compacted in-context memory. (`kind=workflow` is unaffected —
+  `step-done` writes each step's note immediately.) The canonical
+  `OPERATING.md` and the `drive-journal` skill carry this instruction.
 
 ## Testing
 

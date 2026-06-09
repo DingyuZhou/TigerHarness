@@ -1706,10 +1706,11 @@ class TestMain:
 
 
 class TestRefreshSkills:
-    """`tigerharness init --refresh-skills` copies any
-    newly-bundled SKILL.md files into the team's `.claude/skills/`
-    without trying to create / touch personas. Idempotent: existing
-    skill files are left alone."""
+    """`tigerharness init --refresh-skills` brings an existing team's
+    bundled skills current without touching personas: installs missing
+    skills, refreshes any skill byte-identical to a previously-shipped
+    version, leaves hand-edited skills alone, and tops up
+    `.claude/settings.json` (guard hook + compact threshold). Idempotent."""
 
     def test_installs_missing_bundled_skills(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,

@@ -139,8 +139,12 @@ Driver (drive-journal skill, interactive session)
   2. Pick an actionable task -- classify by `kind` AND `compile_pending`:
        - kind=task: Phase 1 flow.
        - kind=workflow, compile_pending=true: COMPILE SUB-PROTOCOL (below).
-       - kind=workflow, compile_pending=false: graph-walk (per the
-         existing workflow-runner step protocol).
+       - kind=workflow, compile_pending=false: graph-walk, advanced ONE
+         step at a time via the `tigerharness journal step-done --task
+         <id> --step <id> --verdict <V> --output <note>` gate. The gate
+         writes that step's persona-attributed `worklog/` entry, routes
+         along the verdict's edge, and prints the next step -- the driver
+         does NOT follow edges by hand. (Per-persona memory; see below.)
   3. Cascade after each task lands.
 ```
 
@@ -222,19 +226,23 @@ sub-phase (required for `kind=workflow`, rejected for `kind=task`):
 
 | Value | Meaning |
 |---|---|
-| `pending` | Scaffolded; no session has picked it up. |
-| `drafting` | A session is mid-drafter-turn. |
-| `tier1_pre` | A session is running pre-critique Tier 1. |
-| `critiquing` | A session is mid-critique loop. |
-| `tier1_post` | A session is running post-critique Tier 1 + landing. |
-| `complete` | Compile landed; `orchestration.json` is trustworthy. |
-| `failed` | Compile gave up; paired with `state=blocked`. |
+| `pending` | Scaffolded **and throughout the compile** — the shipped backend leaves `compile_phase=pending` until landing. |
+| `drafting` | *Reserved — not written by any current code path.* |
+| `tier1_pre` | *Reserved — not written by any current code path.* |
+| `critiquing` | *Reserved — not written by any current code path.* |
+| `tier1_post` | *Reserved — not written by any current code path.* |
+| `complete` | Compile landed (`land-compile`); `orchestration.json` is trustworthy. |
+| `failed` | Compile gave up (`compile-fail`); paired with `state=blocked`. |
 
 `Status.from_dict` enforces: `kind=workflow` requires `compile_phase`
 present and one of the seven values; `kind=task` rejects the field
-(preserves the strict-unknown-keys invariant). The graph-walker only
-reads `orchestration.json` when `compile_phase=="complete"`; any
-other value means the file may be absent or partial.
+(preserves the strict-unknown-keys invariant). In the shipped backend
+only `pending` → `complete`/`failed` are ever written (the four
+intermediate values are reserved; an interrupted compile resumes by
+reading the highest `compile/round-NN-*.md` on disk, not a phase value).
+The graph-walker only reads `orchestration.json` when
+`compile_phase=="complete"`; any other value means the file may be
+absent or partial.
 
 ## Compile workspace on disk
 
@@ -247,8 +255,13 @@ During an in-flight compile, all scratch state lives under
 active/<task-id>/
   task_brief.md           # written at scaffold
   playbook_snapshot.md    # written at scaffold
-  status.json             # state=in_progress, compile_phase=critiquing, ...
-  progress.md             # one entry on land or failure (no per-round noise)
+  status.json             # state=in_progress, compile_phase=pending, ...
+  progress.md             # narrative log (one entry on land/failure); NOT
+                          #   ingested by tiger-memory -- the worklog is
+  worklog/                # per-persona memory records (the INGESTED record)
+    0001-Anzai-compile.md #   land-compile writes one per compile round,
+    ...                   #   step-done writes one per graph-walk step;
+                          #   tiger-memory's journal_worklog source reads these
 
   compile/                # IN-FLIGHT scratch -- driver never reads it post-land
     round-01-draft.md     # drafter bundle for round 1 (StepFrontmatter list)
@@ -267,6 +280,14 @@ active/<task-id>/
   steps/<id>.md           # per-step bodies
   compile_critique.md     # rendered final transcript (kept forever)
 ```
+
+> **Per-persona memory.** `land-compile` normalises the saved
+> `compile/round-NN-*.md` files into per-persona `worklog/` entries (one
+> per round, attributed via the `compile_personas` role→persona map), and
+> each graph-walk step writes its own `worklog/` entry via `journal
+> step-done`. tiger-memory ingests **only** `worklog/`, never
+> `progress.md`. See
+> [`per-persona-journal-memory.md`](per-persona-journal-memory.md).
 
 `compile/` is preserved verbatim on archival to `done/<task-id>/`
 (small forensic value; <500KB worst-case). The per-round files are
