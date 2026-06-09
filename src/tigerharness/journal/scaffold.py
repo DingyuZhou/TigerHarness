@@ -35,6 +35,7 @@ use so the driver can read the vendor-neutral protocol.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
@@ -45,6 +46,24 @@ from tigerharness.journal.ids import JournalIdError, new_task_id
 from tigerharness.journal.models import JournalModelError, Status
 from tigerharness.journal.operating_template import OPERATING_MD
 from tigerharness.journal.paths import JournalPaths
+
+# sha256 of *prior shipped* OPERATING.md templates. On scaffold, an
+# on-disk OPERATING.md byte-identical to one of these (an unmodified
+# earlier ship) is refreshed to the current template -- so a protocol
+# update propagates to existing journals -- while a human-edited file
+# (matching neither current nor a prior ship) is left untouched. **When
+# you change OPERATING_MD, append the OLD rendered content's sha256 here.**
+_PRIOR_OPERATING_HASHES = {
+    # Each entry is a previously-shipped rendered OPERATING.md an existing
+    # journal may still have on disk; all refresh to the current (merged
+    # cascade + per-persona-memory) template.
+    # pre-redesign template (origin/main before the cascade rewrite) --
+    # what Shohoku's journal has on disk now.
+    "fe942cf538e662ce7fd4de854e38023c64f11a4a197e14caff2594ed4dfbbf1c",
+    # per-persona-memory template (origin/main after PR #43/#44, before the
+    # cascade redesign merged in).
+    "7446e45e52745ae31548a192801173bacb01e36368b713dd8250eae1d1838ce8",
+}
 
 
 # The three personas the in-session compile sub-protocol adopts (Anzai
@@ -154,13 +173,25 @@ def _write_atomic(path: Path, content: str) -> None:
 
 
 def _ensure_operating_md(paths: JournalPaths) -> None:
-    """Write OPERATING.md at the journal root if it's not there yet.
-    Idempotent. Once written, the file is the contract -- subsequent
-    scaffolder runs leave it alone so a human edit isn't overwritten."""
-    if paths.operating_md.is_file():
+    """Write OPERATING.md at the journal root if it's not there yet; else
+    **refresh it to the current template only when the on-disk copy is
+    byte-identical to a previously-shipped version** (``_PRIOR_OPERATING_HASHES``).
+
+    So a protocol update propagates to an existing journal on its next
+    scaffold (``journal new``) -- but a **human-edited** OPERATING.md
+    (content matching neither the current template nor a prior ship) is
+    left untouched. Already-current files are a no-op."""
+    op = paths.operating_md
+    if not op.is_file():
+        paths.root.mkdir(parents=True, exist_ok=True)
+        _write_atomic(op, OPERATING_MD)
         return
-    paths.root.mkdir(parents=True, exist_ok=True)
-    _write_atomic(paths.operating_md, OPERATING_MD)
+    on_disk = op.read_text(encoding="utf-8")
+    if on_disk == OPERATING_MD:
+        return  # already current
+    if hashlib.sha256(on_disk.encode("utf-8")).hexdigest() in _PRIOR_OPERATING_HASHES:
+        _write_atomic(op, OPERATING_MD)  # unmodified prior ship -> refresh
+    # else: human-edited -> leave it (OPERATING.md is the contract)
 
 
 def new_task(

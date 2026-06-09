@@ -10,10 +10,13 @@ from unittest.mock import patch
 import pytest
 
 from tigerharness.init import (
+    _AUTOCOMPACT_DEFAULT_PCT,
+    _AUTOCOMPACT_ENV_KEY,
     _append_lane_to_slack_bridge_index,
     _append_persona_to_yaml,
     _auto_init_tiger_memory,
     _command_prefix,
+    _ensure_compact_env_in_file,
     _ensure_journal_guard_hook,
     _format_path,
     _inject_allowed_user_ids,
@@ -546,6 +549,63 @@ class TestJournalGuardHelpers:
         assert _GUARD_MODULE in json.dumps(merged["hooks"])
 
 
+class TestEnsureCompactEnvInFile:
+    """Unit coverage for the additive compact-threshold env merge."""
+
+    def test_adds_key_to_envless_file(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        assert _ensure_compact_env_in_file(path) is True
+        env = json.loads(path.read_text())["env"]
+        assert env[_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+
+    def test_adds_key_beside_existing_env(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text(
+            json.dumps({"env": {"FOO": "bar"}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        assert _ensure_compact_env_in_file(path) is True
+        env = json.loads(path.read_text())["env"]
+        assert env["FOO"] == "bar"  # pre-existing key preserved
+        assert env[_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+
+    def test_respects_operator_chosen_value(self, tmp_path: Path):
+        """If the operator already set the key, their value is kept."""
+        path = tmp_path / "settings.json"
+        path.write_text(
+            json.dumps({"env": {_AUTOCOMPACT_ENV_KEY: "70"}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        assert _ensure_compact_env_in_file(path) is False
+        env = json.loads(path.read_text())["env"]
+        assert env[_AUTOCOMPACT_ENV_KEY] == "70"  # untouched
+
+    def test_missing_file_returns_false(self, tmp_path: Path):
+        missing = tmp_path / "nope" / "settings.json"
+        assert _ensure_compact_env_in_file(missing) is False
+
+    def test_malformed_json_left_untouched(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text("{ not json", encoding="utf-8")
+        assert _ensure_compact_env_in_file(path) is False
+        assert path.read_text() == "{ not json"
+
+    def test_non_object_json_left_untouched(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert _ensure_compact_env_in_file(path) is False
+        assert path.read_text() == "[1, 2, 3]"
+
+    def test_non_dict_env_left_untouched(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text(
+            json.dumps({"env": "not-a-dict"}) + "\n", encoding="utf-8"
+        )
+        assert _ensure_compact_env_in_file(path) is False
+        assert json.loads(path.read_text())["env"] == "not-a-dict"
+
+
 class TestScaffoldGuardHook:
     """_scaffold_claude_dir wires the guard hook on create and on merge."""
 
@@ -576,7 +636,9 @@ class TestScaffoldGuardHook:
         created = _scaffold_claude_dir(team)
         assert settings_path in created
         merged = json.loads(settings_path.read_text())
-        assert merged["env"] == {"CUSTOM": "1"}  # not clobbered
+        assert merged["env"]["CUSTOM"] == "1"  # pre-existing key not clobbered
+        # The recommended compact threshold is topped up alongside the hook.
+        assert merged["env"][_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
         assert _GUARD_MODULE in json.dumps(merged["hooks"])
 
     def test_existing_settings_merge_is_idempotent(self, tmp_path: Path):
@@ -1706,6 +1768,114 @@ class TestRefreshSkills:
         assert rc == 0
         assert "do not overwrite" in target.read_text()
 
+    def test_refresh_updates_unmodified_prior_and_keeps_handedited(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A skill byte-identical to a *prior shipped* version is refreshed
+        to the current bundled version (the team never customized it);
+        a hand-edited skill is left alone."""
+        import hashlib
+        from pathlib import Path as _Path
+        import tigerharness.init as _init
+
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        skills = tmp_path / "tigers" / ".claude" / "skills"
+        dj = skills / "drive-journal" / "SKILL.md"
+        jn = skills / "journal-new" / "SKILL.md"
+        # drive-journal: overwrite with a synthetic *prior shipped* version.
+        prior = "# drive-journal -- an earlier shipped version\n"
+        dj.write_text(prior)
+        # journal-new: a genuine hand-edit (matches no shipped version).
+        jn.write_text("# hand-edited journal-new\nkeep me\n")
+        monkeypatch.setattr(
+            "tigerharness.init._PRIOR_SKILL_HASHES",
+            {"drive-journal": {hashlib.sha256(prior.encode()).hexdigest()}},
+        )
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        # drive-journal refreshed to the exact current bundled content.
+        bundled = (
+            _Path(_init.__file__).parent / "_bundled_skills"
+            / "drive-journal" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert dj.read_text(encoding="utf-8") == bundled
+        # journal-new hand-edit preserved.
+        assert "keep me" in jn.read_text()
+        out = capsys.readouterr().out
+        assert "Refreshed" in out
+        assert "Left" in out and "hand-edited" in out
+
+    def test_refresh_tops_up_existing_team_settings(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """A team scaffolded before the compact-threshold default existed
+        (its settings.json has no CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) adopts it
+        on --refresh-skills, even when no skills changed."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        settings_path = tmp_path / "tigers" / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        # Simulate a pre-feature team: strip the compact key but keep the
+        # guard hook already wired (so the top-up is compact-env-only).
+        del settings["env"][_AUTOCOMPACT_ENV_KEY]
+        settings_path.write_text(
+            json.dumps(settings, indent=2) + "\n", encoding="utf-8"
+        )
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        refreshed = json.loads(settings_path.read_text())
+        assert refreshed["env"][_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+        out = capsys.readouterr().out
+        assert "Updated" in out
+        assert "compact threshold" in out
+
+    def test_current_bundled_hash_not_in_prior_manifest(self):
+        """Maintenance footgun guard: the CURRENTLY shipped SKILL.md must
+        never appear in _PRIOR_SKILL_HASHES. The manifest records *prior*
+        versions (so an existing team's unmodified copy refreshes); the
+        documented rule is "append the OLD content's hash" on every edit.
+        Appending the NEW hash instead is the classic slip -- it both stops
+        propagation (old copies look hand-edited) and makes the set
+        self-referential. This catches that at CI time."""
+        import tigerharness.init as _init
+        skills_root = Path(_init.__file__).parent / "_bundled_skills"
+        for name, hashes in _init._PRIOR_SKILL_HASHES.items():
+            skill_md = skills_root / name / "SKILL.md"
+            assert skill_md.is_file(), f"manifest names missing skill {name!r}"
+            current = _init._sha256_text(skill_md.read_text(encoding="utf-8"))
+            assert current not in hashes, (
+                f"{name}: the current bundled SKILL.md hash is listed in "
+                f"_PRIOR_SKILL_HASHES -- you likely appended the NEW hash "
+                f"instead of the OLD one."
+            )
+
+    def test_refresh_with_no_settings_file_is_fine(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """A team dir with no .claude/settings.json (only skills) refreshes
+        without crashing -- the settings top-up is simply skipped."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        (tmp_path / "tigers" / ".claude" / "settings.json").unlink()
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Nothing to do" in out
+
     def test_explicit_team_flag(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
     ):
@@ -1790,6 +1960,67 @@ class TestRefreshSkills:
         rc = main(["--dir", str(tmp_path), "--refresh-skills"])
         assert rc == 1
         assert "no teams found" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Bundled drive-journal skill content + mirror invariant
+# ---------------------------------------------------------------------------
+
+class TestBundledDriveJournalSkill:
+    """The bundled drive-journal skill is design copy (no behavior), but
+    two of its contracts are load-bearing and easy to drop on a rewrite,
+    so pin them."""
+
+    def _bundled(self, name: str) -> Path:
+        import tigerharness.init as _init
+        return (
+            Path(_init.__file__).parent / "_bundled_skills" / name / "SKILL.md"
+        )
+
+    def test_skill_teaches_per_persona_memory_gates(self):
+        """The skill is read top-to-bottom and `claim`s in step 2 BEFORE it
+        loads OPERATING.md in step 3 -- so the per-persona-memory gates have
+        to live in the skill itself, or a Slack-driven drive claims without
+        --driver and silently skips per-persona memory. (This regressed once
+        when the skill was rewritten as a lazy-load checklist; pin it.)"""
+        text = self._bundled("drive-journal").read_text(encoding="utf-8")
+        assert "--driver" in text          # attribution at claim/release
+        assert "--output" in text          # the note is the ticket (done gate)
+        assert "journal step-done" in text  # graph-walk gate
+        # --driver must appear at the claim step, not only at release --
+        # claim happens before OPERATING.md is read.
+        claim_idx = text.index("journal claim")
+        assert "--driver" in text[claim_idx:claim_idx + 600]
+
+    def test_step_done_scoped_to_graph_walk_not_compile(self):
+        """`step-done` is the graph-walk gate; the compile sub-protocol uses
+        `land-compile`. The skill must not imply step-done drives a compile
+        round (it would mislead a driver in compile_pending=true)."""
+        text = self._bundled("drive-journal").read_text(encoding="utf-8")
+        assert "graph walk" in text.lower()
+        assert "land-compile" in text
+
+    def test_bundled_and_repo_mirror_skills_byte_identical(self):
+        """Every skill shipped in BOTH trees -- the installed package data
+        (`_bundled_skills/`) and the repo-of-record mirror (`skills/`) --
+        must be byte-identical. The two are kept in sync by hand; this
+        catches an edit that touched only one (the discoverable repo copy
+        and the actually-installed copy must never disagree)."""
+        import tigerharness.init as _init
+        root = _tigerharness_project_root()
+        bundled_root = Path(_init.__file__).parent / "_bundled_skills"
+        mirror_root = root / "skills"
+        shared = sorted(
+            d.name for d in bundled_root.iterdir()
+            if d.is_dir() and (mirror_root / d.name / "SKILL.md").is_file()
+        )
+        assert shared, "expected at least one skill shared across both trees"
+        mismatched = [
+            name for name in shared
+            if (bundled_root / name / "SKILL.md").read_bytes()
+            != (mirror_root / name / "SKILL.md").read_bytes()
+        ]
+        assert not mismatched, f"bundled vs repo-mirror drift: {mismatched}"
 
 
 # ---------------------------------------------------------------------------

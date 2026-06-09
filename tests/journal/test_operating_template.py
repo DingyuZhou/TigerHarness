@@ -70,6 +70,57 @@ def test_attach_signal_claim_release_documented():
     assert "immediately" in text
 
 
+def test_continuity_contract_pinned():
+    """The continuity rules (2026-06-08) are load-bearing — pin them so a
+    future edit can't silently re-introduce one-session-per-loop-fire.
+
+    1) a busy-only queue is a cheap no-op (don't read further); 2) cascade
+    is a hard, same-turn loop, never one-per-fire; 3) "context heavy" is
+    answered by compaction, not a hand-off; 4) the stuck-timeout is
+    operator-configurable."""
+    text = OPERATING_MD
+    low = text.lower()
+    assert "cheap no-op fast path" in low          # busy-only -> stop cheaply
+    assert "one-session-per-loop-fire" in low      # the named anti-pattern
+    assert "same turn" in low                      # cascade is same-turn
+    assert "compaction" in low                     # compact, don't hand off
+    assert "TIGERHARNESS_JOURNAL_STUCK_TIMEOUT" in text  # configurable
+
+
+def test_finish_before_start_guard_pinned():
+    """Priority branch (b): a *busy* `in_progress` task defers any `pending`
+    pickup (finish-before-start). The lazy-loaded skill once dropped this
+    (critique R2) -- pin it in the contract so it can't silently vanish here
+    too, since the skill defers to OPERATING.md on conflict."""
+    assert "do NOT start new" in OPERATING_MD       # busy -> defer pending
+    assert "finish before any" in OPERATING_MD.lower()
+
+
+def test_task_done_note_durable_record_guidance_pinned():
+    """The cascade x compaction x per-persona-memory interaction: a
+    `kind=task`'s only ingested memory is the single done-note, written at
+    the end, so it must be assembled from the durable record (progress.md /
+    artifacts) -- a long cascade may have compacted earlier sessions away,
+    and tiger-memory ingests only worklog/, never progress.md. Pin this
+    landmark so the guidance can't be silently dropped (critique R5)."""
+    low = OPERATING_MD.lower()
+    assert "durable record" in low
+    assert "ingests only" in low   # ...worklog/ (never progress.md)
+
+
+def test_current_template_not_in_prior_hash_manifest():
+    """Maintenance footgun guard (mirror of the skill manifest test in
+    test_init): the CURRENT OPERATING_MD must never be listed in
+    scaffold._PRIOR_OPERATING_HASHES. The manifest records *prior* shipped
+    templates (so an unmodified earlier ship refreshes); listing the
+    current one stops propagation and is the 'appended the new hash instead
+    of the old one' slip."""
+    import hashlib
+    from tigerharness.journal import scaffold
+    current = hashlib.sha256(OPERATING_MD.encode("utf-8")).hexdigest()
+    assert current not in scaffold._PRIOR_OPERATING_HASHES
+
+
 def test_per_persona_memory_gates_documented():
     """Per-persona memory protocol: the CLI gates that route each
     persona's worklog note exist, but they only fire if the driver

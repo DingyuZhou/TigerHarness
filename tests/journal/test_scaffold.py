@@ -156,8 +156,36 @@ class TestNewTask:
         paths.ensure()
         paths.operating_md.write_text("CUSTOMISED BY HUMAN")
         new_task(prd_text="# T\nbody\n", persona="P", paths=paths)
-        # Untouched.
+        # A hand-edited OPERATING.md (matching no shipped version) is the
+        # contract -- left untouched.
         assert paths.operating_md.read_text() == "CUSTOMISED BY HUMAN"
+
+    def test_operating_md_noop_when_already_current(self, paths):
+        from tigerharness.journal.operating_template import OPERATING_MD
+        paths.ensure()
+        new_task(prd_text="# T\nbody\n", persona="P", paths=paths)  # creates it
+        assert paths.operating_md.read_text() == OPERATING_MD
+        new_task(prd_text="# U\nbody\n", persona="P", paths=paths)  # second scaffold
+        assert paths.operating_md.read_text() == OPERATING_MD  # unchanged
+
+    def test_operating_md_refreshed_when_unmodified_prior_ship(
+        self, paths, monkeypatch,
+    ):
+        """An on-disk OPERATING.md byte-identical to a *prior shipped*
+        version (the team never customized it) is refreshed to the current
+        template on the next scaffold -- so a protocol update propagates."""
+        import hashlib
+        from tigerharness.journal.operating_template import OPERATING_MD
+        paths.ensure()
+        prior = "# OPERATING.md -- an earlier shipped version\nold body\n"
+        paths.operating_md.write_text(prior)
+        monkeypatch.setattr(
+            "tigerharness.journal.scaffold._PRIOR_OPERATING_HASHES",
+            {hashlib.sha256(prior.encode()).hexdigest()},
+        )
+        new_task(prd_text="# T\nbody\n", persona="P", paths=paths)
+        # Refreshed to current (the unmodified prior ship was replaced).
+        assert paths.operating_md.read_text() == OPERATING_MD
 
     def test_collision_with_active_then_done_handled(
         self, paths, monkeypatch,
