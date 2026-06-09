@@ -71,19 +71,28 @@ human stops it — then writes its state back.
 3. You open the interactive Claude Code app and invoke the **driver**
    skill (`drive-journal`). Each invocation begins with a **lazy
    sweep** of `active/` — archive anything that finished, classify
-   each `in_progress` task as fresh-or-stale (the heartbeat doubles
-   as a soft lease), and summarize what's actionable to you
-   in-session. Then the driver picks **one** actionable task —
-   leaving any *fresh* `in_progress` task alone (another session owns
-   it) — and works it continuously, appending progress and updating
-   state as it goes, until the task is `done`, hits a blocker, or you
-   stop the session. When that task finishes, the driver
-   **cascades**: re-sweeps and picks up the next actionable task,
-   draining the queue in one sitting.
+   each `in_progress` task as **idle** (detached — `session_ref`
+   cleared, resumable now), **busy** (attached + heartbeat fresh
+   within the stuck-timeout — a live session owns it), or **crashed**
+   (attached + heartbeat stale), and summarize what's actionable
+   in-session. If every `in_progress` task is busy and nothing is
+   idle/crashed/pending, the invocation **stops cheaply right there** —
+   a frequent loop is meant to no-op when work is already healthy. Otherwise
+   the driver picks **one** actionable task (priority order: a resumable
+   `in_progress` task first; else, if a *busy* task exists, exit cleanly
+   rather than start a `pending` one; else the oldest `pending`), and works
+   it continuously. Then it **cascades** — the hard loop that is the
+   driver's whole job: re-sweep and pick up the next session/task
+   **back-to-back in the same turn**, draining the whole queue (and each
+   task's whole `max_sessions` budget) in one sitting, **never
+   one-session-per-loop-fire**. Context pressure is not a stop reason: the
+   driver relies on auto-compaction and re-orients from `progress.md`,
+   handing off only at the genuine context ceiling.
 4. If a task isn't finished (you stopped, or it blocked), resume
-   later — the state is durable on disk. The next `drive-journal`
-   invocation's sweep picks up where this one left off; meanwhile any
-   *stale* `in_progress` task can be rescued by a future invocation.
+   later — the state is durable on disk. A clean stop **detaches**
+   (clears `session_ref`), so the task is **idle** and the next
+   `drive-journal` resumes it **immediately**, with no heartbeat wait;
+   a **crashed** task (owner went silent) is rescued the same way.
 
 Single-persona work (the task-runner's niche) and multi-persona work
 (the workflow-runner's niche) both belong here in principle. The
@@ -235,10 +244,8 @@ bookkeeping or human-facing labels.
 > idle/busy/crashed classification, the `journal claim` / `release`
 > CLIs, and the compare-and-set claim — live in
 > [`journal-instant-resume.md`](journal-instant-resume.md) and the
-> on-disk `OPERATING.md`. Some older "fresh/stale" prose elsewhere in
-> *this* document still reflects the pre-change framing and is being
-> migrated; where they differ, journal-instant-resume.md + OPERATING.md
-> win.
+> on-disk `OPERATING.md`; this document has been brought in line with
+> them. Where any detail still differs, those two sources win.
 
 ### State transitions
 
@@ -246,10 +253,10 @@ bookkeeping or human-facing labels.
 |---|---|---|---|---|
 | (none) | `pending` | scaffolder | `tigerharness journal new --prd ...` succeeds | full status.json initialized |
 | `pending` | `in_progress` | driver | sweep step 2 picks this task | `sessions += 1`, `updated_at` bumped, `session_ref` set to a fresh attach token by `journal claim` |
-| `in_progress`-stale | `in_progress` | driver | **rescue** -- the sweep classified the task as stale (heartbeat older than `stuck_timeout`) and step 2 picked it up; the previous owner is presumed wedged or crashed | `sessions += 1`, `updated_at` bumped, `session_ref` re-set to a fresh attach token by `journal claim`. The driver reads the tail of `progress.md` to figure out where the previous owner left off |
+| `in_progress`-crashed | `in_progress` | driver | **rescue** -- the sweep classified the task as crashed (attached but heartbeat older than `stuck_timeout`) and step 2 picked it up; the previous owner is presumed wedged or crashed | `sessions += 1`, `updated_at` bumped, `session_ref` re-set to a fresh attach token by `journal claim`. The driver reads the tail of `progress.md` to figure out where the previous owner left off |
 | `in_progress` | `in_progress` | driver | mid-task progress (clean stop, max_sessions not hit) | `updated_at` bumped, `next_action` rewritten. **No** `sessions` change -- the counter was already incremented on pickup |
 | `in_progress` | `done` | driver | task complete per acceptance criteria | `state=done`, `next_action` cleared, sweep will archive on next invocation |
-| `in_progress` | `blocked` | driver | real blocker (need human / another agent / external input) OR `sessions == max_sessions` | `state=blocked`, `next_action` names the blocker |
+| `in_progress` | `blocked` | driver | real blocker (need human / another agent / external input) OR `sessions >= max_sessions` | `state=blocked`, `next_action` names the blocker |
 | `blocked` | `in_progress` | human | manual edit of `status.json` to clear the blocker | `next_action` rewritten by the human to point the next session at the resolution |
 
 Phase 1 deliberately does **not** model a `failed` terminal state.
@@ -262,29 +269,45 @@ Writes to `status.json` must be **atomic** (write to a temp file, then
 rename) so an interrupted session never leaves a half-written state
 file.
 
-There is deliberately **no lease / lock field.** Leasing would guard
-against two drivers grabbing the same task at once, but parallelism is
-a non-goal here and a single human drives serially. `state` +
-`updated_at` already answer "is this being worked / is it stale." A
-lease can be added later if concurrent drivers ever become real (see
-Non-goals).
+There is deliberately **no hard lock.** Parallelism is a non-goal and a
+single human drives serially. The **soft lease** is `session_ref` (the
+attach token a session sets at `claim` and clears at `release`):
+`session_ref` + `updated_at` together answer idle (detached) / busy
+(attached + fresh) / crashed (attached + stale) — see
+[`journal-instant-resume.md`](journal-instant-resume.md). `claim` is an
+atomic compare-and-set on `session_ref`, so two concurrent drivers can't
+both grab a task; a hard lock can still be added if concurrent drivers
+ever become real (see Non-goals).
 
 
 ### Why one invocation runs the task to completion (and then cascades)
 
-The driver is **not** stepwise. One `drive-journal` invocation is
-intended to take its picked-up task as far as it can in a single
-interactive sitting — ideally all the way to `done` — and then,
-having finished that task, **cascade** by sweeping the journal again
-and picking up the next actionable task. One invocation drains as
-much of the queue as it can; it does not stop after a single task
-when more are waiting.
+The driver is **not** stepwise, and the cascade is **not** optional —
+it is the driver's whole job. One `drive-journal` invocation runs a
+task through its **entire `max_sessions` budget** session-to-session,
+and then drains the rest of the queue, **back-to-back in the same
+turn**. It does **not** hand the turn back between sessions or after a
+single task, and it is **never** one-session-per-loop-fire (that
+anti-pattern stretches a day of work across a day of 30-minute waits).
 
-The session stops only when (a) the picked task is finished, (b) a
-real blocker requires a human or another persona, (c) a guard rail
-like `max_sessions` fires, or (d) the human ends the session. After
-(a) or (b), the cascade decides whether to keep going on a new task;
-after (c) or (d), the invocation exits.
+The session stops only when: the picked task is `done` **and**
+`early_exit=true` (with the default `early_exit=false` it keeps
+iterating through `max_sessions`); a real blocker requires a human or
+another persona; `sessions >= max_sessions` fires; the sweep reports
+nothing actionable; the human ends the session; or you hit the
+**genuine context ceiling**. Short of those, it loops back to the
+sweep and keeps going.
+
+**Context pressure is not a stop reason — compact instead.** Every
+session checkpoints to `progress.md` + `next_action`, so a context
+compaction loses nothing for continuity (re-orient from those after
+one). The driver relies on **auto-compaction** (triggers at ~50% of
+the window by default, via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`) rather
+than handing off early "to let the loop bridge"; it hands off only at
+the true hard ceiling, and even then a fresh fire resumes the idle
+task instantly. (Compaction is safe for *memory* too — provided a
+`kind=task` done-note is assembled from the durable record; see
+[Per-persona memory](#per-persona-memory-the-worklog).)
 
 This matters because the subscription model rewards long, productive
 interactive sessions, not many short ones. Splitting work into
@@ -340,9 +363,11 @@ records** instead of the raw transcript:
   so the driver doesn't *also* get a fat summary of the whole drive.
 - **Ingestion.** A `journal_worklog` tiger-memory source discovers
   `*/worklog/*.md` under the journal root, groups them per `(task,
-  persona)`, and feeds the existing summarize → ingest machinery. Each
-  journal-working persona needs a tiger-memory config + store listing
-  that source (the roster prerequisite).
+  persona)`, and feeds the existing summarize → ingest machinery. It
+  reads **only** `worklog/` — `progress.md` is the narrative/continuity
+  log and is **never** ingested. Each journal-working persona needs a
+  tiger-memory config + store listing that source (the roster
+  prerequisite).
 
 The enforcement lives in **harness code**, not a prompt: a turn that
 skips its note simply cannot advance. The worst case is a *thin* note,
@@ -350,17 +375,25 @@ never a missing or mis-attributed one. Note **prose quality** is not
 enforced (code can guarantee a note exists and is correctly attributed,
 not that it is well-written).
 
+**Cascade × compaction caveat.** A `kind=task`'s worklog note is written
+**once, at `done`**, so it is the assigned persona's *only* ingested
+memory of the whole task. Because the cascade-first protocol relies on
+auto-compaction across a long task, the driver must build that note from
+the **durable record** (`progress.md` + `artifacts/`), not from
+possibly-compacted in-context memory. (`kind=workflow` is unaffected:
+`step-done` writes each step's note immediately, before any later
+compaction.)
+
 ## OPERATING.md — the protocol
 
-> **⚠ Superseded below (instant session hand-off, 2026-06-06).** The
-> inlined decision-procedure summary in this section still describes the
-> OLD fresh/stale heartbeat-lease model. The shipped protocol classifies
-> `in_progress` as **idle / busy / crashed** via the `session_ref`
-> attach token, resumes an idle task **immediately** (no 30-min wait),
-> and picks up / hands off via `journal claim` / `release`. The on-disk
-> `OPERATING.md` (generated from `operating_template.py`) and
-> [`journal-instant-resume.md`](journal-instant-resume.md) are
-> authoritative; read the walkthrough below as historical.
+> **ℹ This is a synopsis.** The on-disk `OPERATING.md` (generated from
+> `operating_template.py`) is the authoritative, fuller contract — it
+> additionally covers the per-persona memory gates (`--driver` /
+> `--output` / `journal step-done`) and the compile / graph-walk
+> sub-protocols. See also
+> [`journal-instant-resume.md`](journal-instant-resume.md) for the
+> idle/busy/crashed classification. The summary below is kept in sync
+> with the shipped protocol (cascade-first redesign, 2026-06-08).
 
 `OPERATING.md` is the instruction file: a vendor-neutral markdown
 contract that teaches *any* file-reading agent to drive the journal.
@@ -376,58 +409,71 @@ so could a human or another vendor's agent. It specifies:
   1. **Lazy sweep** of `active/*/status.json` first:
      a. Move any `done` task to `journal/done/` (the *previous*
         invocation may have finished a task without archiving it).
-     b. Classify every `in_progress` task by heartbeat age:
-        - **Fresh** (`updated_at` within `stuck_timeout`) — another
-          session owns this *right now*. Do **not** pick it up. The
-          heartbeat is the de-facto lease.
-        - **Stale** (`updated_at` older than `stuck_timeout`) — the
-          previous owner wedged or crashed. Flag it as stale in the
-          in-session summary; it is now reclaimable by the rescue
-          path in step 2.
-     c. Print the summary (count of `pending` / `in_progress`-fresh /
-        `in_progress`-stale / `blocked`) into the session.
-  2. Pick the next actionable task — **exactly one**, never multiple
-     in parallel:
-     - A `pending` task to start, OR
-     - A *stale* `in_progress` task to **rescue** (read its tail of
-       `progress.md` first to understand where the previous owner
-       left off, then resume from `next_action`).
-     - **Never** pick a *fresh* `in_progress` task — leaving it alone
-       is the correct behaviour. If no other task is actionable, the
-       invocation should exit cleanly, not steal someone else's
-       in-flight work.
-     - Skip `blocked` tasks; surface them in the summary so the human
-       can unblock manually.
-     - Prefer the one with the oldest heartbeat among the candidates.
+     b. Classify every `in_progress` task via the `session_ref` attach
+        token + heartbeat: **idle** (detached — resumable now),
+        **busy** (attached + heartbeat fresh within `stuck_timeout`),
+        or **crashed** (attached + heartbeat stale).
+     c. Print the summary (`pending` / resumable / busy / crashed /
+        `blocked` counts) into the session.
+     d. **Cheap no-op fast path:** if every `in_progress` task is
+        **busy** and nothing is idle / crashed / pending, **stop the
+        invocation here** without reading task context or the rest of
+        `OPERATING.md`. A healthy live session already owns the work; a
+        frequent loop (every few minutes) is *designed* to no-op
+        cheaply at this point.
+  2. Pick the next actionable task — **exactly one**, in this
+     **priority order (finish before you start)**:
+     a. A **resumable** `in_progress` task → resume it: **idle** (clean
+        hand-off — resume **immediately**, no wait) or **crashed**
+        (rescue). Read the tail of `progress.md` and continue from
+        `next_action`; prefer the oldest heartbeat among several.
+     b. **Else, if a *busy* `in_progress` task exists, do NOT start new
+        work — exit cleanly.** A live session owns it (the soft lease);
+        let it finish before any `pending` task begins (a later task
+        may depend on the one in flight).
+     c. **Else, start the oldest `pending` task.**
+     Then **claim atomically** with `tigerharness journal claim <id>`
+     (sets `session_ref`, bumps `sessions`, refreshes the heartbeat,
+     compare-and-set). In a Slack-driven drive, pass `--driver
+     <persona>`. Skip `blocked` tasks; surface them so the human can
+     unblock.
   3. Read its `task.md` (PRD) + `next_action` + the tail of
      `progress.md`.
   4. **Work the task continuously** — do the real work, append to
-     `progress.md`, and refresh `updated_at` as a heartbeat as you go.
-     Keep going until **one** of the stop conditions below fires.
-     Do **not** stop after a single step just because progress was
-     made; the goal is to take the task as far as possible in this
-     session.
-  5. On exit, write a final `progress.md` entry summarising the
-     session and update `status.json`: refresh `updated_at` one last
-     time, rewrite `next_action` (or clear it if `done`), and set
-     `state` to `done` / `blocked` / leave as `in_progress` for a
-     clean stop. The `sessions` counter was already bumped on pickup
-     (step 2) -- do **not** bump it again on exit.
-  6. **Cascade.** If the task you just finished moved to `done` (or
-     even `blocked` — a `blocked` task is "off your plate" because
-     the human's next action is to unblock it, not to drive it),
-     loop back to step 1 (re-sweep) and pick up the next actionable
-     task. Keep cycling until step 1 reports nothing actionable
-     remains, or the human ends the session, or a session-level
-     guard rail fires. Don't manufacture a stopping point just
-     because one task finished — drain the queue while the session is
-     hot.
-- **Stop conditions** — exit the loop in step 4 (for the current
-  task) when **any** of these hold: the task is fully `done`; a real
-  blocker is hit that needs a human or another agent (`blocked`); the
-  work has hit `max_sessions` or another guard rail; or the human
-  ends the session. Step 6 then decides whether to cascade or exit
-  the whole invocation.
+     `progress.md`, and refresh `updated_at` as a heartbeat (≥ every
+     ~10 min) as you go. For `kind=workflow`, advance the graph walk
+     via `journal step-done` (the gate routes and records each step's
+     per-persona worklog note; don't follow edges by hand). Keep going
+     until **one** of the stop conditions below fires.
+  5. On stop, run `tigerharness journal release <id>` to detach (clears
+     `session_ref` → the task is **idle** and resumes instantly next
+     time). In a drive, pass the same `--driver` you used at claim:
+     a clean stop with work left → `--next-action "<note>"`; a
+     `kind=task` `done` → `--state done --output <work-note.md>` (the
+     assigned persona's work note — built from the durable record, since
+     a long cascade may have compacted earlier sessions; it is the
+     persona's only ingested memory); a `kind=workflow` `done` →
+     `--state done` (the per-step notes are the record); blocked or
+     `sessions >= max_sessions` → `--state blocked --next-action
+     "<why>"`. `release` refreshes `updated_at`; the `sessions` counter
+     was already bumped at `claim` — do **not** bump it again.
+  6. **Cascade — the hard loop, the driver's whole job.** Immediately
+     loop back to step 1 **in the same turn** and continue: a task you
+     released not-done is now idle (re-claim and keep going); a task you
+     finished yields a different next pick. Run a task's whole
+     `max_sessions` budget and the whole queue back-to-back in one
+     sitting — **never one-session-per-loop-fire**. Don't hand the turn
+     back or write a "drive summary" between sessions.
+- **Stop conditions** — exit the loop in step 4 (for the current task)
+  when **any** of these hold: the task is `done` **and**
+  `early_exit=true` (with the default `early_exit=false`, do **not**
+  stop here — keep iterating through `max_sessions`); a real blocker
+  needs a human or another agent (`blocked`); `sessions >=
+  max_sessions`; or the human ends the session. The cascade (step 6)
+  ends the whole invocation only when the sweep reports nothing
+  actionable, the human ends it, or you hit the genuine **context
+  ceiling** — context pressure itself is **not** a stop reason (rely on
+  auto-compaction; see the cascade rationale above).
 
 The committed `OPERATING.md` is the contract; the driver skill is thin
 sugar that says "read `OPERATING.md` and execute it."
@@ -448,6 +494,19 @@ The driver has no CLI form on purpose: a CLI driver would be a
 programmatic entry point and defeat the subscription model. Driving
 only happens inside an interactive session a human started.
 
+**Adopting protocol updates on an existing team.** The skill and
+`OPERATING.md` propagate to already-scaffolded teams **hash-gated**, so
+an upgrade reaches them without clobbering local edits:
+- `tigerharness init --refresh-skills` installs any missing bundled
+  skill, **refreshes** any skill byte-identical to a previously-shipped
+  version to the current one, **leaves hand-edited skills untouched**,
+  and tops up `.claude/settings.json` (the journal-guard hook + the
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` compact threshold).
+- `OPERATING.md` refreshes on the next `tigerharness journal new`: the
+  scaffolder's `_ensure_operating_md` rewrites an on-disk file that
+  matches a prior shipped template (`_PRIOR_OPERATING_HASHES`) to the
+  current one, and leaves a hand-edited file alone.
+
 ## The lazy sweep (built into the driver)
 
 Every `drive-journal` invocation begins with a sweep over
@@ -456,18 +515,24 @@ between cascaded tasks. **It calls no model and costs nothing beyond
 the routine session.** Responsibilities:
 
 - Move `done` tasks to `journal/done/` to keep `active/` lean.
-- Classify every `in_progress` task by heartbeat age:
-  - **Fresh** (`updated_at` within `stuck_timeout`): another session
-    owns this right now. Leave it alone. The heartbeat is the
-    de-facto lease.
-  - **Stale** (`updated_at` older than `stuck_timeout`): the previous
-    owner wedged or crashed. Flag it for rescue — it's reclaimable
-    by the next step-2 pick.
+- Classify every `in_progress` task via the `session_ref` attach token
+  + heartbeat:
+  - **idle** (`session_ref` cleared): cleanly detached — resumable
+    **now**, no heartbeat wait.
+  - **busy** (attached + `updated_at` within `stuck_timeout`): a live
+    session owns it right now (the soft lease). Leave it alone.
+  - **crashed** (attached + `updated_at` older than `stuck_timeout`):
+    the owner wedged or went silent. Reclaimable by the next step-2
+    rescue.
 - Summarize what's actionable: e.g. *"2 pending, 1 resumable, 1 busy
   (owned by a live session), 1 crashed (no heartbeat 40m), 1 blocked
   awaiting your review."* The summary lands in the same
   interactive context where you're about to act on it, instead of a
   separate Slack DM from a daemon.
+- **Cheap no-op fast path:** if every `in_progress` task is busy and
+  nothing is idle / crashed / pending, the invocation stops right here —
+  a frequent loop (every 5–10 min) is meant to no-op cheaply when work
+  is already healthy, without reading task context or `OPERATING.md`.
 
 No cron, no systemd unit, no background process. The sweep is plain
 non-AI Python logic invoked at the start of the `drive-journal`
@@ -484,7 +549,8 @@ it.
 | Env var | Default | Purpose |
 |---|---|---|
 | `TIGERHARNESS_JOURNAL_DIR` | `<team>/journal/` | Journal root the scaffolder and driver operate on. |
-| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which the sweep flags an `in_progress` task as stale. |
+| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age (seconds) past which the sweep classifies an *attached* `in_progress` task as **crashed** (and below which it is **busy**). |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` | Claude Code auto-compaction threshold (% of the context window) that the harness **seeds** into a new team's `.claude/settings.json` `env` (and tops up on `init --refresh-skills`). Lets a long cascade compact proactively instead of handing off for "context heavy". It lives in the `env` block, not as a settings.json key. |
 
 ## The work loop
 
@@ -495,15 +561,17 @@ it.
    seeds `status.json` as `pending`.
 3. **Drive.** Open Claude Code, invoke `drive-journal`. The skill
    first runs the lazy sweep (archive any `done`, classify
-   `in_progress` tasks as fresh-or-stale, summarize what's actionable
-   in-session); then it picks **one** actionable task — never a
-   *fresh* `in_progress` task, since that belongs to another active
-   session — and runs it continuously, appending to `progress.md` and
-   bumping the heartbeat in `status.json` as it goes, until the task
-   is `done`, hits a blocker, or you stop the session. When that task
-   finishes, the skill **cascades**: re-runs the sweep and picks up
-   the next actionable task. One invocation drains as much of the
-   queue as it can in one sitting.
+   `in_progress` tasks as **idle / busy / crashed**, summarize what's
+   actionable in-session — and stop cheaply if everything is busy);
+   then it picks **one** actionable task — never a *busy* `in_progress`
+   task, since that belongs to another active session — and runs it
+   continuously, appending to `progress.md` and bumping the heartbeat
+   in `status.json` as it goes, until a stop condition fires. Then it
+   **cascades** — the hard loop: re-sweep and pick up the next
+   session/task **back-to-back in the same turn**. One invocation
+   drains the whole queue (and each task's whole `max_sessions` budget)
+   in one sitting, never one-session-per-loop-fire; context pressure is
+   handled by compaction, not by handing off.
 4. **Resume if needed.** If the task isn't `done` (you stopped, it
    blocked, or it hit `max_sessions`), come back later and invoke
    `drive-journal` again — a fresh session resumes the idle task
@@ -528,14 +596,6 @@ Serial and human-paced — by design.
 
 ### How serial execution is enforced
 
-> **⚠ Partially superseded (instant session hand-off, 2026-06-06).** The
-> serial "one task at a time" principle still holds, but the mechanism
-> below is in the old fresh/stale terms. Today the soft lease is the
-> `session_ref` attach token (not the heartbeat); a cleanly handed-off
-> task is **idle** and resumes immediately; the heartbeat only flags a
-> **crashed** owner. See
-> [`journal-instant-resume.md`](journal-instant-resume.md).
-
 Serial means **one task at a time**, not one task per invocation.
 The decision procedure picks exactly **one** task at step 2, drives
 it to its stop condition at steps 3–5, and *then* cascades at step 6
@@ -546,25 +606,26 @@ What prevents parallel execution within a single invocation: step 2
 of the procedure picks exactly one task and the driver doesn't move
 on until that task hits its stop condition. The interactive session
 is one human at one keyboard, so within a single session there is
-fundamentally one driver doing one task at a time.
+fundamentally one driver doing one task at a time. And **finish
+before you start**: if a *busy* `in_progress` task exists, step 2
+declines to start a `pending` one and exits cleanly — a later task
+may depend on the one in flight.
 
 What prevents two invocations from clobbering each other on the same
-task: the **heartbeat as a soft lease**. A *fresh* `updated_at` on
-an `in_progress` task signals that another session is actively
-working it; the sweep classifies it as `in_progress`-fresh and
-step 2 declines to pick it up. Only `pending` tasks and *stale*
-`in_progress` tasks (heartbeat older than `stuck_timeout`) are
-candidates for a new owner. This makes the heartbeat double as a
-soft lease without an explicit lease field.
+task: the **`session_ref` attach token** as a soft lease, enforced by
+`journal claim`. `claim` is an atomic **compare-and-set** on
+`session_ref` — it re-reads and refuses if another session set the
+token first ("busy" / "claim lost"), so two concurrent drivers can't
+both own a task. The sweep classifies an attached + fresh task as
+**busy** (step 2 leaves it alone); a cleanly **idle** (detached) task
+is the one available to resume, and a **crashed** (attached + stale)
+owner is reclaimable. The heartbeat only distinguishes busy from
+crashed — it is no longer the lease itself.
 
-The doc deliberately omits an explicit lease (cut from the MVP) on
-the honest assumption that two concurrent drivers is the rare case
-and the heartbeat-as-soft-lease catches it well enough. The
-remaining race window — two invocations both seeing a `pending`
-task as their best pick at the exact same moment — could clobber
-each other's `status.json` initial write. Adding an explicit lease
-(file lock, dedicated `lease.json`) is a Phase 2 hardening if
-concurrent drivers ever become a real workflow.
+The doc deliberately omits an explicit *hard* lock (cut from the MVP):
+`claim`'s compare-and-set already closes the double-owner race for the
+serial single-human workflow. A dedicated file lock / `lease.json` is
+a Phase 2 hardening only if concurrent drivers ever become real.
 
 ## Configuration (Phase 2)
 

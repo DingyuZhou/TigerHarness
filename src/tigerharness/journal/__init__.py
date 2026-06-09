@@ -7,8 +7,9 @@ See ``docs/subscription-backend.md`` for the design. Phase 1 ships:
   ``done/``; and ``OPERATING.md`` at the journal root.
 - The ``Status`` dataclass + state machine.
 - The scaffolder: create a task from a PRD.
-- The lazy sweep: classify ``in_progress`` tasks as fresh vs stale,
-  archive ``done`` tasks, summarise what's actionable.
+- The lazy sweep: classify ``in_progress`` tasks as idle / busy /
+  crashed (via the ``session_ref`` attach token + heartbeat), archive
+  ``done`` tasks, summarise what's actionable.
 - A small CLI: ``new`` / ``list`` / ``status`` / ``sweep``.
 
 The driver (``drive-journal`` skill) is intentionally *not* a Python
