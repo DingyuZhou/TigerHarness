@@ -132,6 +132,52 @@ delete it from OPERATING the way the skill rewrite once dropped it.
 | 5 | new-skill / stale-OPERATING propagation window | MINOR | Noted — benign (pick logic agrees; skill additions are silent-not-contradicted) |
 | — | finish-before-start now pinned in the contract | — | **Added** — regression guard for #4 |
 
+---
+
+## Round 4 — post-merge integration review
+
+After merging `main`'s per-persona-memory revamp (commit 3c20dff), a round
+over the *integration itself*. The merge was sound (full suite 100%,
+Shohoku refresh verified at runtime), so the findings are honest **MINOR**s
+— clarity + test-quality, no correctness regression.
+
+### MINOR-6 (fixed) — skill over-attributed `step-done` to the compile phase
+
+When weaving the revamp's memory gates into the lazy-load checklist, step 4
+said "for `kind=workflow` … end each step at the `journal step-done` gate"
+for the *whole* workflow branch. But `step-done` is the **graph-walk** gate
+only; the **compile** sub-protocol advances via `land-compile`, which writes
+its own per-round worklogs. A driver in `compile_pending=true` could have
+been misled into reaching for `step-done`. **Fix:** scoped step 4 — `step-done`
+is named for the graph walk, and `land-compile` is named for compile. Low
+blast radius (step 4 runs *after* OPERATING.md is loaded in step 3, which is
+authoritative), but the skill shouldn't mislead.
+
+### MINOR-7 (fixed) — no regression guard that the skill teaches the gates
+
+The merge's load-bearing fix was putting `--driver`/`--output`/`step-done`
+*in the skill* (it `claim`s in step 2 before reading OPERATING.md in step 3,
+so a Slack drive would otherwise skip per-persona memory). Nothing pinned
+that. **Fix:** `test_skill_teaches_per_persona_memory_gates` asserts the
+bundled skill names `--driver` (and that it appears at the *claim* step, not
+only release), `--output`, and `journal step-done`; plus
+`test_step_done_scoped_to_graph_walk_not_compile` locks in MINOR-6's scoping
+(`graph walk` + `land-compile` both present).
+
+### MINOR-8 (fixed) — bundled↔repo-mirror equality was hand-only
+
+The installed package data (`src/.../_bundled_skills/`) and the
+repo-of-record mirror (`skills/`) carry byte-identical copies of every
+shared skill, but the sync is by hand (a `cp` after each edit). A future
+edit to only the discoverable repo copy would silently diverge from what
+actually installs. **Fix:** `test_bundled_and_repo_mirror_skills_byte_identical`
+walks the intersection of the two trees and asserts every shared `SKILL.md`
+is byte-for-byte equal. (Confirmed all 5 shared skills identical today.)
+
+**Round 4 verified:** 3 new tests; full suite **3193 passed, 100%
+line+branch coverage** on the merged tree. No production behavior changed —
+one skill-copy clarity edit + three guards.
+
 **Net code change across the three rounds:** one new no-clobber helper
 (`_ensure_compact_env_in_file`) wired into two adoption paths; the skill's
 step-2 pick logic realigned to the contract; six new tests (the helper's 7

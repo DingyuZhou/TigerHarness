@@ -1963,6 +1963,67 @@ class TestRefreshSkills:
 
 
 # ---------------------------------------------------------------------------
+# Bundled drive-journal skill content + mirror invariant
+# ---------------------------------------------------------------------------
+
+class TestBundledDriveJournalSkill:
+    """The bundled drive-journal skill is design copy (no behavior), but
+    two of its contracts are load-bearing and easy to drop on a rewrite,
+    so pin them."""
+
+    def _bundled(self, name: str) -> Path:
+        import tigerharness.init as _init
+        return (
+            Path(_init.__file__).parent / "_bundled_skills" / name / "SKILL.md"
+        )
+
+    def test_skill_teaches_per_persona_memory_gates(self):
+        """The skill is read top-to-bottom and `claim`s in step 2 BEFORE it
+        loads OPERATING.md in step 3 -- so the per-persona-memory gates have
+        to live in the skill itself, or a Slack-driven drive claims without
+        --driver and silently skips per-persona memory. (This regressed once
+        when the skill was rewritten as a lazy-load checklist; pin it.)"""
+        text = self._bundled("drive-journal").read_text(encoding="utf-8")
+        assert "--driver" in text          # attribution at claim/release
+        assert "--output" in text          # the note is the ticket (done gate)
+        assert "journal step-done" in text  # graph-walk gate
+        # --driver must appear at the claim step, not only at release --
+        # claim happens before OPERATING.md is read.
+        claim_idx = text.index("journal claim")
+        assert "--driver" in text[claim_idx:claim_idx + 600]
+
+    def test_step_done_scoped_to_graph_walk_not_compile(self):
+        """`step-done` is the graph-walk gate; the compile sub-protocol uses
+        `land-compile`. The skill must not imply step-done drives a compile
+        round (it would mislead a driver in compile_pending=true)."""
+        text = self._bundled("drive-journal").read_text(encoding="utf-8")
+        assert "graph walk" in text.lower()
+        assert "land-compile" in text
+
+    def test_bundled_and_repo_mirror_skills_byte_identical(self):
+        """Every skill shipped in BOTH trees -- the installed package data
+        (`_bundled_skills/`) and the repo-of-record mirror (`skills/`) --
+        must be byte-identical. The two are kept in sync by hand; this
+        catches an edit that touched only one (the discoverable repo copy
+        and the actually-installed copy must never disagree)."""
+        import tigerharness.init as _init
+        root = _tigerharness_project_root()
+        bundled_root = Path(_init.__file__).parent / "_bundled_skills"
+        mirror_root = root / "skills"
+        shared = sorted(
+            d.name for d in bundled_root.iterdir()
+            if d.is_dir() and (mirror_root / d.name / "SKILL.md").is_file()
+        )
+        assert shared, "expected at least one skill shared across both trees"
+        mismatched = [
+            name for name in shared
+            if (bundled_root / name / "SKILL.md").read_bytes()
+            != (mirror_root / name / "SKILL.md").read_bytes()
+        ]
+        assert not mismatched, f"bundled vs repo-mirror drift: {mismatched}"
+
+
+# ---------------------------------------------------------------------------
 # Integration: generated artifacts actually work
 # ---------------------------------------------------------------------------
 

@@ -72,11 +72,12 @@ boundary instead.
 
 4. **Work the task continuously** per OPERATING.md — branch on
    `status.kind` (for `kind=workflow`, follow the compile / graph-walk
-   sub-protocols *in OPERATING.md*; end each step at the gate —
-   `tigerharness journal step-done --task <id> --step <id> --verdict <V>
-   --output <note>` — which writes that step persona's worklog entry and
-   prints the next step. Do **not** follow the edges by hand: the gate
-   routes AND records). **Heartbeat** every ~10 min of work (append to
+   sub-protocols *in OPERATING.md*: in a **graph walk**, end each step at
+   the `tigerharness journal step-done --task <id> --step <id> --verdict
+   <V> --output <note>` gate — it writes that step persona's worklog entry
+   and prints the next step, so do **not** follow the edges by hand; in the
+   **compile** sub-protocol, `land-compile` records its own per-round
+   worklogs). **Heartbeat** every ~10 min of work (append to
    `progress.md` + refresh `updated_at`), so a concurrent loop correctly
    sees you as *busy*. Stop the session only on a real **stop condition**:
    task `done` *and* `early_exit=true`; a real blocker; or the human ends
