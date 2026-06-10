@@ -1,4 +1,4 @@
-"""Unit tests for ``tigerharness.workflow_runner.models``."""
+"""Unit tests for ``tigerharness.journal.wfcore.models``."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import datetime as dt
 
 import pytest
 
-from tigerharness.workflow_runner import models as models_mod
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore import models as models_mod
+from tigerharness.journal.wfcore.models import (
     Event,
     Orchestration,
     SessionMap,

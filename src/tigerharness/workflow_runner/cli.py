@@ -66,7 +66,7 @@ from tigerharness.workflow_runner.atomic import (
     read_json,
     write_json_atomic,
 )
-from tigerharness.workflow_runner.compile.errors import (
+from tigerharness.journal.wfcore.errors import (
     CompileTier1Error,
     CompileTier2Error,
 )
@@ -75,7 +75,7 @@ from tigerharness.workflow_runner.executor import (
     ExecutorError,
     WorkflowExecutor,
 )
-from tigerharness.workflow_runner.models import now_iso
+from tigerharness.journal.wfcore.models import now_iso
 from tigerharness.workflow_runner.paths import (
     TaskPaths,
     default_journal_root,
@@ -545,7 +545,7 @@ def _resolve_compile_entrypoint() -> Any:
     """
     compile_fn = compile_playbook
     if compile_fn is None:  # pragma: no cover - integration seam (Sakuragi)
-        from tigerharness.workflow_runner.compile.pipeline import (
+        from tigerharness.journal.wfcore.pipeline import (
             compile_playbook as compile_fn,
         )
     return compile_fn

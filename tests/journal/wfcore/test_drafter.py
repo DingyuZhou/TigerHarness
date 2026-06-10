@@ -1,4 +1,4 @@
-"""Unit tests for ``tigerharness.workflow_runner.compile.drafter``.
+"""Unit tests for ``tigerharness.journal.wfcore.drafter``.
 
 The drafter talks to the LLM only through ``SessionManager.invoke``;
 every test injects the in-memory :class:`FakeSessionManager` from
@@ -26,14 +26,14 @@ from __future__ import annotations
 
 import pytest
 
-from tigerharness.workflow_runner.compile.drafter import (
+from tigerharness.journal.wfcore.drafter import (
     DrafterParseError,
     DrafterResult,
     draft_steps,
 )
-from tigerharness.workflow_runner.models import StepFrontmatter
+from tigerharness.journal.wfcore.models import StepFrontmatter
 
-from tests.workflow_runner.compile.conftest import (
+from tests.journal.wfcore.conftest import (
     FakeSessionManager,
     StepSpec,
     make_response,

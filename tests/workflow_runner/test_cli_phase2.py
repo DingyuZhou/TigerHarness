@@ -24,12 +24,12 @@ from pathlib import Path
 import pytest
 
 from tigerharness.workflow_runner import cli, read_events
-from tigerharness.workflow_runner.compile.errors import (
+from tigerharness.journal.wfcore.errors import (
     CompileTier1Error,
     CompileTier2Error,
 )
 from tigerharness.workflow_runner.executor import ExecutionOutcome
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     Orchestration,
     WorkflowConfig,
     now_iso,

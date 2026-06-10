@@ -43,7 +43,7 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
-from tigerharness.workflow_runner.ids import validate_step_id
+from tigerharness.journal.wfcore.ids import validate_step_id
 
 _STATE_DIR_NAME = "tigerharness-workflows"
 

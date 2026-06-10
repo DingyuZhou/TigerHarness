@@ -773,7 +773,7 @@ def _load_orchestration(paths: JournalPaths, task_id: str):
     ``Orchestration`` on success or a human-readable error string. The
     workflow_runner import is lazy (mirrors the compile CLIs) so the
     pure-task journal paths never pull it in."""
-    from tigerharness.workflow_runner.models import (
+    from tigerharness.journal.wfcore.models import (
         Orchestration,
         WorkflowModelError,
     )

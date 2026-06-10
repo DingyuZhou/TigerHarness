@@ -43,7 +43,7 @@ from tigerharness.workflow_runner.events import (
     read_events,
     tail_events,
 )
-from tigerharness.workflow_runner.ids import (
+from tigerharness.journal.wfcore.ids import (
     STEP_ID_PATTERN,
     validate_step_id,
 )
@@ -56,7 +56,7 @@ from tigerharness.workflow_runner.locks import (
     read_pid_info,
     write_pid,
 )
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     Event,
     Orchestration,
     SessionMap,
@@ -77,7 +77,7 @@ from tigerharness.workflow_runner.sessions import (
     InvocationResult,
     SessionManager,
 )
-from tigerharness.workflow_runner.trailer import (
+from tigerharness.journal.wfcore.trailer import (
     Approve,
     Block,
     ParseError,

@@ -27,7 +27,7 @@ Design picks
   - Atomic JSON I/O comes from
     :mod:`tigerharness.workflow_runner.atomic`.
   - The typed view of ``sessions.json`` is
-    :class:`tigerharness.workflow_runner.models.SessionMap`.
+    :class:`tigerharness.journal.wfcore.models.SessionMap`.
   - Persona prompt lookup and the ``_SUDO_DENY`` floor come from
     :mod:`tigerharness.task_runner.personas`. Reusing the floor is
     not cosmetic: it keeps the workflow-runner's per-turn argv
@@ -58,7 +58,7 @@ from subprocess import PIPE, Popen, TimeoutExpired
 from typing import Any, Optional
 
 from tigerharness.workflow_runner.atomic import read_json, write_json_atomic
-from tigerharness.workflow_runner.models import SessionMap
+from tigerharness.journal.wfcore.models import SessionMap
 
 log = logging.getLogger("tigerharness.workflow_runner.sessions")
 

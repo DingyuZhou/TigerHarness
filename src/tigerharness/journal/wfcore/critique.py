@@ -30,7 +30,7 @@ Seams and the lines we do **not** cross:
   here. In production the pipeline passes a closure over
   ``drafter.draft_steps`` that forwards playbook + brief + roster.
 * Verdict parsing is delegated to
-  :func:`tigerharness.workflow_runner.trailer.parse_trailer` -- the one
+  :func:`tigerharness.journal.wfcore.trailer.parse_trailer` -- the one
   place in the codebase where AI-generated text meets deterministic
   routing. Reusing it keeps a single grammar authority for the
   ``WORKFLOW:`` trailer instead of a second, drifting regex here. A
@@ -50,9 +50,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-from tigerharness.workflow_runner.models import StepFrontmatter
+from tigerharness.journal.wfcore.models import StepFrontmatter
 from tigerharness.workflow_runner.sessions import InvocationResult, SessionManager
-from tigerharness.workflow_runner.trailer import (
+from tigerharness.journal.wfcore.trailer import (
     Approve,
     Revise,
     parse_trailer,

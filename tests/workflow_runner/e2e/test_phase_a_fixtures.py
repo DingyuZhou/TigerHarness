@@ -31,8 +31,8 @@ import pytest
 
 from tigerharness.workflow_runner import cli as wf_cli
 from tigerharness.workflow_runner.executor import ExecutionOutcome
-from tigerharness.workflow_runner.models import StepFrontmatter
-from tigerharness.workflow_runner.trailer import parse_trailer
+from tigerharness.journal.wfcore.models import StepFrontmatter
+from tigerharness.journal.wfcore.trailer import parse_trailer
 
 
 # --------------------------------------------------------------------------- #

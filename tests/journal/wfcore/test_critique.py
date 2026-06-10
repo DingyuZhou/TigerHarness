@@ -1,4 +1,4 @@
-"""Unit tests for ``tigerharness.workflow_runner.compile.critique``.
+"""Unit tests for ``tigerharness.journal.wfcore.critique``.
 
 The critique loop talks to the LLM only through ``SessionManager.invoke``;
 every test injects :class:`ScriptedSessionManager`, which serves a
@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import pytest
 
-from tigerharness.workflow_runner.compile.critique import (
+from tigerharness.journal.wfcore.critique import (
     AKAGI_CRITIC_PROMPT_TEMPLATE,
     AYAKO_CRITIC_PROMPT_TEMPLATE,
     CritiqueAbortedError,
@@ -39,10 +39,10 @@ from tigerharness.workflow_runner.compile.critique import (
     CritiqueVerdict,
     run_critique_loop,
 )
-from tigerharness.workflow_runner.models import StepFrontmatter
+from tigerharness.journal.wfcore.models import StepFrontmatter
 from tigerharness.workflow_runner.sessions import TIMEOUT_EXIT_CODE, InvocationResult
 
-from tests.workflow_runner.compile.conftest import RecordedCall
+from tests.journal.wfcore.conftest import RecordedCall
 
 ROSTER = ["anzai", "akagi", "ayako", "rukawa"]
 

@@ -2,7 +2,7 @@
 
 This is the orchestration glue that turns a freestyle markdown playbook
 plus a task brief into a validated, ready-to-persist
-:class:`~tigerharness.workflow_runner.models.Orchestration`. It stitches
+:class:`~tigerharness.journal.wfcore.models.Orchestration`. It stitches
 together the three Wave-1/Wave-2 components:
 
 * **drafter** (:func:`compile.drafter.draft_steps`) -- Anzai's initial
@@ -40,7 +40,7 @@ What we deliberately do **not** do (out of scope, see the task brief):
 * Persist ``orchestration.json`` / ``steps/*.md`` -- the caller's
   ``write_artifacts`` does that from the returned :class:`CompileResult`.
 * Retry the *initial* draft on a parse failure -- a
-  :class:`~tigerharness.workflow_runner.compile.drafter.DrafterParseError`
+  :class:`~tigerharness.journal.wfcore.drafter.DrafterParseError`
   propagates to the caller untouched.
 
 Cross-module seam
@@ -74,12 +74,12 @@ from typing import Any
 
 import yaml
 
-from tigerharness.workflow_runner.compile.drafter import draft_steps
-from tigerharness.workflow_runner.compile.validators import (
+from tigerharness.journal.wfcore.drafter import draft_steps
+from tigerharness.journal.wfcore.validators import (
     ValidationError,
     validate_compile_output,
 )
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     Orchestration,
     StepFrontmatter,
     WorkflowConfig,
@@ -429,7 +429,7 @@ def compile_playbook(
         # pipeline module stays importable in the parallel-build window
         # where ``compile.critique`` hadn't landed yet. Tests inject a
         # fake via the ``critique_loop=`` kwarg.
-        from tigerharness.workflow_runner.compile.critique import (
+        from tigerharness.journal.wfcore.critique import (
             run_critique_loop,
         )
         critique_loop = run_critique_loop

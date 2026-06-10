@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     StepFrontmatter,
     WorkflowModelError,
 )

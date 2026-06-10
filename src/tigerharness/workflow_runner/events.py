@@ -32,7 +32,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     Event,
     WorkflowModelError,
     now_iso,

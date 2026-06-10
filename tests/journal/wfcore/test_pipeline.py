@@ -1,4 +1,4 @@
-"""Unit tests for ``tigerharness.workflow_runner.compile.pipeline``.
+"""Unit tests for ``tigerharness.journal.wfcore.pipeline``.
 
 The pipeline stitches together three components. Two are real here (the
 drafter + the Tier 1 validators); the Tier 2 critique loop is injected as
@@ -33,7 +33,7 @@ from typing import Any, Optional
 
 import pytest
 
-from tigerharness.workflow_runner.compile.pipeline import (
+from tigerharness.journal.wfcore.pipeline import (
     CompileConfigError,
     CompileResult,
     CompileTier1Error,
@@ -41,14 +41,14 @@ from tigerharness.workflow_runner.compile.pipeline import (
     CritiqueResult,
     compile_playbook,
 )
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     Orchestration,
     StepFrontmatter,
     WorkflowConfig,
 )
 from tigerharness.workflow_runner.paths import TaskPaths
 
-from tests.workflow_runner.compile.conftest import (
+from tests.journal.wfcore.conftest import (
     FakeSessionManager,
     StepSpec,
     make_response,

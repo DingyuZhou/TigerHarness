@@ -1,4 +1,4 @@
-"""Tests for ``tigerharness.workflow_runner.trailer``.
+"""Tests for ``tigerharness.journal.wfcore.trailer``.
 
 The persona response trailer is the only place AI-generated text meets
 deterministic routing. The grammar is tight on purpose; these tests
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from tigerharness.workflow_runner.trailer import (
+from tigerharness.journal.wfcore.trailer import (
     Approve,
     Block,
     ParseError,

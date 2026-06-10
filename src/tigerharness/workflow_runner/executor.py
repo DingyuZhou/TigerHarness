@@ -12,7 +12,7 @@ top:
 
 * :class:`tigerharness.workflow_runner.sessions.SessionManager` for
   per-persona ``claude -p --resume`` dispatch.
-* :func:`tigerharness.workflow_runner.trailer.parse_trailer` for
+* :func:`tigerharness.journal.wfcore.trailer.parse_trailer` for
   verdict extraction; the executor branches on the typed verdict ADT
   (``isinstance(verdict, Approve|Revise|Block|ParseError)``).
 * :class:`Status` / :class:`StepHistoryEntry` / :class:`Orchestration`
@@ -64,7 +64,7 @@ from tigerharness.workflow_runner.locks import (
     heartbeat,
     write_pid,
 )
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     Orchestration,
     Status,
     StepFrontmatter,
@@ -77,7 +77,7 @@ from tigerharness.workflow_runner.sessions import (
     InvocationResult,
     SessionManager,
 )
-from tigerharness.workflow_runner.trailer import (
+from tigerharness.journal.wfcore.trailer import (
     Approve,
     Block,
     ParseError,

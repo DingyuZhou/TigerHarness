@@ -248,7 +248,7 @@ class TestGuessTeamForStatus:
 
 class TestRenderFrontmatter:
     def test_skips_body_renders_list_inline(self):
-        from tigerharness.workflow_runner.compile.drafter import (
+        from tigerharness.journal.wfcore.drafter import (
             _parse_response,
         )
         steps = _parse_response(_VALID_BUNDLE)
@@ -462,7 +462,7 @@ class TestCompilePrompts:
         We patch _build_prompt to return a no-newline string to drive the
         else-branch."""
         task_id, paths = scaffolded
-        import tigerharness.workflow_runner.compile.drafter as drafter_mod
+        import tigerharness.journal.wfcore.drafter as drafter_mod
         monkeypatch.setattr(
             drafter_mod, "_build_prompt",
             lambda **kw: "no-newline-prompt",
@@ -1215,7 +1215,7 @@ class TestAppendSteps:
         capsys.readouterr()
         bundle_path = tmp_path / "bundle.md"
         bundle_path.write_text("```steps-bundle\n```\n")
-        import tigerharness.workflow_runner.compile.drafter as drafter_mod
+        import tigerharness.journal.wfcore.drafter as drafter_mod
         monkeypatch.setattr(drafter_mod, "_parse_response", lambda _: [])
         rc = cmd_append_steps(argparse.Namespace(
             journal_dir=str(paths.root),
@@ -1521,7 +1521,7 @@ class TestReadExistingStep:
         from tigerharness.journal.compile_cli import (
             _read_existing_step, _render_frontmatter,
         )
-        from tigerharness.workflow_runner.models import StepFrontmatter
+        from tigerharness.journal.wfcore.models import StepFrontmatter
 
         s = StepFrontmatter(
             id="x-1", persona="Anzai", role="planner",

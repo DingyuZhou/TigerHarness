@@ -30,7 +30,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from tigerharness.workflow_runner.ids import validate_step_id
+from tigerharness.journal.wfcore.ids import validate_step_id
 
 # --------------------------------------------------------------------------- #
 # Exceptions

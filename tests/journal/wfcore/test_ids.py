@@ -1,4 +1,4 @@
-"""Unit tests for ``tigerharness.workflow_runner.ids``.
+"""Unit tests for ``tigerharness.journal.wfcore.ids``.
 
 The sanitizer is small but security-load-bearing once Phase 2's
 AI-compile lands. Every accept/reject case is explicit and named so a
@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from tigerharness.workflow_runner.ids import (
+from tigerharness.journal.wfcore.ids import (
     STEP_ID_PATTERN,
     validate_step_id,
 )
-from tigerharness.workflow_runner.models import WorkflowModelError
+from tigerharness.journal.wfcore.models import WorkflowModelError
 
 
 # --------------------------------------------------------------------------- #

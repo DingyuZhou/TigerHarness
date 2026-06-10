@@ -1,4 +1,4 @@
-"""Unit tests for ``tigerharness.workflow_runner.compile.validators``.
+"""Unit tests for ``tigerharness.journal.wfcore.validators``.
 
 Each Tier 1 validator gets a happy path, a focused failure path, and
 an edge case. The dry-run trace has a verbatim regression pin so any
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from tigerharness.workflow_runner.compile.validators import (
+from tigerharness.journal.wfcore.validators import (
     SENTINELS,
     ValidationError,
     ValidationResult,
@@ -22,7 +22,7 @@ from tigerharness.workflow_runner.compile.validators import (
     validate_roster,
     validate_schema,
 )
-from tigerharness.workflow_runner.models import StepFrontmatter
+from tigerharness.journal.wfcore.models import StepFrontmatter
 
 
 # --------------------------------------------------------------------------- #

@@ -10,7 +10,7 @@ adds the Tier 2 forced critique loop (Rukawa) and the
 
 from __future__ import annotations
 
-from tigerharness.workflow_runner.compile.critique import (
+from tigerharness.journal.wfcore.critique import (
     CritiqueAbortedError,
     CritiqueParseError,
     CritiqueResult,
@@ -18,19 +18,19 @@ from tigerharness.workflow_runner.compile.critique import (
     CritiqueVerdict,
     run_critique_loop,
 )
-from tigerharness.workflow_runner.compile.drafter import (
+from tigerharness.journal.wfcore.drafter import (
     DrafterParseError,
     DrafterResult,
     draft_steps,
 )
-from tigerharness.workflow_runner.compile.pipeline import (
+from tigerharness.journal.wfcore.pipeline import (
     CompileConfigError,
     CompileResult,
     CompileTier1Error,
     CompileTier2Error,
     compile_playbook,
 )
-from tigerharness.workflow_runner.compile.validators import (
+from tigerharness.journal.wfcore.validators import (
     SENTINELS,
     ValidationError,
     ValidationResult,

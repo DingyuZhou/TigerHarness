@@ -33,7 +33,7 @@ def validate_step_id(step_id: object) -> None:
     is imported lazily to keep this module a dependency leaf -- ``models``
     imports from here, not the other way around.
     """
-    from tigerharness.workflow_runner.models import WorkflowModelError
+    from tigerharness.journal.wfcore.models import WorkflowModelError
 
     if not isinstance(step_id, str):
         raise WorkflowModelError(

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tigerharness.workflow_runner import paths as paths_mod
-from tigerharness.workflow_runner.models import WorkflowModelError
+from tigerharness.journal.wfcore.models import WorkflowModelError
 from tigerharness.workflow_runner.paths import (
     TaskPaths,
     default_journal_root,

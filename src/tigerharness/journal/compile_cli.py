@@ -243,7 +243,7 @@ def cmd_compile_context(args: argparse.Namespace) -> int:
 
     # Lazy import: avoids a hard import-time dep on workflow_runner
     # during journal Phase 1 callsites that never reach compile mode.
-    from tigerharness.workflow_runner.compile.drafter import _build_prompt
+    from tigerharness.journal.wfcore.drafter import _build_prompt
 
     drafter_prompt = _build_prompt(
         playbook_text=playbook,
@@ -311,7 +311,7 @@ def cmd_compile_prompts(args: argparse.Namespace) -> int:
 
     kind = args.kind
     if kind == "drafter":
-        from tigerharness.workflow_runner.compile.drafter import _build_prompt
+        from tigerharness.journal.wfcore.drafter import _build_prompt
         prompt = _build_prompt(
             playbook_text=playbook,
             task_brief=brief,
@@ -342,7 +342,7 @@ def cmd_compile_prompts(args: argparse.Namespace) -> int:
             return 1
         # Parse the draft into StepFrontmatter, then re-render for the
         # critic prompt (the critic sees the parsed view, not raw text).
-        from tigerharness.workflow_runner.compile.drafter import _parse_response
+        from tigerharness.journal.wfcore.drafter import _parse_response
         try:
             steps = _parse_response(draft_text)
         except Exception as exc:  # DrafterParseError
@@ -351,7 +351,7 @@ def cmd_compile_prompts(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        from tigerharness.workflow_runner.compile.critique import (
+        from tigerharness.journal.wfcore.critique import (
             AKAGI_CRITIC_PROMPT_TEMPLATE,
             AYAKO_CRITIC_PROMPT_TEMPLATE,
             _build_critic_prompt,
@@ -405,7 +405,7 @@ def cmd_validate_graph(args: argparse.Namespace) -> int:
         print(f"error: cannot read draft {draft_path}: {exc}", file=sys.stderr)
         return 2
 
-    from tigerharness.workflow_runner.compile.drafter import (
+    from tigerharness.journal.wfcore.drafter import (
         DrafterParseError,
         _parse_response,
     )
@@ -430,7 +430,7 @@ def cmd_validate_graph(args: argparse.Namespace) -> int:
 
     roster = _roster_for_task(paths, status_or_err.id)
 
-    from tigerharness.workflow_runner.compile.validators import (
+    from tigerharness.journal.wfcore.validators import (
         validate_compile_output,
     )
     result = validate_compile_output(steps, roster=roster)
@@ -486,7 +486,7 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
         print(f"error: cannot read draft/transcript: {exc}", file=sys.stderr)
         return 1
 
-    from tigerharness.workflow_runner.compile.drafter import (
+    from tigerharness.journal.wfcore.drafter import (
         DrafterParseError,
         _parse_response,
     )
@@ -498,7 +498,7 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
 
     # Defensive Tier 1 re-validation.
     roster = _roster_for_task(paths, status.id)
-    from tigerharness.workflow_runner.compile.validators import (
+    from tigerharness.journal.wfcore.validators import (
         validate_compile_output,
     )
     val = validate_compile_output(steps, roster=roster)
@@ -521,8 +521,8 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
     # Tier 3 human_gate mechanism does not port -- it's permanently
     # disabled here. See docs/journal-workflow-mode.md "Out of scope"
     # for the rationale.
-    from tigerharness.workflow_runner.compile.pipeline import _build_orchestration
-    from tigerharness.workflow_runner.models import WorkflowConfig
+    from tigerharness.journal.wfcore.pipeline import _build_orchestration
+    from tigerharness.journal.wfcore.models import WorkflowConfig
     orchestration = _build_orchestration(
         task_id=status.id,
         team=_guess_team_for_status(),
@@ -762,7 +762,7 @@ def _read_existing_step(task_dir: Path, step_id: str):
     YAML-ish key/value block between ``---`` delimiters, no body
     (Phase 1.5/2 step files don't carry body text)."""
     import yaml
-    from tigerharness.workflow_runner.models import StepFrontmatter
+    from tigerharness.journal.wfcore.models import StepFrontmatter
 
     text = (task_dir / "steps" / f"{step_id}.md").read_text(encoding="utf-8")
     # Pull the frontmatter block between the first two `---` lines.
@@ -837,7 +837,7 @@ def cmd_append_steps(args: argparse.Namespace) -> int:
         return 2
 
     # Parse the new bundle into StepFrontmatter.
-    from tigerharness.workflow_runner.compile.drafter import (
+    from tigerharness.journal.wfcore.drafter import (
         DrafterParseError,
         _parse_response,
     )
@@ -905,7 +905,7 @@ def cmd_append_steps(args: argparse.Namespace) -> int:
 
     combined = existing_steps + new_steps
     roster = _roster_for_task(paths, status.id)
-    from tigerharness.workflow_runner.compile.validators import (
+    from tigerharness.journal.wfcore.validators import (
         validate_compile_output,
     )
     result = validate_compile_output(combined, roster=roster)

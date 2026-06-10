@@ -49,7 +49,7 @@ from tigerharness.workflow_runner.executor import (
     _parse_frontmatter,
 )
 from tigerharness.workflow_runner.locks import read_pid_info
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     Orchestration,
     SessionMap,
     Status,

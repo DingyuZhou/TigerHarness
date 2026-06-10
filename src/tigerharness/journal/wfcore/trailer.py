@@ -70,8 +70,8 @@ __all__ = [
 # The discriminator values are deliberately UPPERCASE to match the
 # wire protocol (the verb tokens in the trailer itself -- ``APPROVE``
 # / ``REVISE`` / ``BLOCK``) and the on-disk shape enforced by
-# :data:`tigerharness.workflow_runner.models._VERDICTS`, which is the
-# allowlist :class:`~tigerharness.workflow_runner.models.StepHistoryEntry`
+# :data:`tigerharness.journal.wfcore.models._VERDICTS`, which is the
+# allowlist :class:`~tigerharness.journal.wfcore.models.StepHistoryEntry`
 # validates ``verdict`` against. ``PARSE_ERROR`` mirrors the spec's
 # ``verdict_parse_failed`` event terminology in uppercase form. A
 # downstream executor can therefore use ``verdict.kind`` directly as

@@ -66,7 +66,7 @@ from typing import Any, Optional
 
 import yaml
 
-from tigerharness.workflow_runner.models import (
+from tigerharness.journal.wfcore.models import (
     StepFrontmatter,
     WorkflowModelError,
 )

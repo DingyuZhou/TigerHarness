@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from tigerharness.workflow_runner.sessions import SessionManager
-from tigerharness.workflow_runner.trailer import parse_trailer
+from tigerharness.journal.wfcore.trailer import parse_trailer
 
 
 @pytest.fixture
