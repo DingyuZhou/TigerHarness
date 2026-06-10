@@ -60,7 +60,7 @@ from .persistence import ThreadStore, default_state_path
 from .router import detect_persona
 
 
-log = logging.getLogger("tigerharness.slack_bridge")
+log = logging.getLogger("tigerharness.slack_bridge.bridge")
 
 
 # Bash patterns blocked from the agent.

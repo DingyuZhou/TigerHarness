@@ -26,7 +26,11 @@ reuse across every summarize call for that record.
 """
 from __future__ import annotations
 
+import logging
+
 import re
+
+log = logging.getLogger("tigerharness.tiger_memory.prefilter")
 
 # A rendered event-header line: ``[<iso-ts>] user:`` / ``[<iso-ts>]
 # assistant:`` (the timestamp may be empty). These -- plus the tool

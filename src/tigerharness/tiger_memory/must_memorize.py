@@ -16,6 +16,8 @@ See design doc §5.5 + §6.
 """
 from __future__ import annotations
 
+import logging
+
 import difflib
 import re
 from dataclasses import dataclass, field, replace
@@ -27,6 +29,8 @@ from . import frontmatter
 from .config import Config
 from .state import iso_now
 from .store import Store
+
+log = logging.getLogger("tigerharness.tiger_memory.must_memorize")
 
 
 KIND_OWNER_EXPLICIT = "owner_explicit"

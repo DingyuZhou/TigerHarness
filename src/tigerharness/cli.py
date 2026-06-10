@@ -12,6 +12,8 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    from tigerharness._logging import configure_cli_logging
+    configure_cli_logging()
     args = argv if argv is not None else sys.argv[1:]
 
     if not args:

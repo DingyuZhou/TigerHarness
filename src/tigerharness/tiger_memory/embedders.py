@@ -18,9 +18,13 @@ Selection precedence in ``pick_embedder()``:
 """
 from __future__ import annotations
 
+import logging
+
 import os
 from abc import ABC, abstractmethod
 from typing import Iterable
+
+log = logging.getLogger("tigerharness.tiger_memory.embedders")
 
 
 class Embedder(ABC):

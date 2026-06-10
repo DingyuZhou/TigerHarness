@@ -24,10 +24,14 @@ You can register your own backends:
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Callable
 
 from .errors import AgentSDKError
 from .types import AgentBackend
+
+log = logging.getLogger("tigerharness.agent_sdk.factory")
 
 
 _REGISTRY: dict[str, Callable[..., AgentBackend]] = {}
@@ -54,6 +58,7 @@ def get_backend(name: str = "claude_p", **kwargs: Any) -> AgentBackend:
             f"Unknown backend {name!r}. Registered: {sorted(_REGISTRY)}. "
             "Use `register_backend` to add a custom one."
         )
+    log.debug("backend resolved: %s", name)
     return _REGISTRY[name](**kwargs)
 
 

@@ -23,6 +23,8 @@ via ``TIGERHARNESS_JOURNAL_STUCK_TIMEOUT``.
 
 from __future__ import annotations
 
+import logging
+
 import os
 from dataclasses import dataclass, field
 
@@ -33,6 +35,8 @@ from tigerharness.journal.models import (
     _utcnow_iso,
 )
 from tigerharness.journal.paths import JournalPaths
+
+log = logging.getLogger("tigerharness.journal.sweep")
 
 
 DEFAULT_STUCK_TIMEOUT_SEC = 1800
@@ -176,6 +180,7 @@ def sweep(
             try:
                 paths.archive(task_id)
                 result.archived.append(task_id)
+                log.info("sweep: archived %s (done -> done/)", task_id)
             except Exception as exc:  # pragma: no cover - defensive
                 # Surface as malformed-shaped so the driver still sees it.
                 result.malformed.append(MalformedEntry(
@@ -212,6 +217,7 @@ def sweep(
                 error=f"heartbeat unreadable: {exc}",
             ))
             continue
+        log.info("sweep: %s classified %s", task_id, klass)
         if klass == "idle":
             result.in_progress_idle.append(status)
         elif klass == "busy":

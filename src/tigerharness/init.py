@@ -31,6 +31,8 @@ Non-interactive use::
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import hashlib
 import json
@@ -40,6 +42,8 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger("tigerharness.init")
 
 # Hashes of *prior shipped* versions of a bundled skill, keyed by skill
 # dir name. On ``tigerharness init --refresh-skills``, an on-disk skill

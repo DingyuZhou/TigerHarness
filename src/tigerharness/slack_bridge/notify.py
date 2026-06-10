@@ -372,7 +372,8 @@ def _cmd_file(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    from tigerharness._logging import configure_cli_logging
+    configure_cli_logging(default="INFO")
     p = argparse.ArgumentParser(
         prog="tigerharness.slack_bridge.notify",
         description="DM a user or upload a file to a Slack thread.",

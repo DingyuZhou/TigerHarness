@@ -18,6 +18,8 @@ Filename conventions (§4.1):
 """
 from __future__ import annotations
 
+import logging
+
 import errno
 import json
 import os
@@ -29,6 +31,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
+
+log = logging.getLogger("tigerharness.tiger_memory.store")
 
 
 # Glob/regex patterns per §4.1

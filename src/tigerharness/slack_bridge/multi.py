@@ -37,6 +37,8 @@ team's Slack bridge.
 """
 from __future__ import annotations
 
+import logging
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +49,8 @@ from .bridge import (
     build_persona_agent_config,
 )
 from .config import normalize_tiger_memory_trigger
+
+log = logging.getLogger("tigerharness.slack_bridge.multi")
 
 
 # ---------------------------------------------------------------------------

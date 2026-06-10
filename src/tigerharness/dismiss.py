@@ -28,6 +28,8 @@ single-tenant. Stick with block style and edits remain safe.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import os
 import re
@@ -39,6 +41,8 @@ from pathlib import Path
 from typing import Callable
 
 from .init import discover_teams, list_personas_in_team
+
+log = logging.getLogger("tigerharness.dismiss")
 
 # Names appear in shell snippets and paths -- enforce the same alphabet
 # as init.

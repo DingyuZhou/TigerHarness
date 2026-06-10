@@ -24,6 +24,8 @@ Subcommands (see design doc §3.3):
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import sys
@@ -34,8 +36,12 @@ from .config import Config, ConfigError, load_config
 from .store import Store
 from .sweep import DEFAULT_MAX_PERSONAS
 
+log = logging.getLogger("tigerharness.tiger_memory.cli")
+
 
 def main(argv: list[str] | None = None) -> int:
+    from tigerharness._logging import configure_cli_logging
+    configure_cli_logging()
     parser = argparse.ArgumentParser(
         prog="tiger-memory",
         description="Agent-agnostic conversation memory module.",

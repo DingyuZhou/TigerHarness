@@ -21,6 +21,8 @@ All written to briefing.tmp/ then mv-swap with briefing/.
 """
 from __future__ import annotations
 
+import logging
+
 import json
 import shutil
 import tempfile
@@ -37,6 +39,8 @@ from .store import (
     WEEKLY_RE,
     Store,
 )
+
+log = logging.getLogger("tigerharness.tiger_memory.briefing")
 
 
 def rebuild_briefing(cfg: Config, store: Store) -> None:

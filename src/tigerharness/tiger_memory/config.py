@@ -10,12 +10,16 @@ rather than mid-rebuild.
 """
 from __future__ import annotations
 
+import logging
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger("tigerharness.tiger_memory.config")
 
 
 class ConfigError(ValueError):

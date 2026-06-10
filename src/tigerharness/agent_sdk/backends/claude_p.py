@@ -29,6 +29,8 @@ catch the limitation immediately rather than getting silent fallthrough.
 
 from __future__ import annotations
 
+import logging
+
 import asyncio
 import json
 import os
@@ -64,6 +66,8 @@ from ..types import (
     ToolUsePart,
 )
 from ._base import BaseStreamHandle, run_via_stream
+
+log = logging.getLogger("tigerharness.agent_sdk.backends.claude_p")
 
 
 # ---------- Session ----------
@@ -422,6 +426,7 @@ class _ClaudePStreamHandle(BaseStreamHandle):
         # results or image-heavy system prompts can easily exceed 64 KB.
         _STREAM_LIMIT = 10 * 1024 * 1024  # 10 MB
 
+        log.info("spawning %s (cwd=%s)", self._argv[0], self._cwd)
         proc = await asyncio.create_subprocess_exec(
             *self._argv,
             stdin=asyncio.subprocess.PIPE,
@@ -641,6 +646,8 @@ class _ClaudePStreamHandle(BaseStreamHandle):
 
         # Fail loudly on non-zero exits unless we were cancelled (-2 = SIGINT).
         if proc.returncode not in (0, -2, None):
+            log.warning("%s exited nonzero: code=%s stderr=%.500s",
+                        self._argv[0], proc.returncode, stderr_text.strip())
             yield ErrorEvent(
                 message=(
                     f"`{self._argv[0]}` exited with code {proc.returncode}: "

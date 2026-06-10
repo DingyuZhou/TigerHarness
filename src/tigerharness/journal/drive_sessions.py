@@ -34,6 +34,8 @@ import time; ``test_drive_sessions`` cross-checks the two readers agree.
 
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import tempfile
@@ -42,6 +44,8 @@ from pathlib import Path
 
 from tigerharness.journal.models import _utcnow_iso
 from tigerharness.journal.paths import JournalPaths
+
+log = logging.getLogger("tigerharness.journal.drive_sessions")
 
 
 # How long a drive thread stays in the registry, by ``last_seen_at``.

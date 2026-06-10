@@ -22,6 +22,8 @@ their tools. Use ``builtin_tools`` for now or open a PR.
 
 from __future__ import annotations
 
+import logging
+
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -50,6 +52,8 @@ from ..types import (
     ToolUsePart,
 )
 from ._base import BaseStreamHandle, run_via_stream
+
+log = logging.getLogger("tigerharness.agent_sdk.backends.anthropic_sdk")
 
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,8 @@ use so the driver can read the vendor-neutral protocol.
 
 from __future__ import annotations
 
+import logging
+
 import hashlib
 import os
 import re
@@ -46,6 +48,8 @@ from tigerharness.journal.ids import JournalIdError, new_task_id
 from tigerharness.journal.models import JournalModelError, Status
 from tigerharness.journal.operating_template import OPERATING_MD
 from tigerharness.journal.paths import JournalPaths
+
+log = logging.getLogger("tigerharness.journal.scaffold")
 
 # sha256 of *prior shipped* OPERATING.md templates. On scaffold, an
 # on-disk OPERATING.md byte-identical to one of these (an unmodified

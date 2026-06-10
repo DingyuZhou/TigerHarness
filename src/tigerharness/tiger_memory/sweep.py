@@ -26,12 +26,16 @@ later if contention is ever observed.
 """
 from __future__ import annotations
 
+import logging
+
 import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger("tigerharness.tiger_memory.sweep")
 
 SWEEP_STATE_FILENAME = ".tiger-memory-sweep.json"
 DEFAULT_STALENESS_FLOOR_HOURS = 24.0

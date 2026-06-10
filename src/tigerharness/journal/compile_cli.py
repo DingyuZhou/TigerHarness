@@ -48,6 +48,8 @@ and tested.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -116,6 +118,8 @@ def _load_workflow_status(
     paths: JournalPaths, task_id: str,
 ) -> Status | str:
     """Read + parse a workflow task's status.json. Returns the Status on
+
+log = logging.getLogger("tigerharness.journal.compile_cli")
     success or a human-readable error string on failure (so the caller
     can print to stderr without raising)."""
     try:
