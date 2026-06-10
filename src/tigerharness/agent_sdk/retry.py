@@ -30,7 +30,7 @@ Design picks
   log how many attempts each call took, and which exception triggered
   the retry.
 - **Cancellation propagates.** ``asyncio.CancelledError`` is re-raised
-  immediately — we don't want a task-runner cancel to be silently
+  immediately — we don't want a caller's cancel to be silently
   swallowed by a backoff sleep.
 """
 

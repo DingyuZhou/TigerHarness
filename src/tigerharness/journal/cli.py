@@ -1159,7 +1159,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Allow the driver to stop early once the task is done per "
             "acceptance criteria. Default off -> run the full "
             "max_sessions budget (N iterations = exactly N). Mirrors the "
-            "task-runner's --early-exit."
+            "retired runner's --early-exit."
         ),
     )
     n.set_defaults(func=cmd_new)

@@ -520,7 +520,7 @@ class TestResolveTargetUserIdFromYaml:
     def test_missing_pyyaml_logs_at_most_once(
         self, monkeypatch, tmp_path, caplog,
     ):
-        """Long-running processes (e.g., task-runner jobs calling
+        """Long-running processes (e.g., detached agent jobs calling
         notify many times) shouldn't spam the same diagnostic. The
         module-level sentinel keeps logging to once per process."""
         import sys

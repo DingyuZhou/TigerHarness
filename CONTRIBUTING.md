@@ -37,12 +37,6 @@ src/tigerharness/
         factory.py           get_backend / register_backend / list_backends
         retry.py             run_with_retry (exponential backoff)
         errors.py            Exception hierarchy
-    task_runner/             Iterative task execution
-        cli.py               CLI subcommands (assign, list, cancel, amend, show, logs, continue, personas)
-        runner.py            Core iteration loop
-        notifier.py          Slack DM notifications
-        personas.py          Config-driven persona registry
-        registry.py          Task state persistence
     slack_bridge/            Slack Socket Mode bridge
         bridge.py            Event handler + dispatch
         config.py            Env-var-driven config loader
@@ -64,26 +58,19 @@ src/tigerharness/
         summarizers/         Summarizer backends (anthropic, mock)
         templates/           Briefing README template
     journal/                 File-based subscription backend (kind=task + kind=workflow)
-        cli.py               new / list / status / sweep
-        compile_cli.py       Nine compile subcommands (compile-context ... validate-personas)
+        cli.py               new / list / status / sweep / claim / release / step-done
+        compile_cli.py       Compile subcommands (compile-context ... validate-personas)
         models.py            status.json schema + state machine
         scaffold.py          Task / workflow scaffolding
         sweep.py             Lazy sweep (archive + fresh/stale classify)
         operating_template.py  OPERATING.md contract shipped into each journal
-    workflow_runner/         Multi-persona orchestration (standalone `workflow` CLI)
-        cli.py               start / show / list / tail / cancel
-        executor.py          Sequential graph-walk executor
-        compile/             Compile pipeline (drafter, validators, critique)
-        sessions.py          Per-persona claude -p session manager
-        trailer.py           WORKFLOW: APPROVE / REVISE / BLOCK parser
-        models.py            Orchestration + step frontmatter models
+        wfcore/              Workflow compile core (models, drafter, critique
+                             prompts, Tier-1 validators, trailer parser)
 tests/
     agent_sdk/               Agent SDK tests
-    task_runner/             Task runner tests
     slack_bridge/            Slack bridge tests
     tiger_memory/            Tiger memory tests
-    journal/                 Journal backend tests
-    workflow_runner/         Workflow runner tests
+    journal/                 Journal backend tests (incl. wfcore/)
     test_main_modules.py     __main__.py entrypoint tests
 examples/
     tigers/                  Sample team scaffolded by `tigerharness init`
@@ -91,15 +78,13 @@ examples/
     env.example              Standalone Slack bridge env template
 docs/
     agent_sdk.md             Agent SDK reference
-    task-runner.md           Task runner module README
     slack-bridge.md          Slack bridge module README
     tiger-memory.md          Tiger memory module README
     journal.md               Journal / subscription-backend operator quickstart
     subscription-backend.md  Subscription backend concept + status.json schema
     journal-workflow-mode.md kind=workflow compile + graph-walk deep dive
-    workflow-runner.md       Standalone workflow_runner spec
-    workflow-runner-phase2.md  Phase-2 (compile) design detail
-    adr/                     Architecture Decision Records
+    adr/                     Architecture Decision Records (0003: legacy
+                             runner removal + write-guard migration)
 skills/                      Claude Code SKILL.md definitions
 ```
 
@@ -120,18 +105,15 @@ team and scaffolds the persona inside it. Non-interactive:
 ```bash
 tigerharness init --persona analyst --team tigers --yes
 export TIGERHARNESS_PERSONAS_CONFIG=./tigers/configs/personas.yaml
-python -m tigerharness.task_runner assign --to analyst --prompt "..." --iters 5
+tigerharness journal new --kind task --persona analyst --prd brief.md
 ```
 
 The team folder structure is documented in the [README](README.md) and
 in `examples/tigers/`. Each persona lives at
 `<team>/personas/<name>/prompt.md` (edit this) with optional memory
 config at `<team>/memories/<name>/tiger-memory.config.yaml`. The
-generated `<team>/configs/personas.yaml` is the registry consumed by
-`tigerharness.task_runner.personas.load_personas_config`.
-
-If you need to register a persona programmatically (e.g. for tests),
-use `register_persona()` from `tigerharness.task_runner.personas`.
+generated `<team>/configs/personas.yaml` is the team registry (the
+yaml shape is documented in its own preamble comment).
 
 ## Adding a custom memory backend
 
@@ -163,8 +145,8 @@ Prefix: `feat:`, `fix:`, `test:`, `docs:`, `refactor:`
 ## Running a single sub-package
 
 ```bash
-# Task runner
-python -m tigerharness.task_runner --help
+# Journal backend
+tigerharness journal --help
 
 # Slack bridge (daemon)
 python -m tigerharness.slack_bridge

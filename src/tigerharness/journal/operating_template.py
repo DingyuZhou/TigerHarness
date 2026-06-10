@@ -101,7 +101,7 @@ load-bearing fields are:
   and does NOT mark the task `done` before the budget is spent (it keeps
   iterating: review, harden, extend). When `true`, the driver may mark
   `done` as soon as the acceptance criteria are met, before the budget
-  is spent. Mirrors the task-runner's `--early-exit`.
+  is spent. Mirrors the retired runner's `--early-exit`.
   **Meaningful for `kind=task` only.** For `kind=workflow` the compiled
   graph is the authority on completion: when the walk reaches `__done__`
   the task is released `done` even with budget remaining. There

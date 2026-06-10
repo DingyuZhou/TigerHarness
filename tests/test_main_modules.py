@@ -1,4 +1,4 @@
-"""Tests for __main__.py entrypoints (task_runner and slack_bridge)."""
+"""Tests for __main__.py entrypoints (slack_bridge)."""
 from __future__ import annotations
 
 import importlib.util

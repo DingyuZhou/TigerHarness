@@ -340,7 +340,7 @@ class TestCmdNew:
         """Iteration on the review fix: explicit --persona is NOT
         roster-validated. Phase 1 behaviour preserved -- the operator
         typing the value seconds ago can correct the late "no
-        prompt.md" error from the task-runner. Only the default_persona
+        prompt.md" error from the legacy loader. Only the default_persona
         fallback path gets the safety gate (it's a yaml typo that
         sticks around).
         """

@@ -6,8 +6,6 @@ Covers:
 - slack_bridge/gen_service.py:154 (__main__ guard)
 - slack_bridge/migrate.py:191 (__main__ guard)
 - slack_bridge/notify.py:400 (__main__ guard)
-- task_runner/cli.py:587 (__main__ guard)
-- task_runner/runner.py:1051 (__main__ guard)
 - tiger_memory/cli.py:158 (__main__ guard)
 - init.py:741-744 (EOFError during multi-team prompt)
 """

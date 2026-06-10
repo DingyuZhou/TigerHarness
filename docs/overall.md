@@ -7,12 +7,11 @@ per-persona memory. It has zero hard dependencies — every
 integration is an optional extra — and its default execution
 backend is a plain `claude -p` subprocess.
 
-**Two execution rails.** The `journal` sub-command is the default
-rail: a file-based subscription backend that routes agent work
+**One execution rail.** The `journal` sub-command is the execution
+path: a file-based subscription backend that routes agent work
 through the interactive Claude Code app, so it bills to a monthly
-subscription instead of token-metered API. The api-billed rail
-(`task_runner`, `workflow_runner`) remains for api-budget
-workloads.
+subscription instead of token-metered API. (The legacy api-billed
+runners were removed — ADR 0003.)
 
 **Journal (subscription backend).** Scaffolds single-persona tasks
 (`kind=task`) and multi-persona workflows (`kind=workflow`) from
@@ -24,12 +23,6 @@ note with its persona for memory attribution. Crash handling is
 built in: a heartbeat lease classifies tasks idle/busy/crashed, and
 a fresh session resumes a crashed walk at the same step.
 
-**Task runner (api rail).** Fire-and-forget iterative execution:
-`assign/list/cancel/amend/show/logs/continue` over a per-job
-working folder, resuming the same session across iterations, with
-a stuck watchdog. The standalone `workflow` script
-(`start/show/list/tail/cancel`) drives api-billed multi-persona
-orchestration with the same compile pipeline the journal uses.
 
 **Slack bridge.** A Socket Mode bridge forwards DMs to personas and
 posts replies in-thread, with multi-team/persona routing and a
@@ -54,7 +47,7 @@ runtimes, with a shared retry/error model.
 
 **Entry points and extras.** Install: `uv add 'tigerharness[all]'`
 (or pip/pipx equivalent). Console scripts: `tigerharness`
-(init, dismiss, task-runner, tiger-memory, slack-bridge, journal),
-`tiger-memory`, `workflow`. Extras: `[anthropic]`, `[slack]`,
+(init, dismiss, tiger-memory, slack-bridge, journal) and
+`tiger-memory`. Extras: `[anthropic]`, `[slack]`,
 `[memory]`, `[memory-rag]`, `[memory-rag-openai]`, `[all]`.
 Thirteen further docs files plus ADRs cover each module in depth.

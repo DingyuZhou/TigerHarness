@@ -4,7 +4,7 @@ The pure compile machinery the in-session (journal) compile drives:
 step models, the drafter's prompt builder and bundle parser, the
 critic prompt builders, the Tier 1 mechanical validators (schema,
 ref, roster, cycle, dry-run trace), and orchestration assembly.
-Relocated from the retired api-billed workflow_runner (see
+Relocated from the retired api-billed runner (see
 docs/adr/0003-remove-legacy-runners.md); the session-driven halves
 were removed with that runner.
 """

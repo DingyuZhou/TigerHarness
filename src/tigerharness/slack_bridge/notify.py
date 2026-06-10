@@ -42,7 +42,7 @@ def _load_slack_bridge_dotenv() -> None:
     candidates.append(Path.cwd() / ".env")
     # `tigerharness init` puts the team's .env at <team>/configs/.env.
     # When an agent is invoked from the team root (the default for
-    # task-runner personas), this candidate lets `notify` find the
+    # detached personas), this candidate lets `notify` find the
     # right team's bot tokens without an explicit TIGERHARNESS_SLACK_ENV.
     candidates.append(Path.cwd() / "configs" / ".env")
     # Also check our own package's parent dir
@@ -88,7 +88,7 @@ def _resolve_target_user_id() -> str | None:
 
 
 # Module-level sentinel: log the pyyaml-missing diagnostic at most once
-# per process. Repeated logging would spam long-running task-runner
+# per process. Repeated logging would spam long-running detached
 # jobs that call notify many times.
 _PYYAML_MISSING_LOGGED = False
 

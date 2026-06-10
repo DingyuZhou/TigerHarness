@@ -477,7 +477,6 @@ class TestScaffoldClaudeDir:
 # Journal write-guard PreToolUse hook wiring
 # ---------------------------------------------------------------------------
 
-_GUARD_MODULE = "tigerharness.workflow_runner.hooks.journal_write_guard"
 
 
 class TestJournalGuardHelpers:
@@ -1496,7 +1495,7 @@ class TestMain:
         `uv run` so copy-paste from the user's shell actually works.
 
         (The `tiger-memory init` line is no longer printed -- auto-run
-        in PR8's UX pass -- so we only check the task-runner snippet.)"""
+        in PR8's UX pass -- so we only check the journal snippet.)"""
         from tigerharness import init as init_mod
         monkeypatch.setattr(init_mod.shutil, "which", lambda name: None)
         main([
@@ -1532,7 +1531,7 @@ class TestMain:
         ])
         out = capsys.readouterr().out
         # `tigerharness tiger-memory init` line is no longer printed
-        # (auto-run in PR8); only task-runner remains as a Next Steps hint.
+        # (auto-run in PR8); the journal scaffold is the Next Steps hint.
         assert "tigerharness journal new --kind task --persona chief" in out
         assert "uv run tigerharness" not in out
 
@@ -1908,7 +1907,7 @@ class TestBundledDriveJournalSkill:
 class TestGeneratedConfigLoads:
     """End-to-end check that what `init` writes is consumable -- the
     personas.yaml parses and its fields resolve to real files. (The
-    legacy task_runner loader retired with ADR 0003; the yaml shape
+    legacy loader retired with ADR 0003; the yaml shape
     itself is the surviving contract.)"""
 
     def test_personas_yaml_loads_and_resolves_prompt(self, tmp_path: Path):

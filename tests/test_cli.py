@@ -13,7 +13,7 @@ def test_help(capsys):
     ret = main(["--help"])
     assert ret == 0
     out = capsys.readouterr().out
-    assert "task-runner" not in out
+    assert "journal (j)" in out  # the runner arm is gone (ADR 0003)
     assert "tiger-memory" in out
     assert "journal" in out
 

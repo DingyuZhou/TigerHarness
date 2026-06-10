@@ -73,7 +73,7 @@ Optional:
   iterations" -> `--max-sessions 10`).
 - `--early-exit` -- let the driver stop as soon as the task is done per
   its acceptance criteria. Default off: run the full `--max-sessions`
-  budget ("N iterations = exactly N", matching the task-runner).
+  budget ("N iterations = exactly N").
 - `--slug` -- override the slug portion of the task id.
 
 ## How to invoke -- workflow mode (`kind=workflow`)

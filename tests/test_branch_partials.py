@@ -34,7 +34,6 @@ class TestConfigRequireStr:
         assert result == 42
 
 
-# --- task_runner/cli.py 382->391: cmd_show with no result file ---
 
 # --- sources/docs.py 54->59: file not in git history ---
 

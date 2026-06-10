@@ -143,7 +143,7 @@ class Status:
     # When False (default), the driver runs the full ``max_sessions``
     # budget -- "N iterations means exactly N". When True, the driver may
     # stop early once the task is done per acceptance criteria (mirrors
-    # the task-runner's opt-in ``--early-exit``).
+    # the retired runner's opt-in ``--early-exit``).
     early_exit: bool = False
     # Workflow-only sub-state. Defaults are neutral so a task-mode
     # Status round-trips byte-identically; the JSON schema gate in

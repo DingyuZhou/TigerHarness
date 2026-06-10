@@ -1,5 +1,5 @@
 # Team: tigers
-# Personas registry for tigerharness.task_runner.
+# Personas registry for tigerharness (journal, slack-bridge).
 #
 # Load this file by pointing the env var at it (absolute or relative path):
 #     export TIGERHARNESS_PERSONAS_CONFIG=path/to/tigers/configs/personas.yaml
@@ -12,7 +12,9 @@
 #   - `personas_dir: ../personas` -- prompts live next to this folder
 #   - `cwd: ..` on every persona  -- agents run from the team root
 #   - uncomment `extra.add_dirs: [../skills]` to expose team skills
-# Schema: tigerharness.task_runner.personas.load_personas_config.
+# Schema: top-level `personas_dir` + `personas:` list; each entry has
+# `name`, optional `aliases`, `cwd` (relative to this file), and
+# `prompt_file` (relative to personas_dir, `.md` appended).
 
 personas_dir: ../personas
 

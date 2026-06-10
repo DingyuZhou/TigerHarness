@@ -28,7 +28,7 @@ subscription instead of token-billed API usage.
 
 ## Why this exists
 
-The `task-runner` and `workflow-runner` both drive work by spawning
+The legacy api runners (retired; ADR 0003) both drove work by spawning
 `claude -p --resume` child processes. That is a *programmatic* entry
 point: it bills as API token usage, which is expensive and hard to
 cap. A monthly Claude subscription, by contrast, covers **interactive**
@@ -94,10 +94,10 @@ human stops it — then writes its state back.
    `drive-journal` resumes it **immediately**, with no heartbeat wait;
    a **crashed** task (owner went silent) is rescued the same way.
 
-Single-persona work (the task-runner's niche) and multi-persona work
+Single-persona work (the legacy iterative runner's niche) and multi-persona work
 (the workflow-runner's niche) both belong here in principle. The
 distinction between the two is not steps-vs-no-steps — both can take
-many steps. It is **orchestration**: a task-runner job is a single
+many steps. It is **orchestration**: a legacy iterative job was a single
 persona working a PRD freely, with no pre-defined step graph; a
 workflow-runner job is a pre-compiled multi-persona graph where each
 node names the persona and contract for that step.
@@ -539,7 +539,7 @@ non-AI Python logic invoked at the start of the `drive-journal`
 skill and at every cascade boundary, executing inside the human's
 interactive session.
 
-Note the contrast with the task-runner's `stuck_watchdog`: that
+Note the contrast with the retired runner's `stuck_watchdog`: that
 watchdog can **kill** a wedged subprocess because the api backend owns
 one. The subscription backend owns no process — there is nothing to
 kill. Stale handling is purely **advisory**: the sweep names the
@@ -680,8 +680,6 @@ skill, so the MVP is one chunk.
 
 ## Related
 
-- [`task-runner.md`](task-runner.md) — the single-persona,
-  no-pre-orchestration API backend (one persona drives the PRD freely).
 - [`workflow-runner.md`](workflow-runner.md) — the multi-persona API
   backend driven by a pre-compiled workflow graph; already file-based,
   and the closest sibling to this design.

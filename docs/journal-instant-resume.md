@@ -180,6 +180,6 @@ update.
 
 Added alongside this work: a per-task `early_exit` flag (`journal new
 --early-exit`). Default **off** runs the full `max_sessions` budget —
-"N iterations means exactly N", mirroring the task-runner's default.
+"N iterations means exactly N", mirroring the retired runner's default.
 Set it on to let the driver stop as soon as the task is done per its
 acceptance criteria.

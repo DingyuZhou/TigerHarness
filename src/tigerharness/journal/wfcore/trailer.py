@@ -1,6 +1,6 @@
 """Persona response trailer parser for the workflow-runner.
 
-The workflow-runner sits above the task-runner and routes a graph of
+The workflow walk routes a graph of
 personas through a playbook. Routing decisions are driven by a single
 structured trailer line in each persona's reply:
 

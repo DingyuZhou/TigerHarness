@@ -147,7 +147,7 @@ teams/
 ├── shohoku/
 │   ├── configs/
 │   │   ├── .env                  ← tokens for Shohoku's Slack app
-│   │   ├── personas.yaml         ← task-runner registry
+│   │   ├── personas.yaml         ← team personas registry
 │   │   └── slack-bridge.yaml     ← per-team FRAGMENT (this file)
 │   ├── personas/ayako/prompt.md
 │   └── memories/ayako/tiger-memory.config.yaml

@@ -374,7 +374,7 @@ def read_team_roster(team_root: Path) -> set[str]:
 
 def _normalize_persona_key(name: str) -> str:
     """Normalize a persona name for case- + separator-insensitive
-    matching. Mirrors the retired task-runner's resolve order:
+    matching. Mirrors the retired runner's resolve order:
     lowercased, with spaces and underscores collapsed to hyphens.
     """
     return name.strip().lower().replace(" ", "-").replace("_", "-")
