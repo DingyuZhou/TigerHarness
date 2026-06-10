@@ -46,7 +46,10 @@ installed. Remove the entry whose fields match (copied from
   `python -m tigerharness.workflow_runner.hooks.journal_write_guard`
 
 Delete that one hook object from the `PreToolUse` list (leave any
-others). The guard only ever protected the legacy
+others). Developers with pre-removal source checkouts should also
+delete stray `src/tigerharness/{task_runner,workflow_runner}/`
+`__pycache__/` directories — orphaned bytecode makes the deleted
+packages silently importable in editable installs. The guard only ever protected the legacy
 `workflow_journal/` truth files; the journal backend never used it,
 so removal loses nothing. An idempotent de-registration pass in
 `tigerharness init` was considered and deliberately deferred as a
