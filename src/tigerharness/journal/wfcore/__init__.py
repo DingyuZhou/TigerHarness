@@ -1,34 +1,23 @@
-"""Compile phase for the workflow-runner (Phase 2).
+"""Workflow compile core for the journal subscription backend.
 
-Turns a freestyle playbook + a task brief into validated step files.
-Wave 1 ships the step drafter (Mitsui) and the Tier 1 mechanical
-validators (schema, ref, roster, cycle, dry-run trace -- Miyagi); Wave 2
-adds the Tier 2 forced critique loop (Rukawa) and the
-``compile_playbook`` pipeline entrypoint (Sakuragi). See
-``docs/workflow-runner-phase2.md``.
+The pure compile machinery the in-session (journal) compile drives:
+step models, the drafter's prompt builder and bundle parser, the
+critic prompt builders, the Tier 1 mechanical validators (schema,
+ref, roster, cycle, dry-run trace), and orchestration assembly.
+Relocated from the retired api-billed workflow_runner (see
+docs/adr/0003-remove-legacy-runners.md); the session-driven halves
+were removed with that runner.
 """
 
 from __future__ import annotations
 
 from tigerharness.journal.wfcore.critique import (
-    CritiqueAbortedError,
-    CritiqueParseError,
     CritiqueResult,
     CritiqueRound,
     CritiqueVerdict,
-    run_critique_loop,
 )
 from tigerharness.journal.wfcore.drafter import (
     DrafterParseError,
-    DrafterResult,
-    draft_steps,
-)
-from tigerharness.journal.wfcore.pipeline import (
-    CompileConfigError,
-    CompileResult,
-    CompileTier1Error,
-    CompileTier2Error,
-    compile_playbook,
 )
 from tigerharness.journal.wfcore.validators import (
     SENTINELS,
@@ -43,18 +32,10 @@ from tigerharness.journal.wfcore.validators import (
 )
 
 __all__ = [
-    # Tier 2 critique loop (Wave 2, Rukawa)
-    "CritiqueAbortedError",
-    "CritiqueParseError",
     "CritiqueResult",
     "CritiqueRound",
     "CritiqueVerdict",
-    "run_critique_loop",
-    # Step drafter (Wave 1, Mitsui)
     "DrafterParseError",
-    "DrafterResult",
-    "draft_steps",
-    # Tier 1 validators (Wave 1, Miyagi)
     "SENTINELS",
     "ValidationError",
     "ValidationResult",
@@ -64,10 +45,4 @@ __all__ = [
     "validate_refs",
     "validate_roster",
     "validate_schema",
-    # Pipeline (Wave 2, Sakuragi)
-    "CompileConfigError",
-    "CompileResult",
-    "CompileTier1Error",
-    "CompileTier2Error",
-    "compile_playbook",
 ]

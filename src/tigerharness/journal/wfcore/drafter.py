@@ -70,7 +70,6 @@ from tigerharness.journal.wfcore.models import (
     StepFrontmatter,
     WorkflowModelError,
 )
-from tigerharness.workflow_runner.sessions import SessionManager
 
 __all__ = [
     "DrafterParseError",
@@ -124,20 +123,6 @@ class DrafterParseError(ValueError):
         self.raw_response = raw_response
 
 
-@dataclass(frozen=True)
-class DrafterResult:
-    """Outcome of one :func:`draft_steps` call.
-
-    ``steps`` are parsed but not yet semantically validated; ``raw_response``
-    is the model output verbatim (for the transcript); ``cost_usd`` is the
-    invocation cost, passed through for the pipeline's cost roll-up.
-    """
-
-    steps: list[StepFrontmatter]
-    raw_response: str
-    cost_usd: float
-
-
 # --------------------------------------------------------------------------- #
 # Internal signal
 # --------------------------------------------------------------------------- #
@@ -155,70 +140,6 @@ class _BundleFormatError(Exception):
 # --------------------------------------------------------------------------- #
 # Public entrypoint
 # --------------------------------------------------------------------------- #
-
-
-def draft_steps(
-    *,
-    playbook_text: str,
-    task_brief: str,
-    roster: list[str],
-    session_manager: SessionManager,
-    feedback: Optional[str] = None,
-    timeout_sec: int = 600,
-) -> DrafterResult:
-    """Drive Anzai to draft step files from a playbook + brief.
-
-    Parameters
-    ----------
-    playbook_text:
-        The freestyle playbook markdown, verbatim.
-    task_brief:
-        The task brief, verbatim.
-    roster:
-        Persona names from the team config. Given to the LLM so it only
-        assigns personas that exist (Tier 1's ``roster`` validator is
-        the enforcing check; this is the courtesy input).
-    session_manager:
-        The LLM seam. Tests inject a fake; production hits ``claude -p``.
-    feedback:
-        Tier 2 critic feedback for a re-draft. ``None`` on the initial
-        call; a ``REVISE`` message string on subsequent loop turns.
-    timeout_sec:
-        Per-invocation wall-clock cap handed to the session manager.
-
-    Returns
-    -------
-    DrafterResult
-        Parsed steps, the verbatim response, and the invocation cost.
-
-    Raises
-    ------
-    DrafterParseError
-        If the invocation errored or the reply cannot be parsed into
-        well-formed step frontmatters.
-    """
-    prompt = _build_prompt(
-        playbook_text=playbook_text,
-        task_brief=task_brief,
-        roster=roster,
-        feedback=feedback,
-    )
-    result = session_manager.invoke(
-        _DRAFTER_PERSONA, prompt, timeout_sec=timeout_sec
-    )
-    if result.error is not None:
-        raise DrafterParseError(
-            f"drafter LLM invocation failed: {result.error}",
-            raw_response=result.stdout,
-        )
-    steps = _parse_response(result.stdout)
-    return DrafterResult(
-        steps=steps,
-        raw_response=result.stdout,
-        cost_usd=result.cost_usd,
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Prompt assembly
 # --------------------------------------------------------------------------- #
