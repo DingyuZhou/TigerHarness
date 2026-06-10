@@ -129,6 +129,7 @@ def try_claim_sweep(
     """
     state = read_sweep_state(team_memories_dir)
     if not sweep_due(state.get("last_sweep_at"), now, floor_hours=floor_hours):
+        log.info("team sweep: not_due (inside staleness floor)")
         return ClaimResult(False, "not_due")
 
     claim_at = _parse_iso(state.get("claim_at"))
@@ -138,6 +139,7 @@ def try_claim_sweep(
         and state.get("claim_token") != token
     )
     if held_by_other:
+        log.info("team sweep: busy (live claim holds the lease)")
         return ClaimResult(False, "busy")
 
     # Bound a sweep RUN to the staleness floor. A run spans several wakes
@@ -160,6 +162,7 @@ def try_claim_sweep(
     state["claim_token"] = token
     state["claim_at"] = now.isoformat()
     write_sweep_state(team_memories_dir, state)
+    log.info("team sweep: claimed")
     return ClaimResult(True, "claimed")
 
 

@@ -104,6 +104,7 @@ class Store:
 
     def atomic_swap_dir(self, new_dir: Path, target: Path) -> None:
         """Atomically replace ``target`` with ``new_dir`` (both must exist)."""
+        log.debug("atomic_swap_dir: %s -> %s", new_dir, target)
         if not new_dir.exists():
             raise FileNotFoundError(f"new_dir does not exist: {new_dir}")
         backup = target.with_name(target.name + ".old")

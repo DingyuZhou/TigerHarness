@@ -71,6 +71,7 @@ def ingest_collapsed_summary(
     the merge to a single finalize step. See
     ``docs/tiger-memory-sweep-protocol.md``.
     """
+    log.info("ingest-summary: merging collapsed summary into store")
     short_body, detailed_body, mm_section = parse_collapsed(bundle_text)
 
     rec = SourceRecord(

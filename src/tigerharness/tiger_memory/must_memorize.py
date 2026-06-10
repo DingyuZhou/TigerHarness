@@ -137,6 +137,7 @@ def decay_all(
     days_per_point: dict[str, int],
 ) -> list[Row]:
     """Apply decay to non-locked rows; remove any row with score ≤ 0."""
+    log.debug("must-memorize decay pass starting")
     today = today or _today_iso()
     today_dt = date.fromisoformat(today)
     kept: list[Row] = []

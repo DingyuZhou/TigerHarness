@@ -29,6 +29,13 @@ posts replies in-thread, with multi-team/persona routing and a
 persistent thread-to-session map; a `notify` CLI sends proactive
 text or file messages.
 
+**Where the logs are.** Every CLI reads `TIGERHARNESS_LOG_LEVEL`
+(default WARNING; INFO/DEBUG opt-in) via one helper; logs go to
+stderr, the bridge daemon to its own handlers. One named logger
+per module; `tests/test_logging_audit.py` enforces coverage and
+`tests/test_logging_families.py` pins the load-bearing lines (gate
+refusals, sweep classifications, retries, spawn exits, redaction).
+
 **Tiger-memory.** Per-persona persistent memory: archive, journal,
 and briefing stores with lazy rebuild, pinning, decay, and
 drill-down. Search is substring by default, semantic via local
