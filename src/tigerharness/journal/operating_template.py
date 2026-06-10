@@ -102,6 +102,11 @@ load-bearing fields are:
   iterating: review, harden, extend). When `true`, the driver may mark
   `done` as soon as the acceptance criteria are met, before the budget
   is spent. Mirrors the task-runner's `--early-exit`.
+  **Meaningful for `kind=task` only.** For `kind=workflow` the compiled
+  graph is the authority on completion: when the walk reaches `__done__`
+  the task is released `done` even with budget remaining. There
+  `max_sessions` is a runaway ceiling, not a quota to fill -- the
+  iteration depth lives in the graph's own critique loops.
 - `kind` -- `task` or `workflow`. The driver switches behaviour at
   step 4 on this field.
 - `compile_pending` + `compile_phase` (workflow only) -- the compile
@@ -319,6 +324,9 @@ Exit the inner loop on **any** of:
   full work pass first, *then* `release --state done` at its end -- do
   NOT treat merely reaching the cap on entry as "already done" and skip
   the work. Mark `done` earlier only when `early_exit=true`.
+  (**`kind=task` semantics.** For `kind=workflow` the walk reaching
+  `__done__` ends the task immediately -- `release --state done` --
+  regardless of `early_exit` or remaining budget.)
 - A real blocker requires a human or another persona (`blocked`).
 - `sessions >= max_sessions` -- the budget is spent. Mark `done` if the
   work is complete, else `blocked` with a `next_action` naming the cap.
