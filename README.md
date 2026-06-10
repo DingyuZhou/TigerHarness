@@ -11,12 +11,23 @@ integration, and persistent memory management.
 
 | Package | Description |
 |---|---|
-| `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: `claude -p` subprocess, Anthropic's `claude-agent-sdk`, OpenAI's `openai-agents` (planned). |
-| `tigerharness.journal` | **File-based subscription backend.** Routes agent work through the interactive Claude Code app so it counts against a monthly subscription instead of token-billed API. Supports single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`, compiled in-session from a team playbook). CLI: `journal`. See [docs/journal.md](docs/journal.md). |
-| `tigerharness.task_runner` | Fire-and-forget iterative task execution via `claude -p`. Phase 1.5+ users typically prefer the journal subscription backend; this remains for api-budget workloads. |
+| `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: the `claude -p` subprocess backend and Anthropic's `claude-agent-sdk` backend, with a shared typed event/retry/error model. |
+| `tigerharness.journal` | **File-based subscription backend — the default rail.** Routes agent work through the interactive Claude Code app so it counts against a monthly subscription instead of token-billed API. Single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`) compiled in-session by a drafter/two-critic loop over mechanical validators, then walked through gates that enforce step order and write persona-stamped worklog notes (the per-persona memory rail). Crash-safe by lease: tasks classify idle/busy/crashed and a fresh session resumes a crashed walk at the same step. 16 CLI verbs under `journal`. See [docs/journal.md](docs/journal.md), [docs/journal-workflow-mode.md](docs/journal-workflow-mode.md), [docs/journal-instant-resume.md](docs/journal-instant-resume.md). |
+| `tigerharness.task_runner` | Fire-and-forget iterative task execution via `claude -p`, resuming the same session across iterations. Part of the api-billed rail: the journal is the default (subscription) rail; this runner remains for api-budget workloads. |
 | `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to a `claude -p` backend and posts replies back to the thread. |
-| `tigerharness.tiger_memory` | Persistent agent memory: archive, journal, briefing with lazy rebuild, kind-decay must-memorize, and drill-down. |
-| `tigerharness.workflow_runner` | Multi-persona workflow orchestration via `claude -p`. Phase 1.5+ users typically prefer `journal` with `--kind workflow` (same compile pipeline, in-session compile, no API billing). The api-backed runner remains for api-budget workloads. CLI: the standalone `workflow` console script (`start`/`show`/`list`/`tail`/`cancel`) — *not* a `tigerharness` subcommand. See [docs/workflow-runner.md](docs/workflow-runner.md). |
+| `tigerharness.tiger_memory` | Persistent agent memory: archive, journal, briefing with lazy rebuild, kind-decay must-memorize, and drill-down. Includes the team-wide sweep protocol (`sweep-plan`/`sweep-done`/`sweep-complete`/`sweep-release` under a lease, watermark, and per-wake cap) and subscription-rail staging (`plan`, `ingest-summary`) so summarization bills to the subscription. See [docs/tiger-memory.md](docs/tiger-memory.md), [docs/tiger-memory-sweep-protocol.md](docs/tiger-memory-sweep-protocol.md). |
+| `tigerharness.workflow_runner` | Multi-persona workflow orchestration via `claude -p`, sharing the journal's compile pipeline. Part of the api-billed rail (the journal's `--kind workflow` is the subscription equivalent). CLI: the standalone `workflow` console script (`start`/`show`/`list`/`tail`/`cancel`) — *not* a `tigerharness` subcommand. See [docs/workflow-runner.md](docs/workflow-runner.md). |
+
+## Bundled Claude Code skills
+
+`tigerharness init` installs five Claude Code skills into a new
+team's `.claude/skills/`: `drive-journal` (the subscription drive
+loop), `journal-new` (task/workflow scaffolding), `assign-task`
+(background persona tasks), `slack-notify` (proactive Slack
+messages), and `workflow-append-steps` (runtime graph extension).
+Refreshes are hash-aware: a skill that still matches a previously
+shipped version is updated in place, while a hand-edited skill is
+left alone (`src/tigerharness/init.py`).
 
 ## Installation
 
