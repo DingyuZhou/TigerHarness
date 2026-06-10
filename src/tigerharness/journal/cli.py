@@ -771,7 +771,7 @@ def cmd_release(args: argparse.Namespace) -> int:
 def _load_orchestration(paths: JournalPaths, task_id: str):
     """Load + parse a workflow's orchestration.json. Returns the
     ``Orchestration`` on success or a human-readable error string. The
-    workflow_runner import is lazy (mirrors the compile CLIs) so the
+    wfcore import is lazy (mirrors the compile CLIs) so the
     pure-task journal paths never pull it in."""
     from tigerharness.journal.wfcore.models import (
         Orchestration,

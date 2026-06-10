@@ -87,7 +87,7 @@ _DEFAULT_COMPILE_PERSONAS: dict[str, str] = {
 
 _COMPILE_ROLES: tuple[str, ...] = ("drafter", "akagi", "ayako")
 
-# Regex pattern for a playbook name (mirrors workflow_runner.cli's
+# Regex pattern for a playbook name (mirrors the retired runner's
 # _PLAYBOOK_NAME_RE): bare name, no path separators, conservative
 # charset. Lets us reject ``--playbook ../../etc`` at CLI time.
 _PLAYBOOK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -296,7 +296,7 @@ def new_task(
 def resolve_team_root(team: str) -> Path:
     """Resolve the on-disk team root for ``team``.
 
-    Resolution order mirrors ``workflow_runner.cli._resolve_team_root``
+    Resolution order mirrors the retired api runner's team-root resolution
     so the two backends locate the same directory:
 
     1. ``$TIGERHARNESS_TEAMS_DIR/<team>`` if the env var is set --
@@ -343,7 +343,7 @@ def read_team_roster(team_root: Path) -> set[str]:
     persona names. An unreadable or malformed config returns an empty
     set -- the scaffolder's COMPILE_PERSONAS gate still fires.
 
-    The yaml shape is the same as ``task_runner.personas.load_personas_config``:
+    The yaml shape is the team personas registry (configs/personas.yaml):
     a top-level ``personas:`` list whose entries each have a ``name``
     field.
     """
@@ -374,7 +374,7 @@ def read_team_roster(team_root: Path) -> set[str]:
 
 def _normalize_persona_key(name: str) -> str:
     """Normalize a persona name for case- + separator-insensitive
-    matching. Mirrors :func:`task_runner.personas.resolve`:
+    matching. Mirrors the retired task-runner's resolve order:
     lowercased, with spaces and underscores collapsed to hyphens.
     """
     return name.strip().lower().replace(" ", "-").replace("_", "-")
@@ -402,7 +402,7 @@ def read_team_alias_map(team_root: Path) -> dict[str, str]:
       wins** -- whichever entry appears later in personas.yaml takes
       the alias. The tests pin this so the precedence is observable.
 
-    Convention: matches ``task_runner.personas`` -- aliases include
+    Convention: matches the personas registry -- aliases include
     the canonical name when explicit, but a persona without an
     ``aliases`` field still self-maps via the canonical layer. Case-
     and separator-insensitive lookup.
@@ -463,7 +463,7 @@ _PLAYBOOK_META_BLOCK_RE = re.compile(
 
 # Whitelist of keys the journal scaffolder reads out of playbook
 # metadata blocks. Anything else (e.g. the existing ``workflow_config:``
-# block consumed by the api-backed workflow_runner) is parsed by the
+# block once consumed by the retired api-backed runner) is parsed by the
 # yaml loader but DROPPED here, so journal-side code can't accidentally
 # consume runner-only config and the surface stays explicit.
 _PLAYBOOK_META_KNOWN_KEYS: frozenset[str] = frozenset({"default_captain"})
@@ -474,7 +474,7 @@ def extract_playbook_meta(playbook_text: str) -> dict:
     YAML and return a dict of the known journal-side metadata keys.
 
     The HTML-comment YAML convention is shared with the api-backed
-    workflow_runner (see Shohoku's ``workflow/default.md``: the
+    the retired api runner (see Shohoku's ``workflow/default.md``: the
     ``workflow_config:`` block is the runner's example). To keep
     surface minimal and intentional, this function filters the merged
     dict down to keys in :data:`_PLAYBOOK_META_KNOWN_KEYS`. Adding a

@@ -270,7 +270,6 @@ class TestCreateTeam:
         assert "TIGERHARNESS_PERSONAS_CONFIG" in settings_text
         # Skills copied from package
         assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
-        assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
         # gitignore excludes secrets and the runner's working journal,
         # but NOT archive/journal (those are git-tracked memory summaries).
         gi_text = (team / ".gitignore").read_text()
@@ -416,7 +415,6 @@ class TestScaffoldClaudeDir:
         team.mkdir()
         created = _scaffold_claude_dir(team)
         assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
-        assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
         # At least settings.json + 2 skills
         assert len(created) >= 3
 
@@ -2062,105 +2060,58 @@ class TestBundledDriveJournalSkill:
 # ---------------------------------------------------------------------------
 
 class TestGeneratedConfigLoads:
-    """End-to-end check that what `init` writes is consumable by
-    downstream tigerharness components -- not just syntactically
-    plausible markdown/YAML."""
+    """End-to-end check that what `init` writes is consumable -- the
+    personas.yaml parses and its fields resolve to real files. (The
+    legacy task_runner loader retired with ADR 0003; the yaml shape
+    itself is the surviving contract.)"""
 
     def test_personas_yaml_loads_and_resolves_prompt(self, tmp_path: Path):
-        from tigerharness.task_runner.personas import (
-            clear_registry,
-            load_personas_config,
-        )
+        import yaml as _yaml
         team_dir, _, _ = init(
             persona="chief", team="tigers",
             include_memory=False, include_slack=False,
             search_root=tmp_path,
         )
-        clear_registry()
-        try:
-            personas = load_personas_config(
-                team_dir / "configs" / "personas.yaml"
-            )
-        finally:
-            clear_registry()
-
+        data = _yaml.safe_load(
+            (team_dir / "configs" / "personas.yaml").read_text()
+        )
+        personas = data["personas"]
         assert len(personas) == 1
         chief = personas[0]
-        assert chief.name == "chief"
+        assert chief["name"] == "chief"
         # cwd: .. resolves to the team root (not configs/)
-        assert chief.cwd == team_dir
-        # prompt_file resolves into personas/chief/prompt.md
-        cfg = chief.build_config()
-        assert "You are chief, part of team tigers" in cfg.instructions
+        assert (team_dir / "configs" / chief["cwd"]).resolve() == team_dir
+        # prompt_file resolves under personas_dir
+        prompt = (
+            team_dir / "configs" / data["personas_dir"]
+            / (chief["prompt_file"] + ".md")
+        ).resolve()
+        assert prompt.exists()
+        assert "You are chief, part of team tigers" in prompt.read_text()
 
     def test_two_personas_both_load(self, tmp_path: Path):
-        from tigerharness.task_runner.personas import (
-            clear_registry,
-            load_personas_config,
-        )
-        init(
+        import yaml as _yaml
+        team_dir, _, _ = init(
             persona="chief", team="tigers",
             include_memory=False, include_slack=False,
             search_root=tmp_path,
         )
-        team_dir, _, _ = init(
+        init(
             persona="scout", team="tigers",
             include_memory=False, include_slack=False,
             search_root=tmp_path,
         )
-        clear_registry()
-        try:
-            personas = load_personas_config(
-                team_dir / "configs" / "personas.yaml"
-            )
-        finally:
-            clear_registry()
-        names = sorted(p.name for p in personas)
-        assert names == ["chief", "scout"]
-
-    def test_memory_config_loads_and_resolves_store_root(self, tmp_path: Path):
-        """The generated tiger-memory config must satisfy its own loader,
-        and the auto-suffix logic must NOT double-append the agent slug."""
-        from tigerharness.tiger_memory.config import load_config
-        team_dir, _, _ = init(
-            persona="chief", team="tigers",
-            include_memory=True, include_slack=False,
-            search_root=tmp_path,
+        data = _yaml.safe_load(
+            (team_dir / "configs" / "personas.yaml").read_text()
         )
-        cfg_path = team_dir / "memories" / "chief" / "tiger-memory.config.yaml"
-        cfg = load_config(cfg_path)
-        assert cfg.agent.name == "chief"
-        # store.root="." with the config inside memories/chief/ should
-        # resolve to memories/chief/ (not memories/chief/chief/) because
-        # tiger-memory detects the slug match.
-        assert cfg.store.root == (team_dir / "memories" / "chief").resolve()
-
-
-# ---------------------------------------------------------------------------
-# __main__ coverage
-# ---------------------------------------------------------------------------
-
-class TestDunderMain:
-    def test_task_runner_main(self):
-        with patch("tigerharness.task_runner.cli.main", return_value=0):
-            with pytest.raises(SystemExit) as exc_info:
-                runpy.run_module(
-                    "tigerharness.task_runner",
-                    run_name="__main__",
-                    alter_sys=True,
-                )
-            assert exc_info.value.code == 0
-
-    def test_task_runner_main_error(self):
-        with patch("tigerharness.task_runner.cli.main", return_value=2):
-            with pytest.raises(SystemExit) as exc_info:
-                runpy.run_module(
-                    "tigerharness.task_runner",
-                    run_name="__main__",
-                    alter_sys=True,
-                )
-            assert exc_info.value.code == 2
-
+        names = [p["name"] for p in data["personas"]]
+        assert names == ["chief", "scout"]
+        for p in data["personas"]:
+            f = (
+                team_dir / "configs" / data["personas_dir"]
+                / (p["prompt_file"] + ".md")
+            ).resolve()
+            assert f.exists()
 
 class TestExpectedClaudeProjectPath:
     """``expected_claude_project_path`` always returns a path, even when

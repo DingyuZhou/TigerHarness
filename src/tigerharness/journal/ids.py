@@ -1,6 +1,6 @@
 """Task-id generation: ``<YYYYMMDD>-<slug>-<uuid8>``.
 
-Mirrors ``workflow_runner.ids`` in spirit but lives in its own module so
+Mirrors ``wfcore.ids`` in spirit but lives in its own module so
 the journal package has no dependency on the workflow-runner: this
 backend should keep working even if the workflow-runner is renamed,
 deleted, or reorganised.

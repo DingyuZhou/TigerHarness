@@ -241,7 +241,7 @@ def cmd_compile_context(args: argparse.Namespace) -> int:
     brief, playbook = _read_brief_and_playbook(paths, status.id)
     roster = _roster_for_task(paths, status.id)
 
-    # Lazy import: avoids a hard import-time dep on workflow_runner
+    # Lazy import: avoids a hard import-time dep on wfcore
     # during journal Phase 1 callsites that never reach compile mode.
     from tigerharness.journal.wfcore.drafter import _build_prompt
 
@@ -389,7 +389,7 @@ def cmd_validate_graph(args: argparse.Namespace) -> int:
 
     The draft is read from ``--draft`` (raw drafter text). We parse it
     via the same ``_parse_response`` the api pipeline uses, then call
-    ``validate_compile_output`` from workflow_runner.compile.validators.
+    ``validate_compile_output`` from journal.wfcore.validators.
     The roster is the team's personas.yaml (best-effort).
     """
     paths = _paths_from_args(args)

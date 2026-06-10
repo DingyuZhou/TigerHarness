@@ -1,6 +1,6 @@
 """``JournalPaths``: filesystem layout for a journal.
 
-Mirrors ``workflow_runner.paths.TaskPaths`` in spirit. Resolution
+Mirrors the retired api runner's TaskPaths in spirit. Resolution
 priority for the journal root:
 
 1. ``$TIGERHARNESS_JOURNAL_DIR`` (env override)

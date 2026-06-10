@@ -37,73 +37,6 @@ class TestRouterDuplicateRosterName:
         assert idx["alpha"] == "Alpha"  # canonical wins over alias
 
 
-class TestNotifierNoValidUserIds:
-    """notifier.py:117->116: loop completes without valid entry."""
-
-    def test_all_invalid_entries(self, tmp_path):
-        from tigerharness.task_runner.notifier import _first_allowed_user_from_yaml
-        cfg = tmp_path / "bridge.yaml"
-        cfg.write_text("allowed_user_ids:\n  - 123\n  - ''\n  - '   '\n")
-        result = _first_allowed_user_from_yaml(cfg)
-        assert result is None
-
-    def test_empty_list(self, tmp_path):
-        from tigerharness.task_runner.notifier import _first_allowed_user_from_yaml
-        cfg = tmp_path / "bridge.yaml"
-        cfg.write_text("allowed_user_ids: []\n")
-        result = _first_allowed_user_from_yaml(cfg)
-        assert result is None
-
-
-class TestNotifierEmptyMetaName:
-    """notifier.py:252->254: meta.name is empty → skip name line."""
-
-    def test_stuck_escalation_no_name(self, tmp_path):
-        from tigerharness.task_runner.notifier import notify_stuck_escalation
-        from tigerharness.task_runner.registry import JobMeta
-
-        meta = JobMeta(
-            job_id="noname-test", persona="tester", prompt_chars=10,
-            max_iters=3, compact_every=0, continuation="", name="",
-            cwd="/tmp", started_at=0.0, status="running", pid=None,
-            current_iter=1, session_id="", last_update=0.0,
-        )
-
-        # Provide creds so we reach the name check at line 252
-        with patch("tigerharness.task_runner.notifier._resolve_creds",
-                   return_value=("xoxb-fake", "U0CEO")):
-            with patch("tigerharness.task_runner.notifier._post_json",
-                       return_value={"ok": True}):
-                result = notify_stuck_escalation(meta, iter_num=1, detail="test detail")
-        assert result is True
-
-    def test_stuck_escalation_with_name(self, tmp_path):
-        """252->254 True: meta.name is non-empty → name line included."""
-        from tigerharness.task_runner.notifier import notify_stuck_escalation
-        from tigerharness.task_runner.registry import JobMeta
-
-        meta = JobMeta(
-            job_id="named-test", persona="tester", prompt_chars=10,
-            max_iters=3, compact_every=0, continuation="", name="my-task",
-            cwd="/tmp", started_at=0.0, status="running", pid=None,
-            current_iter=1, session_id="", last_update=0.0,
-        )
-
-        posted_payloads = []
-
-        def _capture_post(endpoint, token, payload):
-            posted_payloads.append(payload)
-            return {"ok": True}
-
-        with patch("tigerharness.task_runner.notifier._resolve_creds",
-                   return_value=("xoxb-fake", "U0CEO")):
-            with patch("tigerharness.task_runner.notifier._post_json",
-                       side_effect=_capture_post):
-                result = notify_stuck_escalation(meta, iter_num=1, detail="test")
-        assert result is True
-        assert any("my-task" in p.get("text", "") for p in posted_payloads)
-
-
 class TestDrillPartialBranches:
     """drill.py partial branches."""
 
@@ -176,13 +109,3 @@ class TestTranscriptUnknownBlockType:
         result = _extract_text(event)
         assert "visible" in result
 
-
-class TestReadBtimeNoBtimeLine:
-    """stuck_watchdog.py:59->64: /proc/stat has no btime line."""
-
-    def test_no_btime_line(self):
-        from tigerharness.task_runner.stuck_watchdog import _read_btime
-        fake_stat = StringIO("cpu  123 456\nprocesses 789\n")
-        with patch("builtins.open", return_value=fake_stat):
-            result = _read_btime()
-        assert result is None

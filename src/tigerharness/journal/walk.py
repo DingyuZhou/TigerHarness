@@ -39,8 +39,8 @@ from tigerharness.journal.paths import JournalPaths
 
 
 # Routing sentinels recognised as terminal walk targets. Mirrors
-# ``workflow_runner.models._SENTINELS`` -- duplicated here (rather than
-# imported) to keep the core journal walk independent of workflow_runner
+# ``wfcore.models._SENTINELS`` -- duplicated here (rather than
+# imported) to keep the core journal walk independent of wfcore
 # at import time; the two literals are a frozen part of the protocol.
 DONE = "__done__"
 ESCALATE = "__escalate__"

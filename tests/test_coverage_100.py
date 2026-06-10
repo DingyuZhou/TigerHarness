@@ -86,32 +86,6 @@ class TestMainGuards:
                 )
                 sys_mock.exit.assert_called_once_with(0)
 
-    def test_task_runner_cli_main_guard(self):
-        """task_runner/cli.py:587"""
-        with patch("tigerharness.task_runner.cli.main", return_value=0) as m:
-            with patch("tigerharness.task_runner.cli.sys") as sys_mock:
-                exec(
-                    compile(
-                        "if True:\n    sys.exit(main())\n",
-                        "<cli>", "exec",
-                    ),
-                    {"sys": sys_mock, "main": m},
-                )
-                sys_mock.exit.assert_called_once_with(0)
-
-    def test_runner_main_guard(self):
-        """task_runner/runner.py:1051"""
-        with patch("tigerharness.task_runner.runner.main", return_value=0) as m:
-            with patch("tigerharness.task_runner.runner.sys") as sys_mock:
-                exec(
-                    compile(
-                        "if True:\n    sys.exit(main())\n",
-                        "<runner>", "exec",
-                    ),
-                    {"sys": sys_mock, "main": m},
-                )
-                sys_mock.exit.assert_called_once_with(0)
-
     def test_tiger_memory_cli_main_guard(self):
         """tiger_memory/cli.py:158"""
         with patch("tigerharness.tiger_memory.cli.main", return_value=0) as m:
