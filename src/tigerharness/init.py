@@ -4,6 +4,8 @@ Every persona belongs to a team. A team is a self-contained directory
 with this layout::
 
     <team>/
+        AGENTS.md                            -- agent entry point, auto-loaded each session
+        CLAUDE.md                            -- imports AGENTS.md for Claude Code
         configs/
             personas.yaml                    -- team's persona registry
             .env                             -- slack tokens (optional, gitignored)
@@ -259,10 +261,74 @@ uncomment it (per persona, or for the whole team) to expose this
 folder to that agent.
 """
 
+# AGENTS.md: the vendor-neutral agent bootstrap auto-loaded at session
+# start. Codex/Cursor/etc. read it as AGENTS.md directly; Claude Code loads
+# it via the CLAUDE.md import below. Deliberately thin -- it sets the
+# persona and routes to the charter (the operating manual), not a second
+# copy of it. Persona-name-agnostic on purpose: it points at
+# `default_persona` in personas.yaml rather than hardcoding a name, which
+# isn't known until the first persona is appended.
+_AGENTS_MD = """\
+# {team} -- agent session bootstrap
+
+This file is loaded automatically into context at the start of every
+session whose working directory is the **{team}** team root, for **all**
+personas. It is vendor-neutral: Claude Code loads it via `CLAUDE.md`
+(which imports this file); Codex, Cursor, and other agents read it as
+`AGENTS.md` directly.
+
+{team} is a roster of named AI personas that collaborate on a shared
+project. The roster is in `configs/personas.yaml`; each persona's operating
+prompt is `personas/<Name>/prompt.md`.
+
+## Which persona are you?
+
+- **If your system prompt already names a specific team member** (you were
+  launched as one of the personas in `configs/personas.yaml`), you are that
+  persona -- follow it and ignore the default below.
+- **Otherwise** -- a hand-started session with no persona identity -- adopt
+  the team default before any substantive work: read the `default_persona`
+  field in `configs/personas.yaml`, open that persona's
+  `personas/<Name>/prompt.md`, and hold that role for the session.
+  `configs/personas.yaml` is the source of truth; if `default_persona`
+  changes, follow it.
+
+Adopting a persona here sets **voice and role only**. It does not set the
+journal `--driver` flag (a launch-time argument), so tiger-memory
+attribution still routes exactly as the launcher configured it.
+
+## The operating manual lives elsewhere
+
+This bootstrap is deliberately thin. For the team's mission, scope,
+permissions, and conventions, read **`charter/README.md`** -- the operating
+manual -- before substantive work. Other key locations:
+
+- **`knowledge/INDEX.md`** (or `knowledge/README.md` until an INDEX exists)
+  -- the team's curated reference base.
+- **`configs/personas.yaml`** -- the roster and the default persona.
+- A journal's **`OPERATING.md`** governs task/queue work; drive it through
+  the `drive-journal` skill and `tigerharness journal` CLIs -- never
+  hand-edit journal state.
+"""
+
+# CLAUDE.md: a thin pointer that imports AGENTS.md so Claude Code auto-loads
+# the same vendor-neutral source. All actual guidance lives in AGENTS.md.
+_CLAUDE_MD = """\
+# {team} team
+
+Single source of truth is `AGENTS.md` (the vendor-neutral session
+bootstrap). It is imported below so Claude Code loads it automatically in
+every session that starts in this folder. Do not duplicate guidance here --
+edit `AGENTS.md`.
+
+@AGENTS.md
+"""
+
 # Charter: the team's operating manual -- mission, scope, permissions,
 # conventions, and how to use the knowledge base. Seeded with TODOs so
 # the team fills in the team-specific bits, but the structure is fixed.
-# This is the single entry point every persona reads before any work.
+# AGENTS.md (the auto-loaded entry point) points every persona here for
+# mission and scope before any work.
 _CHARTER_README = """\
 # Team charter -- {team}
 
@@ -820,6 +886,19 @@ def create_team(
     knowledge = team_dir / "knowledge" / "README.md"
     if _write_if_missing(knowledge, _KNOWLEDGE_README.format(team=team_dir.name)):
         created.append(knowledge)
+
+    # AGENTS.md + CLAUDE.md: the always-loaded entry point. AGENTS.md is the
+    # vendor-neutral source (Codex/Cursor/etc. read it directly); CLAUDE.md
+    # imports it so Claude Code auto-loads the same content. Both apply to
+    # every persona; the persona-default rule inside is conditional, so a
+    # launcher-spawned persona session is never overwritten.
+    agents_md = team_dir / "AGENTS.md"
+    if _write_if_missing(agents_md, _AGENTS_MD.format(team=team_dir.name)):
+        created.append(agents_md)
+
+    claude_md = team_dir / "CLAUDE.md"
+    if _write_if_missing(claude_md, _CLAUDE_MD.format(team=team_dir.name)):
+        created.append(claude_md)
 
     # .claude/ directory: settings.json + skills from the package.
     created.extend(_scaffold_claude_dir(team_dir))

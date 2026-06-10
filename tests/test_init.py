@@ -261,6 +261,9 @@ class TestCreateTeam:
         assert "First-read checklist" in charter_text
         knowledge_text = (team / "knowledge" / "README.md").read_text()
         assert "Team knowledge -- tigers" in knowledge_text
+        # AGENTS.md + CLAUDE.md: the auto-loaded vendor-neutral entry point
+        assert (team / "AGENTS.md").exists()
+        assert (team / "CLAUDE.md").exists()
         # .claude/ directory scaffolded
         assert (team / ".claude" / "settings.json").exists()
         settings_text = (team / ".claude" / "settings.json").read_text()
@@ -282,10 +285,40 @@ class TestCreateTeam:
         defaults_text = (team / "configs" / "tiger-memory.defaults.yaml").read_text()
         assert "summarizer:" in defaults_text
         assert "claude-sonnet-4-6" in defaults_text
-        # Base paths (7: gitignore, personas.yaml, mem defaults, .env,
-        # skills README, charter README, knowledge README) +
-        # settings.json + 2 skills = 10.
-        assert len(created) >= 10
+        # Base paths (9: gitignore, personas.yaml, mem defaults, .env,
+        # skills README, charter README, knowledge README, AGENTS.md,
+        # CLAUDE.md) + settings.json + 2 skills = 12.
+        assert len(created) >= 12
+
+    def test_entry_point_files_wired(self, tmp_path: Path):
+        """AGENTS.md is the vendor-neutral entry point; CLAUDE.md imports
+        it so Claude Code loads the same source. AGENTS.md must stay
+        persona-name-agnostic (point at default_persona, not a hardcoded
+        name) and keep the conditional rule that stops it overwriting a
+        launcher-assigned persona."""
+        team = tmp_path / "shohoku"
+        create_team(team, include_slack=False)
+
+        agents = (team / "AGENTS.md").read_text()
+        # Team name interpolated, not a generic doc.
+        assert "shohoku -- agent session bootstrap" in agents
+        # Default resolved from personas.yaml, never a hardcoded name.
+        assert "default_persona" in agents
+        assert "configs/personas.yaml" in agents
+        # Conditional rule: an already-assigned persona is not overwritten.
+        assert "If your system prompt already names a specific" in agents
+        # Routes to the charter (the operating manual) rather than duplicating it.
+        assert "charter/README.md" in agents
+        # The voice-only / no --driver caveat is preserved.
+        assert "--driver" in agents
+        # Regression: the generic template scaffolds arbitrary teams, so it
+        # must not leak the Shohoku/Slam Dunk roster as hardcoded examples.
+        for leaked in ("Rukawa", "Anzai", "Sakuragi", "Ayako"):
+            assert leaked not in agents, f"template leaks persona name: {leaked}"
+
+        claude = (team / "CLAUDE.md").read_text()
+        # Thin pointer that imports the single source of truth.
+        assert "@AGENTS.md" in claude
 
     def test_skip_slack(self, tmp_path: Path):
         team = tmp_path / "tigers"
