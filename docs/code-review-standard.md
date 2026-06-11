@@ -33,7 +33,8 @@ this change and would maintain it."
    behavior breaks.
 2. New code ships with its tests in the same commit. A bug fix ships
    the regression test that would have caught the bug — written first,
-   observed failing.
+   observed failing, with that observation noted in the commit body so
+   the reviewer can verify the claim.
 3. No test deletions or skips to make a change pass; weakening an
    assertion is a behavior change and falls under §1.2.
 4. Coverage-excluded paths (e.g. `agent_sdk/examples/`) stay excluded
@@ -121,9 +122,12 @@ this change and would maintain it."
 
 ## §10 Commit hygiene
 
-1. Format: `<persona-or-author prefix>: <imperative summary, <= 72
-   chars>`, body explaining what changed and why (the why is the part
-   the diff can't show).
+1. Format: `<prefix>: <imperative summary, <= 72 chars>`, body
+   explaining what changed and why (the why is the part the diff
+   can't show). The prefix is the type prefix from CONTRIBUTING.md
+   (`feat:`, `fix:`, `test:`, `docs:`, `refactor:`) for external
+   contributors, or the team persona prefix (`akagi:`, `ayako:`, …)
+   for team-operated agents — both satisfy this section.
 2. Stage files explicitly — never `git add -A` / `git add .` (parallel
    sessions leave unrelated files in the tree).
 3. No `--amend` after push, no `--no-verify`, no force-push. History
@@ -137,5 +141,6 @@ this change and would maintain it."
 2. The reviewer states what they actually verified (ran the tests,
    traced the path, checked the docs) — rubber-stamp approvals are
    themselves a §11 violation.
-3. Disagreements between author and reviewer escalate to the
-   maintainer/Operator rather than being worn down in-thread.
+3. Disagreements between author and reviewer escalate to the project
+   maintainer (for agent teams, the human operator) rather than being
+   worn down in-thread.
