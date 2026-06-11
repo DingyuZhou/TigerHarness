@@ -1129,10 +1129,19 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
         else:
             payload["brief_text"] = args.task_brief
         payload["playbook"] = args.playbook
-        payload["playbook_text"] = playbook_path.read_text(encoding="utf-8")
+        playbook_text = playbook_path.read_text(encoding="utf-8")
+        payload["playbook_text"] = playbook_text
         payload["team_root"] = str(team_root)
-        if args.captain:
-            payload["captain"] = args.captain
+        captain = args.captain
+        if not captain:
+            # Parity with `journal new`: fall back to the playbook's
+            # default_captain so scheduled workflows aren't silently
+            # captainless (b2-haruko).
+            captain = resolve_playbook_default_captain(
+                playbook_text, team_root,
+            )
+        if captain:
+            payload["captain"] = captain
 
     def_id = re.sub(r"[^A-Za-z0-9_-]+", "-", args.title.strip().lower())
     def_id = re.sub(r"-{2,}", "-", def_id).strip("-") or "schedule"

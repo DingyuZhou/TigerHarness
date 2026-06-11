@@ -603,6 +603,31 @@ class TestScheduleCliWorkflow:
         assert data["payload"]["brief_text"].startswith("# Diag")
         assert data["payload"]["captain"] == "Anzai"
 
+    def test_workflow_add_resolves_default_captain(
+        self, tmp_path, capsys, monkeypatch,
+    ):
+        # Parity with journal new: --captain absent -> playbook's
+        # default_captain lands in the payload (b2-haruko).
+        journal_dir = tmp_path / "journal"
+        team = tmp_path / "teams" / "Shohoku"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n  - name: Anzai\n")
+        (team / "workflow").mkdir()
+        (team / "workflow" / "diag.md").write_text(
+            "# Diag\n<!--\ndefault_captain: Anzai\n-->\n")
+        monkeypatch.chdir(tmp_path)
+        rc = main([
+            "--journal-dir", str(journal_dir),
+            "schedule", "add", "--title", "Diag cap", "--at", "07:00",
+            "--kind", "workflow", "--playbook", "diag",
+            "--task-brief", "# x\n", "--team", "Shohoku",
+        ])
+        assert rc == 0
+        data = json.loads((journal_dir / "schedule" /
+                           "diag-cap.json").read_text())
+        assert data["payload"]["captain"] == "Anzai"
+
     def test_workflow_add_inline_brief(self, tmp_path, capsys, monkeypatch):
         journal_dir = tmp_path / "journal"
         team = tmp_path / "teams" / "Shohoku"
