@@ -103,6 +103,23 @@ def test_find_short_excludes_rollups(tmp_path: Path) -> None:
     assert store.find_short(uid) == short  # daily excluded
 
 
+def test_find_short_only_rollup_returns_none(tmp_path: Path) -> None:
+    """Only a rollup exists for the uuid -> None.
+
+    Also the deterministic pin for the loop's skip-and-continue arc
+    (store.py 146->145): the mixed-file test above only exercises it
+    when glob yields the rollup BEFORE the short, and glob order is
+    filesystem-dependent -- it did on the dev box (aarch64/NixOS) and
+    did not on ubuntu CI, which is exactly how the first CI run landed
+    at 99.99%. With ONLY a non-matching file present, the arc executes
+    on every platform regardless of directory order."""
+    store = Store(tmp_path / "mem")
+    store.init_layout()
+    uid = "abcdef12-3456-7890-1234-567890abcdef"
+    (store.paths.journal / f"20260514-daily-{uid}.md").write_text("d")
+    assert store.find_short(uid) is None
+
+
 def test_filename_derivation() -> None:
     uid = "abcdef12-3456-7890-1234-567890abcdef"
     dt = datetime(2026, 5, 14, 8, 21, 36)
