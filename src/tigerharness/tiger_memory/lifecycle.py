@@ -101,7 +101,7 @@ def bootstrap(
                 break
 
         # In bootstrap, also process auto-memory directory → synthetic conv.
-        am = _auto_memory_record(cfg)
+        am = _auto_memory_record(cfg, store)
         if am is not None and (not limit or len(records) < limit):
             records.append(am)
 
@@ -752,8 +752,10 @@ def _write_short_archive_bodies(
     short_path = store.paths.journal / filename
     archive_path = store.paths.archive / filename
 
+    _op, _ = store.ensure_operator_id()
     short_fm = {
         "type": "short_summary",
+        "operator": _op,
         "conversation_uuid": rec.conversation_uuid,
         "source": rec.source,
         "source_id": rec.source_id,
@@ -849,8 +851,10 @@ def _write_addendum(
     )
     filename = Store.short_filename(today_dt, addendum_uuid)
     short_path = store.paths.journal / filename
+    _op2, _ = store.ensure_operator_id()
     fm = {
         "type": "short_summary",
+        "operator": _op2,
         "conversation_uuid": addendum_uuid,
         "source": rec.source,
         "source_id": rec.source_id,
@@ -896,6 +900,60 @@ def _cascade_all_rollups(store: Store, cfg: Config, summarizer: Summarizer) -> N
     _cascade_monthlies(store, cfg, summarizer)
 
 
+def _operator_of(path) -> str | None:
+    """The ``operator`` frontmatter key of a summary file, or None for
+    legacy (pre-multi-op) files. Unreadable files count as legacy --
+    the fold filter then excludes them unless this store adopted the
+    legacy pyramid (conservative: never fold what you can't
+    attribute to yourself)."""
+    try:
+        fm, _ = frontmatter.parse(path.read_text(encoding="utf-8"))
+        op = fm.get("operator")
+        return str(op) if op else None
+    except Exception:  # noqa: BLE001 -- unreadable = unattributable
+        return None
+
+
+def _fold_inputs(files, operator_id: str, adopt_legacy: bool):
+    """Multi-operator fold locality (T12b, THE invariant): a cascade
+    folds ONLY files written by the local operator -- plus the
+    segment-less legacy files iff this store adopted the legacy
+    pyramid. Foreign operators' files are read-only inputs to the
+    briefing, never fold targets; folding them would re-create the
+    same-name collision one level up."""
+    out = []
+    for f in files:
+        op = _operator_of(f)
+        if op == operator_id or (op is None and adopt_legacy):
+            out.append(f)
+    return out
+
+
+def _local_rollup_target(
+    store: Store,
+    *,
+    kind: str,
+    period_key: str,
+    filename_fn,
+    operator_id: str,
+    adopt_legacy: bool,
+):
+    """The LOCAL pyramid's rollup path for a period (T12b re-roll
+    seam): the operator-seeded name -- except a pre-upgrade period
+    whose legacy file exists in an adopting store, which keeps the
+    legacy name (one file per period per writer, before and after
+    the upgrade)."""
+    seeded = store.paths.journal / filename_fn(
+        period_key, str(uuid5(NAMESPACE_URL, f"{kind}:{period_key}:{operator_id}"))
+    )
+    legacy = store.paths.journal / filename_fn(
+        period_key, str(uuid5(NAMESPACE_URL, f"{kind}:{period_key}"))
+    )
+    if not seeded.exists() and adopt_legacy and legacy.exists():
+        return legacy
+    return seeded
+
+
 def _cascade_dailies(store: Store, cfg: Config, summarizer: Summarizer) -> None:
     """For each date with shorts, create/refresh daily if dirty."""
     by_date: dict[str, list[Path]] = {}
@@ -904,8 +962,17 @@ def _cascade_dailies(store: Store, cfg: Config, summarizer: Summarizer) -> None:
         if m:
             by_date.setdefault(m.group(1), []).append(f)
     prompts_root = _prompts_root(cfg)
-    for date_str, shorts in by_date.items():
-        if not _daily_dirty(store, date_str, shorts):
+    operator_id, adopt_legacy = store.ensure_operator_id()
+    for date_str, all_shorts in by_date.items():
+        shorts = _fold_inputs(all_shorts, operator_id, adopt_legacy)
+        if not shorts:
+            continue  # nothing of OURS this day; foreign-only periods stay foreign
+        target = _local_rollup_target(
+            store, kind="daily", period_key=date_str,
+            filename_fn=Store.daily_filename,
+            operator_id=operator_id, adopt_legacy=adopt_legacy,
+        )
+        if not _rollup_dirty(target, shorts):
             continue
         content_parts = []
         for s in sorted(shorts):
@@ -926,23 +993,26 @@ def _cascade_dailies(store: Store, cfg: Config, summarizer: Summarizer) -> None:
         except Exception:
             log.exception("daily rollup failed for %s", date_str)
             continue
-        # Use deterministic per-date uuid5 so re-roll keeps the same filename.
-        rollup_uuid = str(uuid5(NAMESPACE_URL, f"daily:{date_str}"))
-        target = store.paths.journal / Store.daily_filename(date_str, rollup_uuid)
+        # Operator-seeded deterministic uuid: re-roll keeps the same
+        # filename PER WRITER; cross-writer collisions impossible.
         fm = {
             "type": "daily_rollup",
             "period": _format_period_date(date_str),
             "summarizer": summarizer.tag,
+            "operator": operator_id,
         }
         store.atomic_write(target, frontmatter.render(fm, body))
 
 
-def _daily_dirty(store: Store, date_str: str, shorts: list[Path]) -> bool:
-    daily = store.daily_for_date(date_str)
-    if daily is None:
+def _rollup_dirty(target, inputs) -> bool:
+    """Local-pyramid dirty check (T12b): compare the EXACT local
+    target's mtime against its fold inputs -- never resolve "the
+    period's rollup" by glob, which could pick a foreign writer's
+    file and mask (or force) re-rolls."""
+    if not target.exists():
         return True
-    daily_mtime = daily.stat().st_mtime
-    return any(s.stat().st_mtime > daily_mtime for s in shorts)
+    t = target.stat().st_mtime
+    return any(f.stat().st_mtime > t for f in inputs)
 
 
 def _cascade_weeklies(store: Store, cfg: Config, summarizer: Summarizer) -> None:
@@ -956,8 +1026,17 @@ def _cascade_weeklies(store: Store, cfg: Config, summarizer: Summarizer) -> None
         monday = d - timedelta(days=d.weekday())
         by_monday.setdefault(monday.strftime("%Y%m%d"), []).append(f)
     prompts_root = _prompts_root(cfg)
-    for monday_str, dailies in by_monday.items():
-        if not _weekly_dirty(store, monday_str, dailies):
+    operator_id, adopt_legacy = store.ensure_operator_id()
+    for monday_str, all_dailies in by_monday.items():
+        dailies = _fold_inputs(all_dailies, operator_id, adopt_legacy)
+        if not dailies:
+            continue
+        target = _local_rollup_target(
+            store, kind="weekly", period_key=monday_str,
+            filename_fn=Store.weekly_filename,
+            operator_id=operator_id, adopt_legacy=adopt_legacy,
+        )
+        if not _rollup_dirty(target, dailies):
             continue
         content_parts = []
         for d in sorted(dailies):
@@ -978,22 +1057,13 @@ def _cascade_weeklies(store: Store, cfg: Config, summarizer: Summarizer) -> None
         except Exception:
             log.exception("weekly rollup failed for %s", monday_str)
             continue
-        rollup_uuid = str(uuid5(NAMESPACE_URL, f"weekly:{monday_str}"))
-        target = store.paths.journal / Store.weekly_filename(monday_str, rollup_uuid)
         fm = {
             "type": "weekly_rollup",
             "period": _format_period_date(monday_str),
             "summarizer": summarizer.tag,
+            "operator": operator_id,
         }
         store.atomic_write(target, frontmatter.render(fm, body))
-
-
-def _weekly_dirty(store: Store, monday_str: str, dailies: list[Path]) -> bool:
-    weekly = store.weekly_for_monday(monday_str)
-    if weekly is None:
-        return True
-    weekly_mtime = weekly.stat().st_mtime
-    return any(d.stat().st_mtime > weekly_mtime for d in dailies)
 
 
 def _cascade_monthlies(store: Store, cfg: Config, summarizer: Summarizer) -> None:
@@ -1007,8 +1077,17 @@ def _cascade_monthlies(store: Store, cfg: Config, summarizer: Summarizer) -> Non
         key = d.strftime("%Y%m")
         by_month.setdefault(key, []).append(f)
     prompts_root = _prompts_root(cfg)
-    for yyyymm, weeklies in by_month.items():
-        if not _monthly_dirty(store, yyyymm, weeklies):
+    operator_id, adopt_legacy = store.ensure_operator_id()
+    for yyyymm, all_weeklies in by_month.items():
+        weeklies = _fold_inputs(all_weeklies, operator_id, adopt_legacy)
+        if not weeklies:
+            continue
+        target = _local_rollup_target(
+            store, kind="monthly", period_key=yyyymm,
+            filename_fn=Store.monthly_filename,
+            operator_id=operator_id, adopt_legacy=adopt_legacy,
+        )
+        if not _rollup_dirty(target, weeklies):
             continue
         content_parts = []
         for w in sorted(weeklies):
@@ -1029,25 +1108,13 @@ def _cascade_monthlies(store: Store, cfg: Config, summarizer: Summarizer) -> Non
         except Exception:
             log.exception("monthly rollup failed for %s", yyyymm)
             continue
-        rollup_uuid = str(uuid5(NAMESPACE_URL, f"monthly:{yyyymm}"))
-        target = store.paths.journal / Store.monthly_filename(yyyymm, rollup_uuid)
         fm = {
             "type": "monthly_rollup",
             "period": f"{yyyymm[:4]}-{yyyymm[4:]}",
             "summarizer": summarizer.tag,
+            "operator": operator_id,
         }
         store.atomic_write(target, frontmatter.render(fm, body))
-
-
-def _monthly_dirty(store: Store, yyyymm: str, weeklies: list[Path]) -> bool:
-    monthly = store.monthly_for_yyyymm(yyyymm)
-    if monthly is None:
-        return True
-    monthly_mtime = monthly.stat().st_mtime
-    return any(w.stat().st_mtime > monthly_mtime for w in weeklies)
-
-
-# ----- longer-memory refresh (§7.3 step 3b) --------------------------------
 
 
 def _refresh_longer_memory(
@@ -1191,7 +1258,7 @@ def _write_state(
 # ----- auto-memory synthetic conv (§11 step 3) -----------------------------
 
 
-def _auto_memory_record(cfg: Config) -> SourceRecord | None:
+def _auto_memory_record(cfg: Config, store: Store) -> SourceRecord | None:
     """Build a SourceRecord by concatenating the legacy auto-memory dir.
 
     Only runs if a source of kind ``auto_memory`` is configured with a
@@ -1215,7 +1282,10 @@ def _auto_memory_record(cfg: Config) -> SourceRecord | None:
         return None
     content = "".join(parts)
     now = datetime.now(timezone.utc)
-    uid = str(uuid5(NAMESPACE_URL, f"auto_memory:{cfg.agent.name}"))
+    # Operator-segmented for uniformity with the rollup seeds (design
+    # Q2 recommendation adopted; Decision logged in the task record).
+    _op, _ = store.ensure_operator_id()
+    uid = str(uuid5(NAMESPACE_URL, f"auto_memory:{cfg.agent.name}:{_op}"))
     return SourceRecord(
         conversation_uuid=uid,
         source="doc",
