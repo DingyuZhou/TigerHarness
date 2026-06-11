@@ -118,8 +118,8 @@ tigers/
 │   ├── settings.json             # wires TIGERHARNESS_PERSONAS_CONFIG, the
 │   │                             #   journal write-guard hook, and seeds
 │   │                             #   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50
-│   └── skills/                   # bundled skills (slack-notify, drive-journal,
-│                                 #   journal-new, assign-task, ...)
+│   └── skills/                   # bundled skills (drive-journal, journal-new,
+│                                 #   slack-notify, workflow-append-steps)
 ├── configs/
 │   ├── personas.yaml              # team registry (auto-updated)
 │   └── .env                       # Slack tokens (gitignored)
@@ -258,7 +258,6 @@ All paths are resolved from environment variables -- no hardcoded paths.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TIGERHARNESS_STATE_DIR` | `~/.local/state/tigerharness-tasks/` | Task runner state directory |
 | `TIGERHARNESS_PERSONAS_DIR` | (none) | Directory containing `<name>.md` prompt files |
 | `TIGERHARNESS_SLACK_ENV` | `.env` | Path to slack-bridge .env file |
 | `TIGERHARNESS_AGENT_CWD` | `.` | Working directory for the Claude agent |
@@ -306,10 +305,10 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
 
 ### Agent Slack notifications
 
-- **Notifications require the bot to be in `SLACK_NOTIFY_CHANNEL`.** Each team has its own Slack app (own bot user). After creating a new team's Slack app and setting `SLACK_NOTIFY_CHANNEL` in `configs/.env`, the bot must be **invited to that channel** (`/invite @BotName` in Slack). Without this, `chat.postMessage` returns `channel_not_found` and notifications are silently skipped. The task runner logs the error to stderr but doesn't surface it to the user.
+- **Notifications require the bot to be in `SLACK_NOTIFY_CHANNEL`.** Each team has its own Slack app (own bot user). After creating a new team's Slack app and setting `SLACK_NOTIFY_CHANNEL` in `configs/.env`, the bot must be **invited to that channel** (`/invite @BotName` in Slack). Without this, `chat.postMessage` returns `channel_not_found` and notifications are silently skipped. The notify CLI logs the error to stderr but doesn't surface it to the user.
   - **Fix candidate**: `tigerharness init` could print a reminder ("Don't forget to invite your bot to the ops-log channel"), or the notifier could log a more prominent first-time warning.
 - **Agents need `.claude/settings.json` + skills to send proactive DMs.** Agents use the `slack-notify` skill to send per-iteration updates via `python -m tigerharness.slack_bridge.notify`. Without `.claude/settings.json` (which wires `TIGERHARNESS_PERSONAS_CONFIG`) and `.claude/skills/slack-notify/SKILL.md` (which teaches the agent the notify CLI exists), the agent doesn't know how to send Slack messages. As of v0.2.1+, `tigerharness init` scaffolds these automatically for new teams (the `.claude/settings.json` also seeds `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50`). Existing teams adopt them with `tigerharness init --refresh-skills`, which installs any missing skills, refreshes un-customized ones to the latest, and tops up `.claude/settings.json` (compact threshold) — without clobbering hand edits.
-- **`--thread` must be passed when assigning from a Slack thread.** When a task is assigned from a Slack DM thread, the agent must pass `--thread <slack_thread_ts>` (from the `[bridge-context]` block) so notifications land in the right thread. Without it, notifications go to a new top-level message instead of the conversation thread. The `assign-task` skill documents this prominently, but it's easy to forget.
+- **`--thread` must be passed when notifying from a Slack thread.** When an agent sends a proactive message from a Slack DM thread, it must pass `--thread <slack_thread_ts>` (from the `[bridge-context]` block) so notifications land in the right thread. Without it, notifications go to a new top-level message instead of the conversation thread. The `slack-notify` skill documents this prominently, but it's easy to forget.
 
 ### `tigerharness init`
 

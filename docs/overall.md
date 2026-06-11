@@ -45,9 +45,9 @@ protocol (`sweep-plan/done/complete/release`, with `plan` and
 the subscription rail under a lease, watermark, and per-wake cap.
 
 **Team tooling.** `tigerharness init` scaffolds a team (personas,
-config, .env) and installs five bundled Claude Code skills
-(drive-journal, journal-new, assign-task, slack-notify,
-workflow-append-steps), hash-aware so hand-edited skills are never
+config, .env) and installs four bundled Claude Code skills
+(drive-journal, journal-new, slack-notify, workflow-append-steps),
+hash-aware so hand-edited skills are never
 overwritten; `dismiss` tears down. An `agent_sdk` provides a typed,
 backend-agnostic API over the `claude -p` and Claude Agent SDK
 runtimes, with a shared retry/error model.
