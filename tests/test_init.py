@@ -47,6 +47,9 @@ from tigerharness.init import (
 class TestValidateName:
     @pytest.mark.parametrize("name", [
         "chief", "scout-7", "Q_master", "a", "X1", "team-99",
+        # Single internal spaces are valid: space-separated words,
+        # each starting with an alphanumeric.
+        "Chuan Ying", "Chuan Ying Wu", "Tiger Team", "9 to 5",
     ])
     def test_accepts_valid(self, name: str):
         assert _validate_name(name, kind="persona") == name
@@ -54,10 +57,24 @@ class TestValidateName:
     def test_strips_whitespace(self):
         assert _validate_name("  chief  ", kind="persona") == "chief"
 
+    def test_strips_whitespace_around_spaced_name(self):
+        assert _validate_name(" Chuan Ying ", kind="persona") == "Chuan Ying"
+
     @pytest.mark.parametrize("name", [
         "", "   ", "chief/scout", "..", ".hidden", "-leading-dash",
-        "with space", "with/slash", "with\\back", "weird:char",
+        "with/slash", "with\\back", "weird:char",
         "../escape", "name.with.dot",
+        # Space edge classes: only single INTERNAL ASCII spaces are
+        # valid. (Leading/trailing spaces are stripped before
+        # validation, so they are exercised in the accept tests.)
+        "Chuan  Ying",      # consecutive spaces
+        "Chuan\tYing",      # tab
+        "Chuan\u00a0Ying",  # unicode (non-breaking) space
+        "Chuan -Ying",      # word starting with non-alphanumeric
+        # ASCII-only lock: non-ASCII letters stay rejected so the
+        # error text keeps describing the real rule.
+        "\u5bab\u57ce",        # 宫城
+        "\u5bab\u57ce \u826f\u7530",  # 宫城 良田
     ])
     def test_rejects_invalid(self, name: str):
         with pytest.raises(ValueError, match="(invalid|cannot be empty)"):
@@ -2526,3 +2543,98 @@ class TestInitMultiTeamGating:
         assert rc == 0
         frag = tmp_path / "shohoku" / "configs" / "slack-bridge.yaml"
         assert "allowed_user_ids: []" in frag.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Space-containing names (init side)
+# ---------------------------------------------------------------------------
+
+class TestSpacedNames:
+    """End-to-end coverage for space-containing persona/team names.
+
+    The grammar accepts space-separated words ([A-Za-z0-9][A-Za-z0-9_-]*
+    joined by single spaces); these tests pin the user-visible surfaces:
+    the interactive prompt (the originally-reported failure), folder
+    scaffolding, the personas.yaml round-trip through a real YAML
+    loader, shell-snippet quoting, and --team-dir basename derivation.
+    """
+
+    def test_interactive_prompt_accepts_spaced_persona(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ):
+        # The reported failure surface: the persona arrives via the
+        # interactive prompt, not a flag.
+        from tigerharness import init as init_mod
+        monkeypatch.setattr(
+            init_mod, "_prompt_text", lambda *a, **k: "Chuan Ying"
+        )
+        rc = main([
+            "--dir", str(tmp_path),
+            "--team", "tigers",
+            "--no-memory", "--no-slack", "--no-multi-team",
+        ])
+        assert rc == 0
+        assert (
+            tmp_path / "tigers" / "personas" / "Chuan Ying" / "prompt.md"
+        ).exists()
+        import yaml as _yaml
+        cfg = _yaml.safe_load(
+            (tmp_path / "tigers" / "configs" / "personas.yaml").read_text()
+        )
+        # (default_persona seeding is a separate, pre-existing flow --
+        # create_team scaffolds the personas.yaml header before the
+        # entry is appended -- so it is not asserted here.)
+        entry = cfg["personas"][0]
+        assert entry["name"] == "Chuan Ying"
+        assert entry["prompt_file"] == "Chuan Ying/prompt"
+        # Copy-paste shell snippets must quote the spaced name.
+        out = capsys.readouterr().out
+        assert "--persona 'Chuan Ying'" in out
+
+    def test_spaced_team_scaffolds_and_quotes_paths(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team", "Tiger Team",
+            "--no-memory", "--no-slack", "--no-multi-team", "--yes",
+        ])
+        assert rc == 0
+        assert (
+            tmp_path / "Tiger Team" / "personas" / "ayako" / "prompt.md"
+        ).exists()
+        out = capsys.readouterr().out
+        # The export line embeds a path containing the spaced team
+        # name; it must arrive shell-quoted.
+        assert "export TIGERHARNESS_PERSONAS_CONFIG='Tiger Team/" in out
+
+    def test_team_dir_basename_with_space_accepted(self, tmp_path: Path):
+        # --team-dir derives the team name from an existing folder's
+        # basename (init.py team derivation); a single internal space
+        # must now pass validation.
+        team_dir = tmp_path / "Tiger Team"
+        team_dir.mkdir()
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team-dir", str(team_dir),
+            "--no-memory", "--no-slack", "--no-multi-team", "--yes",
+        ])
+        assert rc == 0
+        assert (team_dir / "personas" / "ayako" / "prompt.md").exists()
+
+    def test_team_dir_basename_double_space_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        team_dir = tmp_path / "Bad  Team"
+        team_dir.mkdir()
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "ayako",
+            "--team-dir", str(team_dir),
+            "--no-memory", "--no-slack", "--no-multi-team", "--yes",
+        ])
+        assert rc != 0
+        assert "invalid team name" in capsys.readouterr().err

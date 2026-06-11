@@ -39,6 +39,7 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -100,10 +101,15 @@ class SkillSync:
     def changed(self) -> list[Path]:
         return self.created + self.updated
 
-# Valid persona/team names: letters, digits, dash, underscore. The
-# folder names show up in paths and shell commands, so we keep them
-# strict rather than POSIX-permissive.
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# Valid persona/team names: space-separated words, each starting with
+# a letter or digit and continuing with letters, digits, dash,
+# underscore. Single internal spaces only -- no leading/trailing or
+# consecutive spaces. The names show up in paths, shell snippets
+# (quoted at the print site), and YAML scalars, so everything beyond
+# this stays rejected.
+_NAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_-]*(?: [A-Za-z0-9][A-Za-z0-9_-]*)*$"
+)
 
 # ---------------------------------------------------------------------------
 # Templates
@@ -186,7 +192,7 @@ _PERSONAS_YAML_PREAMBLE = """\
 # Personas registry for tigerharness (journal, slack-bridge).
 #
 # Load this file by pointing the env var at it (absolute or relative path):
-#     export TIGERHARNESS_PERSONAS_CONFIG=path/to/{team}/configs/personas.yaml
+#     export TIGERHARNESS_PERSONAS_CONFIG='path/to/{team}/configs/personas.yaml'
 #
 # `personas_dir`, `cwd`, and `extra.add_dirs` are resolved relative to
 # THIS FILE'S directory, not your cwd at load time, so the team folder
@@ -551,8 +557,10 @@ state_dir: ~/.local/state/slack-bridge/{team}
 def _validate_name(value: str, *, kind: str) -> str:
     """Raise ValueError if *value* is unsafe to use as a folder name.
 
-    Folder names appear in paths, shell snippets, and YAML keys.
-    Restrict to ``[A-Za-z0-9_-]`` starting with an alphanumeric.
+    Folder names appear in paths, shell snippets, and YAML scalars.
+    Accept space-separated words of ``[A-Za-z0-9_-]``, each starting
+    with an alphanumeric -- i.e. single internal spaces are allowed,
+    leading/trailing/consecutive spaces are not.
     """
     v = (value or "").strip()
     if not v:
@@ -560,7 +568,8 @@ def _validate_name(value: str, *, kind: str) -> str:
     if not _NAME_RE.fullmatch(v):
         raise ValueError(
             f"invalid {kind} name {value!r}: use letters, digits, '-', "
-            f"and '_' only (must start with a letter or digit)"
+            f"'_', and single spaces between words (must start with a "
+            f"letter or digit)"
         )
     return v
 
@@ -1743,6 +1752,14 @@ def main(argv: list[str] | None = None) -> int:
     personas_cfg = team_dir / "configs" / "personas.yaml"
     print()
     print("  To run tasks (subscription journal backend):")
-    print(f"    export TIGERHARNESS_PERSONAS_CONFIG={_format_path(personas_cfg, search_root)}")
-    print(f"    {prefix}tigerharness journal new --kind task --persona {persona} --prd <brief.md>")
+    # Names and paths may contain spaces; quote anything a user will
+    # copy-paste into a shell.
+    print(
+        f"    export TIGERHARNESS_PERSONAS_CONFIG="
+        f"{shlex.quote(_format_path(personas_cfg, search_root))}"
+    )
+    print(
+        f"    {prefix}tigerharness journal new --kind task "
+        f"--persona {shlex.quote(persona)} --prd <brief.md>"
+    )
     return 0
