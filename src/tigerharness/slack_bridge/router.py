@@ -55,8 +55,10 @@ listed aliases (e.g. "Hi Ayako" or "Hi 安西教练"), return the \
 team member's CANONICAL name (the first name listed, before the aliases).
 - If no team member is clearly addressed, or the addressed name is \
 not in the roster, return the literal word "default".
-- Return EXACTLY one token: a canonical name from the roster, or \
-"default". No commentary, no punctuation, no quotes, no formatting.\
+- Return EXACTLY one roster entry: a canonical name from the roster \
+(verbatim, even when it contains a space), or the literal word \
+"default". Reply with the name alone -- no commentary, no \
+punctuation, no quotes, no formatting.\
 """
 
 
@@ -175,7 +177,8 @@ def _parse_router_response(
     When *aliases* is provided, the response is also checked against
     alias values, mapping back to the canonical persona name.
 
-    The router is told to return one token. We tolerate trailing
+    The router is told to return one roster entry (which may contain
+    an internal space). We tolerate trailing
     punctuation, whitespace, or surrounding quotes so a model that
     over-formats gets parsed correctly instead of forcing a fallback.
     """

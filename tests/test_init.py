@@ -2638,3 +2638,25 @@ class TestSpacedNames:
         ])
         assert rc != 0
         assert "invalid team name" in capsys.readouterr().err
+
+    def test_golden_unspaced_output_unchanged(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """Regression lock: for space-free names the printed snippets
+        are byte-identical to the pre-spaces behavior -- shlex.quote
+        leaves shell-safe strings unquoted, so legacy users see no
+        change. Golden lines captured from the pre-change output.
+        """
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief",
+            "--team", "tigers",
+            "--no-memory", "--no-slack", "--no-multi-team", "--yes",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert (
+            "export TIGERHARNESS_PERSONAS_CONFIG="
+            "tigers/configs/personas.yaml\n"
+        ) in out
+        assert "--persona chief --prd <brief.md>" in out
