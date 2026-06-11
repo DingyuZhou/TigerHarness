@@ -342,7 +342,13 @@ class Store:
             return str(state["operator_id"]), bool(
                 state.get("adopt_legacy", False)
             )
-        adopt_legacy = state is not None  # pre-existing store, pre-upgrade
+        if state is not None and "adopt_legacy" in state:
+            # Recorded once, preserved forever: a lost/corrupted
+            # operator id must never flip a fresh clone into adopting
+            # foreign legacy files (b2-sakuragi).
+            adopt_legacy = bool(state["adopt_legacy"])
+        else:
+            adopt_legacy = state is not None  # pre-existing, pre-upgrade
         state = dict(state or {})
         state["operator_id"] = _uuid.uuid4().hex[:8]
         state["adopt_legacy"] = adopt_legacy

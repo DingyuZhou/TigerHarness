@@ -77,6 +77,19 @@ class TestOperatorIdentity:
         _, adopt = store.ensure_operator_id()
         assert adopt is False
 
+    def test_lost_id_preserves_recorded_adopt_legacy(self, tmp_path):
+        # b2-sakuragi: corrupting the id must NOT flip a fresh
+        # store's recorded adopt_legacy=False to True.
+        _, store = _mk_store(tmp_path)
+        op1, adopt1 = store.ensure_operator_id()
+        assert adopt1 is False
+        state = store.read_state()
+        del state["operator_id"]
+        store.write_state(state)
+        op2, adopt2 = store.ensure_operator_id()
+        assert op2 != op1  # new id minted (old pyramid = history)
+        assert adopt2 is False  # recorded value preserved
+
     def test_pre_upgrade_store_adopts_legacy(self, tmp_path):
         _, store = _mk_store(tmp_path)
         store.write_state({"last_op": "rebuild"})  # pre-upgrade state
