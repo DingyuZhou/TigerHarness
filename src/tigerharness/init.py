@@ -65,9 +65,16 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         # per-persona-memory skill (origin/main after PR #43/#44, before
         # the cascade redesign merged in) -- what Shohoku has on disk now.
         "25d2c223c976e14ed4441660d6fb064fbaedb65a898f65250a4fc0bc1447cb6c",
-        # pre-Slack-rail-rule skill (before the cost-discipline rule was
-        # added on work/2026-06-11-slack-cost-discipline).
+        # pre-Slack-rail-rule AND pre-compaction-redesign skill (both
+        # 2026-06-11 branches started from this main-shipped version;
+        # registered once, comments merged at consolidation).
         "3ea99c3d99de7f6cecd7185d8b1769bf907b02f4967466a445998eeee19e1f17",
+        # branch-only renders, both "shipped" in the sense that a team
+        # may hold them (Shohoku's team copy carries the cost-discipline
+        # render): slack-cost-discipline's SKILL.md ...
+        "a1217e8c9c09e532d6593e73d0b4f0d9bab09e4a3bc4b8b53cf44a79a8cad56b",
+        # ... and compaction-redesign's SKILL.md.
+        "fe5d54603c5f68a9f9d7eba929bbba1bb0678ba2bec204a9362fce1716417727",
     },
     "journal-new": {
         # pre-Slack-rail-rule bundle (also predates the team-side
@@ -463,21 +470,26 @@ memories/*/state.json
 """
 
 # .claude/settings.json -- env vars that Claude Code injects into agent
-# subprocesses. The persona registry path and the compact threshold are
-# seeded here for every new team.
+# subprocesses. The persona registry path is seeded here for every new
+# team. Mid-task auto-compaction (Layer A) is GONE by Operator ruling
+# (2026-06-11): no compacting in the middle of a task -- a drive that
+# nears the context ceiling checkpoints to progress.md + next_action
+# and hands off; instant-resume picks the task back up. The only
+# proactive compaction is the bridge's idle compaction (ADR 0004,
+# between tasks). The remover below actively cleans up the key WE
+# seeded on existing teams.
 
 
-_AUTOCOMPACT_ENV_KEY = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
-_AUTOCOMPACT_DEFAULT_PCT = "50"
+_LEGACY_AUTOCOMPACT_ENV_KEY = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+_LEGACY_AUTOCOMPACT_SEEDED_PCT = "50"
 
 
-def _ensure_compact_env_in_file(settings_path: Path) -> bool:
-    """Additively set ``env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`` in an existing
-    settings.json. Returns True iff the file was rewritten.
-
-    Never clobbers: if the key is already present (operator chose a value)
-    it's left alone. A file we can't parse as a JSON object, or whose
-    ``env`` is a non-dict, is left untouched.
+def _remove_compact_env_in_file(settings_path: Path) -> bool:
+    """Remove the legacy Layer-A key from an existing settings.json
+    IFF its value equals the old seeded default ("50") -- we put that
+    there, so we take it back. Any other value was an operator's
+    explicit choice: leave it and log a notice. Returns True iff the
+    file was rewritten. Unparseable files are left untouched.
     """
     try:
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -486,13 +498,18 @@ def _ensure_compact_env_in_file(settings_path: Path) -> bool:
     if not isinstance(settings, dict):
         return False
     env = settings.get("env")
-    if env is None:
-        env = settings["env"] = {}
-    elif not isinstance(env, dict):
+    if not isinstance(env, dict) or _LEGACY_AUTOCOMPACT_ENV_KEY not in env:
         return False
-    if _AUTOCOMPACT_ENV_KEY in env:
-        return False  # operator already set it -> respect their value
-    env[_AUTOCOMPACT_ENV_KEY] = _AUTOCOMPACT_DEFAULT_PCT
+    value = env[_LEGACY_AUTOCOMPACT_ENV_KEY]
+    if str(value) != _LEGACY_AUTOCOMPACT_SEEDED_PCT:
+        log.info(
+            "leaving %s=%r in %s: not the old seeded default, so it "
+            "was an operator's explicit choice (mid-task compaction "
+            "is no longer recommended -- see the drive-journal skill)",
+            _LEGACY_AUTOCOMPACT_ENV_KEY, value, settings_path,
+        )
+        return False
+    del env[_LEGACY_AUTOCOMPACT_ENV_KEY]
     settings_path.write_text(
         json.dumps(settings, indent=2) + "\n", encoding="utf-8"
     )
@@ -764,21 +781,19 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     personas_cfg_rel = "configs/personas.yaml"
     settings_path = team_dir / ".claude" / "settings.json"
     if settings_path.exists():
-        # Existing team: additively top up the recommended
-        # compact-threshold env (so an already-scaffolded team adopts it
-        # on re-init / --refresh-skills, not just new ones).
-        changed = _ensure_compact_env_in_file(settings_path)
+        # Existing team: actively REMOVE the legacy Layer-A key we
+        # seeded (iff it still holds the old default; an operator's
+        # explicit value is respected and logged).
+        changed = _remove_compact_env_in_file(settings_path)
         if changed:
             created.append(settings_path)
     else:
         settings: dict = {
             "env": {
+                # repo-path-portability's relative form survives; the
+                # compaction-redesign side removes the retired mid-task
+                # autocompact seeding (Layer A) entirely.
                 "TIGERHARNESS_PERSONAS_CONFIG": personas_cfg_rel,
-                # Auto-compact at ~50% of the context window so a
-                # long-cascading drive-journal session compacts proactively
-                # (and resumes from progress.md) instead of handing off for
-                # "context heavy". Tune per team; integer percent 1-100.
-                _AUTOCOMPACT_ENV_KEY: _AUTOCOMPACT_DEFAULT_PCT,
             },
         }
         settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1553,13 +1568,14 @@ def main(argv: list[str] | None = None) -> int:
         if team_dir is None:
             return 1
         sync = install_bundled_skills(team_dir, refresh=True)
-        # Bring an existing team's settings current too (idempotent /
-        # no-clobber): the recommended compact threshold. So one command
-        # adopts both the new skills AND the recommended config.
+        # Bring an existing team's settings current too: actively
+        # remove the legacy Layer-A compact key we once seeded (iff
+        # still at the old default). One command adopts the new skills
+        # AND sheds the retired config.
         settings_path = team_dir / ".claude" / "settings.json"
         settings_changed = False
         if settings_path.exists():
-            settings_changed = _ensure_compact_env_in_file(settings_path)
+            settings_changed = _remove_compact_env_in_file(settings_path)
         if not sync.changed and not settings_changed:
             msg = (
                 f"Nothing to do -- all bundled skills + settings already "
@@ -1594,7 +1610,7 @@ def main(argv: list[str] | None = None) -> int:
         if settings_changed:
             print(
                 f"Updated {_format_path(settings_path, search_root)} "
-                f"(journal-guard hook / compact threshold)."
+                f"(removed the retired mid-task compact override)."
             )
         return 0
 

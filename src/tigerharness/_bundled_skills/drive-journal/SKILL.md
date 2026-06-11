@@ -118,18 +118,22 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    true context ceiling (step 7). **Never manufacture a stopping point
    just because a session finished or the conversation feels long.**
 
-7. **Let compaction keep you going — "context heavy" is NOT a stop reason.**
-   Every session checkpoints to `progress.md` + `next_action`, so a context
-   **compaction loses nothing** here — you simply re-orient from those.
-   Therefore keep cascading and rely on **auto-compaction** (triggers at
-   ~50% of the context window by default — set via
-   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in your team `.claude/settings.json`)
-   to reclaim context; do **not** hand off early to "let the loop bridge."
-   Hand off (release idle + end the turn) **only** at the genuine hard
-   ceiling — and even then a fresh fire resumes the idle task instantly.
-   **After any compaction: re-sweep (step 1) and continue.** Compaction is
-   safe for *memory* too — as long as a `kind=task` done note is built from
-   the durable record (step 5), since that note is the only thing ingested.
+7. **Checkpoint-and-hand-off near the ceiling — "context heavy" still is
+   NOT a panic.** Every session checkpoints to `progress.md` +
+   `next_action`, so nothing is lost at a hand-off. There is NO
+   configured mid-task compaction (retired 2026-06-11: compacting
+   mid-task can cause unexpected results); the CLI's own auto-compact
+   fires only near the hard limit. Nearing the ceiling: finish the
+   current step, checkpoint, release idle, end the turn — instant-resume
+   picks the task back up with fresh context. The only proactive
+   compaction is the bridge's idle compaction (between tasks; see
+   docs/slack-bridge.md). Do **not** hand off early "to be safe" — hand
+   off **only** at the genuine hard ceiling; even then a fresh fire
+   resumes the idle task instantly. **If a compaction does happen
+   (the CLI's near-limit fallback): re-sweep (step 1) and continue.**
+   Compaction and hand-offs are safe for *memory* too — as long as a
+   `kind=task` done note is built from the durable record (step 5),
+   since that note is the only thing ingested.
 
 ## If you get confused
 

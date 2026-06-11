@@ -107,7 +107,6 @@ Task-id format: `<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>`.
 |---|---|---|
 | `TIGERHARNESS_JOURNAL_DIR` | resolver (below) | Override the journal root. |
 | `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which an *attached* `in_progress` task (`session_ref` set) is treated as **crashed** and reclaimable. A detached task is **idle**/resumable regardless of age — the heartbeat is crash-detection only. |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` | Claude Code auto-compaction threshold (% of context window). `tigerharness init` seeds it into a new team's `.claude/settings.json` `env` (and tops it up on `--refresh-skills`) so a long-cascading drive compacts proactively instead of handing off for "context heavy". A Claude Code env var the harness seeds — not read by tigerharness itself; lives in the `env` block, not as a settings.json key. |
 
 Journal root resolution priority:
 

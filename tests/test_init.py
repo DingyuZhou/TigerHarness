@@ -11,13 +11,13 @@ import pytest
 
 from tigerharness.init import (
     _scaffold_repos_yaml,
-    _AUTOCOMPACT_DEFAULT_PCT,
-    _AUTOCOMPACT_ENV_KEY,
+    _LEGACY_AUTOCOMPACT_ENV_KEY,
+    _LEGACY_AUTOCOMPACT_SEEDED_PCT,
     _append_lane_to_slack_bridge_index,
     _append_persona_to_yaml,
     _auto_init_tiger_memory,
     _command_prefix,
-    _ensure_compact_env_in_file,
+    _remove_compact_env_in_file,
     _format_path,
     _inject_allowed_user_ids,
     _maybe_register_slack_bridge_lane,
@@ -615,62 +615,63 @@ class TestScaffoldClaudeDir:
 class TestJournalGuardHelpers:
     """Unit coverage for the hook-merge helpers."""
 
-class TestEnsureCompactEnvInFile:
-    """Unit coverage for the additive compact-threshold env merge."""
+class TestRemoveCompactEnvInFile:
+    """Layer A is retired (Operator ruling 2026-06-11): the remover
+    takes back the key WE seeded, and only that."""
 
-    def test_adds_key_to_envless_file(self, tmp_path: Path):
-        path = tmp_path / "settings.json"
-        path.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
-        assert _ensure_compact_env_in_file(path) is True
-        env = json.loads(path.read_text())["env"]
-        assert env[_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
-
-    def test_adds_key_beside_existing_env(self, tmp_path: Path):
+    def test_removes_old_seeded_default(self, tmp_path: Path):
         path = tmp_path / "settings.json"
         path.write_text(
-            json.dumps({"env": {"FOO": "bar"}}, indent=2) + "\n",
+            json.dumps({"env": {
+                "KEEP": "1",
+                _LEGACY_AUTOCOMPACT_ENV_KEY: _LEGACY_AUTOCOMPACT_SEEDED_PCT,
+            }}, indent=2) + "\n",
             encoding="utf-8",
         )
-        assert _ensure_compact_env_in_file(path) is True
+        assert _remove_compact_env_in_file(path) is True
         env = json.loads(path.read_text())["env"]
-        assert env["FOO"] == "bar"  # pre-existing key preserved
-        assert env[_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+        assert _LEGACY_AUTOCOMPACT_ENV_KEY not in env
+        assert env["KEEP"] == "1"  # everything else preserved
 
-    def test_respects_operator_chosen_value(self, tmp_path: Path):
-        """If the operator already set the key, their value is kept."""
+    def test_leaves_operator_chosen_value_and_logs(
+        self, tmp_path: Path, caplog,
+    ):
         path = tmp_path / "settings.json"
         path.write_text(
-            json.dumps({"env": {_AUTOCOMPACT_ENV_KEY: "70"}}, indent=2) + "\n",
+            json.dumps({"env": {_LEGACY_AUTOCOMPACT_ENV_KEY: "70"}},
+                       indent=2) + "\n",
             encoding="utf-8",
         )
-        assert _ensure_compact_env_in_file(path) is False
+        import logging
+        with caplog.at_level(logging.INFO):
+            assert _remove_compact_env_in_file(path) is False
         env = json.loads(path.read_text())["env"]
-        assert env[_AUTOCOMPACT_ENV_KEY] == "70"  # untouched
+        assert env[_LEGACY_AUTOCOMPACT_ENV_KEY] == "70"  # untouched
+        assert "explicit choice" in caplog.text
+
+    def test_absent_key_is_noop(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"env": {"FOO": "bar"}}) + "\n",
+                        encoding="utf-8")
+        assert _remove_compact_env_in_file(path) is False
 
     def test_missing_file_returns_false(self, tmp_path: Path):
         missing = tmp_path / "nope" / "settings.json"
-        assert _ensure_compact_env_in_file(missing) is False
+        assert _remove_compact_env_in_file(missing) is False
 
-    def test_malformed_json_left_untouched(self, tmp_path: Path):
+    def test_malformed_file_untouched(self, tmp_path: Path):
         path = tmp_path / "settings.json"
-        path.write_text("{ not json", encoding="utf-8")
-        assert _ensure_compact_env_in_file(path) is False
-        assert path.read_text() == "{ not json"
+        path.write_text("{not json", encoding="utf-8")
+        assert _remove_compact_env_in_file(path) is False
+        assert path.read_text() == "{not json"
 
-    def test_non_object_json_left_untouched(self, tmp_path: Path):
+    def test_non_dict_settings_or_env(self, tmp_path: Path):
         path = tmp_path / "settings.json"
-        path.write_text("[1, 2, 3]", encoding="utf-8")
-        assert _ensure_compact_env_in_file(path) is False
-        assert path.read_text() == "[1, 2, 3]"
-
-    def test_non_dict_env_left_untouched(self, tmp_path: Path):
-        path = tmp_path / "settings.json"
-        path.write_text(
-            json.dumps({"env": "not-a-dict"}) + "\n", encoding="utf-8"
-        )
-        assert _ensure_compact_env_in_file(path) is False
-        assert json.loads(path.read_text())["env"] == "not-a-dict"
-
+        path.write_text(json.dumps([1, 2]) + "\n", encoding="utf-8")
+        assert _remove_compact_env_in_file(path) is False
+        path.write_text(json.dumps({"env": "nope"}) + "\n",
+                        encoding="utf-8")
+        assert _remove_compact_env_in_file(path) is False
 
 class TestScaffoldGuardHook:
     """_scaffold_claude_dir wires the guard hook on create and on merge."""
@@ -681,11 +682,15 @@ class TestScaffoldGuardHook:
         team = tmp_path / "tigers"
         (team / ".claude").mkdir(parents=True)
         settings_path = team / ".claude" / "settings.json"
-        settings_path.write_text(json.dumps({"env": {"KEEP": "1"}}) + "\n")
+        settings_path.write_text(json.dumps({"env": {
+            "KEEP": "1",
+            _LEGACY_AUTOCOMPACT_ENV_KEY: _LEGACY_AUTOCOMPACT_SEEDED_PCT,
+        }}) + "\n")
         _scaffold_claude_dir(team)
         merged = json.loads(settings_path.read_text())
         assert merged["env"]["KEEP"] == "1"
-        assert merged["env"][_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+        # Layer A retired: the old seeded key is actively removed.
+        assert _LEGACY_AUTOCOMPACT_ENV_KEY not in merged["env"]
         assert "hooks" not in merged
 
     def test_malformed_existing_settings_not_in_created(self, tmp_path: Path):
@@ -1845,12 +1850,11 @@ class TestRefreshSkills:
         assert "Refreshed" in out
         assert "Left" in out and "hand-edited" in out
 
-    def test_refresh_tops_up_existing_team_settings(
+    def test_refresh_removes_legacy_seeded_compact_key(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
     ):
-        """A team scaffolded before the compact-threshold default existed
-        (its settings.json has no CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) adopts it
-        on --refresh-skills, even when no skills changed."""
+        """A team still carrying the old seeded Layer-A default ("50")
+        sheds it on --refresh-skills; an operator-chosen value stays."""
         rc = main([
             "--dir", str(tmp_path),
             "--persona", "chief", "--team", "tigers", "--yes",
@@ -1858,9 +1862,10 @@ class TestRefreshSkills:
         assert rc == 0
         settings_path = tmp_path / "tigers" / ".claude" / "settings.json"
         settings = json.loads(settings_path.read_text())
-        # Simulate a pre-feature team: strip the compact key but keep the
-        # guard hook already wired (so the top-up is compact-env-only).
-        del settings["env"][_AUTOCOMPACT_ENV_KEY]
+        # Simulate a pre-redesign team: the seeded key is present.
+        settings["env"][_LEGACY_AUTOCOMPACT_ENV_KEY] = (
+            _LEGACY_AUTOCOMPACT_SEEDED_PCT
+        )
         settings_path.write_text(
             json.dumps(settings, indent=2) + "\n", encoding="utf-8"
         )
@@ -1868,10 +1873,20 @@ class TestRefreshSkills:
         rc = main(["--dir", str(tmp_path), "--refresh-skills"])
         assert rc == 0
         refreshed = json.loads(settings_path.read_text())
-        assert refreshed["env"][_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+        assert _LEGACY_AUTOCOMPACT_ENV_KEY not in refreshed["env"]
         out = capsys.readouterr().out
         assert "Updated" in out
-        assert "compact threshold" in out
+        assert "retired mid-task compact override" in out
+        # Operator-chosen value: untouched on a second pass.
+        refreshed["env"][_LEGACY_AUTOCOMPACT_ENV_KEY] = "70"
+        settings_path.write_text(
+            json.dumps(refreshed, indent=2) + "\n", encoding="utf-8"
+        )
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        final = json.loads(settings_path.read_text())
+        assert final["env"][_LEGACY_AUTOCOMPACT_ENV_KEY] == "70"
 
     def test_current_bundled_hash_not_in_prior_manifest(self):
         """Maintenance footgun guard: the CURRENTLY shipped SKILL.md must
