@@ -128,11 +128,18 @@ def journal_is_idle(journal_root: Path) -> bool:
         from tigerharness.journal.sweep import sweep
 
         result = sweep(JournalPaths(root=journal_root))
+        # A blocked task with a session still attached counts as NOT
+        # idle (conservative: someone may be mid-escalation on it) --
+        # the code now matches this docstring's promise.
+        blocked_attached = any(
+            s.session_ref for s in result.blocked
+        )
         return not (
             result.pending
             or result.in_progress_idle
             or result.in_progress_busy
             or result.in_progress_crashed
+            or blocked_attached
         )
     except Exception:  # noqa: BLE001 -- never break the turn
         log.exception("idle-compact: sweep failed; treating as busy")

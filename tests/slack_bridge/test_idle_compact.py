@@ -134,6 +134,39 @@ class TestJournalIsIdle:
         assert journal_is_idle(
             _journal(tmp_path, with_pending=True)) is False
 
+    def test_blocked_with_attached_session_means_busy(self, tmp_path):
+        # The docstring/code mismatch fix (compaction-redesign d1):
+        # blocked + session attached = NOT idle.
+        from dataclasses import replace
+
+        from tigerharness.journal.models import State
+
+        root = _journal(tmp_path)
+        tdir = root / "active" / "20260611-blk-bbbb"
+        tdir.mkdir()
+        st = Status.new(id="20260611-blk-bbbb", title="t", persona="P")
+        st = replace(
+            st, state=State.BLOCKED, session_ref="deadbeef",
+        )
+        (tdir / "status.json").write_text(st.to_json())
+        assert journal_is_idle(root) is False
+
+    def test_blocked_detached_is_still_idle(self, tmp_path):
+        # A cleanly-released blocked task (no session) does not hold
+        # the idle gate -- it is parked for a human, nothing is
+        # running.
+        from dataclasses import replace
+
+        from tigerharness.journal.models import State
+
+        root = _journal(tmp_path)
+        tdir = root / "active" / "20260611-blk-cccc"
+        tdir.mkdir()
+        st = Status.new(id="20260611-blk-cccc", title="t", persona="P")
+        st = replace(st, state=State.BLOCKED, session_ref=None)
+        (tdir / "status.json").write_text(st.to_json())
+        assert journal_is_idle(root) is True
+
     def test_sweep_failure_means_busy(self, tmp_path, monkeypatch):
         # The sweep tolerates odd roots, so force the failure path
         # directly: when in doubt, don't compact.
