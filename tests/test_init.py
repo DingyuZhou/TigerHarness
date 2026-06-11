@@ -408,6 +408,18 @@ class TestScaffoldClaudeDir:
         assert '"configs/personas.yaml"' in text
         assert "myteam" not in text
 
+    def test_add_persona_backfills_repos_yaml(self, tmp_path: Path):
+        # Sakuragi (b2 defense): an existing pre-T6 team that re-runs
+        # init to add a persona must adopt repos.yaml -- create_team
+        # is not the only door into an aging team.
+        team = tmp_path / "teams" / "oldteam"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas_dir: ../personas\npersonas: []\n"
+        )
+        add_persona(team, "newbie", include_memory=False)
+        assert (team / "configs" / "repos.yaml").exists()
+
     def test_repos_yaml_detection_hit(self, tmp_path: Path):
         # Layout: tmp/projects/{tigerharness, teams/myteam}
         proj = tmp_path / "projects" / "tigerharness"
@@ -764,8 +776,9 @@ class TestAddPersona:
         created = add_persona(team, "chief", include_memory=False)
         assert (team / "personas" / "chief" / "prompt.md").exists()
         assert (team / "configs" / "personas.yaml").exists()
-        # prompt + yaml = 2 paths
-        assert len(created) == 2
+        # prompt + yaml + backfilled repos.yaml = 3 paths
+        assert len(created) == 3
+        assert (team / "configs" / "repos.yaml").exists()
 
     def test_partial_recovery_memory_and_yaml_present(self, tmp_path: Path):
         """If memory cfg and yaml entry exist but prompt does not, add_persona

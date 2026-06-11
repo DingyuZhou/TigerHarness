@@ -1045,6 +1045,14 @@ def add_persona(
     if _append_persona_to_yaml(yaml_path, persona, desc, team_dir.name):
         created.append(yaml_path)
 
+    # Existing teams adopt repos.yaml on re-init (b2 finding 1):
+    # add_persona is the door an aging team walks through, and the
+    # scaffold is idempotent/never-clobber, so this is safe to call
+    # unconditionally.
+    repos_path = _scaffold_repos_yaml(team_dir)
+    if repos_path is not None:
+        created.append(repos_path)
+
     return created
 
 
