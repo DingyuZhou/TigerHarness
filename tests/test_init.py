@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from tigerharness.init import (
+    _scaffold_repos_yaml,
     _AUTOCOMPACT_DEFAULT_PCT,
     _AUTOCOMPACT_ENV_KEY,
     _append_lane_to_slack_bridge_index,
@@ -402,7 +403,44 @@ class TestScaffoldClaudeDir:
         assert settings in created
         text = settings.read_text()
         assert "TIGERHARNESS_PERSONAS_CONFIG" in text
-        assert "myteam" in text
+        # Team-root-relative on purpose (T6 portability): the same
+        # checked-in settings file must work on every machine.
+        assert '"configs/personas.yaml"' in text
+        assert "myteam" not in text
+
+    def test_repos_yaml_detection_hit(self, tmp_path: Path):
+        # Layout: tmp/projects/{tigerharness, teams/myteam}
+        proj = tmp_path / "projects" / "tigerharness"
+        proj.mkdir(parents=True)
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "tigerharness"\n'
+        )
+        team = tmp_path / "projects" / "teams" / "myteam"
+        team.mkdir(parents=True)
+        path = _scaffold_repos_yaml(team)
+        assert path is not None and path.exists()
+        text = path.read_text()
+        assert "team_root: ." in text
+        assert "project: ../../tigerharness" in text
+
+    def test_repos_yaml_detection_miss_writes_placeholder(
+        self, tmp_path: Path, capsys,
+    ):
+        team = tmp_path / "teams" / "myteam"
+        team.mkdir(parents=True)
+        path = _scaffold_repos_yaml(team)
+        assert path is not None
+        text = path.read_text()
+        assert "# project:" in text and "set me" in text
+        assert "could not auto-detect" in capsys.readouterr().err
+
+    def test_repos_yaml_never_clobbers_existing(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        (team / "configs").mkdir(parents=True)
+        existing = team / "configs" / "repos.yaml"
+        existing.write_text("team_root: .\nproject: /custom/spot\n")
+        assert _scaffold_repos_yaml(team) is None
+        assert existing.read_text() == "team_root: .\nproject: /custom/spot\n"
 
     def test_skills_copied(self, tmp_path: Path):
         team = tmp_path / "myteam"

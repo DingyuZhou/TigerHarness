@@ -188,7 +188,7 @@ style, trivial to write atomically per turn.
 
   ```yaml
   - kind: journal_worklog
-    journal_root: /home/tigerleap/projects/teams/Shohoku/journal/
+    journal_root: <team-root>/journal/   # e.g. teams/Shohoku/journal/
     persona: Rukawa
   ```
 

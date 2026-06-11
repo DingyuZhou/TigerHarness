@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import logging
 
+import os
+
 import argparse
 import hashlib
 import json
@@ -642,6 +644,83 @@ def expected_claude_project_path(
 # Team / persona scaffolding
 # ---------------------------------------------------------------------------
 
+def _detect_project_dir(team_dir: Path) -> Path | None:
+    """Locate the tigerharness checkout near *team_dir* (repos.yaml
+    auto-capture).
+
+    Rule (T6 plan S1): walk up from ``team_dir`` at most 3 levels; at
+    each level scan the *immediate child directories* for a
+    ``pyproject.toml`` whose ``[project] name`` is ``tigerharness``;
+    the first hit (sorted order) wins. Returns ``None`` when nothing
+    matches -- the caller emits a placeholder, never a silent guess.
+    """
+    current = team_dir.resolve()
+    for _ in range(3):
+        parent = current.parent
+        if parent == current:
+            break
+        try:
+            children = sorted(parent.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if not child.is_dir() or child == current:
+                continue
+            py = child / "pyproject.toml"
+            if not py.is_file():
+                continue
+            try:
+                text = py.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if re.search(
+                r'^name\s*=\s*"tigerharness"', text, re.MULTILINE
+            ):
+                return child
+        current = parent
+    return None
+
+
+def _scaffold_repos_yaml(team_dir: Path) -> Path | None:
+    """Write ``configs/repos.yaml`` -- the team's path-indirection map.
+
+    Prose and config in a portable team repo reference paths relative
+    to the team root (sessions start there); this file is the single
+    place a machine-specific layout is recorded. Idempotent: an
+    existing file is NEVER rewritten (it may carry hand edits).
+    Returns the path when created, ``None`` when left alone.
+    """
+    path = team_dir / "configs" / "repos.yaml"
+    if path.exists():
+        return None
+    project = _detect_project_dir(team_dir)
+    if project is not None:
+        rel = os.path.relpath(project, team_dir.resolve())
+        project_line = f"project: {rel}"
+    else:
+        project_line = (
+            "# project: ../tigerharness"
+            "  # <- set me: path to the repo this team works on"
+        )
+        print(
+            "hint: could not auto-detect the tigerharness checkout; "
+            "set 'project:' in configs/repos.yaml by hand",
+            file=sys.stderr,
+        )
+    content = (
+        "# Where this team lives and what it works on.\n"
+        "# All paths are relative to the team root (this file's\n"
+        "# directory's parent). Sessions start at the team root, so\n"
+        "# prose and config reference paths from here -- see the\n"
+        "# team's knowledge/path-conventions doc.\n"
+        "team_root: .\n"
+        f"{project_line}\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     """Create ``.claude/settings.json`` and ``.claude/skills/`` for a team.
 
@@ -666,7 +745,11 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
 
     # settings.json: create fresh, or additively merge the guard hook into
     # an existing file so a pre-existing team gets the protection too.
-    personas_cfg_abs = str((team_dir / "configs" / "personas.yaml").resolve())
+    # Team-root-relative on purpose: Claude Code launches sessions at
+    # the team root, and tigerharness components resolve the env var
+    # against the cwd -- so the same checked-in settings file works on
+    # every machine (T6 portability convention).
+    personas_cfg_rel = "configs/personas.yaml"
     settings_path = team_dir / ".claude" / "settings.json"
     if settings_path.exists():
         # Existing team: additively top up the recommended
@@ -678,7 +761,7 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     else:
         settings: dict = {
             "env": {
-                "TIGERHARNESS_PERSONAS_CONFIG": personas_cfg_abs,
+                "TIGERHARNESS_PERSONAS_CONFIG": personas_cfg_rel,
                 # Auto-compact at ~50% of the context window so a
                 # long-cascading drive-journal session compacts proactively
                 # (and resumes from progress.md) instead of handing off for
@@ -805,6 +888,9 @@ def create_team(
 
     # .claude/ directory: settings.json + skills from the package.
     created.extend(_scaffold_claude_dir(team_dir))
+    repos_path = _scaffold_repos_yaml(team_dir)
+    if repos_path is not None:
+        created.append(repos_path)
 
     return created
 
