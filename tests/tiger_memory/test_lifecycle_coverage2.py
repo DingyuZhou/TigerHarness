@@ -335,6 +335,8 @@ class TestAutoMemoryRecordOSError:
     def test_unreadable_md_skipped(self, tmp_path: Path):
         am_dir = tmp_path / "auto_mem"
         am_dir.mkdir()
+        store = Store(tmp_path / "memstore")
+        store.init_layout()
         good = am_dir / "good.md"
         good.write_text("good content")
         bad = am_dir / "bad.md"
@@ -357,7 +359,7 @@ class TestAutoMemoryRecordOSError:
             return orig_read_text(self, *a, **kw)
 
         with patch.object(Path, "read_text", patched_read):
-            result = _auto_memory_record(cfg)
+            result = _auto_memory_record(cfg, store)
 
         assert result is not None
         assert "good content" in result.content

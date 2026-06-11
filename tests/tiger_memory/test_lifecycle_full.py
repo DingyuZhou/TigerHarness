@@ -272,6 +272,9 @@ class TestCascadeRollups:
         cfg = _cfg(tmp_path)
         store = Store(cfg.store.root)
         store.init_layout()
+        # Pre-upgrade store: a state file exists, so the segment-less
+        # legacy shorts below are ADOPTED (multi-operator T12b).
+        store.write_state({})
         summarizer = MockSummarizer()
         # Create a short
         uid = str(uuid4())
@@ -291,6 +294,7 @@ class TestCascadeRollups:
         cfg = _cfg(tmp_path)
         store = Store(cfg.store.root)
         store.init_layout()
+        store.write_state({})  # pre-upgrade store adopts legacy files
         summarizer = MockSummarizer()
         # Create a short + cascade to daily first
         uid = str(uuid4())
@@ -310,6 +314,7 @@ class TestCascadeRollups:
         cfg = _cfg(tmp_path)
         store = Store(cfg.store.root)
         store.init_layout()
+        store.write_state({})  # pre-upgrade store adopts legacy files
         summarizer = MockSummarizer()
         # Create short → daily → weekly → monthly
         uid = str(uuid4())
@@ -414,7 +419,9 @@ class TestWriteState:
 class TestAutoMemoryRecord:
     def test_returns_none_when_not_configured(self, tmp_path: Path):
         cfg = _cfg(tmp_path)
-        result = _auto_memory_record(cfg)
+        store = Store(cfg.store.root)
+        store.init_layout()
+        result = _auto_memory_record(cfg, store)
         assert result is None
 
     def test_returns_record_when_configured(self, tmp_path: Path):
@@ -435,7 +442,9 @@ class TestAutoMemoryRecord:
             rebuild: {{lock_path: {tmp_path}/lock}}
         """))
         cfg = load_config(cfg_path)
-        result = _auto_memory_record(cfg)
+        store = Store(cfg.store.root)
+        store.init_layout()
+        result = _auto_memory_record(cfg, store)
         if result is not None:
             assert "Note 1" in result.content
             assert result.source == "doc"
@@ -456,7 +465,9 @@ class TestAutoMemoryRecord:
             rebuild: {{lock_path: {tmp_path}/lock}}
         """))
         cfg = load_config(cfg_path)
-        result = _auto_memory_record(cfg)
+        store = Store(cfg.store.root)
+        store.init_layout()
+        result = _auto_memory_record(cfg, store)
         assert result is None
 
 

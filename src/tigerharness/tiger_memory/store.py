@@ -24,6 +24,8 @@ import errno
 import json
 import os
 import re
+import uuid as _uuid
+from uuid import NAMESPACE_URL, uuid5
 import shutil
 import time
 from contextlib import contextmanager
@@ -177,12 +179,28 @@ class Store:
         return sorted(out)
 
     def daily_for_date(self, date_str: str) -> Path | None:
+        matches = self.dailies_for_date(date_str)
+        return matches[-1] if matches else None  # if duplicated, pick latest UUID
+
+    def dailies_for_date(self, date_str: str) -> list[Path]:
+        """ALL dailies for a date, multi-operator aware (T12b).
+
+        With operator-seeded rollup uuids, one date legitimately has N
+        sibling dailies (one per writer). Order is deterministic on
+        every machine: the legacy (pre-multi-op, segment-less seed)
+        file first, then the operator-seeded files by filename — so
+        newer-model content reads later and wins prose conflicts
+        under last-mention-wins.
+        """
+        legacy_name = Store.daily_filename(
+            date_str, str(uuid5(NAMESPACE_URL, f"daily:{date_str}"))
+        )
         matches = sorted(
             f
             for f in self.paths.journal.glob(f"{date_str}-daily-*.md")
             if DAILY_RE.match(f.name)
         )
-        return matches[-1] if matches else None  # if duplicated, pick latest UUID
+        return sorted(matches, key=lambda f: (f.name != legacy_name, f.name))
 
     def weekly_for_monday(self, monday_str: str) -> Path | None:
         matches = sorted(
@@ -306,6 +324,30 @@ class Store:
             self.paths.journal / ".state.json",
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
         )
+
+    def ensure_operator_id(self) -> tuple[str, bool]:
+        """Provision (once) and return ``(operator_id, adopt_legacy)``.
+
+        Multi-operator memory (T12b): the id is a random 8-hex slug
+        generated ONCE and persisted in the machine-local
+        ``.state.json`` — never derived from mutable facts (git
+        email, hostname). ``adopt_legacy`` is True iff THIS store
+        already had a state file before the upgrade (it predates
+        multi-op, so the segment-less legacy pyramid is its own) —
+        never inferred from mere legacy-file presence, which a fresh
+        clone of a shared repo would false-positive on.
+        """
+        state = self.read_state()
+        if state is not None and state.get("operator_id"):
+            return str(state["operator_id"]), bool(
+                state.get("adopt_legacy", False)
+            )
+        adopt_legacy = state is not None  # pre-existing store, pre-upgrade
+        state = dict(state or {})
+        state["operator_id"] = _uuid.uuid4().hex[:8]
+        state["adopt_legacy"] = adopt_legacy
+        self.write_state(state)
+        return state["operator_id"], adopt_legacy
 
     def read_state(self) -> dict | None:
         p = self.paths.journal / ".state.json"
