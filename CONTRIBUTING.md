@@ -23,6 +23,15 @@ uv run pytest tests/tiger_memory/test_lifecycle_full.py -v
 
 Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[tool.coverage.report] fail_under = 100`). Current: **100.00%** (1700+ tests).
 
+## Code review
+
+Every change is reviewed against the
+[code review standard](docs/code-review-standard.md) — numbered,
+citable sections covering correctness, tests, error paths, atomicity,
+docs, security, scope, dependencies, self-critique, commit hygiene,
+and review verdicts. Read it before opening a PR; reviewers cite it
+by section ("standard §2").
+
 ## Project structure
 
 ```
