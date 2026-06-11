@@ -449,6 +449,75 @@ class TestScaffoldClaudeDir:
         assert path is not None
         assert "project: ../../tigerharness" in path.read_text()
 
+    def test_detection_walks_past_odd_children(self, tmp_path: Path):
+        # Non-dir sibling, dir without pyproject, unreadable pyproject
+        # (a directory), then the real hit -- all in one walk.
+        projects = tmp_path / "projects"
+        (projects / "teams" / "myteam").mkdir(parents=True)
+        (projects / "loose-file.txt").write_text("not a dir")
+        (projects / "no-pyproject").mkdir()
+        weird = projects / "weird"
+        (weird / "pyproject.toml").mkdir(parents=True)  # read -> OSError
+        proj = projects / "zz-tigerharness"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "TigerHarness"\n')
+        team = projects / "teams" / "myteam"
+        path = _scaffold_repos_yaml(team)
+        assert path is not None
+        assert "project: ../../zz-tigerharness" in path.read_text()
+
+    def test_detection_tolerates_unreadable_pyproject_and_other_names(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from tigerharness.init import _detect_project_dir
+        projects = tmp_path / "projects"
+        team = projects / "teams" / "myteam"
+        team.mkdir(parents=True)
+        other = projects / "aa-other"
+        other.mkdir()
+        (other / "pyproject.toml").write_text(
+            '[project]\nname = "somethingelse"\n')
+        secret = projects / "bb-secret"
+        secret.mkdir()
+        (secret / "pyproject.toml").write_text("locked")
+        real_read = Path.read_text
+
+        def flaky_read(self, *a, **k):
+            if "bb-secret" in str(self):
+                raise OSError("permission denied")
+            return real_read(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", flaky_read)
+        proj = projects / "zz-tigerharness"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "TigerHarness"\n')
+        assert _detect_project_dir(team) == proj
+
+    def test_detection_tolerates_unlistable_parent(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from tigerharness.init import _detect_project_dir
+        team = tmp_path / "projects" / "teams" / "myteam"
+        team.mkdir(parents=True)
+        real_iterdir = Path.iterdir
+
+        def flaky_iterdir(self):
+            if self.name == "teams":
+                raise OSError("denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", flaky_iterdir)
+        # teams/ unlistable -> level skipped; nothing matches above.
+        assert _detect_project_dir(team) is None
+
+    def test_detection_stops_at_filesystem_root(self):
+        from tigerharness.init import _detect_project_dir
+        from pathlib import Path as _P
+        # parent == current short-circuits the walk; read-only probe.
+        assert _detect_project_dir(_P("/")) is None
+
     def test_repos_yaml_detection_miss_writes_placeholder(
         self, tmp_path: Path, capsys,
     ):
