@@ -207,6 +207,9 @@ def new_task(
     kind: str = "task",
     max_sessions: int = 3,
     early_exit: bool = False,
+    autonomy: str = "ask",
+    schedule_def: str | None = None,
+    schedule_due: str | None = None,
     slug: str | None = None,
 ) -> ScaffoldResult:
     """Create a new task in ``paths.active``. Returns ``ScaffoldResult``.
@@ -261,6 +264,9 @@ def new_task(
             kind=kind,
             max_sessions=max_sessions,
             early_exit=early_exit,
+            autonomy=autonomy,
+            schedule_def=schedule_def,
+            schedule_due=schedule_due,
         )
     except JournalModelError as exc:
         raise JournalScaffoldError(
@@ -679,6 +685,9 @@ def new_workflow_task(
     captain: str | None = None,
     max_sessions: int = 10,
     early_exit: bool = False,
+    autonomy: str = "ask",
+    schedule_def: str | None = None,
+    schedule_due: str | None = None,
     slug: str | None = None,
 ) -> ScaffoldResult:
     """Scaffold a new ``kind=workflow`` task. No LLM calls -- the
@@ -760,6 +769,9 @@ def new_workflow_task(
             captain=captain,
             max_sessions=max_sessions,
             early_exit=early_exit,
+            autonomy=autonomy,
+            schedule_def=schedule_def,
+            schedule_due=schedule_due,
         )
     except JournalModelError as exc:
         raise JournalScaffoldError(

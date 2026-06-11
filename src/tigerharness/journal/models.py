@@ -84,6 +84,14 @@ class CompilePhase(str, enum.Enum):
 # constant; Phase 1.5 added "workflow".
 _SUPPORTED_KINDS: frozenset[str] = frozenset({"task", "workflow"})
 
+# Allowed values for ``Status.autonomy``. "ask" keeps every
+# judgment-call pause; "judgement" lets the working persona
+# self-resolve yellow-light calls (logged as Decision: entries).
+# Red-light rules are never overridable in any mode -- that boundary
+# lives in the team charter, not here; this field only carries the
+# task's declared level to the persona reading status.json.
+SUPPORTED_AUTONOMY: tuple[str, ...] = ("ask", "judgement")
+
 # CompilePhase values are required-and-validated for workflow tasks
 # and rejected outright for task tasks. The bare strings are the
 # on-disk form (JSON enum values).
@@ -145,6 +153,19 @@ class Status:
     # stop early once the task is done per acceptance criteria (mirrors
     # the retired runner's opt-in ``--early-exit``).
     early_exit: bool = False
+    # Detached-run autonomy level (both kinds). ``ask`` (default): the
+    # persona pauses on judgment calls per its prompt/charter rules.
+    # ``judgement``: the persona may self-resolve yellow-light calls,
+    # logging each as a ``Decision:`` entry in progress.md and the
+    # final work note. Red-light rules stay non-overridable in every
+    # mode (charter-defined).
+    autonomy: str = "ask"
+    # Set iff this task was materialized from a schedule definition
+    # (T8): the definition id and the due timestamp it satisfied.
+    # Both kinds; suppressed from JSON when absent. schedule_due is
+    # what makes crash recovery's duplicate-detection exact.
+    schedule_def: str | None = None
+    schedule_due: str | None = None
     # Workflow-only sub-state. Defaults are neutral so a task-mode
     # Status round-trips byte-identically; the JSON schema gate in
     # ``from_dict`` / ``to_dict`` is what makes the per-kind contract
@@ -173,6 +194,9 @@ class Status:
         max_sessions: int = 3,
         next_action: str = "",
         early_exit: bool = False,
+        autonomy: str = "ask",
+        schedule_def: str | None = None,
+        schedule_due: str | None = None,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded Status in ``state=pending``.
@@ -196,6 +220,11 @@ class Status:
             raise JournalModelError(
                 f"max_sessions must be >= 1; got {max_sessions}"
             )
+        if autonomy not in SUPPORTED_AUTONOMY:
+            raise JournalModelError(
+                f"autonomy must be one of {list(SUPPORTED_AUTONOMY)}; "
+                f"got {autonomy!r}"
+            )
         ts = now or _utcnow_iso()
         return cls(
             id=id,
@@ -210,6 +239,9 @@ class Status:
             next_action=next_action,
             session_ref=None,
             early_exit=early_exit,
+            autonomy=autonomy,
+            schedule_def=schedule_def,
+            schedule_due=schedule_due,
             compile_pending=False,
             compile_phase=None,
         )
@@ -225,6 +257,9 @@ class Status:
         max_sessions: int = 10,
         next_action: str = "",
         early_exit: bool = False,
+        autonomy: str = "ask",
+        schedule_def: str | None = None,
+        schedule_due: str | None = None,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded ``kind=workflow`` Status.
@@ -264,6 +299,11 @@ class Status:
             raise JournalModelError(
                 f"max_sessions must be >= 1; got {max_sessions}"
             )
+        if autonomy not in SUPPORTED_AUTONOMY:
+            raise JournalModelError(
+                f"autonomy must be one of {list(SUPPORTED_AUTONOMY)}; "
+                f"got {autonomy!r}"
+            )
         ts = now or _utcnow_iso()
         return cls(
             id=id,
@@ -278,6 +318,9 @@ class Status:
             next_action=next_action,
             session_ref=None,
             early_exit=early_exit,
+            autonomy=autonomy,
+            schedule_def=schedule_def,
+            schedule_due=schedule_due,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
             playbook_name=playbook_name.strip(),
@@ -293,6 +336,12 @@ class Status:
         # State is a StrEnum; emit the plain string for forward-
         # compatibility with non-Python readers.
         d["state"] = self.state.value
+        # Schedule stamps: emitted only when set (both kinds), so an
+        # unscheduled task's JSON shape is unchanged.
+        if self.schedule_def is None:
+            d.pop("schedule_def", None)
+        if self.schedule_due is None:
+            d.pop("schedule_due", None)
         # Workflow-only fields: emit iff kind=workflow, suppress
         # otherwise so task-mode JSON stays Phase 1 byte-shape.
         if self.kind == "workflow":
@@ -337,6 +386,7 @@ class Status:
             )
         optional_keys = {
             "persona", "next_action", "session_ref", "early_exit",
+            "autonomy", "schedule_def", "schedule_due",
             "compile_pending", "compile_phase", "playbook_name",
         }
         unknown = set(data) - (required | optional_keys)
@@ -458,6 +508,13 @@ class Status:
                 )
             playbook_name = playbook_name_raw
 
+        autonomy_val = data.get("autonomy", "ask")
+        if autonomy_val not in SUPPORTED_AUTONOMY:
+            raise JournalModelError(
+                f"autonomy must be one of {list(SUPPORTED_AUTONOMY)}; "
+                f"got {autonomy_val!r}"
+            )
+
         return cls(
             id=data["id"],
             title=data["title"],
@@ -471,6 +528,9 @@ class Status:
             next_action=data.get("next_action", "") or "",
             session_ref=data.get("session_ref"),
             early_exit=bool(data.get("early_exit", False)),
+            autonomy=autonomy_val,
+            schedule_def=data.get("schedule_def"),
+            schedule_due=data.get("schedule_due"),
             compile_pending=compile_pending_val,
             compile_phase=compile_phase,
             playbook_name=playbook_name,

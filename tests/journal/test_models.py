@@ -592,6 +592,46 @@ class TestEarlyExit:
         assert Status.from_json(s.to_json()).early_exit is True
 
 
+class TestAutonomy:
+    """autonomy -- ask (default) vs judgement (yellow-light self-resolve)."""
+
+    def test_default_ask(self):
+        assert Status.new(id="x", title="t", persona="P").autonomy == "ask"
+
+    def test_judgement_settable_and_round_trips(self):
+        s = Status.new(id="x", title="t", persona="P", autonomy="judgement")
+        assert s.autonomy == "judgement"
+        assert Status.from_json(s.to_json()).autonomy == "judgement"
+
+    def test_invalid_value_rejected_at_construction(self):
+        with pytest.raises(JournalModelError):
+            Status.new(id="x", title="t", persona="P", autonomy="yolo")
+
+    def test_invalid_value_rejected_in_workflow_constructor(self):
+        with pytest.raises(JournalModelError):
+            Status.new_workflow(
+                id="x", title="t", playbook_name="default", autonomy="full",
+            )
+
+    def test_legacy_status_without_field_defaults_ask(self):
+        d = Status.new(id="x", title="t", persona="P").to_dict()
+        d.pop("autonomy")
+        assert Status.from_dict(d).autonomy == "ask"
+
+    def test_invalid_on_disk_value_rejected(self):
+        d = Status.new(id="x", title="t", persona="P").to_dict()
+        d["autonomy"] = "maybe"
+        with pytest.raises(JournalModelError):
+            Status.from_dict(d)
+
+    def test_workflow_carries_autonomy(self):
+        s = Status.new_workflow(
+            id="x", title="t", playbook_name="default", autonomy="judgement",
+        )
+        assert s.autonomy == "judgement"
+        assert Status.from_json(s.to_json()).autonomy == "judgement"
+
+
 class TestLegacySessionRef:
     """Pre-instant-resume status.json had no `session_ref` key; such an
     in_progress task must load with session_ref=None and classify as

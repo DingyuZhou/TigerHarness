@@ -101,6 +101,9 @@ class SweepResult:
     in_progress_crashed: list[Status] = field(default_factory=list)
     blocked: list[Status] = field(default_factory=list)
     malformed: list[MalformedEntry] = field(default_factory=list)
+    # T8 scheduler counts (populated before classification).
+    schedule_materialized: list[str] = field(default_factory=list)
+    schedule_malformed: list[str] = field(default_factory=list)
 
     def actionable(self) -> list[Status]:
         """Tasks the driver may pick at step 2 of OPERATING.md, in
@@ -144,6 +147,14 @@ class SweepResult:
             parts.append(f"archived {len(self.archived)} done")
         if self.malformed:
             parts.append(f"{len(self.malformed)} malformed")
+        if self.schedule_materialized:
+            parts.append(
+                f"materialized {len(self.schedule_materialized)} scheduled"
+            )
+        if self.schedule_malformed:
+            parts.append(
+                f"{len(self.schedule_malformed)} malformed-definitions"
+            )
         return "Journal: " + ", ".join(parts) + "."
 
 
@@ -165,6 +176,18 @@ def sweep(
     ts_now = now or _utcnow_iso()
 
     result = SweepResult()
+
+    # T8: materialize due schedule definitions FIRST, so a task born
+    # from a schedule shows up in this very sweep's pending list (the
+    # drive that triggered it can claim it immediately). The
+    # materializer never raises -- the sweep is the drive's front door.
+    from tigerharness.journal.schedule import materialize_due
+    mat = materialize_due(
+        paths, now=ts_now, stuck_timeout_sec=timeout,
+    )
+    result.schedule_materialized = mat.materialized
+    result.schedule_malformed = mat.malformed
+
     for task_id in paths.list_active_ids():
         status_path = paths.status_json(task_id)
         try:

@@ -16,6 +16,7 @@ import logging
 
 import argparse
 import json
+import re
 import os
 import secrets
 import sys
@@ -150,6 +151,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             kind=args.kind,
             max_sessions=args.max_sessions if args.max_sessions is not None else 3,
             early_exit=args.early_exit,
+            autonomy=args.autonomy,
             slug=args.slug,
         )
     except (JournalScaffoldError, JournalModelError) as exc:
@@ -251,6 +253,7 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
             captain=captain,
             max_sessions=args.max_sessions if args.max_sessions is not None else 10,
             early_exit=args.early_exit,
+            autonomy=args.autonomy,
             slug=args.slug,
         )
     except MissingPersonaError as exc:
@@ -1060,6 +1063,191 @@ def _check_workflow_walk_complete(
 # parser
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# T8: schedule verbs (add / list / rm)
+# ---------------------------------------------------------------------------
+
+def cmd_schedule_add(args: argparse.Namespace) -> int:
+    """Create a recurring definition. The prd/brief file is read NOW
+    and inlined, so a definition can never dangle on a moved file."""
+    import datetime as _dt
+
+    from tigerharness.journal.schedule import (
+        ScheduleDef,
+        ScheduleDefError,
+        def_path,
+        next_occurrence,
+        save_def,
+    )
+
+    paths = _paths_from_args(args)
+    payload: dict = {
+        "kind": args.kind,
+        "max_sessions": args.max_sessions,
+        "early_exit": args.early_exit,
+        "autonomy": args.autonomy,
+    }
+    if args.kind == "task":
+        if not args.prd or not args.persona:
+            print("error: --kind task needs --prd and --persona",
+                  file=sys.stderr)
+            return 2
+        prd_path = Path(args.prd)
+        if not prd_path.exists():
+            print(f"error: PRD not found: {prd_path}", file=sys.stderr)
+            return 2
+        payload["prd_text"] = prd_path.read_text(encoding="utf-8")
+        payload["persona"] = args.persona
+    else:
+        if not args.playbook or not (args.task_brief or args.brief_file):
+            print(
+                "error: --kind workflow needs --playbook and "
+                "--task-brief or --brief-file",
+                file=sys.stderr,
+            )
+            return 2
+        if args.task_brief and args.brief_file:
+            print("error: --task-brief and --brief-file are mutually "
+                  "exclusive", file=sys.stderr)
+            return 2
+        team_root = resolve_team_root(args.team)
+        playbook_path = (
+            team_root / "workflow" / f"{args.playbook}.md"
+        )
+        if not playbook_path.exists():
+            print(f"error: playbook not found: {playbook_path}",
+                  file=sys.stderr)
+            return 2
+        if args.brief_file:
+            brief_path = Path(args.brief_file)
+            if not brief_path.exists():
+                print(f"error: brief not found: {brief_path}",
+                      file=sys.stderr)
+                return 2
+            payload["brief_text"] = brief_path.read_text(encoding="utf-8")
+        else:
+            payload["brief_text"] = args.task_brief
+        payload["playbook"] = args.playbook
+        playbook_text = playbook_path.read_text(encoding="utf-8")
+        payload["playbook_text"] = playbook_text
+        payload["team_root"] = str(team_root)
+        captain = args.captain
+        if not captain:
+            # Parity with `journal new`: fall back to the playbook's
+            # default_captain so scheduled workflows aren't silently
+            # captainless (b2-haruko).
+            captain = resolve_playbook_default_captain(
+                playbook_text, team_root,
+            )
+        if captain:
+            payload["captain"] = captain
+
+    def_id = re.sub(r"[^A-Za-z0-9_-]+", "-", args.title.strip().lower())
+    def_id = re.sub(r"-{2,}", "-", def_id).strip("-") or "schedule"
+    if def_path(paths, def_id).exists():
+        print(f"error: definition {def_id!r} already exists "
+              f"(rm it first)", file=sys.stderr)
+        return 1
+    now_utc = _dt.datetime.now(_dt.timezone.utc)
+    try:
+        first_due = next_occurrence(
+            now_utc, period=args.period, at=args.at,
+        )
+        d = ScheduleDef(
+            id=def_id,
+            title=args.title.strip(),
+            period=args.period,
+            at=args.at,
+            next_due=first_due.replace(microsecond=0)
+            .isoformat().replace("+00:00", "Z"),
+            payload=payload,
+        )
+        save_def(paths, d)
+    except ScheduleDefError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Scheduled: {def_id}")
+    print(f"  title:    {d.title}")
+    print(f"  cadence:  {d.period} at {d.at} (local wall clock)")
+    print(f"  next_due: {d.next_due}")
+    return 0
+
+
+def cmd_schedule_list(args: argparse.Namespace) -> int:
+    from tigerharness.journal.schedule import (
+        ScheduleDef,
+        ScheduleDefError,
+        def_path,
+        list_def_ids,
+    )
+
+    paths = _paths_from_args(args)
+    rows = []
+    broken = []
+    for def_id in list_def_ids(paths):
+        try:
+            rows.append(ScheduleDef.from_json(
+                def_path(paths, def_id).read_text(encoding="utf-8")
+            ))
+        except (ScheduleDefError, OSError) as exc:
+            broken.append((def_id, str(exc)))
+    if args.format == "json":
+        print(json.dumps({
+            "definitions": [r.to_dict() for r in rows],
+            "malformed": [
+                {"id": i, "error": e} for (i, e) in broken
+            ],
+        }, indent=2))
+        return 0
+    if not rows and not broken:
+        print("No schedule definitions.")
+        return 0
+    for r in rows:
+        flag = "" if r.enabled else "  [disabled]"
+        print(f"{r.id}  {r.period}@{r.at}  next_due={r.next_due}"
+              f"{flag}  {r.title}")
+    for def_id, err in broken:
+        print(f"{def_id}  [malformed: {err}]")
+    return 0
+
+
+def cmd_schedule_rm(args: argparse.Namespace) -> int:
+    import datetime as _dt
+
+    from tigerharness.journal.schedule import (
+        ScheduleDef,
+        ScheduleDefError,
+        _intent_stale,
+        def_path,
+    )
+    from tigerharness.journal.sweep import stuck_timeout_from_env
+
+    paths = _paths_from_args(args)
+    p = def_path(paths, args.def_id)
+    if not p.exists():
+        print(f"error: no definition {args.def_id!r}", file=sys.stderr)
+        return 1
+    try:
+        d = ScheduleDef.from_json(p.read_text(encoding="utf-8"))
+        if d.materializing is not None and not _intent_stale(
+            d.materializing,
+            _dt.datetime.now(_dt.timezone.utc),
+            stuck_timeout_from_env(),
+        ):
+            print(
+                f"error: definition {args.def_id!r} is mid-"
+                f"materialization (fresh lease); retry shortly",
+                file=sys.stderr,
+            )
+            return 1
+    except ScheduleDefError:
+        pass  # malformed is still removable -- that's the point of rm
+    p.unlink()
+    print(f"Removed: {args.def_id}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="journal",
@@ -1181,7 +1369,55 @@ def build_parser() -> argparse.ArgumentParser:
             "retired runner's --early-exit."
         ),
     )
+    n.add_argument(
+        "--autonomy", choices=("ask", "judgement"), default="ask",
+        help=(
+            "Detached-run autonomy level. 'ask' (default): the persona "
+            "pauses on judgment calls per its prompt/charter rules. "
+            "'judgement': the persona may self-resolve yellow-light "
+            "calls, logging each as a Decision: entry; red-light rules "
+            "are never overridable (see the team charter)."
+        ),
+    )
     n.set_defaults(func=cmd_new)
+
+    sch = sub.add_parser(
+        "schedule",
+        help="Recurring task definitions materialized by the sweep.",
+    )
+    sch_sub = sch.add_subparsers(dest="schedule_cmd", required=True)
+
+    sa = sch_sub.add_parser("add", help="Add a recurring definition.")
+    sa.add_argument("--title", required=True)
+    sa.add_argument("--period", choices=("daily", "weekly"),
+                    default="daily")
+    sa.add_argument("--at", required=True,
+                    help="HH:MM, local wall clock (DST-safe).")
+    sa.add_argument("--kind", choices=("task", "workflow"),
+                    default="task")
+    sa.add_argument("--prd", help="PRD file (kind=task); inlined now.")
+    sa.add_argument("--persona", help="Assignee (kind=task).")
+    sa.add_argument("--playbook", help="Bare playbook name (workflow).")
+    sa.add_argument("--task-brief", help="Inline brief (workflow).")
+    sa.add_argument("--brief-file", help="Brief file (workflow); "
+                    "inlined now.")
+    sa.add_argument("--captain", help="Accountable owner (workflow).")
+    sa.add_argument("--team", default="Shohoku",
+                    help="Team for playbook resolution (workflow).")
+    sa.add_argument("--max-sessions", type=int, default=None)
+    sa.add_argument("--early-exit", action="store_true", default=False)
+    sa.add_argument("--autonomy", choices=("ask", "judgement"),
+                    default="ask")
+    sa.set_defaults(func=cmd_schedule_add)
+
+    sl = sch_sub.add_parser("list", help="List definitions.")
+    sl.add_argument("--format", choices=("text", "json"),
+                    default="text")
+    sl.set_defaults(func=cmd_schedule_list)
+
+    sr = sch_sub.add_parser("rm", help="Remove a definition.")
+    sr.add_argument("def_id")
+    sr.set_defaults(func=cmd_schedule_rm)
 
     li = sub.add_parser("list", help="List active tasks.")
     li.add_argument(

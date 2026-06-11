@@ -160,6 +160,29 @@ class TestCmdNew:
             paths.status_json(other).read_text()
         ).early_exit is True
 
+    def test_autonomy_defaults_ask_and_flag_sets_judgement(
+        self, tmp_path, journal_dir,
+    ):
+        prd = tmp_path / "brief.md"
+        prd.write_text("# T\nbody\n")
+        paths = JournalPaths(root=journal_dir)
+        # Default: no --autonomy -> ask (pause on judgment calls).
+        assert main(["--journal-dir", str(journal_dir),
+                     "new", "--prd", str(prd), "--persona", "P"]) == 0
+        tid = paths.list_active_ids()[0]
+        assert Status.from_json(
+            paths.status_json(tid).read_text()
+        ).autonomy == "ask"
+        # With --autonomy judgement -> persona may self-resolve
+        # yellow-light calls (logged); red-light stays non-overridable.
+        assert main(["--journal-dir", str(journal_dir), "new", "--prd",
+                     str(prd), "--persona", "P",
+                     "--autonomy", "judgement"]) == 0
+        other = [i for i in paths.list_active_ids() if i != tid][0]
+        assert Status.from_json(
+            paths.status_json(other).read_text()
+        ).autonomy == "judgement"
+
     def test_missing_prd_returns_2(self, journal_dir, capsys):
         rc = main([
             "--journal-dir", str(journal_dir),
