@@ -156,6 +156,28 @@ class TestScheduleDefRoundTrip:
         with pytest.raises(ScheduleDefError, match="kind"):
             d.validate()
 
+    def test_bad_max_sessions_rejected_at_validate(self):
+        # b2-sakuragi finding 1: fail at add time, not at 8am.
+        d = _task_def(next_due=_iso(_utc(2026, 6, 12, 12)))
+        d.payload["max_sessions"] = -1
+        with pytest.raises(ScheduleDefError, match="max_sessions"):
+            d.validate()
+        d.payload["max_sessions"] = "three"
+        with pytest.raises(ScheduleDefError, match="max_sessions"):
+            d.validate()
+
+    def test_cli_add_rejects_bad_max_sessions(self, tmp_path, capsys):
+        journal_dir = tmp_path / "journal"
+        prd = tmp_path / "b.md"
+        prd.write_text("x")
+        rc = main(["--journal-dir", str(journal_dir),
+                   "schedule", "add", "--title", "Bad", "--at", "08:00",
+                   "--kind", "task", "--prd", str(prd),
+                   "--persona", "P", "--max-sessions", "-1"])
+        assert rc == 1
+        assert "max_sessions" in capsys.readouterr().err
+        assert not (journal_dir / "schedule" / "bad.json").exists()
+
     def test_bad_autonomy_rejected(self):
         d = _task_def(
             next_due=_iso(_utc(2026, 6, 12, 12)), autonomy="ask",
@@ -415,12 +437,12 @@ class TestMaterializeDue:
         assert any("broken" in m for m in res.malformed)
 
     def test_scaffold_failure_reported_not_fatal(self, paths):
+        # Whitespace persona passes the definition's presence check
+        # (truthy) but Status.new strips-and-rejects it -- the scaffold
+        # failure path survives now that add-time validation catches
+        # the cruder cases like max_sessions=-1.
         d = _task_def(next_due=_iso(_utc(2026, 6, 12, 12)))
-        d.payload["persona"] = " "  # passes def-level check? no: blank
-        # Make it pass validation but fail at scaffold: blank persona is
-        # caught by validate(), so use a payload that scaffold rejects.
-        d.payload["persona"] = "Ayako"
-        d.payload["max_sessions"] = -1  # Status.new raises
+        d.payload["persona"] = " "
         save_def(paths, d)
         res = materialize_due(paths, now=self.NOW, tz=NY)
         assert res.materialized == []

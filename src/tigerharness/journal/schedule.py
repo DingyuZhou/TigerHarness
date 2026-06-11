@@ -143,6 +143,17 @@ class ScheduleDef:
                 f"payload.autonomy must be one of "
                 f"{list(SUPPORTED_AUTONOMY)}; got {autonomy!r}"
             )
+        # Fail at ADD time, not at the first 8am materialization: a
+        # value the scaffolder would reject makes the definition a
+        # permanent zombie (b2-sakuragi finding 1).
+        max_sessions = payload.get("max_sessions")
+        if max_sessions is not None and (
+            not isinstance(max_sessions, int) or max_sessions < 1
+        ):
+            raise ScheduleDefError(
+                f"payload.max_sessions must be a positive integer; "
+                f"got {max_sessions!r}"
+            )
 
     def validate(self) -> None:
         if not self.id.strip() or not self.title.strip():

@@ -274,6 +274,9 @@ Semantics (deliberately small in v1):
 - The prd/brief is **inlined into the definition at add time**, so a
   definition never dangles on a moved file. Materialized tasks are
   stamped with `schedule_def` + `schedule_due` in their status.json.
+- v1 has **no disable verb**: `enabled: false` is honored if set by
+  hand, but the CLI levers are `add` and `rm` only -- disable =
+  `rm` now, re-`add` later.
 - A malformed definition is reported in the sweep summary
   (`N malformed-definitions`) and skipped -- it never breaks the
   sweep.
