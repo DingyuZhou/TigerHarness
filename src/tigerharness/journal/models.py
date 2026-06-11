@@ -84,6 +84,14 @@ class CompilePhase(str, enum.Enum):
 # constant; Phase 1.5 added "workflow".
 _SUPPORTED_KINDS: frozenset[str] = frozenset({"task", "workflow"})
 
+# Allowed values for ``Status.autonomy``. "ask" keeps every
+# judgment-call pause; "judgement" lets the working persona
+# self-resolve yellow-light calls (logged as Decision: entries).
+# Red-light rules are never overridable in any mode -- that boundary
+# lives in the team charter, not here; this field only carries the
+# task's declared level to the persona reading status.json.
+SUPPORTED_AUTONOMY: tuple[str, ...] = ("ask", "judgement")
+
 # CompilePhase values are required-and-validated for workflow tasks
 # and rejected outright for task tasks. The bare strings are the
 # on-disk form (JSON enum values).
@@ -145,6 +153,13 @@ class Status:
     # stop early once the task is done per acceptance criteria (mirrors
     # the retired runner's opt-in ``--early-exit``).
     early_exit: bool = False
+    # Detached-run autonomy level (both kinds). ``ask`` (default): the
+    # persona pauses on judgment calls per its prompt/charter rules.
+    # ``judgement``: the persona may self-resolve yellow-light calls,
+    # logging each as a ``Decision:`` entry in progress.md and the
+    # final work note. Red-light rules stay non-overridable in every
+    # mode (charter-defined).
+    autonomy: str = "ask"
     # Workflow-only sub-state. Defaults are neutral so a task-mode
     # Status round-trips byte-identically; the JSON schema gate in
     # ``from_dict`` / ``to_dict`` is what makes the per-kind contract
@@ -173,6 +188,7 @@ class Status:
         max_sessions: int = 3,
         next_action: str = "",
         early_exit: bool = False,
+        autonomy: str = "ask",
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded Status in ``state=pending``.
@@ -196,6 +212,11 @@ class Status:
             raise JournalModelError(
                 f"max_sessions must be >= 1; got {max_sessions}"
             )
+        if autonomy not in SUPPORTED_AUTONOMY:
+            raise JournalModelError(
+                f"autonomy must be one of {list(SUPPORTED_AUTONOMY)}; "
+                f"got {autonomy!r}"
+            )
         ts = now or _utcnow_iso()
         return cls(
             id=id,
@@ -210,6 +231,7 @@ class Status:
             next_action=next_action,
             session_ref=None,
             early_exit=early_exit,
+            autonomy=autonomy,
             compile_pending=False,
             compile_phase=None,
         )
@@ -225,6 +247,7 @@ class Status:
         max_sessions: int = 10,
         next_action: str = "",
         early_exit: bool = False,
+        autonomy: str = "ask",
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded ``kind=workflow`` Status.
@@ -264,6 +287,11 @@ class Status:
             raise JournalModelError(
                 f"max_sessions must be >= 1; got {max_sessions}"
             )
+        if autonomy not in SUPPORTED_AUTONOMY:
+            raise JournalModelError(
+                f"autonomy must be one of {list(SUPPORTED_AUTONOMY)}; "
+                f"got {autonomy!r}"
+            )
         ts = now or _utcnow_iso()
         return cls(
             id=id,
@@ -278,6 +306,7 @@ class Status:
             next_action=next_action,
             session_ref=None,
             early_exit=early_exit,
+            autonomy=autonomy,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
             playbook_name=playbook_name.strip(),
@@ -337,6 +366,7 @@ class Status:
             )
         optional_keys = {
             "persona", "next_action", "session_ref", "early_exit",
+            "autonomy",
             "compile_pending", "compile_phase", "playbook_name",
         }
         unknown = set(data) - (required | optional_keys)
@@ -458,6 +488,13 @@ class Status:
                 )
             playbook_name = playbook_name_raw
 
+        autonomy_val = data.get("autonomy", "ask")
+        if autonomy_val not in SUPPORTED_AUTONOMY:
+            raise JournalModelError(
+                f"autonomy must be one of {list(SUPPORTED_AUTONOMY)}; "
+                f"got {autonomy_val!r}"
+            )
+
         return cls(
             id=data["id"],
             title=data["title"],
@@ -471,6 +508,7 @@ class Status:
             next_action=data.get("next_action", "") or "",
             session_ref=data.get("session_ref"),
             early_exit=bool(data.get("early_exit", False)),
+            autonomy=autonomy_val,
             compile_pending=compile_pending_val,
             compile_phase=compile_phase,
             playbook_name=playbook_name,

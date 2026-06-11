@@ -150,6 +150,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
             kind=args.kind,
             max_sessions=args.max_sessions if args.max_sessions is not None else 3,
             early_exit=args.early_exit,
+            autonomy=args.autonomy,
             slug=args.slug,
         )
     except (JournalScaffoldError, JournalModelError) as exc:
@@ -251,6 +252,7 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
             captain=captain,
             max_sessions=args.max_sessions if args.max_sessions is not None else 10,
             early_exit=args.early_exit,
+            autonomy=args.autonomy,
             slug=args.slug,
         )
     except MissingPersonaError as exc:
@@ -1179,6 +1181,16 @@ def build_parser() -> argparse.ArgumentParser:
             "acceptance criteria. Default off -> run the full "
             "max_sessions budget (N iterations = exactly N). Mirrors the "
             "retired runner's --early-exit."
+        ),
+    )
+    n.add_argument(
+        "--autonomy", choices=("ask", "judgement"), default="ask",
+        help=(
+            "Detached-run autonomy level. 'ask' (default): the persona "
+            "pauses on judgment calls per its prompt/charter rules. "
+            "'judgement': the persona may self-resolve yellow-light "
+            "calls, logging each as a Decision: entry; red-light rules "
+            "are never overridable (see the team charter)."
         ),
     )
     n.set_defaults(func=cmd_new)
