@@ -67,6 +67,13 @@ _PRIOR_OPERATING_HASHES = {
     # per-persona-memory template (origin/main after PR #43/#44, before the
     # cascade redesign merged in).
     "7446e45e52745ae31548a192801173bacb01e36368b713dd8250eae1d1838ce8",
+    # f92eb69 render (workflow-mode termination clarification) -- shipped
+    # but never registered here; Shohoku's live journal carried it, so any
+    # journal on this version would otherwise never auto-refresh.
+    "e274e368d55f0f6bc838b09f827ca8c071877e7dfb6f994285092c3457d11841",
+    # pre-Slack-rail-rule template (before the cost-discipline section
+    # was added on work/2026-06-11-slack-cost-discipline).
+    "a48ca1f1df272f8c6911a92c4c1af94ecb3da477918793a92a9e05aadeb26cae",
 }
 
 

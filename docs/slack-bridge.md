@@ -106,6 +106,36 @@ slack_channel: D012ABCDEF
 
 Agents use this to route follow-up DMs via `--thread`.
 
+## Journal tasks over Slack (cost discipline)
+
+Every turn the bridge spawns runs over `claude -p` — the **API-billed
+rail**, expensive and hard to cap. Journal work follows two rules here
+(rails and billing: [`subscription-backend.md`](subscription-backend.md)):
+
+**1. Scheduling is allowed — and must stay lean.** When asked to
+schedule a journal task from Slack, the persona does the minimum:
+
+1. Collect the brief — the Operator's message verbatim plus only what
+   the `journal-new` skill itself requires (title, kind, playbook,
+   persona).
+2. Run exactly ONE scaffold command (`tigerharness journal new ...`).
+   The scaffolder is deliberately LLM-free pure Python — scheduling is
+   cheap and must stay that way.
+3. Reply with the task id (and task_dir) — one short message.
+4. Stop.
+
+No repo exploration, no design work, no sweeps. All real work happens
+later, on the subscription rail, via `drive-journal` in an interactive
+session.
+
+**2. Driving is forbidden (hard rule).** A Slack-triggered session
+must never drive the journal — no `drive-journal`, no claim, no
+graph-walk, no compile turns. `journal claim` enforces this
+mechanically: the bridge exports `TIGERHARNESS_SLACK_THREAD_TS` into
+every turn it spawns, and claim refuses when that marker is present
+(exit 1, nothing mutated). An Operator who deliberately wants an
+API-billed drive can pass `--allow-api-drive` to override.
+
 ## Multi-team mode
 
 A single bridge process can serve N teams concurrently — one Slack app
