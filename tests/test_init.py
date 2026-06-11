@@ -424,8 +424,10 @@ class TestScaffoldClaudeDir:
         # Layout: tmp/projects/{tigerharness, teams/myteam}
         proj = tmp_path / "projects" / "tigerharness"
         proj.mkdir(parents=True)
+        # The REAL spelling -- the fixture must match reality or the
+        # test verifies the code against itself (b2-haruko lesson).
         (proj / "pyproject.toml").write_text(
-            '[project]\nname = "tigerharness"\n'
+            '[project]\nname = "TigerHarness"\n'
         )
         team = tmp_path / "projects" / "teams" / "myteam"
         team.mkdir(parents=True)
@@ -434,6 +436,18 @@ class TestScaffoldClaudeDir:
         text = path.read_text()
         assert "team_root: ." in text
         assert "project: ../../tigerharness" in text
+
+    def test_repos_yaml_detection_hit_lowercase_name(self, tmp_path: Path):
+        proj = tmp_path / "projects" / "tigerharness"
+        proj.mkdir(parents=True)
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "tigerharness"\n'
+        )
+        team = tmp_path / "projects" / "teams" / "myteam"
+        team.mkdir(parents=True)
+        path = _scaffold_repos_yaml(team)
+        assert path is not None
+        assert "project: ../../tigerharness" in path.read_text()
 
     def test_repos_yaml_detection_miss_writes_placeholder(
         self, tmp_path: Path, capsys,

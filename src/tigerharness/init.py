@@ -673,8 +673,12 @@ def _detect_project_dir(team_dir: Path) -> Path | None:
                 text = py.read_text(encoding="utf-8")
             except OSError:
                 continue
+            # PEP 503 treats project names case-insensitively, and
+            # the real pyproject spells it "TigerHarness" (b2-haruko).
             if re.search(
-                r'^name\s*=\s*"tigerharness"', text, re.MULTILINE
+                r'^name\s*=\s*"tigerharness"',
+                text,
+                re.MULTILINE | re.IGNORECASE,
             ):
                 return child
         current = parent
