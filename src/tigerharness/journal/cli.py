@@ -554,6 +554,32 @@ def cmd_claim(args: argparse.Namespace) -> int:
     ``in_progress``, bump ``sessions``, refresh ``updated_at``, write
     atomically, then re-read and confirm our token won (compare-and-set).
     """
+    # Cost-discipline rail guard -- runs FIRST, before any status read
+    # or mutation, so a refused claim provably changes nothing. The
+    # slack bridge exports ``TIGERHARNESS_SLACK_THREAD_TS`` into every
+    # turn it spawns (the API-billed rail); interactive sessions never
+    # carry it (they register a drive thread via the explicit
+    # ``--drive-thread`` flag instead). Slack-triggered sessions may
+    # only SCHEDULE journal tasks (``journal new``), never drive them;
+    # ``--allow-api-drive`` is the deliberate override, under which the
+    # thread-registration path below still works.
+    if (os.environ.get("TIGERHARNESS_SLACK_THREAD_TS")
+            and not getattr(args, "allow_api_drive", False)):
+        log.warning(
+            "claim refused: %s bridge session (TIGERHARNESS_SLACK_THREAD_TS"
+            " set) -- Slack schedules, never drives", args.task_id,
+        )
+        print(
+            "error: claim refused: this session looks bridge-spawned "
+            "(TIGERHARNESS_SLACK_THREAD_TS is set), which bills API "
+            "tokens. Slack-triggered sessions may only schedule journal "
+            "tasks (journal new), never drive them; drive from an "
+            "interactive session instead, or pass --allow-api-drive to "
+            "proceed deliberately. Rails and billing: "
+            "docs/subscription-backend.md.",
+            file=sys.stderr,
+        )
+        return 1
     paths = _paths_from_args(args)
     status = _read_status_or_none(paths, args.task_id)
     if status is None:
@@ -1486,6 +1512,17 @@ def build_parser() -> argparse.ArgumentParser:
             "automatically from the TIGERHARNESS_SLACK_THREAD_TS env var "
             "the bridge sets. Pass it explicitly only to override that or "
             "outside the bridge."
+        ),
+    )
+    cl.add_argument(
+        "--allow-api-drive", action="store_true",
+        help=(
+            "Deliberately allow claiming from a bridge-spawned (API-"
+            "billed) session. Without this flag, claim refuses when "
+            "TIGERHARNESS_SLACK_THREAD_TS is set in the environment: "
+            "Slack-triggered sessions may only schedule journal tasks, "
+            "never drive them. Rails and billing: "
+            "docs/subscription-backend.md."
         ),
     )
     cl.set_defaults(func=cmd_claim)

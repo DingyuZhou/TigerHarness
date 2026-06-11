@@ -23,7 +23,13 @@ real work (step 3) — a no-op fire never loads it.
 "continue the journal" · or you're given the floor and entries are
 waiting. **Do NOT** drive from a non-interactive context (`claude -p` /
 cron / API) — the driver is human-triggered by design; surface that
-boundary instead.
+boundary instead. That hard rule includes Slack: a **Slack-triggered
+(bridge-spawned) session bills API tokens** — it may SCHEDULE journal
+tasks (the `journal-new` skill) but must **NEVER drive** them. `journal
+claim` enforces this mechanically: it refuses when the bridge's
+`TIGERHARNESS_SLACK_THREAD_TS` env marker is present, unless the
+deliberate `--allow-api-drive` override is passed. Rails and billing:
+`docs/subscription-backend.md`.
 
 ## The checklist — run top to bottom, every invocation
 

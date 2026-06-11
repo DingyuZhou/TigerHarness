@@ -65,6 +65,14 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         # per-persona-memory skill (origin/main after PR #43/#44, before
         # the cascade redesign merged in) -- what Shohoku has on disk now.
         "25d2c223c976e14ed4441660d6fb064fbaedb65a898f65250a4fc0bc1447cb6c",
+        # pre-Slack-rail-rule skill (before the cost-discipline rule was
+        # added on work/2026-06-11-slack-cost-discipline).
+        "3ea99c3d99de7f6cecd7185d8b1769bf907b02f4967466a445998eeee19e1f17",
+    },
+    "journal-new": {
+        # pre-Slack-rail-rule bundle (also predates the team-side
+        # verbatim-Operator-message section, which this refresh ships).
+        "f31c4503e33616fe6d24f5495192dca912eb5ac3648af67dec923650ed5770e5",
     },
 }
 
