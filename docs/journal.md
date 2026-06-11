@@ -235,6 +235,49 @@ The driver is **skill-only by design**: there is no
 reintroduce programmatic billing and defeat the subscription model.
 Driving only happens inside an interactive Claude Code session.
 
+## Scheduled (recurring) tasks
+
+Recurring definitions live in `schedule/` beside `active/`, one JSON
+file each, and are materialized into normal pending tasks by the lazy
+sweep -- the drive is the only clock; there is no daemon.
+
+```bash
+# Daily self-diagnosis, materialized by the first drive after 08:00:
+tigerharness journal schedule add \
+    --title "Morning self-diagnosis" \
+    --period daily --at 08:00 \
+    --kind workflow --playbook self-diagnosis \
+    --task-brief "Run the morning bug hunt." \
+    --autonomy judgement
+
+tigerharness journal schedule list
+tigerharness journal schedule rm morning-self-diagnosis
+```
+
+Semantics (deliberately small in v1):
+
+- **Cadence** is `daily` or `weekly` at `HH:MM` local **wall clock**
+  (DST-safe: occurrences are recomputed from the calendar, never
+  `+86400s`); `next_due` is stored in UTC.
+- **Run-late-once**: a definition due at 08:00 whose first drive
+  happens at 15:00 materializes once, then `next_due` advances to the
+  next *future* occurrence. Missed days are never backfilled.
+- **Skip-if-in-flight**: while a prior instance of the same
+  definition is still in `active/`, nothing new is materialized and
+  `next_due` does not advance -- the first sweep after it finishes
+  fires.
+- **Exactly-once under concurrent drives**: materialization is a
+  two-phase intent protocol on the definition file (CAS lease +
+  `next_due` advance in one atomic write, then scaffold and close);
+  a crashed materialization is recovered by the next sweep -- a lost
+  run is completed and a completed run is never repeated.
+- The prd/brief is **inlined into the definition at add time**, so a
+  definition never dangles on a moved file. Materialized tasks are
+  stamped with `schedule_def` + `schedule_due` in their status.json.
+- A malformed definition is reported in the sweep summary
+  (`N malformed-definitions`) and skipped -- it never breaks the
+  sweep.
+
 ## status.json schema
 
 See the field-by-field table and state-transition rules in

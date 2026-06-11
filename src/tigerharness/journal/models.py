@@ -160,6 +160,12 @@ class Status:
     # final work note. Red-light rules stay non-overridable in every
     # mode (charter-defined).
     autonomy: str = "ask"
+    # Set iff this task was materialized from a schedule definition
+    # (T8): the definition id and the due timestamp it satisfied.
+    # Both kinds; suppressed from JSON when absent. schedule_due is
+    # what makes crash recovery's duplicate-detection exact.
+    schedule_def: str | None = None
+    schedule_due: str | None = None
     # Workflow-only sub-state. Defaults are neutral so a task-mode
     # Status round-trips byte-identically; the JSON schema gate in
     # ``from_dict`` / ``to_dict`` is what makes the per-kind contract
@@ -189,6 +195,8 @@ class Status:
         next_action: str = "",
         early_exit: bool = False,
         autonomy: str = "ask",
+        schedule_def: str | None = None,
+        schedule_due: str | None = None,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded Status in ``state=pending``.
@@ -232,6 +240,8 @@ class Status:
             session_ref=None,
             early_exit=early_exit,
             autonomy=autonomy,
+            schedule_def=schedule_def,
+            schedule_due=schedule_due,
             compile_pending=False,
             compile_phase=None,
         )
@@ -248,6 +258,8 @@ class Status:
         next_action: str = "",
         early_exit: bool = False,
         autonomy: str = "ask",
+        schedule_def: str | None = None,
+        schedule_due: str | None = None,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded ``kind=workflow`` Status.
@@ -307,6 +319,8 @@ class Status:
             session_ref=None,
             early_exit=early_exit,
             autonomy=autonomy,
+            schedule_def=schedule_def,
+            schedule_due=schedule_due,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
             playbook_name=playbook_name.strip(),
@@ -322,6 +336,12 @@ class Status:
         # State is a StrEnum; emit the plain string for forward-
         # compatibility with non-Python readers.
         d["state"] = self.state.value
+        # Schedule stamps: emitted only when set (both kinds), so an
+        # unscheduled task's JSON shape is unchanged.
+        if self.schedule_def is None:
+            d.pop("schedule_def", None)
+        if self.schedule_due is None:
+            d.pop("schedule_due", None)
         # Workflow-only fields: emit iff kind=workflow, suppress
         # otherwise so task-mode JSON stays Phase 1 byte-shape.
         if self.kind == "workflow":
@@ -366,7 +386,7 @@ class Status:
             )
         optional_keys = {
             "persona", "next_action", "session_ref", "early_exit",
-            "autonomy",
+            "autonomy", "schedule_def", "schedule_due",
             "compile_pending", "compile_phase", "playbook_name",
         }
         unknown = set(data) - (required | optional_keys)
@@ -509,6 +529,8 @@ class Status:
             session_ref=data.get("session_ref"),
             early_exit=bool(data.get("early_exit", False)),
             autonomy=autonomy_val,
+            schedule_def=data.get("schedule_def"),
+            schedule_due=data.get("schedule_due"),
             compile_pending=compile_pending_val,
             compile_phase=compile_phase,
             playbook_name=playbook_name,

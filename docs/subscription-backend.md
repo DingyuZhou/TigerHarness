@@ -229,6 +229,8 @@ keep `journal/OPERATING.md`.
 | `compile_phase` | enum (`kind=workflow` only): `pending` / `drafting` / `tier1_pre` / `critiquing` / `tier1_post` / `complete` / `failed` | compile sub-protocol | The compile sub-state machine. Absent for `kind=task`. |
 | `playbook_name` | string, required for `kind=workflow` | scaffolder | Bare name of the playbook the workflow was compiled from. Rejected for `kind=task`. |
 | `early_exit` | bool (default `false`) | scaffolder | When `false`, the driver runs the full `max_sessions` budget ("N iterations = exactly N"); when `true`, it may mark `done` as soon as acceptance criteria are met. Set via `journal new --early-exit`. See [`journal-instant-resume.md`](journal-instant-resume.md). |
+| `schedule_def` | string (optional) | scheduler | Present iff the task was materialized from a `schedule/` definition: the definition id. |
+| `schedule_due` | string (optional) | scheduler | The due timestamp (ISO UTC) this materialization satisfied; with `schedule_def` it makes crash-recovery duplicate-detection exact. |
 
 Three fields carry the design: `session_ref` (the **attach signal** —
 is a live session driving this right now?), `updated_at` (the
