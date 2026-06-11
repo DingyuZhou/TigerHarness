@@ -301,11 +301,11 @@ sweep and keeps going.
 **Context pressure is not a stop reason — compact instead.** Every
 session checkpoints to `progress.md` + `next_action`, so a context
 compaction loses nothing for continuity (re-orient from those after
-one). The driver relies on **auto-compaction** (triggers at ~50% of
-the window by default, via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`) rather
-than handing off early "to let the loop bridge"; it hands off only at
-the true hard ceiling, and even then a fresh fire resumes the idle
-task instantly. (Compaction is safe for *memory* too — provided a
+one). There is NO configured mid-task compaction (retired 2026-06-11);
+the driver works to the genuine ceiling, then checkpoints and hands
+off — a fresh fire resumes the idle task instantly with fresh
+context. The CLI's own near-limit auto-compact remains as a fallback
+only. (Compaction is safe for *memory* too — provided a
 `kind=task` done-note is assembled from the durable record; see
 [Per-persona memory](#per-persona-memory-the-worklog).)
 
@@ -500,8 +500,9 @@ an upgrade reaches them without clobbering local edits:
 - `tigerharness init --refresh-skills` installs any missing bundled
   skill, **refreshes** any skill byte-identical to a previously-shipped
   version to the current one, **leaves hand-edited skills untouched**,
-  and tops up `.claude/settings.json` (the journal-guard hook + the
-  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` compact threshold).
+  and removes the retired mid-task compact override from
+  `.claude/settings.json` (only when it still holds the old seeded
+  default).
 - `OPERATING.md` refreshes on the next `tigerharness journal new`: the
   scaffolder's `_ensure_operating_md` rewrites an on-disk file that
   matches a prior shipped template (`_PRIOR_OPERATING_HASHES`) to the
@@ -550,7 +551,6 @@ it.
 |---|---|---|
 | `TIGERHARNESS_JOURNAL_DIR` | `<team>/journal/` | Journal root the scaffolder and driver operate on. |
 | `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age (seconds) past which the sweep classifies an *attached* `in_progress` task as **crashed** (and below which it is **busy**). |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` | Claude Code auto-compaction threshold (% of the context window) that the harness **seeds** into a new team's `.claude/settings.json` `env` (and tops up on `init --refresh-skills`). Lets a long cascade compact proactively instead of handing off for "context heavy". It lives in the `env` block, not as a settings.json key. |
 
 ## The work loop
 
