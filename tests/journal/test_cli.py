@@ -1932,3 +1932,15 @@ class TestClaimRailGuard:
                      "--prd", str(prd), "--persona", "Anzai"]) == 0
         out = capsys.readouterr().out
         assert "Scaffolded:" in out
+
+    def test_empty_env_marker_treated_as_unset(self, journal_dir, monkeypatch):
+        # Defense pin: an EMPTY env value is falsy -- the guard must
+        # treat it exactly like the registration fallback does
+        # (``os.environ.get(...) or None``): as unset. The bridge never
+        # exports an empty thread_ts, so refusing here would only ever
+        # false-positive on a degenerate shell export.
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir),
+                     "claim", "t1", "--driver", "Anzai"]) == 0
