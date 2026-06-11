@@ -11,6 +11,8 @@ conversation. Per design doc §3.4:
 """
 from __future__ import annotations
 
+import logging
+
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,8 @@ from typing import Iterator
 from uuid import NAMESPACE_URL, uuid5
 
 from .base import SourceAdapter, SourceRecord
+
+log = logging.getLogger("tigerharness.tiger_memory.sources.docs")
 
 
 class DocsAdapter(SourceAdapter):

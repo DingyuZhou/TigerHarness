@@ -13,7 +13,7 @@ def test_help(capsys):
     ret = main(["--help"])
     assert ret == 0
     out = capsys.readouterr().out
-    assert "task-runner" in out
+    assert "journal (j)" in out  # the runner arm is gone (ADR 0003)
     assert "tiger-memory" in out
     assert "journal" in out
 
@@ -26,17 +26,6 @@ def test_unknown_command(capsys):
 def test_empty_args(capsys):
     ret = main([])
     assert ret == 0
-
-
-def test_task_runner_dispatch():
-    # Should dispatch to task-runner's parser which requires a subcommand
-    with pytest.raises(SystemExit):
-        main(["task-runner"])
-
-
-def test_task_runner_alias():
-    with pytest.raises(SystemExit):
-        main(["tr"])
 
 
 def test_tiger_memory_dispatch():

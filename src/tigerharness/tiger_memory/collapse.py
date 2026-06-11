@@ -21,6 +21,10 @@ Pure and deterministic; trivially unit-testable.
 """
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger("tigerharness.tiger_memory.collapse")
+
 _SHORT = "@@SHORT@@"
 _DETAILED = "@@DETAILED@@"
 _MUST = "@@MUST_MEMORIZE@@"

@@ -9,7 +9,7 @@ Procedural skill for any Claude agent to message a user via the notify CLI.
 
 ## When to use this skill
 
-- Proactive DM during a task-runner job (question, milestone, blocker).
+- Proactive DM during a detached agent run (question, milestone, blocker).
 - Post a chart, CSV, or screenshot the agent just generated.
 - Post a follow-up inside an existing Slack thread (route via `--thread`).
 

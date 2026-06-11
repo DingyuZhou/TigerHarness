@@ -44,7 +44,7 @@ pull table) and
 [`skills/drive-journal/SKILL.md`](../skills/drive-journal/SKILL.md):
 
 - A **programmatically-spawned `claude -p` child** bills as **API
-  tokens**. The task-runner, the workflow-runner, **and
+  tokens**. The legacy runners (since retired, ADR 0003), **and
   tiger-memory's `anthropic` summarizer** all do this today
   (`tiger_memory/summarizers/anthropic.py:97` → `claude_p` backend →
   `claude -p` subprocess). So today's rebuild is **API-billed**, not
@@ -262,7 +262,7 @@ turn, each persona **that has a memory store configured** — skipping
 personas with no memory config. Two things were pinned in P0, both now
 resolved: the **canonical roster source** — *(P0-verified:
 `configs/personas.yaml` is authoritative, no competing notion;
-`workflow_runner/compile/pipeline.py:218`, `slack_bridge/multi.py:178`)*
+`slack_bridge/multi.py:178`; historically the compile pipeline's roster loader)*
 — and the **persona → tiger-memory-config resolution** — *(P0-verified:
 convention-based — persona `X` maps to
 `<team>/memories/X/tiger-memory.config.yaml`, `slack_bridge/multi.py`;
@@ -685,7 +685,7 @@ Code survey of `src/tigerharness/tiger_memory/` and `slack_bridge/` on
 | Defaults 400 / 60 / 120k chars; window 2/7/28/90; decay 7/14/28; owner_explicit locked | **All confirmed in code**, not just docs | `config.py:65,71,77,104-107,82-85` |
 | must_memorize decay is wall-clock-anchored | **Confirmed — and already idempotent across bursty rebuilds** | `must_memorize.py:148-160` |
 | Nothing prunes `threads.json` | **Confirmed** — append/update-only; no `del`/`pop`/TTL; migrator copies every key | `persistence.py:131-148`; `migrate.py:96-107` |
-| `configs/personas.yaml` is the authoritative roster | **Confirmed — no competing source** | `workflow_runner/compile/pipeline.py:218`; `slack_bridge/multi.py:178` |
+| `configs/personas.yaml` is the authoritative roster | **Confirmed — no competing source** | `slack_bridge/multi.py:178` (and the since-retired compile roster loader) |
 | Sub-agent transcript could be re-ingested | **Open risk, gated by the strict filter** — see note | `sources/claude_transcript.py:89-128` |
 
 What this moved in the design:

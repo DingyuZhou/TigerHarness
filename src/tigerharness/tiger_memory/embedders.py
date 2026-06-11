@@ -18,9 +18,13 @@ Selection precedence in ``pick_embedder()``:
 """
 from __future__ import annotations
 
+import logging
+
 import os
 from abc import ABC, abstractmethod
 from typing import Iterable
+
+log = logging.getLogger("tigerharness.tiger_memory.embedders")
 
 
 class Embedder(ABC):
@@ -120,12 +124,17 @@ def pick_embedder(prefer: str = "auto") -> Embedder | None:
     # auto: prefer OpenAI quality if key+deps present
     if os.environ.get("OPENAI_API_KEY"):
         try:
-            return OpenAIEmbedder()
-        except (ImportError, RuntimeError):
-            pass
+            emb = OpenAIEmbedder()
+            log.info("embedder auto-selected: %s", type(emb).__name__)
+            return emb
+        except (ImportError, RuntimeError) as exc:
+            log.info("embedder: OpenAI unavailable (%s); trying fastembed", exc)
     try:
-        return FastEmbedEmbedder()
+        emb = FastEmbedEmbedder()
+        log.info("embedder auto-selected: %s", type(emb).__name__)
+        return emb
     except ImportError:
+        log.info("embedder: none available; substring search only")
         return None
 
 

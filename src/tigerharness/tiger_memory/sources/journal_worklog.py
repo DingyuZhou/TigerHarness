@@ -33,6 +33,8 @@ journal write path -- the write side stays installable without extras.
 """
 from __future__ import annotations
 
+import logging
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -44,6 +46,8 @@ from tigerharness.journal.paths import JournalPaths
 from tigerharness.journal.worklog import WorklogEntry
 
 from .base import SourceAdapter, SourceRecord
+
+log = logging.getLogger("tigerharness.tiger_memory.sources.journal_worklog")
 
 
 def _parse_dt(ts: str | None) -> datetime | None:

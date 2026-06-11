@@ -12,6 +12,8 @@ the in-session compile sub-protocol.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -47,6 +49,8 @@ from tigerharness.journal.sweep import (
     sweep,
 )
 from tigerharness.journal import drive_sessions, walk, worklog
+
+log = logging.getLogger("tigerharness.journal.cli")
 
 
 def _paths_from_args(args: argparse.Namespace) -> JournalPaths:
@@ -503,6 +507,7 @@ def _write_task_work_entry(
         )
         return 1
     if not output_text.strip():
+        log.warning("release done-gate refused: empty note at %s (the note is the ticket)", output_path)
         print(
             f"error: --output {output_path!r} is empty; the work note "
             f"cannot be blank. Refusing to mark done.",
@@ -560,6 +565,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
         return 2
 
     if status.state in (State.DONE, State.BLOCKED):
+        log.warning("claim refused: %s is %s", args.task_id, status.state.value)
         print(f"error: task is {status.state.value}; not claimable",
               file=sys.stderr)
         return 1
@@ -572,6 +578,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if klass == "busy":
+            log.warning("claim refused: %s busy (live session holds the lease)", args.task_id)
             print(
                 f"error: task is busy -- a live session owns it "
                 f"(session_ref={status.session_ref!r}). Not claimable.",
@@ -629,6 +636,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
     # flock is the upgrade path (see docs/journal-instant-resume.md).
     confirm = _read_status_or_none(paths, args.task_id)
     if confirm is None or confirm.session_ref != token:
+        log.warning("claim lost: %s taken by a concurrent session", args.task_id)
         print(
             "error: claim lost -- another session claimed this task "
             "concurrently. Re-sweep and pick again.",
@@ -682,6 +690,9 @@ def cmd_claim(args: argparse.Namespace) -> int:
             "kind": status.kind,
         }, indent=2))
     else:
+        log.info("claimed %s session_ref=%s sessions=%d/%d kind=%s",
+                 status.id, token, status.sessions, status.max_sessions,
+                 status.kind.value if hasattr(status.kind, "value") else status.kind)
         print(f"Claimed {status.id}")
         print(f"  session_ref: {token}")
         print(f"  sessions:    {status.sessions}/{status.max_sessions}")
@@ -711,6 +722,7 @@ def cmd_release(args: argparse.Namespace) -> int:
         # Don't resurrect a terminal task. `release` is the driver's
         # in_progress -> exit transition; a done task is awaiting archive,
         # and flipping it back would re-surface it as actionable.
+        log.warning("release refused: %s already done", args.task_id)
         print("error: task is done; refusing to release (would resurrect "
               "an archived/terminal task).", file=sys.stderr)
         return 1
@@ -759,6 +771,7 @@ def cmd_release(args: argparse.Namespace) -> int:
     status.updated_at = _utcnow_iso()
     _write_status_atomic(paths, status)
 
+    log.info("released %s state=%s detached", status.id, new_state.value)
     print(f"Released {status.id} (state={new_state.value}, detached)")
     return 0
 
@@ -771,9 +784,9 @@ def cmd_release(args: argparse.Namespace) -> int:
 def _load_orchestration(paths: JournalPaths, task_id: str):
     """Load + parse a workflow's orchestration.json. Returns the
     ``Orchestration`` on success or a human-readable error string. The
-    workflow_runner import is lazy (mirrors the compile CLIs) so the
+    wfcore import is lazy (mirrors the compile CLIs) so the
     pure-task journal paths never pull it in."""
-    from tigerharness.workflow_runner.models import (
+    from tigerharness.journal.wfcore.models import (
         Orchestration,
         WorkflowModelError,
     )
@@ -878,6 +891,7 @@ def cmd_step_done(args: argparse.Namespace) -> int:
         )
         return 1
     if not output_text.strip():
+        log.warning("step-done refused: %s empty note (the note is the ticket)", args.step)
         print(
             f"error: --output {args.output!r} is empty; the step note "
             "cannot be blank. Refusing to advance.",
@@ -912,6 +926,7 @@ def cmd_step_done(args: argparse.Namespace) -> int:
         state = walk.initial(status.id, orchestration.entrypoint)
 
     if state.current in walk.SENTINELS:
+        log.warning("step-done refused: walk already terminal at %s", state.current)
         print(
             f"error: walk already terminal (current={state.current!r}); "
             "refusing further step-done.",
@@ -919,6 +934,8 @@ def cmd_step_done(args: argparse.Namespace) -> int:
         )
         return 1
     if args.step != state.current:
+        log.warning("step-done refused: out-of-order (walk at %s, got %s)",
+                    state.current, args.step)
         print(
             f"error: out-of-order step: the walk is at {state.current!r} but "
             f"--step is {args.step!r}; drive the current step (or check the "
@@ -989,6 +1006,8 @@ def cmd_step_done(args: argparse.Namespace) -> int:
             "worklog_path": str(stamped.path),
         }, indent=2))
     else:
+        log.info("step-done: %s verdict=%s persona=%s next=%s",
+                 args.step, args.verdict, persona, next_step)
         print(f"step-done: {args.step} ({args.verdict}) by {persona}")
         print(f"  worklog: {stamped.path}")
         if next_step == walk.DONE:
@@ -1159,7 +1178,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Allow the driver to stop early once the task is done per "
             "acceptance criteria. Default off -> run the full "
             "max_sessions budget (N iterations = exactly N). Mirrors the "
-            "task-runner's --early-exit."
+            "retired runner's --early-exit."
         ),
     )
     n.set_defaults(func=cmd_new)
@@ -1319,6 +1338,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from tigerharness._logging import configure_cli_logging
+    configure_cli_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

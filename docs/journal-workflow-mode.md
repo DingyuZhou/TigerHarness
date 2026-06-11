@@ -26,7 +26,7 @@ workflow tasks (`kind=workflow`). Single-persona task mode
 ## Why this exists
 
 Phase 1's `drive-journal` skill drives a *single persona* through a
-free-form PRD — the task-runner-style workload. The Operator's question
+free-form PRD — the single-persona iterative workload. The Operator's question
 on 2026-06-03: *how do I trigger workflow-runner-style work through
 this backend?*
 
@@ -41,7 +41,7 @@ interactive Claude Code app, using the same `journal/` folder, the
 same `drive-journal` skill, the same lazy sweep, and an extended
 `status.json` schema. The compile pipeline that turns a playbook +
 brief into a step graph is **reused from Wave 2** (the modules under
-`workflow_runner.compile`); the new code is the journal-side glue
+the compile core, now `journal.wfcore`); the new code is the journal-side glue
 and the protocol additions that teach the interactive session to
 walk the graph one persona at a time.
 
@@ -91,19 +91,19 @@ work as part of its session budget. Recoverable, cascading, journaled.
 
 The compile machinery already on main is reused as-is:
 
-- `workflow_runner.compile.validators.validate_compile_output` — pure
+- `journal.wfcore.validators.validate_compile_output` — pure
   Python, no LLM, called by the session via a new `journal
   validate-graph` CLI shim.
-- `workflow_runner.compile.pipeline._build_orchestration` — builds
+- `journal.wfcore.pipeline._build_orchestration` — builds
   the `Orchestration` object from a parsed `StepFrontmatter` list.
   Called by the new `journal land-compile` CLI.
-- `workflow_runner.compile.drafter._build_prompt` and the
+- `journal.wfcore.drafter._build_prompt` and the
   `critique.{AKAGI,AYAKO}_CRITIC_PROMPT_TEMPLATE` constants — the
   prompt text is the contract. A new `journal compile-prompts` CLI
   prints the assembled prompts on demand from the same Python
   constants, so the in-session compile is textually identical to
   what the api-billed pipeline would emit.
-- `workflow_runner.models.{Orchestration, StepFrontmatter}` and the
+- `journal.wfcore.models.{Orchestration, StepFrontmatter}` and the
   `WORKFLOW: APPROVE/REVISE/BLOCK` trailer protocol — shared with
   Phase 1's graph-walk verbatim.
 
@@ -315,13 +315,13 @@ This is the exact preamble the shipped `OPERATING.md` (from
 persona's prompt body (read from
 `teams/<team>/personas/<name>/prompt.md`) follows the preamble.
 Compile turns also reference a critic-lens prompt (Akagi or Ayako
-critic prompt from `workflow_runner.compile.critique`); graph-walk step
+critic prompt from `journal.wfcore.critique`); graph-walk step
 turns reference the step body file. The audit-trail format is identical
 across compile and graph-walk phases.
 
 The compile-time critic prompts are pulled by the session via
 `tigerharness journal compile-prompts --kind {drafter,akagi,ayako}`,
-which prints the canonical text from `workflow_runner.compile.{drafter,
+which prints the canonical text from `journal.wfcore.{drafter,
 critique}` with playbook + brief + roster + feedback interpolated.
 This is the single source of truth: no prompt text is embedded in
 SKILL.md or OPERATING.md, and no separate "synced" copy of the
@@ -419,7 +419,7 @@ shells out to them between turns:
 |---|---|
 | `tigerharness journal new --kind workflow --playbook <name> --task-brief <text>\|--brief-file <path>` | Scaffold-time only. Writes brief + playbook snapshot + `status.json` (`compile_pending=true`). |
 | `tigerharness journal compile-context <task-id>` | Prints playbook + brief + roster + drafter prompt. One-shot context bootstrap for the session. |
-| `tigerharness journal compile-prompts --task <id> --kind {drafter\|akagi\|ayako} [--feedback <str>] [--draft <path>] [--trace <path>]` | Prints the assembled prompt for the requested role, pulling text from `workflow_runner.compile.{drafter,critique}` with all interpolations applied. For `--kind {akagi,ayako}`, `--draft` and `--trace` are **required** (exit 2 otherwise); for `drafter` they're unused. |
+| `tigerharness journal compile-prompts --task <id> --kind {drafter\|akagi\|ayako} [--feedback <str>] [--draft <path>] [--trace <path>]` | Prints the assembled prompt for the requested role, pulling text from `journal.wfcore.{drafter,critique}` with all interpolations applied. For `--kind {akagi,ayako}`, `--draft` and `--trace` are **required** (exit 2 otherwise); for `drafter` they're unused. |
 | `tigerharness journal validate-graph --task <id> --draft <path>` | Runs `validate_compile_output` on the draft; emits JSON `{ok, errors, trace}`. Exit 0/1. |
 | `tigerharness journal land-compile --task <id> --draft <path> --transcript <path> --rounds <N>` | Atomic transition: re-runs Tier 1, builds `Orchestration`, writes step files + `orchestration.json` + `compile_critique.md` to `compile/final/`, promotes via `os.replace`, flips `compile_pending=false` + `compile_phase=complete` last. |
 | `tigerharness journal compile-fail <task-id> --reason <str>` | Soft compile failure: sets `state=blocked` + `compile_phase=failed`, writes `--reason` as `next_action`, leaves the task in `active/` for human inspection. The driver invokes this on a `WORKFLOW: BLOCK` critic verdict or on cap exhaustion. |
@@ -503,7 +503,7 @@ the Phase 1.5 PR review (mirrors Phase 1's manual-verify discipline).
 |---|---|---|
 | Model layer (`models.py`) | ~50 | Relax `kind` enum; add `compile_pending` + `compile_phase` fields with strict validation. Update tests. |
 | Scaffolder (`scaffold.py`) | ~60 | `new_workflow_task(...)` writes brief + snapshot + `status.json`. No compile call. Persona pre-flight check (Anzai/Akagi/Ayako + playbook-extracted refs). |
-| Compile CLIs (`journal/compile_cli.py`) | ~250 | Seven subcommands (above). Wraps `workflow_runner.compile.{validators, pipeline._build_orchestration, drafter, critique}` constants. |
+| Compile CLIs (`journal/compile_cli.py`) | ~250 | Seven subcommands (above). Wraps `journal.wfcore.{validators, pipeline._build_orchestration, drafter, critique}` constants. |
 | Sweep + list (`sweep.py`, `cli.py`) | ~20 | Show `compile_pending` + `compile_phase` in summary line + list table. |
 | `OPERATING.md` + `drive-journal/SKILL.md` | ~180 lines | Compile sub-protocol section (~80 lines), persona-adoption preamble spec (~20 lines), state-machine docs (~30 lines), failure recovery (~50 lines). Pinned by landmark smoke tests. |
 | Tests | ~130 tests / ~600 LOC test code | Per the breakdown above. |
@@ -520,11 +520,11 @@ tractable because every load-bearing decision is in a Python CLI).
 
 > **Design history — Phase 1.5 planning; superseded by the shipped implementation.** Kept for provenance, not a description of current behavior.
 
-**None.** Existing `workflow_runner` task journals under
-`~/.local/state/tigerharness-workflows/` and `task_runner` jobs under
+**None.** The retired api runner's task journals under
+`~/.local/state/tigerharness-workflows/` and the retired iterative runner's jobs under
 `~/.local/state/tigerharness-tasks/` are not imported. They get
 deleted after Phase 1.5 ships (Operator decision: nothing important
-in them). In-flight workflow_runner tasks at ship time are lost —
+in them). In-flight api-runner tasks at ship time were lost —
 documented as a one-line release-note warning.
 
 ## Phasing
@@ -630,7 +630,7 @@ needed to implement Phase 1.5 the same shape as Phase 1.
   Phase 1.5 just makes the journal a viable subscription-friendly
   alternative for the same shape of workload.
 - **Inventing a new graph format.** We reuse
-  `workflow_runner.compile`'s output verbatim — `orchestration.json`
+  the compile core's output verbatim — `orchestration.json`
   + `steps/<id>.md` per the existing schema.
 - **Parallel persona work.** A single human drives serially.
   Concurrent drivers stay out of scope; the heartbeat-as-soft-lease

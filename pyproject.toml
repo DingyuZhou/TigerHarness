@@ -9,7 +9,7 @@ description = "A generic Claude Code agent harness: iterative task execution, Sl
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-keywords = ["agent", "claude", "anthropic", "harness", "task-runner", "memory"]
+keywords = ["agent", "claude", "anthropic", "harness", "memory"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -62,7 +62,6 @@ all = [
 [project.scripts]
 tigerharness = "tigerharness.cli:main"
 tiger-memory = "tigerharness.tiger_memory.cli:main"
-workflow = "tigerharness.workflow_runner.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/DingyuZhou/TigerHarness"

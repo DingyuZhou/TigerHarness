@@ -9,11 +9,15 @@ workspace paths.
 
 from __future__ import annotations
 
+import logging
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+log = logging.getLogger("tigerharness.slack_bridge.config")
 
 
 # tiger-memory rebuild trigger modes for a new thread:
@@ -120,6 +124,11 @@ def load() -> BridgeConfig:
     except ValueError as exc:
         raise SystemExit(f"slack-bridge: {exc}")
 
+    def _redact(tok: str) -> str:
+        return f"{tok[:5]}...{tok[-4:]}" if len(tok) > 12 else "<short>"
+    log.info("bridge config loaded (bot=%s app=%s)",
+             _redact(required["SLACK_BOT_TOKEN"]),
+             _redact(required["SLACK_APP_TOKEN"]))
     return BridgeConfig(
         slack_app_token=required["SLACK_APP_TOKEN"],
         slack_bot_token=required["SLACK_BOT_TOKEN"],

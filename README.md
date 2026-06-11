@@ -11,12 +11,20 @@ integration, and persistent memory management.
 
 | Package | Description |
 |---|---|
-| `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: `claude -p` subprocess, Anthropic's `claude-agent-sdk`, OpenAI's `openai-agents` (planned). |
-| `tigerharness.journal` | **File-based subscription backend.** Routes agent work through the interactive Claude Code app so it counts against a monthly subscription instead of token-billed API. Supports single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`, compiled in-session from a team playbook). CLI: `journal`. See [docs/journal.md](docs/journal.md). |
-| `tigerharness.task_runner` | Fire-and-forget iterative task execution via `claude -p`. Phase 1.5+ users typically prefer the journal subscription backend; this remains for api-budget workloads. |
+| `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: the `claude -p` subprocess backend and Anthropic's `claude-agent-sdk` backend, with a shared typed event/retry/error model. |
+| `tigerharness.journal` | **File-based subscription backend.** Routes agent work through the interactive Claude Code app so it counts against a monthly subscription instead of token-billed API. Single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`) compiled in-session by a drafter/two-critic loop over mechanical validators, then walked through gates that enforce step order and write persona-stamped worklog notes (the per-persona memory rail). Crash-safe by lease: tasks classify idle/busy/crashed and a fresh session resumes a crashed walk at the same step. 16 CLI verbs under `journal`. See [docs/journal.md](docs/journal.md), [docs/journal-workflow-mode.md](docs/journal-workflow-mode.md), [docs/journal-instant-resume.md](docs/journal-instant-resume.md). |
 | `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to a `claude -p` backend and posts replies back to the thread. |
-| `tigerharness.tiger_memory` | Persistent agent memory: archive, journal, briefing with lazy rebuild, kind-decay must-memorize, and drill-down. |
-| `tigerharness.workflow_runner` | Multi-persona workflow orchestration via `claude -p`. Phase 1.5+ users typically prefer `journal` with `--kind workflow` (same compile pipeline, in-session compile, no API billing). The api-backed runner remains for api-budget workloads. CLI: the standalone `workflow` console script (`start`/`show`/`list`/`tail`/`cancel`) — *not* a `tigerharness` subcommand. See [docs/workflow-runner.md](docs/workflow-runner.md). |
+| `tigerharness.tiger_memory` | Persistent agent memory: archive, journal, briefing with lazy rebuild, kind-decay must-memorize, and drill-down. Includes the team-wide sweep protocol (`sweep-plan`/`sweep-done`/`sweep-complete`/`sweep-release` under a lease, watermark, and per-wake cap) and subscription-rail staging (`plan`, `ingest-summary`) so summarization bills to the subscription. See [docs/tiger-memory.md](docs/tiger-memory.md), [docs/tiger-memory-sweep-protocol.md](docs/tiger-memory-sweep-protocol.md). |
+
+## Bundled Claude Code skills
+
+`tigerharness init` installs four Claude Code skills into a new
+team's `.claude/skills/`: `drive-journal` (the subscription drive
+loop), `journal-new` (task/workflow scaffolding), `slack-notify`
+(proactive Slack messages), and `workflow-append-steps` (runtime
+graph extension). Refreshes are hash-aware: a skill that still
+matches a previously shipped version is updated in place, while a
+hand-edited skill is left alone (`src/tigerharness/init.py`).
 
 ## Installation
 
@@ -64,7 +72,7 @@ you don't use:
 
 | Extra | Pulls in | Enables / required for |
 |---|---|---|
-| *(none)* | — | `init` scaffolder, `dismiss` teardown, `task-runner` with the default `claude -p` subprocess backend |
+| *(none)* | — | `init` scaffolder, `dismiss` teardown, the `journal` subscription backend |
 | `[anthropic]` | `claude-agent-sdk` | The official Claude Agent SDK backend (`anthropic_sdk`) |
 | `[slack]` | `slack-bolt`, `aiohttp`, `python-dotenv` | `slack-bridge` (Slack Socket Mode DM bridge) |
 | `[memory]` | `pyyaml` | `tiger-memory` (per-persona persistent memory; substring search only) |
@@ -110,8 +118,8 @@ tigers/
 │   ├── settings.json             # wires TIGERHARNESS_PERSONAS_CONFIG, the
 │   │                             #   journal write-guard hook, and seeds
 │   │                             #   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50
-│   └── skills/                   # bundled skills (slack-notify, drive-journal,
-│                                 #   journal-new, assign-task, ...)
+│   └── skills/                   # bundled skills (drive-journal, journal-new,
+│                                 #   slack-notify, workflow-append-steps)
 ├── configs/
 │   ├── personas.yaml              # team registry (auto-updated)
 │   └── .env                       # Slack tokens (gitignored)
@@ -179,23 +187,20 @@ Refusals are deliberate, not bugs:
   Slack-bridge fragment is refused — pick a new default in the fragment
   first, then re-run.
 
-### Task runner
+### Journal (subscription backend)
 
 ```bash
 # 1. Point tigerharness at your team's persona registry
 export TIGERHARNESS_PERSONAS_CONFIG=./tigers/configs/personas.yaml
 
-# 2. Assign a task (5 iterations)
-python -m tigerharness.task_runner assign \
-    --to chief \
-    --prompt "Research the latest developments in solar energy" \
-    --iters 5
+# 2. Scaffold a task for a persona (the drive-journal skill works it)
+tigerharness journal new --kind task --persona chief --prd brief.md
 
-# 3. Check status
-python -m tigerharness.task_runner list
+# 3. Check the queue
+tigerharness journal list
 
-# 4. View logs
-python -m tigerharness.task_runner logs <task-id>
+# 4. Sweep state (archives done, classifies in-progress)
+tigerharness journal sweep
 ```
 
 ### Slack bridge
@@ -253,7 +258,6 @@ All paths are resolved from environment variables -- no hardcoded paths.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TIGERHARNESS_STATE_DIR` | `~/.local/state/tigerharness-tasks/` | Task runner state directory |
 | `TIGERHARNESS_PERSONAS_DIR` | (none) | Directory containing `<name>.md` prompt files |
 | `TIGERHARNESS_SLACK_ENV` | `.env` | Path to slack-bridge .env file |
 | `TIGERHARNESS_AGENT_CWD` | `.` | Working directory for the Claude agent |
@@ -299,12 +303,12 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
 
   The Configuration table above doesn't distinguish which env vars belong in which file. Worth a docs pass (or a single config table with a "where it goes" column) so users don't have to read the loader to find out.
 
-### Task-runner Slack notifications
+### Agent Slack notifications
 
-- **Notifications require the bot to be in `SLACK_NOTIFY_CHANNEL`.** Each team has its own Slack app (own bot user). After creating a new team's Slack app and setting `SLACK_NOTIFY_CHANNEL` in `configs/.env`, the bot must be **invited to that channel** (`/invite @BotName` in Slack). Without this, `chat.postMessage` returns `channel_not_found` and notifications are silently skipped. The task runner logs the error to stderr but doesn't surface it to the user.
+- **Notifications require the bot to be in `SLACK_NOTIFY_CHANNEL`.** Each team has its own Slack app (own bot user). After creating a new team's Slack app and setting `SLACK_NOTIFY_CHANNEL` in `configs/.env`, the bot must be **invited to that channel** (`/invite @BotName` in Slack). Without this, `chat.postMessage` returns `channel_not_found` and notifications are silently skipped. The notify CLI logs the error to stderr but doesn't surface it to the user.
   - **Fix candidate**: `tigerharness init` could print a reminder ("Don't forget to invite your bot to the ops-log channel"), or the notifier could log a more prominent first-time warning.
-- **Agents need `.claude/settings.json` + skills to send proactive DMs.** Task-runner agents use the `slack-notify` skill to send per-iteration updates via `python -m tigerharness.slack_bridge.notify`. Without `.claude/settings.json` (which wires `TIGERHARNESS_PERSONAS_CONFIG`) and `.claude/skills/slack-notify/SKILL.md` (which teaches the agent the notify CLI exists), the agent doesn't know how to send Slack messages. As of v0.2.1+, `tigerharness init` scaffolds these automatically for new teams (the `.claude/settings.json` also wires the journal write-guard hook and seeds `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50`). Existing teams adopt them with `tigerharness init --refresh-skills`, which installs any missing skills, refreshes un-customized ones to the latest, and tops up `.claude/settings.json` (guard hook + compact threshold) — without clobbering hand edits.
-- **`--thread` must be passed when assigning from a Slack thread.** When a task is assigned from a Slack DM thread, the agent must pass `--thread <slack_thread_ts>` (from the `[bridge-context]` block) so notifications land in the right thread. Without it, notifications go to a new top-level message instead of the conversation thread. The `assign-task` skill documents this prominently, but it's easy to forget.
+- **Agents need `.claude/settings.json` + skills to send proactive DMs.** Agents use the `slack-notify` skill to send per-iteration updates via `python -m tigerharness.slack_bridge.notify`. Without `.claude/settings.json` (which wires `TIGERHARNESS_PERSONAS_CONFIG`) and `.claude/skills/slack-notify/SKILL.md` (which teaches the agent the notify CLI exists), the agent doesn't know how to send Slack messages. As of v0.2.1+, `tigerharness init` scaffolds these automatically for new teams (the `.claude/settings.json` also seeds `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50`). Existing teams adopt them with `tigerharness init --refresh-skills`, which installs any missing skills, refreshes un-customized ones to the latest, and tops up `.claude/settings.json` (compact threshold) — without clobbering hand edits.
+- **`--thread` must be passed when notifying from a Slack thread.** When an agent sends a proactive message from a Slack DM thread, it must pass `--thread <slack_thread_ts>` (from the `[bridge-context]` block) so notifications land in the right thread. Without it, notifications go to a new top-level message instead of the conversation thread. The `slack-notify` skill documents this prominently, but it's easy to forget.
 
 ### `tigerharness init`
 

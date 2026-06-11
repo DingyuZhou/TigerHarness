@@ -1,7 +1,8 @@
 """tigerharness — a generic Claude Code agent harness.
 
 Sub-packages:
-    tigerharness.task_runner   — iterative task execution loop
+    tigerharness.agent_sdk     — backend-agnostic agent SDK
+    tigerharness.journal       — file-based subscription backend
     tigerharness.slack_bridge  — Slack Socket Mode bridge to Claude
     tigerharness.tiger_memory  — persistent memory: archive, journal, briefing
 """

@@ -43,6 +43,8 @@ mix-and-match -- only the pre-routing strings get rewritten).
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -50,6 +52,8 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger("tigerharness.slack_bridge.migrate")
 
 
 @dataclass(frozen=True)

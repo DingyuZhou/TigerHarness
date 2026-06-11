@@ -15,6 +15,8 @@ the text and self-validates before calling in.
 """
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,8 @@ from .config import Config
 from .lifecycle import _write_short_archive_bodies
 from .sources.base import SourceRecord
 from .store import Store
+
+log = logging.getLogger("tigerharness.tiger_memory.executor")
 
 SUBAGENT_SUMMARIZER_TAG = "subagent@v1"
 
@@ -67,6 +71,7 @@ def ingest_collapsed_summary(
     the merge to a single finalize step. See
     ``docs/tiger-memory-sweep-protocol.md``.
     """
+    log.info("ingest-summary: merging collapsed summary into store")
     short_body, detailed_body, mm_section = parse_collapsed(bundle_text)
 
     rec = SourceRecord(

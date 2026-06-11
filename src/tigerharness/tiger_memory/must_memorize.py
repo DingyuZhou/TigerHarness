@@ -16,6 +16,8 @@ See design doc §5.5 + §6.
 """
 from __future__ import annotations
 
+import logging
+
 import difflib
 import re
 from dataclasses import dataclass, field, replace
@@ -27,6 +29,8 @@ from . import frontmatter
 from .config import Config
 from .state import iso_now
 from .store import Store
+
+log = logging.getLogger("tigerharness.tiger_memory.must_memorize")
 
 
 KIND_OWNER_EXPLICIT = "owner_explicit"
@@ -133,6 +137,7 @@ def decay_all(
     days_per_point: dict[str, int],
 ) -> list[Row]:
     """Apply decay to non-locked rows; remove any row with score ≤ 0."""
+    log.debug("must-memorize decay pass starting")
     today = today or _today_iso()
     today_dt = date.fromisoformat(today)
     kept: list[Row] = []

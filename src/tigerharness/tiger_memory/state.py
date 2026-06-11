@@ -5,6 +5,8 @@ documented in design doc §3.5.
 """
 from __future__ import annotations
 
+import logging
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,8 @@ from typing import Any
 from .config import Config
 from .store import DAILY_RE, MONTHLY_RE, SHORT_RE, WEEKLY_RE, Store
 from . import frontmatter
+
+log = logging.getLogger("tigerharness.tiger_memory.state")
 
 
 def compute_state(cfg: Config, store: Store) -> dict[str, Any]:

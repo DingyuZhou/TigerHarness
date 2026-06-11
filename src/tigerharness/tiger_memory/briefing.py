@@ -21,6 +21,8 @@ All written to briefing.tmp/ then mv-swap with briefing/.
 """
 from __future__ import annotations
 
+import logging
+
 import json
 import shutil
 import tempfile
@@ -38,11 +40,15 @@ from .store import (
     Store,
 )
 
+log = logging.getLogger("tigerharness.tiger_memory.briefing")
+
 
 def rebuild_briefing(cfg: Config, store: Store) -> None:
     """Atomic briefing rebuild. No-op shortcut: if journal/ unchanged, skip."""
     if _briefing_up_to_date(store):
+        log.info("briefing rebuild: no-op (journal unchanged)")
         return
+    log.info("briefing rebuild: starting (journal changed)")
 
     # Stage in a temp directory next to briefing/ so the rename is on the
     # same filesystem (atomic on POSIX).

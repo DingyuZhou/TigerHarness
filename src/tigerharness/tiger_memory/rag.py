@@ -15,6 +15,8 @@ next search.
 """
 from __future__ import annotations
 
+import logging
+
 import json
 from pathlib import Path
 from typing import Iterable
@@ -22,6 +24,8 @@ from typing import Iterable
 from .config import Config
 from .embedders import Embedder, chunks, pick_embedder
 from .store import Store
+
+log = logging.getLogger("tigerharness.tiger_memory.rag")
 
 
 def search(cfg: Config, store: Store, *, topic: str, k: int = 10) -> int:

@@ -1,4 +1,4 @@
-"""Tests for __main__.py entrypoints (task_runner and slack_bridge)."""
+"""Tests for __main__.py entrypoints (slack_bridge)."""
 from __future__ import annotations
 
 import importlib.util
@@ -7,22 +7,6 @@ import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-
-class TestTaskRunnerMain:
-    def test_module_exists(self):
-        spec = importlib.util.find_spec("tigerharness.task_runner.__main__")
-        assert spec is not None
-
-    def test_runs_as_subprocess(self):
-        """Verify `python -m tigerharness.task_runner` runs without import errors."""
-        result = subprocess.run(
-            [sys.executable, "-m", "tigerharness.task_runner", "--help"],
-            capture_output=True, text=True, timeout=10,
-        )
-        # --help should exit 0 and show usage
-        assert result.returncode == 0
-        assert "usage" in result.stdout.lower() or "tigerharness" in result.stdout.lower()
 
 
 class TestJournalMain:

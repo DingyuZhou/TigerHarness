@@ -1,7 +1,6 @@
 """Top-level CLI entry point for tigerharness.
 
 Dispatches to sub-package CLIs:
-    tigerharness task-runner <subcommand>
     tigerharness slack-bridge <subcommand>
     tigerharness tiger-memory <subcommand>
     tigerharness journal <subcommand>
@@ -13,6 +12,8 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    from tigerharness._logging import configure_cli_logging
+    configure_cli_logging()
     args = argv if argv is not None else sys.argv[1:]
 
     if not args:
@@ -28,9 +29,6 @@ def main(argv: list[str] | None = None) -> int:
     elif cmd == "dismiss":
         from .dismiss import main as dismiss_main
         return dismiss_main(rest)
-    elif cmd in ("task-runner", "task_runner", "tr"):
-        from .task_runner.cli import main as tr_main
-        return tr_main(rest)
     elif cmd in ("tiger-memory", "tiger_memory", "tm"):
         from .tiger_memory.cli import main as tm_main
         return tm_main(rest)
@@ -61,7 +59,6 @@ def _usage() -> None:
     print("Sub-commands:")
     print("  init               Scaffold a new project (personas, .env, config)")
     print("  dismiss            Interactively tear down a team or persona")
-    print("  task-runner (tr)   Iterative task execution")
     print("  tiger-memory (tm)  Persistent memory management")
     print("  slack-bridge (sb)  Slack notify CLI")
     print("  journal (j)        File-based subscription backend (Phase 1)")

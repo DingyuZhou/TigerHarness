@@ -7,6 +7,8 @@ Drill-down chain (filename-pattern only — no frontmatter pointers):
 """
 from __future__ import annotations
 
+import logging
+
 import os
 import re
 import subprocess
@@ -16,6 +18,8 @@ from pathlib import Path
 from . import frontmatter
 from .config import Config
 from .store import DAILY_RE, MONTHLY_RE, SHORT_RE, WEEKLY_RE, Store
+
+log = logging.getLogger("tigerharness.tiger_memory.drill")
 
 
 # ----- drill ---------------------------------------------------------------

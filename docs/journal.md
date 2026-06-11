@@ -120,7 +120,7 @@ scaffolder less typey:
   `journal new` time with a clear error pointing at the yaml.
 - **Persona `aliases:` per entry** -- a list of alternate names
   (case- and separator-insensitive) that resolve to the canonical
-  persona. Matches `task_runner.personas`. Examples on a team:
+  persona. Matches the personas registry's alias rules. Examples on a team:
 
   ```yaml
   default_persona: Ayako
@@ -292,9 +292,3 @@ on subsequent runs — once you've edited it, it's yours.
 - [`journal-workflow-mode.md`](journal-workflow-mode.md) — the
   Phase 1.5 design: `kind=workflow`, the compile sub-protocol, the
   persona-switching mechanic.
-- [`task-runner.md`](task-runner.md) — the api-backed single-persona
-  runner the subscription backend replaces by default.
-- [`workflow-runner.md`](workflow-runner.md) — the api-backed
-  multi-persona graph runner the subscription workflow mode mirrors
-  in shape (same `orchestration.json` / `steps/` graph; different
-  drive surface).

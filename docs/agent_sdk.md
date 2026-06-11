@@ -7,7 +7,7 @@ underneath it (`claude -p` subprocess today; Anthropic's
 string).
 
 `tigerharness.agent_sdk` is the foundation the other sub-packages build
-on: `task_runner`, `slack_bridge`, and `tiger_memory` all run agents
+on: `slack_bridge` and `tiger_memory` run agents
 through it rather than shelling out to `claude` directly.
 
 ## Concept
@@ -153,7 +153,7 @@ result = await run_with_retry(backend, cfg, prompt, session=session,
   taxonomy for `claude -p`, and re-running the same prompt is never
   destructive. The last exception is re-raised when all attempts fail.
 - `asyncio.CancelledError` propagates immediately (never retried), so a
-  task-runner cancel isn't swallowed by a backoff sleep.
+  a caller's cancel isn't swallowed by a backoff sleep.
 - Each retry boundary is logged so an operator can see how many attempts
   a call took and why it retried.
 
@@ -162,5 +162,5 @@ result = await run_with_retry(backend, cfg, prompt, session=session,
 - `src/tigerharness/agent_sdk/README.md` and
   `agent_sdk/docs/agent_sdk_comparison.md` — design rationale and the
   cross-backend feature comparison.
-- [`task-runner.md`](task-runner.md), [`slack-bridge.md`](slack-bridge.md),
+- [`slack-bridge.md`](slack-bridge.md),
   [`tiger-memory.md`](tiger-memory.md) — consumers of this SDK.

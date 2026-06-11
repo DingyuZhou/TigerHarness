@@ -6,8 +6,6 @@ Covers:
 - slack_bridge/gen_service.py:154 (__main__ guard)
 - slack_bridge/migrate.py:191 (__main__ guard)
 - slack_bridge/notify.py:400 (__main__ guard)
-- task_runner/cli.py:587 (__main__ guard)
-- task_runner/runner.py:1051 (__main__ guard)
 - tiger_memory/cli.py:158 (__main__ guard)
 - init.py:741-744 (EOFError during multi-team prompt)
 """
@@ -81,32 +79,6 @@ class TestMainGuards:
                     compile(
                         "if True:\n    sys.exit(main())\n",
                         "<notify>", "exec",
-                    ),
-                    {"sys": sys_mock, "main": m},
-                )
-                sys_mock.exit.assert_called_once_with(0)
-
-    def test_task_runner_cli_main_guard(self):
-        """task_runner/cli.py:587"""
-        with patch("tigerharness.task_runner.cli.main", return_value=0) as m:
-            with patch("tigerharness.task_runner.cli.sys") as sys_mock:
-                exec(
-                    compile(
-                        "if True:\n    sys.exit(main())\n",
-                        "<cli>", "exec",
-                    ),
-                    {"sys": sys_mock, "main": m},
-                )
-                sys_mock.exit.assert_called_once_with(0)
-
-    def test_runner_main_guard(self):
-        """task_runner/runner.py:1051"""
-        with patch("tigerharness.task_runner.runner.main", return_value=0) as m:
-            with patch("tigerharness.task_runner.runner.sys") as sys_mock:
-                exec(
-                    compile(
-                        "if True:\n    sys.exit(main())\n",
-                        "<runner>", "exec",
                     ),
                     {"sys": sys_mock, "main": m},
                 )

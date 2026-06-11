@@ -31,6 +31,8 @@ Non-interactive use::
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import hashlib
 import json
@@ -40,6 +42,8 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger("tigerharness.init")
 
 # Hashes of *prior shipped* versions of a bundled skill, keyed by skill
 # dir name. On ``tigerharness init --refresh-skills``, an on-disk skill
@@ -162,7 +166,7 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token
 
 _PERSONAS_YAML_PREAMBLE = """\
 # Team: {team}
-# Personas registry for tigerharness.task_runner.
+# Personas registry for tigerharness (journal, slack-bridge).
 #
 # Load this file by pointing the env var at it (absolute or relative path):
 #     export TIGERHARNESS_PERSONAS_CONFIG=path/to/{team}/configs/personas.yaml
@@ -175,7 +179,9 @@ _PERSONAS_YAML_PREAMBLE = """\
 #   - `personas_dir: ../personas` -- prompts live next to this folder
 #   - `cwd: ..` on every persona  -- agents run from the team root
 #   - uncomment `extra.add_dirs: [../skills]` to expose team skills
-# Schema: tigerharness.task_runner.personas.load_personas_config.
+# Schema: top-level `personas_dir` + `personas:` list; each entry has
+# `name`, optional `aliases`, `cwd` (relative to this file), and
+# `prompt_file` (relative to personas_dir, `.md` appended).
 
 personas_dir: ../personas
 
@@ -431,8 +437,6 @@ Top-down, with a clear entry point:
 - Team governance -- mission, scope, permissions, and conventions
   live in `../charter/`, not here. Knowledge is reference material;
   the charter is the operating manual.
-- Task working notes -- the task-runner writes those to
-  `../task_journal/` automatically (gitignored runtime artifact).
 - Personal memory -- use `../memories/<persona>/`.
 - Source code -- use the project repo.
 - Stale content -- prune aggressively.
@@ -444,112 +448,15 @@ configs/.env
 memories/*/briefing/
 memories/*/cache/
 memories/*/state.json
-# task_journal/ is the task-runner's per-task working folder
-# (one markdown file per assigned task). Runtime artifact, not source.
-task_journal/
 # archive/ and journal/ are version-controlled (memory summaries).
 # .gitkeep files inside them ensure the empty dirs are tracked.
 """
 
 # .claude/settings.json -- env vars that Claude Code injects into agent
-# subprocesses, plus the workflow journal write-guard hook. The persona
-# config path lets the task-runner and its detached children auto-discover
-# the team's persona registry; the PreToolUse hook blocks personas from
-# Edit/Write/NotebookEdit-ing the workflow journal's machine-truth files
-# (see tigerharness.workflow_runner.hooks.journal_write_guard).
-
-# Module the PreToolUse hook invokes. Matched (not the full command) when
-# detecting whether an existing settings.json already wires the guard, so a
-# relocated checkout doesn't get a duplicate registration.
-_JOURNAL_GUARD_MODULE = "tigerharness.workflow_runner.hooks.journal_write_guard"
-
-# Tools whose writes the guard inspects. Reads (Read/Grep/Glob) never fire it.
-_JOURNAL_GUARD_MATCHER = "Edit|Write|NotebookEdit"
+# subprocesses. The persona registry path and the compact threshold are
+# seeded here for every new team.
 
 
-def _tigerharness_project_root() -> Path:
-    """Absolute path to the tigerharness project root.
-
-    Used to build the hook's ``uv run --project <root>`` command. Derived
-    from this module's location (``<root>/src/tigerharness/init.py``) so a
-    relocated source checkout still emits a correct command. Assumes a
-    source / editable layout; a pure installed-wheel deployment would rely on
-    the ambient environment's tigerharness instead (out of scope here).
-    """
-    return Path(__file__).resolve().parents[2]
-
-
-def _journal_guard_command(project_root: Path) -> str:
-    """The shell command Claude Code runs for the PreToolUse guard."""
-    return f"uv run --project {project_root} python -m {_JOURNAL_GUARD_MODULE}"
-
-
-def _ensure_journal_guard_hook(settings: dict, project_root: Path) -> bool:
-    """Idempotently register the journal write-guard PreToolUse hook.
-
-    Mutates *settings* in place. Returns True iff a registration was added
-    (i.e. the caller should persist the change). Detection is by module name
-    anywhere in the existing ``PreToolUse`` block, so re-running over an
-    already-wired file is a no-op even if the command's ``--project`` path
-    drifted.
-
-    If a pre-existing ``hooks`` / ``PreToolUse`` is shaped unexpectedly (a
-    hand-mangled settings.json), the merge bails out (returns False, leaves
-    *settings* untouched) rather than crash ``tigerharness init`` -- one odd
-    file must not abort scaffolding the rest of the team.
-    """
-    hooks = settings.get("hooks")
-    if hooks is None:
-        hooks = settings["hooks"] = {}
-    elif not isinstance(hooks, dict):
-        return False
-    pre = hooks.get("PreToolUse")
-    if pre is None:
-        pre = hooks["PreToolUse"] = []
-    elif not isinstance(pre, list):
-        return False
-    if _JOURNAL_GUARD_MODULE in json.dumps(pre):
-        return False
-    pre.append(
-        {
-            "matcher": _JOURNAL_GUARD_MATCHER,
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": _journal_guard_command(project_root),
-                }
-            ],
-        }
-    )
-    return True
-
-
-def _merge_journal_guard_into(settings_path: Path, project_root: Path) -> bool:
-    """Additively add the guard hook to an *existing* settings.json.
-
-    Returns True iff the file was rewritten. A file we can't parse as a JSON
-    object is left untouched -- we never clobber user content we don't
-    understand.
-    """
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    if not isinstance(settings, dict):
-        return False
-    if not _ensure_journal_guard_hook(settings, project_root):
-        return False
-    settings_path.write_text(
-        json.dumps(settings, indent=2) + "\n", encoding="utf-8"
-    )
-    return True
-
-
-# Default proactive auto-compact threshold (% of context window) seeded
-# into a team's settings so a long-cascading drive-journal session compacts
-# instead of handing off for "context heavy". Env-only lever (no
-# settings.json key); lives in the ``env`` block. See
-# docs/.../drive-journal SKILL.md step 7.
 _AUTOCOMPACT_ENV_KEY = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
 _AUTOCOMPACT_DEFAULT_PCT = "50"
 
@@ -743,12 +650,11 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     skills from ``.claude/skills/<name>/SKILL.md``. Scaffolding these
     at ``tigerharness init`` time means every new team gets:
 
-    - ``TIGERHARNESS_PERSONAS_CONFIG`` wired up automatically, so the
-      task-runner and its detached children find the team's personas.
-    - the workflow journal write-guard ``PreToolUse`` hook, so personas
-      can't directly Edit/Write the journal's machine-truth files.
-    - ``slack-notify`` and ``assign-task`` skills, so agents know how
-      to send Slack messages and assign background tasks.
+    - ``TIGERHARNESS_PERSONAS_CONFIG`` wired up automatically, so
+      tigerharness components find the team's personas.
+    - the bundled skills (``drive-journal``, ``journal-new``,
+      ``slack-notify``, ``workflow-append-steps``), so agents know how
+      to drive the journal and send Slack messages.
 
     Skills are read from the ``skills/`` directory shipped inside the
     tigerharness package. If a skill file already exists on disk, it's
@@ -761,14 +667,12 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     # settings.json: create fresh, or additively merge the guard hook into
     # an existing file so a pre-existing team gets the protection too.
     personas_cfg_abs = str((team_dir / "configs" / "personas.yaml").resolve())
-    project_root = _tigerharness_project_root()
     settings_path = team_dir / ".claude" / "settings.json"
     if settings_path.exists():
-        # Existing team: additively top up BOTH the journal-guard hook and
-        # the recommended compact-threshold env (so an already-scaffolded
-        # team adopts them on re-init / --refresh-skills, not just new ones).
-        changed = _merge_journal_guard_into(settings_path, project_root)
-        changed = _ensure_compact_env_in_file(settings_path) or changed
+        # Existing team: additively top up the recommended
+        # compact-threshold env (so an already-scaffolded team adopts it
+        # on re-init / --refresh-skills, not just new ones).
+        changed = _ensure_compact_env_in_file(settings_path)
         if changed:
             created.append(settings_path)
     else:
@@ -782,7 +686,6 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
                 _AUTOCOMPACT_ENV_KEY: _AUTOCOMPACT_DEFAULT_PCT,
             },
         }
-        _ensure_journal_guard_hook(settings, project_root)
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         settings_path.write_text(
             json.dumps(settings, indent=2) + "\n", encoding="utf-8"
@@ -1545,19 +1448,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         sync = install_bundled_skills(team_dir, refresh=True)
         # Bring an existing team's settings current too (idempotent /
-        # no-clobber): the journal-guard hook + the recommended compact
-        # threshold. So one command adopts both the new skills AND the
-        # recommended config.
+        # no-clobber): the recommended compact threshold. So one command
+        # adopts both the new skills AND the recommended config.
         settings_path = team_dir / ".claude" / "settings.json"
         settings_changed = False
         if settings_path.exists():
-            project_root = _tigerharness_project_root()
-            settings_changed = _merge_journal_guard_into(
-                settings_path, project_root
-            )
-            settings_changed = (
-                _ensure_compact_env_in_file(settings_path) or settings_changed
-            )
+            settings_changed = _ensure_compact_env_in_file(settings_path)
         if not sync.changed and not settings_changed:
             msg = (
                 f"Nothing to do -- all bundled skills + settings already "
@@ -1724,7 +1620,7 @@ def main(argv: list[str] | None = None) -> int:
 
     personas_cfg = team_dir / "configs" / "personas.yaml"
     print()
-    print("  To run tasks:")
+    print("  To run tasks (subscription journal backend):")
     print(f"    export TIGERHARNESS_PERSONAS_CONFIG={_format_path(personas_cfg, search_root)}")
-    print(f"    {prefix}tigerharness task-runner assign --to {persona} --prompt '...' --iters 5")
+    print(f"    {prefix}tigerharness journal new --kind task --persona {persona} --prd <brief.md>")
     return 0

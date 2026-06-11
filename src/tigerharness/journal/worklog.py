@@ -35,6 +35,8 @@ half-written file.
 
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import re
@@ -44,6 +46,8 @@ from pathlib import Path
 
 from tigerharness.journal.ids import slugify
 from tigerharness.journal.paths import JournalPaths
+
+log = logging.getLogger("tigerharness.journal.worklog")
 
 
 _FM_DELIM = "---"

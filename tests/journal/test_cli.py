@@ -30,7 +30,7 @@ def _seed(paths: JournalPaths, task_id: str, **over) -> None:
 
 def _sf(id, persona, role, on_approve, on_revise, on_block):
     """A minimal valid StepFrontmatter for graph seeding."""
-    from tigerharness.workflow_runner.models import StepFrontmatter
+    from tigerharness.journal.wfcore.models import StepFrontmatter
     return StepFrontmatter(
         id=id, persona=persona, role=role,
         on_approve=on_approve, on_revise=on_revise, on_block=on_block,
@@ -49,7 +49,7 @@ def _seed_workflow_graph(
     writes, so step-done's readers see real on-disk shapes."""
     from tigerharness.journal.compile_cli import _render_frontmatter
     from tigerharness.journal.models import CompilePhase
-    from tigerharness.workflow_runner.models import (
+    from tigerharness.journal.wfcore.models import (
         Orchestration,
         WorkflowConfig,
     )
@@ -340,7 +340,7 @@ class TestCmdNew:
         """Iteration on the review fix: explicit --persona is NOT
         roster-validated. Phase 1 behaviour preserved -- the operator
         typing the value seconds ago can correct the late "no
-        prompt.md" error from the task-runner. Only the default_persona
+        prompt.md" error from the legacy loader. Only the default_persona
         fallback path gets the safety gate (it's a yaml typo that
         sticks around).
         """

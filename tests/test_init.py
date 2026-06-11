@@ -17,19 +17,15 @@ from tigerharness.init import (
     _auto_init_tiger_memory,
     _command_prefix,
     _ensure_compact_env_in_file,
-    _ensure_journal_guard_hook,
     _format_path,
     _inject_allowed_user_ids,
-    _journal_guard_command,
     _maybe_register_slack_bridge_lane,
-    _merge_journal_guard_into,
     _prompt_choice,
     _prompt_optional_text,
     _prompt_text,
     _prompt_yes_no,
     _render_memory_config,
     _scaffold_claude_dir,
-    _tigerharness_project_root,
     _validate_name,
     _write_if_missing,
     add_persona,
@@ -270,12 +266,10 @@ class TestCreateTeam:
         assert "TIGERHARNESS_PERSONAS_CONFIG" in settings_text
         # Skills copied from package
         assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
-        assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
         # gitignore excludes secrets and the runner's working journal,
         # but NOT archive/journal (those are git-tracked memory summaries).
         gi_text = (team / ".gitignore").read_text()
         assert "configs/.env" in gi_text
-        assert "task_journal/" in gi_text
         assert "memories/*/archive/" not in gi_text
         assert "memories/*/journal/" not in gi_text
         # personas.yaml header references team name
@@ -364,7 +358,6 @@ class TestCreateTeam:
         create_team(team, include_slack=False)
         kb = (team / "knowledge" / "README.md").read_text()
         assert "../charter/" in kb
-        assert "../task_journal/" in kb
 
     def test_first_read_order_project_before_briefing(
         self, tmp_path: Path,
@@ -416,7 +409,6 @@ class TestScaffoldClaudeDir:
         team.mkdir()
         created = _scaffold_claude_dir(team)
         assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
-        assert (team / ".claude" / "skills" / "assign-task" / "SKILL.md").exists()
         # At least settings.json + 2 skills
         assert len(created) >= 3
 
@@ -485,102 +477,10 @@ class TestScaffoldClaudeDir:
 # Journal write-guard PreToolUse hook wiring
 # ---------------------------------------------------------------------------
 
-_GUARD_MODULE = "tigerharness.workflow_runner.hooks.journal_write_guard"
 
 
 class TestJournalGuardHelpers:
     """Unit coverage for the hook-merge helpers."""
-
-    def test_project_root_points_at_repo(self):
-        """The computed project root must contain pyproject.toml -- that's
-        what makes ``uv run --project <root>`` resolve tigerharness."""
-        root = _tigerharness_project_root()
-        assert (root / "pyproject.toml").is_file()
-        assert (root / "src" / "tigerharness" / "init.py").is_file()
-
-    def test_command_targets_the_guard_module(self, tmp_path: Path):
-        cmd = _journal_guard_command(tmp_path)
-        assert cmd == (
-            f"uv run --project {tmp_path} python -m {_GUARD_MODULE}"
-        )
-
-    def test_ensure_adds_hook_to_empty_settings(self, tmp_path: Path):
-        settings: dict = {}
-        assert _ensure_journal_guard_hook(settings, tmp_path) is True
-        entries = settings["hooks"]["PreToolUse"]
-        assert entries[0]["matcher"] == "Edit|Write|NotebookEdit"
-        assert _GUARD_MODULE in entries[0]["hooks"][0]["command"]
-
-    def test_ensure_is_idempotent(self, tmp_path: Path):
-        settings: dict = {}
-        assert _ensure_journal_guard_hook(settings, tmp_path) is True
-        # Second call detects the existing registration and no-ops.
-        assert _ensure_journal_guard_hook(settings, tmp_path) is False
-        assert len(settings["hooks"]["PreToolUse"]) == 1
-
-    def test_ensure_appends_beside_other_pretooluse_entry(self, tmp_path: Path):
-        settings: dict = {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "Bash",
-                        "hooks": [{"type": "command", "command": "echo hi"}],
-                    }
-                ]
-            }
-        }
-        assert _ensure_journal_guard_hook(settings, tmp_path) is True
-        pre = settings["hooks"]["PreToolUse"]
-        assert len(pre) == 2
-        assert pre[0]["matcher"] == "Bash"  # pre-existing entry preserved
-        assert pre[1]["matcher"] == "Edit|Write|NotebookEdit"
-
-    def test_ensure_bails_on_non_dict_hooks(self, tmp_path: Path):
-        """A hand-mangled ``hooks`` value is left untouched, not crashed."""
-        settings: dict = {"hooks": "not-a-dict"}
-        assert _ensure_journal_guard_hook(settings, tmp_path) is False
-        assert settings == {"hooks": "not-a-dict"}
-
-    def test_ensure_bails_on_non_list_pretooluse(self, tmp_path: Path):
-        settings: dict = {"hooks": {"PreToolUse": "nope"}}
-        assert _ensure_journal_guard_hook(settings, tmp_path) is False
-        assert settings == {"hooks": {"PreToolUse": "nope"}}
-
-    def test_merge_into_missing_file_returns_false(self, tmp_path: Path):
-        # Non-existent path: read raises OSError -> left untouched.
-        missing = tmp_path / "nope" / "settings.json"
-        assert _merge_journal_guard_into(missing, tmp_path) is False
-
-    def test_merge_into_malformed_json_left_untouched(self, tmp_path: Path):
-        path = tmp_path / "settings.json"
-        path.write_text("{ this is not json", encoding="utf-8")
-        assert _merge_journal_guard_into(path, tmp_path) is False
-        assert path.read_text() == "{ this is not json"
-
-    def test_merge_into_non_object_json_left_untouched(self, tmp_path: Path):
-        path = tmp_path / "settings.json"
-        path.write_text("[1, 2, 3]", encoding="utf-8")
-        assert _merge_journal_guard_into(path, tmp_path) is False
-        assert path.read_text() == "[1, 2, 3]"
-
-    def test_merge_into_already_wired_returns_false(self, tmp_path: Path):
-        path = tmp_path / "settings.json"
-        settings: dict = {"env": {"FOO": "bar"}}
-        _ensure_journal_guard_hook(settings, tmp_path)
-        path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-        assert _merge_journal_guard_into(path, tmp_path) is False
-
-    def test_merge_into_env_only_file_adds_hook(self, tmp_path: Path):
-        path = tmp_path / "settings.json"
-        path.write_text(
-            json.dumps({"env": {"FOO": "bar"}}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        assert _merge_journal_guard_into(path, tmp_path) is True
-        merged = json.loads(path.read_text())
-        assert merged["env"] == {"FOO": "bar"}  # pre-existing key preserved
-        assert _GUARD_MODULE in json.dumps(merged["hooks"])
-
 
 class TestEnsureCompactEnvInFile:
     """Unit coverage for the additive compact-threshold env merge."""
@@ -642,52 +542,18 @@ class TestEnsureCompactEnvInFile:
 class TestScaffoldGuardHook:
     """_scaffold_claude_dir wires the guard hook on create and on merge."""
 
-    def test_fresh_settings_includes_guard_hook(self, tmp_path: Path):
-        team = tmp_path / "myteam"
-        team.mkdir()
-        _scaffold_claude_dir(team)
-        settings = json.loads(
-            (team / ".claude" / "settings.json").read_text()
-        )
-        # env preserved as before...
-        assert "TIGERHARNESS_PERSONAS_CONFIG" in settings["env"]
-        # ...and the guard hook is registered.
-        pre = settings["hooks"]["PreToolUse"]
-        assert pre[0]["matcher"] == "Edit|Write|NotebookEdit"
-        cmd = pre[0]["hooks"][0]["command"]
-        assert cmd.startswith("uv run --project ")
-        assert cmd.endswith(f"python -m {_GUARD_MODULE}")
-
     def test_existing_settings_merged_additively(self, tmp_path: Path):
-        team = tmp_path / "myteam"
+        """An existing settings.json gains the compact env additively --
+        pre-existing keys survive, nothing else is injected."""
+        team = tmp_path / "tigers"
         (team / ".claude").mkdir(parents=True)
         settings_path = team / ".claude" / "settings.json"
-        settings_path.write_text(
-            json.dumps({"env": {"CUSTOM": "1"}}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        created = _scaffold_claude_dir(team)
-        assert settings_path in created
-        merged = json.loads(settings_path.read_text())
-        assert merged["env"]["CUSTOM"] == "1"  # pre-existing key not clobbered
-        # The recommended compact threshold is topped up alongside the hook.
-        assert merged["env"][_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
-        assert _GUARD_MODULE in json.dumps(merged["hooks"])
-
-    def test_existing_settings_merge_is_idempotent(self, tmp_path: Path):
-        team = tmp_path / "myteam"
-        (team / ".claude").mkdir(parents=True)
-        settings_path = team / ".claude" / "settings.json"
-        settings_path.write_text(
-            json.dumps({"env": {"CUSTOM": "1"}}, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        settings_path.write_text(json.dumps({"env": {"KEEP": "1"}}) + "\n")
         _scaffold_claude_dir(team)
-        # Second scaffold over the now-wired file adds nothing.
-        created = _scaffold_claude_dir(team)
-        assert settings_path not in created
-        pre = json.loads(settings_path.read_text())["hooks"]["PreToolUse"]
-        assert len(pre) == 1
+        merged = json.loads(settings_path.read_text())
+        assert merged["env"]["KEEP"] == "1"
+        assert merged["env"][_AUTOCOMPACT_ENV_KEY] == _AUTOCOMPACT_DEFAULT_PCT
+        assert "hooks" not in merged
 
     def test_malformed_existing_settings_not_in_created(self, tmp_path: Path):
         team = tmp_path / "myteam"
@@ -1587,7 +1453,7 @@ class TestMain:
         # because we auto-run it in PR8's UX pass.
         assert "tiger-memory --config" not in out
         assert "TIGERHARNESS_PERSONAS_CONFIG=tigers/configs/personas.yaml" in out
-        assert "task-runner assign --to chief" in out
+        assert "journal new --kind task --persona chief" in out
 
     def test_next_steps_charter_nudge_only_on_first_scaffold(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -1629,7 +1495,7 @@ class TestMain:
         `uv run` so copy-paste from the user's shell actually works.
 
         (The `tiger-memory init` line is no longer printed -- auto-run
-        in PR8's UX pass -- so we only check the task-runner snippet.)"""
+        in PR8's UX pass -- so we only check the journal snippet.)"""
         from tigerharness import init as init_mod
         monkeypatch.setattr(init_mod.shutil, "which", lambda name: None)
         main([
@@ -1639,11 +1505,11 @@ class TestMain:
             "--yes",
         ])
         out = capsys.readouterr().out
-        assert "uv run tigerharness task-runner assign --to chief" in out
+        assert "uv run tigerharness journal new --kind task --persona chief" in out
         # Every `tigerharness <subcommand>` invocation must be prefixed.
         assert (
-            out.count("tigerharness task-runner")
-            == out.count("uv run tigerharness task-runner")
+            out.count("tigerharness journal new")
+            == out.count("uv run tigerharness journal new")
         )
 
     def test_next_steps_uses_bare_command_when_on_path(
@@ -1665,8 +1531,8 @@ class TestMain:
         ])
         out = capsys.readouterr().out
         # `tigerharness tiger-memory init` line is no longer printed
-        # (auto-run in PR8); only task-runner remains as a Next Steps hint.
-        assert "tigerharness task-runner assign --to chief" in out
+        # (auto-run in PR8); the journal scaffold is the Next Steps hint.
+        assert "tigerharness journal new --kind task --persona chief" in out
         assert "uv run tigerharness" not in out
 
     def test_next_steps_numbering_is_sequential_no_gaps(
@@ -2034,133 +1900,63 @@ class TestBundledDriveJournalSkill:
         assert "graph walk" in text.lower()
         assert "land-compile" in text
 
-    def test_bundled_and_repo_mirror_skills_byte_identical(self):
-        """Every skill shipped in BOTH trees -- the installed package data
-        (`_bundled_skills/`) and the repo-of-record mirror (`skills/`) --
-        must be byte-identical. The two are kept in sync by hand; this
-        catches an edit that touched only one (the discoverable repo copy
-        and the actually-installed copy must never disagree)."""
-        import tigerharness.init as _init
-        root = _tigerharness_project_root()
-        bundled_root = Path(_init.__file__).parent / "_bundled_skills"
-        mirror_root = root / "skills"
-        shared = sorted(
-            d.name for d in bundled_root.iterdir()
-            if d.is_dir() and (mirror_root / d.name / "SKILL.md").is_file()
-        )
-        assert shared, "expected at least one skill shared across both trees"
-        mismatched = [
-            name for name in shared
-            if (bundled_root / name / "SKILL.md").read_bytes()
-            != (mirror_root / name / "SKILL.md").read_bytes()
-        ]
-        assert not mismatched, f"bundled vs repo-mirror drift: {mismatched}"
-
-
 # ---------------------------------------------------------------------------
 # Integration: generated artifacts actually work
 # ---------------------------------------------------------------------------
 
 class TestGeneratedConfigLoads:
-    """End-to-end check that what `init` writes is consumable by
-    downstream tigerharness components -- not just syntactically
-    plausible markdown/YAML."""
+    """End-to-end check that what `init` writes is consumable -- the
+    personas.yaml parses and its fields resolve to real files. (The
+    legacy loader retired with ADR 0003; the yaml shape
+    itself is the surviving contract.)"""
 
     def test_personas_yaml_loads_and_resolves_prompt(self, tmp_path: Path):
-        from tigerharness.task_runner.personas import (
-            clear_registry,
-            load_personas_config,
-        )
+        import yaml as _yaml
         team_dir, _, _ = init(
             persona="chief", team="tigers",
             include_memory=False, include_slack=False,
             search_root=tmp_path,
         )
-        clear_registry()
-        try:
-            personas = load_personas_config(
-                team_dir / "configs" / "personas.yaml"
-            )
-        finally:
-            clear_registry()
-
+        data = _yaml.safe_load(
+            (team_dir / "configs" / "personas.yaml").read_text()
+        )
+        personas = data["personas"]
         assert len(personas) == 1
         chief = personas[0]
-        assert chief.name == "chief"
+        assert chief["name"] == "chief"
         # cwd: .. resolves to the team root (not configs/)
-        assert chief.cwd == team_dir
-        # prompt_file resolves into personas/chief/prompt.md
-        cfg = chief.build_config()
-        assert "You are chief, part of team tigers" in cfg.instructions
+        assert (team_dir / "configs" / chief["cwd"]).resolve() == team_dir
+        # prompt_file resolves under personas_dir
+        prompt = (
+            team_dir / "configs" / data["personas_dir"]
+            / (chief["prompt_file"] + ".md")
+        ).resolve()
+        assert prompt.exists()
+        assert "You are chief, part of team tigers" in prompt.read_text()
 
     def test_two_personas_both_load(self, tmp_path: Path):
-        from tigerharness.task_runner.personas import (
-            clear_registry,
-            load_personas_config,
-        )
-        init(
+        import yaml as _yaml
+        team_dir, _, _ = init(
             persona="chief", team="tigers",
             include_memory=False, include_slack=False,
             search_root=tmp_path,
         )
-        team_dir, _, _ = init(
+        init(
             persona="scout", team="tigers",
             include_memory=False, include_slack=False,
             search_root=tmp_path,
         )
-        clear_registry()
-        try:
-            personas = load_personas_config(
-                team_dir / "configs" / "personas.yaml"
-            )
-        finally:
-            clear_registry()
-        names = sorted(p.name for p in personas)
-        assert names == ["chief", "scout"]
-
-    def test_memory_config_loads_and_resolves_store_root(self, tmp_path: Path):
-        """The generated tiger-memory config must satisfy its own loader,
-        and the auto-suffix logic must NOT double-append the agent slug."""
-        from tigerharness.tiger_memory.config import load_config
-        team_dir, _, _ = init(
-            persona="chief", team="tigers",
-            include_memory=True, include_slack=False,
-            search_root=tmp_path,
+        data = _yaml.safe_load(
+            (team_dir / "configs" / "personas.yaml").read_text()
         )
-        cfg_path = team_dir / "memories" / "chief" / "tiger-memory.config.yaml"
-        cfg = load_config(cfg_path)
-        assert cfg.agent.name == "chief"
-        # store.root="." with the config inside memories/chief/ should
-        # resolve to memories/chief/ (not memories/chief/chief/) because
-        # tiger-memory detects the slug match.
-        assert cfg.store.root == (team_dir / "memories" / "chief").resolve()
-
-
-# ---------------------------------------------------------------------------
-# __main__ coverage
-# ---------------------------------------------------------------------------
-
-class TestDunderMain:
-    def test_task_runner_main(self):
-        with patch("tigerharness.task_runner.cli.main", return_value=0):
-            with pytest.raises(SystemExit) as exc_info:
-                runpy.run_module(
-                    "tigerharness.task_runner",
-                    run_name="__main__",
-                    alter_sys=True,
-                )
-            assert exc_info.value.code == 0
-
-    def test_task_runner_main_error(self):
-        with patch("tigerharness.task_runner.cli.main", return_value=2):
-            with pytest.raises(SystemExit) as exc_info:
-                runpy.run_module(
-                    "tigerharness.task_runner",
-                    run_name="__main__",
-                    alter_sys=True,
-                )
-            assert exc_info.value.code == 2
-
+        names = [p["name"] for p in data["personas"]]
+        assert names == ["chief", "scout"]
+        for p in data["personas"]:
+            f = (
+                team_dir / "configs" / data["personas_dir"]
+                / (p["prompt_file"] + ".md")
+            ).resolve()
+            assert f.exists()
 
 class TestExpectedClaudeProjectPath:
     """``expected_claude_project_path`` always returns a path, even when

@@ -37,6 +37,8 @@ team's Slack bridge.
 """
 from __future__ import annotations
 
+import logging
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +49,8 @@ from .bridge import (
     build_persona_agent_config,
 )
 from .config import normalize_tiger_memory_trigger
+
+log = logging.getLogger("tigerharness.slack_bridge.multi")
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +257,7 @@ def _build_persona_slot(
 # ---------------------------------------------------------------------------
 
 def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
+    log.info("building lane %r", lane_name)
     team_dir = _resolve_team_dir(index_dir, lane_name)
     fragment_path = team_dir / "configs" / "slack-bridge.yaml"
     if not fragment_path.exists():

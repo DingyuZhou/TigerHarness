@@ -334,7 +334,7 @@ def _iter_events(jsonl: Path) -> Iterator[dict]:
                     continue
     except OSError as exc:
         import logging
-        logging.getLogger("tigerharness.tiger_memory.sources").warning(
+        logging.getLogger("tigerharness.tiger_memory.sources.claude_transcript").warning(
             "unreadable JSONL %s: %s", jsonl, exc,
         )
         return

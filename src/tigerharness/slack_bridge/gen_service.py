@@ -17,9 +17,13 @@ explaining the manual setup.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import sys
 from pathlib import Path
+
+log = logging.getLogger("tigerharness.slack_bridge.gen_service")
 
 
 def _is_linux() -> bool:

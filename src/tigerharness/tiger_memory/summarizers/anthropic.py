@@ -10,6 +10,8 @@ same policy slack-bridge already uses).
 """
 from __future__ import annotations
 
+import logging
+
 import asyncio
 import os
 import tempfile
@@ -18,6 +20,8 @@ from pathlib import Path
 from tigerharness.agent_sdk import AgentConfig, get_backend, run_with_retry
 
 from .base import Summarizer, SummarizerError
+
+log = logging.getLogger("tigerharness.tiger_memory.summarizers.anthropic")
 
 
 # Default cwd for `claude -p` subprocesses spawned by this summarizer.

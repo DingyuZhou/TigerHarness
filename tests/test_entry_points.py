@@ -3,13 +3,6 @@
 from __future__ import annotations
 
 
-def test_task_runner_main_module_exists():
-    """Verify the __main__ module exists and has expected structure."""
-    import importlib
-    spec = importlib.util.find_spec("tigerharness.task_runner.__main__")
-    assert spec is not None
-
-
 def test_slack_bridge_main_module_exists():
     import importlib
     spec = importlib.util.find_spec("tigerharness.slack_bridge.__main__")
