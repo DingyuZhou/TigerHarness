@@ -63,6 +63,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         # per-persona-memory skill (origin/main after PR #43/#44, before
         # the cascade redesign merged in) -- what Shohoku has on disk now.
         "25d2c223c976e14ed4441660d6fb064fbaedb65a898f65250a4fc0bc1447cb6c",
+        # pre-compaction-redesign skill (step 7 still told drivers to
+        # rely on the ~50% mid-task auto-compaction; retired
+        # 2026-06-11) -- teams that refreshed before the redesign.
+        "3ea99c3d99de7f6cecd7185d8b1769bf907b02f4967466a445998eeee19e1f17",
     },
 }
 

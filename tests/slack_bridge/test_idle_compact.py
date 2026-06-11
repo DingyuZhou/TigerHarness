@@ -61,6 +61,12 @@ class TestDisabledDefaultFirst:
     def test_default_dataclass_is_disabled(self):
         assert IdleCompactConfig().enabled is False
 
+    def test_default_threshold_is_30_percent(self):
+        # The Operator-specified default (compaction-redesign d3):
+        # 0.30, in the dataclass AND via the env path with no
+        # threshold variable set.
+        assert IdleCompactConfig().threshold_fraction == 0.30
+
 
 class TestConfigParsing:
     def test_enabled_without_root_disables_with_warning(self, caplog):
