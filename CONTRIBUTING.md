@@ -21,7 +21,12 @@ uv run pytest --cov=tigerharness --cov-report=term-missing
 uv run pytest tests/tiger_memory/test_lifecycle_full.py -v
 ```
 
-Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[tool.coverage.report] fail_under = 100`). Current: **100.00%** (1700+ tests).
+Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[tool.coverage.report] fail_under = 100`). Current: **100.00%** (2500+ tests).
+
+> **Trap:** plain `uv run pytest` does NOT enforce the floor -- the
+> gate only fires with `--cov` (second command above). A green plain
+> run proves tests pass, not that coverage holds. CI runs the gated
+> form.
 
 ## Project structure
 
