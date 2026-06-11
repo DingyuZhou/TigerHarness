@@ -14,6 +14,7 @@ jobs:
   test:
     name: pytest (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -31,4 +32,6 @@ jobs:
         run: uv sync --extra all
 
       - name: Run tests with the coverage gate
-        run: uv run pytest
+        # Plain pytest does NOT enforce the floor (see CONTRIBUTING's
+        # trap note) -- the gate only fires with --cov.
+        run: uv run pytest --cov=tigerharness --cov-report=term
