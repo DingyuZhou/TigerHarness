@@ -181,9 +181,13 @@ once the graph lands — see
 [`journal-workflow-mode.md`](journal-workflow-mode.md) and
 [`journal.md`](journal.md).
 
-`<task-id>` format mirrors the workflow-runner:
-`<YYYYMMDD>-<short-slug>-<8-char-uuid>`, e.g.
-`20260602-subscription-backend-7f2a9c14`.
+`<task-id>` format:
+`<YYYYMMDD>-<HHmmSS>-<short-slug>-<8-char-uuid>`, e.g.
+`20260602-143052-subscription-backend-7f2a9c14`. The timestamp is
+UTC; the time component makes same-day ids sort in creation order.
+Legacy date-only ids (`<YYYYMMDD>-<slug>-<uuid8>`) remain valid and
+coexist with no migration — ids are never parsed, ordering is plain
+lexicographic.
 
 The `active/` and `done/` split is what keeps the journal lean: the
 driver only ever reads `active/`, so archiving finished tasks bounds
@@ -199,7 +203,7 @@ keep `journal/OPERATING.md`.
 
 ```json
 {
-  "id": "20260602-subscription-backend-7f2a9c14",
+  "id": "20260602-143052-subscription-backend-7f2a9c14",
   "title": "Add the subscription backend",
   "kind": "task",
   "state": "in_progress",
@@ -215,7 +219,7 @@ keep `journal/OPERATING.md`.
 
 | Field | Type | Set by | Purpose |
 |---|---|---|---|
-| `id` | string | scaffolder | `<YYYYMMDD>-<slug>-<uuid8>`. `slug` = ASCII-lowercase-hyphen slugified `--title` (or first H1 of the PRD), max 40 chars. `uuid8` = 8 hex chars from `secrets.token_hex(4)`. On collision the scaffolder regenerates the uuid once then hard-errors. Path-safety enforced (no `/`, no `..`, no hidden-file prefix). |
+| `id` | string | scaffolder | `<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>` (UTC; legacy date-only ids remain valid). `slug` = ASCII-lowercase-hyphen slugified `--title` (or first H1 of the PRD), max 40 chars. `uuid8` = 8 hex chars from `secrets.token_hex(4)`. On collision the scaffolder regenerates the uuid once then hard-errors. Path-safety enforced (no `/`, no `..`, no hidden-file prefix). |
 | `title` | string, required | scaffolder | Human label. Source: `--title` arg, else first H1 of the PRD, else `"task"`. |
 | `kind` | enum: `"task"` (Phase 1) or `"workflow"` (Phase 1.5+) | scaffolder | Phase 1 ships `task`; Phase 1.5 added `workflow` -- see [`journal-workflow-mode.md`](journal-workflow-mode.md). |
 | `persona` | string, required for `kind=task` | scaffolder | The persona this task is assigned to (must exist in the team's persona registry). |

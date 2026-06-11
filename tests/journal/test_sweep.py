@@ -303,3 +303,58 @@ class TestSweep:
         assert [x.id for x in result.in_progress_idle] == ["legacy"]
         assert result.in_progress_busy == []
         assert result.in_progress_crashed == []
+
+    def test_same_day_pending_tasks_actionable_in_scheduled_order(
+        self, paths,
+    ):
+        """End-to-end feature pin for the HHmmSS id prefix: same-day
+        pending tasks flow through list_active_ids() -> result.pending
+        -> actionable() in their scheduled (time-of-day) order. Guards
+        the chain against a future re-sort of pending silently
+        regressing the scheduled-sequence promise."""
+        import datetime as dt
+
+        from tigerharness.journal.ids import new_task_id
+
+        day = dict(year=2026, month=6, day=11, tzinfo=dt.timezone.utc)
+        first = new_task_id(
+            "zz scheduled first", now=dt.datetime(hour=9, **day),
+        )
+        second = new_task_id(
+            "mm scheduled second",
+            now=dt.datetime(hour=9, second=1, **day),
+        )
+        third = new_task_id(
+            "aa scheduled third",
+            now=dt.datetime(hour=12, minute=30, **day),
+        )
+        # Seed out of order; sort must come from the id, not insertion.
+        for tid in (third, first, second):
+            _write_status(paths, tid, state=State.PENDING)
+        result = sweep(paths, now="2026-06-11T13:00:00Z")
+        assert [s.id for s in result.actionable()] == [
+            first, second, third,
+        ]
+
+    def test_legacy_and_new_format_ids_coexist(self, paths):
+        """Mixed-format journal: a legacy date-only id lists, sweeps,
+        and orders lexicographically next to new-format ids (the
+        accepted, documented interleave) with no migration."""
+        import datetime as dt
+
+        from tigerharness.journal.ids import new_task_id
+
+        legacy = "20260611-add-legacy-task-12345678"
+        new = new_task_id(
+            "new format task",
+            now=dt.datetime(
+                2026, 6, 11, 14, 30, 52, tzinfo=dt.timezone.utc,
+            ),
+        )
+        for tid in (legacy, new):
+            _write_status(paths, tid, state=State.PENDING)
+        result = sweep(paths, now="2026-06-11T15:00:00Z")
+        # Both classify as pending; order is plain lexicographic:
+        # digit (1 of 143052) < letter (a of add-...).
+        assert [s.id for s in result.pending] == sorted([legacy, new])
+        assert [s.id for s in result.pending] == [new, legacy]

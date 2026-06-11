@@ -64,14 +64,50 @@ class TestNewTaskId:
             "Hello world",
             now=dt.datetime(2026, 6, 2, tzinfo=dt.timezone.utc),
         )
-        # <YYYYMMDD>-<slug>-<uuid8>
-        assert re.match(r"^20260602-hello-world-[0-9a-f]{8}$", tid)
+        # <YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>
+        assert re.match(r"^20260602-000000-hello-world-[0-9a-f]{8}$", tid)
+
+    def test_time_of_day_flows_through_verbatim(self):
+        """An injected tz-aware clock lands in the id exactly: the
+        HHmmSS component comes from the same strftime as the date, so
+        14:30:52 UTC produces the literal 143052."""
+        tid = new_task_id(
+            "x",
+            now=dt.datetime(2026, 6, 2, 14, 30, 52, tzinfo=dt.timezone.utc),
+        )
+        assert tid.startswith("20260602-143052-")
 
     def test_now_default_uses_utc(self):
         """No ``now`` injected -> default uses utcnow; just verify the
-        date prefix has the right shape."""
+        timestamp prefix has the right shape."""
         tid = new_task_id("anything")
-        assert re.match(r"^\d{8}-[a-z0-9-]+-[0-9a-f]{8}$", tid)
+        assert re.match(r"^\d{8}-\d{6}-[a-z0-9-]+-[0-9a-f]{8}$", tid)
+
+    def test_same_second_ids_stay_unique(self):
+        """Two ids minted within the same second share the full
+        timestamp but differ in the uuid8 suffix; their relative sort
+        order within that second is the uuid's accident, by design."""
+        when = dt.datetime(2026, 6, 2, 9, 0, 0, tzinfo=dt.timezone.utc)
+        a = new_task_id("same second", now=when)
+        b = new_task_id("same second", now=when)
+        assert a != b
+        assert a.startswith("20260602-090000-")
+        assert b.startswith("20260602-090000-")
+
+    def test_same_day_ids_sort_in_scheduled_order(self):
+        """The feature: same-day new-format ids order by time of day
+        under a plain lexicographic sort."""
+        day = dict(year=2026, month=6, day=2, tzinfo=dt.timezone.utc)
+        nine = new_task_id("zzz late slug", now=dt.datetime(hour=9, **day))
+        nine01 = new_task_id(
+            "mmm mid slug",
+            now=dt.datetime(hour=9, second=1, **day),
+        )
+        noonish = new_task_id(
+            "aaa early slug",
+            now=dt.datetime(hour=12, minute=30, **day),
+        )
+        assert sorted([noonish, nine01, nine]) == [nine, nine01, noonish]
 
     def test_uniqueness_in_a_burst(self):
         """Two consecutive mints for the same slug at the same instant
@@ -89,7 +125,7 @@ class TestNewTaskId:
             slug_overrider="short-slug",
             now=dt.datetime(2026, 6, 2, tzinfo=dt.timezone.utc),
         )
-        assert tid.startswith("20260602-short-slug-")
+        assert tid.startswith("20260602-000000-short-slug-")
 
     def test_collision_retries_once_then_succeeds(self):
         """First proposed id collides, second succeeds. The exists_check
