@@ -677,6 +677,36 @@ class TestPersonaPlanGapAudit:
         )
         assert any("20260611-x-abc" in r for r in plan.manual_reminders)
 
+    def test_workflow_yaml_unreadable_returns_empty(
+        self, tmp_path: Path,
+    ) -> None:
+        # OSError branch: a directory where the file should be.
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        (team_dir / "configs" / "workflow.yaml").mkdir()
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert not any(
+            "compile_personas" in r for r in plan.manual_reminders
+        )
+
+    def test_active_task_other_persona_not_listed(
+        self, tmp_path: Path,
+    ) -> None:
+        # The non-matching valid-status loop branch.
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        tdir = team_dir / "journal" / "active" / "20260611-y-zzz"
+        tdir.mkdir(parents=True)
+        (tdir / "status.json").write_text(
+            '{"persona": "ayako", "state": "pending"}'
+        )
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert not any(
+            "journal/active" in r for r in plan.manual_reminders
+        )
+
     def test_no_journal_dir_no_task_reminder(self, tmp_path: Path) -> None:
         _make_team(tmp_path, "tigers", ["ayako", "anzai"])
         plan = build_persona_plan(
