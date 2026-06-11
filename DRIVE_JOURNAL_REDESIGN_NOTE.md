@@ -1,6 +1,6 @@
 # drive-journal redesign — implementation note (2026-06-08, Anzai)
 
-Worktree: `/home/tigerleap/projects/tigerharness-dj-redesign`
+Worktree: `<checkout-parent>/tigerharness-dj-redesign` (historical note; worktree long removed)
 Branch: `work/2026-06-06... → work/2026-06-08-drive-journal-cascade` off
 `origin/main` (cb38fd2). **Not pushed.** Main checkout untouched, so you
 can keep working there in parallel.

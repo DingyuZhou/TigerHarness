@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from tigerharness.init import (
+    _scaffold_repos_yaml,
     _AUTOCOMPACT_DEFAULT_PCT,
     _AUTOCOMPACT_ENV_KEY,
     _append_lane_to_slack_bridge_index,
@@ -402,7 +403,139 @@ class TestScaffoldClaudeDir:
         assert settings in created
         text = settings.read_text()
         assert "TIGERHARNESS_PERSONAS_CONFIG" in text
-        assert "myteam" in text
+        # Team-root-relative on purpose (T6 portability): the same
+        # checked-in settings file must work on every machine.
+        assert '"configs/personas.yaml"' in text
+        assert "myteam" not in text
+
+    def test_add_persona_backfills_repos_yaml(self, tmp_path: Path):
+        # Sakuragi (b2 defense): an existing pre-T6 team that re-runs
+        # init to add a persona must adopt repos.yaml -- create_team
+        # is not the only door into an aging team.
+        team = tmp_path / "teams" / "oldteam"
+        (team / "configs").mkdir(parents=True)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas_dir: ../personas\npersonas: []\n"
+        )
+        add_persona(team, "newbie", include_memory=False)
+        assert (team / "configs" / "repos.yaml").exists()
+
+    def test_repos_yaml_detection_hit(self, tmp_path: Path):
+        # Layout: tmp/projects/{tigerharness, teams/myteam}
+        proj = tmp_path / "projects" / "tigerharness"
+        proj.mkdir(parents=True)
+        # The REAL spelling -- the fixture must match reality or the
+        # test verifies the code against itself (b2-haruko lesson).
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "TigerHarness"\n'
+        )
+        team = tmp_path / "projects" / "teams" / "myteam"
+        team.mkdir(parents=True)
+        path = _scaffold_repos_yaml(team)
+        assert path is not None and path.exists()
+        text = path.read_text()
+        assert "team_root: ." in text
+        assert "project: ../../tigerharness" in text
+
+    def test_repos_yaml_detection_hit_lowercase_name(self, tmp_path: Path):
+        proj = tmp_path / "projects" / "tigerharness"
+        proj.mkdir(parents=True)
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "tigerharness"\n'
+        )
+        team = tmp_path / "projects" / "teams" / "myteam"
+        team.mkdir(parents=True)
+        path = _scaffold_repos_yaml(team)
+        assert path is not None
+        assert "project: ../../tigerharness" in path.read_text()
+
+    def test_detection_walks_past_odd_children(self, tmp_path: Path):
+        # Non-dir sibling, dir without pyproject, unreadable pyproject
+        # (a directory), then the real hit -- all in one walk.
+        projects = tmp_path / "projects"
+        (projects / "teams" / "myteam").mkdir(parents=True)
+        (projects / "loose-file.txt").write_text("not a dir")
+        (projects / "no-pyproject").mkdir()
+        weird = projects / "weird"
+        (weird / "pyproject.toml").mkdir(parents=True)  # read -> OSError
+        proj = projects / "zz-tigerharness"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "TigerHarness"\n')
+        team = projects / "teams" / "myteam"
+        path = _scaffold_repos_yaml(team)
+        assert path is not None
+        assert "project: ../../zz-tigerharness" in path.read_text()
+
+    def test_detection_tolerates_unreadable_pyproject_and_other_names(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from tigerharness.init import _detect_project_dir
+        projects = tmp_path / "projects"
+        team = projects / "teams" / "myteam"
+        team.mkdir(parents=True)
+        other = projects / "aa-other"
+        other.mkdir()
+        (other / "pyproject.toml").write_text(
+            '[project]\nname = "somethingelse"\n')
+        secret = projects / "bb-secret"
+        secret.mkdir()
+        (secret / "pyproject.toml").write_text("locked")
+        real_read = Path.read_text
+
+        def flaky_read(self, *a, **k):
+            if "bb-secret" in str(self):
+                raise OSError("permission denied")
+            return real_read(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", flaky_read)
+        proj = projects / "zz-tigerharness"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "TigerHarness"\n')
+        assert _detect_project_dir(team) == proj
+
+    def test_detection_tolerates_unlistable_parent(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from tigerharness.init import _detect_project_dir
+        team = tmp_path / "projects" / "teams" / "myteam"
+        team.mkdir(parents=True)
+        real_iterdir = Path.iterdir
+
+        def flaky_iterdir(self):
+            if self.name == "teams":
+                raise OSError("denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", flaky_iterdir)
+        # teams/ unlistable -> level skipped; nothing matches above.
+        assert _detect_project_dir(team) is None
+
+    def test_detection_stops_at_filesystem_root(self):
+        from tigerharness.init import _detect_project_dir
+        from pathlib import Path as _P
+        # parent == current short-circuits the walk; read-only probe.
+        assert _detect_project_dir(_P("/")) is None
+
+    def test_repos_yaml_detection_miss_writes_placeholder(
+        self, tmp_path: Path, capsys,
+    ):
+        team = tmp_path / "teams" / "myteam"
+        team.mkdir(parents=True)
+        path = _scaffold_repos_yaml(team)
+        assert path is not None
+        text = path.read_text()
+        assert "# project:" in text and "set me" in text
+        assert "could not auto-detect" in capsys.readouterr().err
+
+    def test_repos_yaml_never_clobbers_existing(self, tmp_path: Path):
+        team = tmp_path / "myteam"
+        (team / "configs").mkdir(parents=True)
+        existing = team / "configs" / "repos.yaml"
+        existing.write_text("team_root: .\nproject: /custom/spot\n")
+        assert _scaffold_repos_yaml(team) is None
+        assert existing.read_text() == "team_root: .\nproject: /custom/spot\n"
 
     def test_skills_copied(self, tmp_path: Path):
         team = tmp_path / "myteam"
@@ -726,8 +859,9 @@ class TestAddPersona:
         created = add_persona(team, "chief", include_memory=False)
         assert (team / "personas" / "chief" / "prompt.md").exists()
         assert (team / "configs" / "personas.yaml").exists()
-        # prompt + yaml = 2 paths
-        assert len(created) == 2
+        # prompt + yaml + backfilled repos.yaml = 3 paths
+        assert len(created) == 3
+        assert (team / "configs" / "repos.yaml").exists()
 
     def test_partial_recovery_memory_and_yaml_present(self, tmp_path: Path):
         """If memory cfg and yaml entry exist but prompt does not, add_persona

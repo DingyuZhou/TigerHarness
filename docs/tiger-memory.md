@@ -224,7 +224,7 @@ Add the source to each journal-working persona's config:
 ```yaml
 sources:
   - kind: journal_worklog
-    journal_root: /home/tigerleap/projects/teams/Shohoku/journal/
+    journal_root: <team-root>/journal/   # e.g. teams/Shohoku/journal/
     persona: Rukawa             # only ingest worklog entries stamped Rukawa
     # team: Shohoku             # optional; defaults to the journal root's
     #                           # parent dir name (set it for non-standard layouts)

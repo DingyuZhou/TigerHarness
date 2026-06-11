@@ -129,6 +129,18 @@ config at `<team>/memories/<name>/tiger-memory.config.yaml`. The
 generated `<team>/configs/personas.yaml` is the team registry (the
 yaml shape is documented in its own preamble comment).
 
+`init` also writes `<team>/configs/repos.yaml` -- the team's
+path-indirection map (`team_root: .` plus `project:`, the relative
+path to the tigerharness checkout, auto-detected case-insensitively
+from directories near the team dir -- the scan walks up to 3 levels,
+checking each level's immediate children for a matching
+`pyproject.toml`; a miss writes a commented placeholder to fill in). Team prose and config should reference paths
+relative to the team root -- sessions launch there -- so the same
+checked-in team repo works on any machine. Existing teams adopt
+`repos.yaml` automatically the next time `init` adds a persona;
+already-absolute `settings.json` env values are yours to relativize
+by hand (init never rewrites user-owned settings).
+
 ## Adding a custom memory backend
 
 Tiger-memory's summarizer is pluggable:
