@@ -56,6 +56,7 @@ from .downloader import (
     SlackFileDownloader,
     augment_prompt,
 )
+from .idle_compact import IdleCompactConfig, maybe_compact
 from .persistence import ThreadStore, default_state_path
 from .router import detect_persona
 
@@ -127,10 +128,13 @@ _ACCEPTED_SUBTYPES = {"file_share"}
 @dataclass
 class _ThreadState:
     """One thread's in-memory state. ``persona`` is the active persona
-    for this thread; never changes once set."""
+    for this thread; never changes once set. ``idle_compacted`` is the
+    one-per-idle-period latch for ADR 0004 idle compaction: set after
+    a compact, cleared by the next real turn."""
     session: Session
     persona: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    idle_compacted: bool = False
 
 
 class SlackBridge:
@@ -170,6 +174,7 @@ class SlackBridge:
         self._downloader: FileDownloader = downloader or SlackFileDownloader(
             self._team.slack_bot_token
         )
+        self._idle_compact_cfg = IdleCompactConfig.from_env()
         self._threads: dict[str, _ThreadState] = {}
         self._threads_guard = asyncio.Lock()
 
@@ -353,6 +358,33 @@ class SlackBridge:
                     log.info(
                         "thread=%s persona=%s ok (session=%s, cost_usd=%s)",
                         thread_key, state.persona, state.session.id, result.cost_usd,
+                    )
+                    # ADR 0004 idle compaction: a real turn completed,
+                    # so the one-per-idle-period latch resets; then the
+                    # hook may compact once if the team opted in, the
+                    # journal is idle, and this turn's usage crossed
+                    # the threshold. maybe_compact NEVER raises.
+                    state.idle_compacted = False
+                    _agent_config = _with_thread_env(
+                        persona.agent_config, thread_key,
+                    )
+
+                    async def _compact_turn(prompt_text: str) -> None:
+                        await run_with_retry(
+                            self._backend,
+                            _agent_config,
+                            prompt_text,
+                            session=state.session,
+                            max_attempts=1,
+                            label=f"thread={thread_key} idle-compact",
+                        )
+
+                    state.idle_compacted = await maybe_compact(
+                        _compact_turn,
+                        self._idle_compact_cfg,
+                        getattr(result, "usage", None),
+                        already_compacted=state.idle_compacted,
+                        label=f"thread={thread_key}",
                     )
                 except Exception as exc:
                     log.exception("backend failure for thread %s", thread_key)
