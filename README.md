@@ -140,12 +140,21 @@ tigers/
         └── tiger-memory.config.yaml
 ```
 
+Persona and team names are space-separated words: letters, digits,
+`-`, and `_`, each word starting with a letter or digit, single
+spaces between words (so `chief`, `scout-7`, and `Chuan Ying` are all
+valid; leading, trailing, or consecutive spaces are not). Paths
+printed by init are shell-quoted when a name contains a space.
+
 ```bash
 # Fully interactive — prompts for persona name, team, slack/memory opts
 tigerharness init
 
 # Non-interactive — creates team 'tigers' with persona 'chief'
 tigerharness init --persona chief --team tigers --yes
+
+# Names may contain single internal spaces
+tigerharness init --persona 'Chuan Ying' --team tigers --yes
 
 # Add a second persona to the same team
 tigerharness init --persona scout --team tigers --yes
