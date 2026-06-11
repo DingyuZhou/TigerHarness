@@ -74,6 +74,13 @@ _PRIOR_OPERATING_HASHES = {
     # pre-Slack-rail-rule template (before the cost-discipline section
     # was added on work/2026-06-11-slack-cost-discipline).
     "a48ca1f1df272f8c6911a92c4c1af94ecb3da477918793a92a9e05aadeb26cae",
+    # branch-only renders (consolidation, 2026-06-11): a journal
+    # refreshed from either branch holds one of these. Shohoku's live
+    # OPERATING.md carries the cost-discipline render ...
+    "353a4caccbe0b57f6fff0e546e67a2ade3f2707b575d128618b556f64bfd5f56",
+    # ... and the compaction-redesign render covers any journal
+    # refreshed from that branch before the merge.
+    "b8d70e4c009cda4a6ebe1201a456bd051c6e425ed058840e4dd97ecbc78bd3e5",
 }
 
 
