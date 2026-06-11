@@ -118,6 +118,32 @@ class TestNewTaskId:
         b = new_task_id("hello", now=when)
         assert a != b
 
+    def test_cross_day_order_holds_across_formats(self):
+        """Ordering rule 2 (defense pin): different dates decide the
+        order regardless of format -- YYYYMMDD is fixed-width, so a
+        day-earlier legacy id sorts before a day-later new-format id
+        even when the legacy slug is lexicographically huge."""
+        legacy_earlier = "20260610-zzz-aaaaaaaa"
+        new_later = new_task_id(
+            "aaa",
+            now=dt.datetime(2026, 6, 11, 0, 0, 0, tzinfo=dt.timezone.utc),
+        )
+        assert sorted([new_later, legacy_earlier]) == [
+            legacy_earlier, new_later,
+        ]
+
+    def test_max_length_id_is_bounded(self):
+        """A maximal 40-char slug yields exactly 65 chars
+        (8+1+6+1+40+1+8) and still passes the path-safety filter --
+        the time component added 7 chars without squeezing the slug
+        budget."""
+        tid = new_task_id(
+            "a" * 80,
+            now=dt.datetime(2026, 6, 11, 23, 59, 59, tzinfo=dt.timezone.utc),
+        )
+        assert len(tid) == 65
+        assert is_safe_task_id(tid)
+
     def test_slug_overrider_wins(self):
         """``--slug`` should override the title-derived slug."""
         tid = new_task_id(
