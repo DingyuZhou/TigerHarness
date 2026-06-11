@@ -1069,10 +1069,11 @@ class TestNewWorkflowTask:
         monkeypatch.setattr(
             id_mod.secrets, "token_hex", lambda n: "deadbeef",
         )
-        # Pre-seed both attempted ids in done/ so the mint fails.
-        import datetime as dt
-        date = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
-        seed = paths.done / f"{date}-collision-deadbeef"
+        # Pre-seed both attempted ids in done/ so the mint fails,
+        # on a frozen clock so the stamp cannot race a second tick.
+        from tests.journal.test_scaffold import _freeze_ids_clock
+        stamp = _freeze_ids_clock(monkeypatch, id_mod)
+        seed = paths.done / f"{stamp}-collision-deadbeef"
         seed.mkdir(parents=True)
         (seed / "status.json").write_text("{}")
         with pytest.raises(JournalScaffoldError):

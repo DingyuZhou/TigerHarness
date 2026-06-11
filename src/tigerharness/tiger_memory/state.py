@@ -30,6 +30,8 @@ def compute_state(cfg: Config, store: Store) -> dict[str, Any]:
 
     return {
         "agent": cfg.agent.name,
+        "operator_id": saved.get("operator_id"),
+        "adopt_legacy": saved.get("adopt_legacy"),
         "last_rebuild_at": saved.get("last_rebuild_at"),
         "last_op": saved.get("last_op"),
         "last_rebuild_duration_sec": saved.get("last_rebuild_duration_sec"),

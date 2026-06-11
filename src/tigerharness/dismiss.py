@@ -329,6 +329,74 @@ def _remove_persona_entry_from_yaml(yaml_text: str, persona: str) -> str:
 # Plan builders
 # ---------------------------------------------------------------------------
 
+
+def _read_persona_aliases(yaml_text: str, persona: str) -> list[str]:
+    """Return the alias list for ``persona`` from personas.yaml text.
+
+    Light-touch line parser matching the init-scaffolded shape
+    (``- name: X`` then an optional ``aliases: [a, b]`` inside the
+    entry). Returns [] when the entry or alias list is absent --
+    callers treat aliases as best-effort enrichment, never as a gate.
+    """
+    aliases: list[str] = []
+    in_entry = False
+    for line in yaml_text.splitlines():
+        m = re.match(r"^\s*-\s*name\s*:\s*(\S+)\s*$", line)
+        if m:
+            in_entry = m.group(1).strip("'\"") == persona
+            continue
+        if in_entry:
+            am = re.match(r"^\s*aliases\s*:\s*\[(.*)\]\s*$", line)
+            if am:
+                aliases = [
+                    a.strip().strip("'\"")
+                    for a in am.group(1).split(",") if a.strip()
+                ]
+                break
+    return aliases
+
+
+def _workflow_yaml_mentions(
+    workflow_path: Path, names: list[str],
+) -> list[str]:
+    """Names from ``names`` referenced in configs/workflow.yaml's
+    ``compile_personas`` mapping (value position). Best-effort line
+    scan; [] when the file is absent."""
+    if not workflow_path.exists():
+        return []
+    hits: list[str] = []
+    try:
+        text = workflow_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        stripped = line.split("#", 1)[0]
+        m = re.match(r"^\s*(drafter|akagi|ayako)\s*:\s*(\S+)\s*$", stripped)
+        if m:
+            value = m.group(2).strip("'\"")
+            if value in names and value not in hits:
+                hits.append(value)
+    return hits
+
+
+def _active_tasks_assigned_to(team_dir: Path, persona: str) -> list[str]:
+    """Task ids under <team>/journal/active/ whose status.json assigns
+    ``persona``. Read-only, tolerant of malformed entries."""
+    active = team_dir / "journal" / "active"
+    if not active.is_dir():
+        return []
+    import json as _json
+    hits: list[str] = []
+    for status_path in sorted(active.glob("*/status.json")):
+        try:
+            data = _json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("persona") == persona:
+            hits.append(status_path.parent.name)
+    return hits
+
+
 def build_team_plan(
     *,
     team: str,
@@ -339,6 +407,12 @@ def build_team_plan(
 
     Raises ValueError when the team doesn't exist or the name is
     syntactically invalid.
+
+    Known limitation: only the multi-team unit
+    (``slack-bridge-multi.service``) is handled. A legacy
+    single-tenant ``slack-bridge.service`` predates the layout this
+    tool scaffolds, cannot be attributed to one team safely, and is
+    left untouched (audit T9, deliberate).
     """
     team = team.strip()
     if not _NAME_RE.fullmatch(team):
@@ -479,6 +553,19 @@ def build_team_plan(
                     "removed."
                 )
 
+    # The global/XDG journal root is shared across teams -- never
+    # auto-delete it on a team dismissal; remind so the operator can
+    # prune team-specific tasks by hand if any landed there.
+    from .journal.paths import default_journal_root
+    xdg_root = default_journal_root()
+    if xdg_root.exists() and xdg_root != (team_dir / "journal"):
+        manual_reminders.append(
+            f"A global journal root exists at {xdg_root} (used when "
+            f"journal commands run outside a team dir). It is shared "
+            f"across teams, so dismiss does not touch it -- prune "
+            f"{team}-specific tasks there by hand if any."
+        )
+
     return DismissPlan(
         kind="team",
         target_name=team,
@@ -538,6 +625,19 @@ def build_persona_plan(
             f"file), then re-run dismiss."
         )
 
+    # Same refusal for the JOURNAL default: personas.yaml's top-level
+    # ``default_persona`` is what ``journal new`` falls back to when
+    # --persona is omitted (and what hand-started sessions bootstrap
+    # as). Dismissing it would leave both pointing at a ghost.
+    yaml_path_early = team_dir / "configs" / "personas.yaml"
+    journal_default = _read_default_persona(yaml_path_early)
+    if journal_default == persona:
+        raise ValueError(
+            f"persona {persona!r} is team {team!r}'s default_persona "
+            f"in {yaml_path_early}. Pick a new default first (edit "
+            f"that file), then re-run dismiss."
+        )
+
     removals: list[FileRemoval] = [
         FileRemoval(persona_dir, "persona prompt directory"),
     ]
@@ -563,13 +663,48 @@ def build_persona_plan(
             new_text,
         ),)
 
+    manual_reminders: list[str] = []
+    # Dangling compile_personas mapping (direct name or alias) would
+    # make the next workflow scaffold's preflight fail -- choosing the
+    # replacement is a human call, so remind rather than auto-edit.
+    alias_names = [persona] + _read_persona_aliases(yaml_text, persona)
+    workflow_path = team_dir / "configs" / "workflow.yaml"
+    wf_hits = _workflow_yaml_mentions(workflow_path, alias_names)
+    if wf_hits:
+        hit_list = ", ".join(wf_hits)
+        manual_reminders.append(
+            f"configs/workflow.yaml's compile_personas references "
+            f"{hit_list} -- repoint those roles or the next workflow "
+            f"scaffold preflight will fail."
+        )
+    # Active journal tasks assigned to the persona become zombies (the
+    # done-gate still stamps the dead name; its memory store is gone).
+    # The journal layer owns its state machine -- remind, never edit.
+    zombie_tasks = _active_tasks_assigned_to(team_dir, persona)
+    if zombie_tasks:
+        task_list = ", ".join(zombie_tasks)
+        manual_reminders.append(
+            f"journal/active/ has task(s) assigned to {persona!r}: "
+            f"{task_list}. Reassign or finish them first (the journal "
+            f"CLI owns that state; dismiss will not touch it)."
+        )
+    # Prose mentions (roster, knowledge) are curation, not teardown --
+    # remind only when the team actually keeps such docs.
+    if (team_dir / "charter" / "roster.md").exists() or (
+        team_dir / "knowledge"
+    ).is_dir():
+        manual_reminders.append(
+            f"Prose mentions of {persona!r} (e.g. charter/roster.md, "
+            f"knowledge/) are not auto-edited -- curate them by hand."
+        )
+
     return DismissPlan(
         kind="persona",
         target_name=f"{team}/{persona}",
         removals=tuple(removals),
         edits=edits,
         service_actions=(),
-        manual_reminders=(),
+        manual_reminders=tuple(manual_reminders),
     )
 
 

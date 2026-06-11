@@ -160,6 +160,29 @@ class TestCmdNew:
             paths.status_json(other).read_text()
         ).early_exit is True
 
+    def test_autonomy_defaults_ask_and_flag_sets_judgement(
+        self, tmp_path, journal_dir,
+    ):
+        prd = tmp_path / "brief.md"
+        prd.write_text("# T\nbody\n")
+        paths = JournalPaths(root=journal_dir)
+        # Default: no --autonomy -> ask (pause on judgment calls).
+        assert main(["--journal-dir", str(journal_dir),
+                     "new", "--prd", str(prd), "--persona", "P"]) == 0
+        tid = paths.list_active_ids()[0]
+        assert Status.from_json(
+            paths.status_json(tid).read_text()
+        ).autonomy == "ask"
+        # With --autonomy judgement -> persona may self-resolve
+        # yellow-light calls (logged); red-light stays non-overridable.
+        assert main(["--journal-dir", str(journal_dir), "new", "--prd",
+                     str(prd), "--persona", "P",
+                     "--autonomy", "judgement"]) == 0
+        other = [i for i in paths.list_active_ids() if i != tid][0]
+        assert Status.from_json(
+            paths.status_json(other).read_text()
+        ).autonomy == "judgement"
+
     def test_missing_prd_returns_2(self, journal_dir, capsys):
         rc = main([
             "--journal-dir", str(journal_dir),
@@ -1284,8 +1307,11 @@ class TestClaimDriveThreadRegistry:
         monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
         paths = JournalPaths(root=journal_dir)
         _seed(paths, "t1", state=State.PENDING)
+        # --allow-api-drive: with the env var set the rail guard would
+        # otherwise refuse (Slack schedules, never drives); the override
+        # is exactly the path where the registration fallback still fires.
         assert main(["--journal-dir", str(journal_dir), "claim", "t1",
-                     "--driver", "Anzai"]) == 0
+                     "--driver", "Anzai", "--allow-api-drive"]) == 0
         assert drive_sessions.registered_threads(
             paths.drive_sessions_json
         ) == {"555.42"}
@@ -1300,7 +1326,8 @@ class TestClaimDriveThreadRegistry:
         monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
         paths = JournalPaths(root=journal_dir)
         _seed(paths, "t1", state=State.PENDING)
-        assert main(["--journal-dir", str(journal_dir), "claim", "t1"]) == 0
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1",
+                     "--allow-api-drive"]) == 0
         assert not paths.drive_sessions_json.exists()
 
     def test_explicit_drive_thread_beats_env(self, journal_dir, monkeypatch):
@@ -1309,7 +1336,8 @@ class TestClaimDriveThreadRegistry:
         paths = JournalPaths(root=journal_dir)
         _seed(paths, "t1", state=State.PENDING)
         assert main(["--journal-dir", str(journal_dir), "claim", "t1",
-                     "--driver", "Anzai", "--drive-thread", "171.99"]) == 0
+                     "--driver", "Anzai", "--drive-thread", "171.99",
+                     "--allow-api-drive"]) == 0
         assert drive_sessions.registered_threads(
             paths.drive_sessions_json
         ) == {"171.99"}
@@ -1852,3 +1880,90 @@ class TestReleaseWorkflowGate:
             ("Akagi", "plan"),
             ("Rukawa", "build"),
         ]
+
+
+class TestClaimRailGuard:
+    """The cost-discipline rail guard: a bridge-spawned session (the
+    slack bridge exports TIGERHARNESS_SLACK_THREAD_TS into every turn)
+    may only SCHEDULE journal tasks, never drive them. The guard runs
+    before any status read, so a refused claim changes nothing."""
+
+    def test_bridge_env_refuses_claim(self, journal_dir, monkeypatch, capsys):
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        before = paths.status_json("t1").read_bytes()
+        assert main(["--journal-dir", str(journal_dir),
+                     "claim", "t1", "--driver", "Anzai"]) == 1
+        err = capsys.readouterr().err
+        assert "claim refused" in err
+        assert "TIGERHARNESS_SLACK_THREAD_TS" in err
+        assert "--allow-api-drive" in err
+        assert "schedule" in err
+        # Guard-first placement: status.json is byte-unchanged (state
+        # still pending, sessions not bumped, no session_ref).
+        assert paths.status_json("t1").read_bytes() == before
+
+    def test_refusal_logs_warning_in_claim_refused_family(
+        self, journal_dir, monkeypatch, caplog,
+    ):
+        import logging
+
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        with caplog.at_level(logging.WARNING):
+            assert main(["--journal-dir", str(journal_dir),
+                         "claim", "t1"]) == 1
+        assert any(
+            r.levelno == logging.WARNING
+            and r.getMessage().startswith("claim refused:")
+            and "bridge session" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_override_flag_allows_claim(self, journal_dir, monkeypatch):
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir), "claim", "t1",
+                     "--driver", "Anzai", "--allow-api-drive"]) == 0
+        # The deliberate override keeps the registration fallback alive.
+        assert drive_sessions.registered_threads(
+            paths.drive_sessions_json
+        ) == {"555.42"}
+
+    def test_no_env_claims_unaffected(self, journal_dir, monkeypatch):
+        # The no-false-positive direction: interactive sessions (no env
+        # var) claim exactly as before, no flag needed.
+        monkeypatch.delenv("TIGERHARNESS_SLACK_THREAD_TS", raising=False)
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir),
+                     "claim", "t1", "--driver", "Anzai"]) == 0
+
+    def test_bridge_env_does_not_block_scheduling(
+        self, journal_dir, monkeypatch, tmp_path, capsys,
+    ):
+        # The schedule-only promise, pinned: with the bridge env set,
+        # ``journal new`` (the LLM-free scaffolder) still works -- the
+        # guard's scope is claim-only, forever.
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        prd = tmp_path / "prd.md"
+        prd.write_text("# Scheduled from Slack\nbody\n", encoding="utf-8")
+        assert main(["--journal-dir", str(journal_dir), "new",
+                     "--prd", str(prd), "--persona", "Anzai"]) == 0
+        out = capsys.readouterr().out
+        assert "Scaffolded:" in out
+
+    def test_empty_env_marker_treated_as_unset(self, journal_dir, monkeypatch):
+        # Defense pin: an EMPTY env value is falsy -- the guard must
+        # treat it exactly like the registration fallback does
+        # (``os.environ.get(...) or None``): as unset. The bridge never
+        # exports an empty thread_ts, so refusing here would only ever
+        # false-positive on a degenerate shell export.
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        assert main(["--journal-dir", str(journal_dir),
+                     "claim", "t1", "--driver", "Anzai"]) == 0

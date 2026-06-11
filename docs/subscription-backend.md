@@ -181,9 +181,13 @@ once the graph lands — see
 [`journal-workflow-mode.md`](journal-workflow-mode.md) and
 [`journal.md`](journal.md).
 
-`<task-id>` format mirrors the workflow-runner:
-`<YYYYMMDD>-<short-slug>-<8-char-uuid>`, e.g.
-`20260602-subscription-backend-7f2a9c14`.
+`<task-id>` format:
+`<YYYYMMDD>-<HHmmSS>-<short-slug>-<8-char-uuid>`, e.g.
+`20260602-143052-subscription-backend-7f2a9c14`. The timestamp is
+UTC; the time component makes same-day ids sort in creation order.
+Legacy date-only ids (`<YYYYMMDD>-<slug>-<uuid8>`) remain valid and
+coexist with no migration — ids are never parsed, ordering is plain
+lexicographic.
 
 The `active/` and `done/` split is what keeps the journal lean: the
 driver only ever reads `active/`, so archiving finished tasks bounds
@@ -199,7 +203,7 @@ keep `journal/OPERATING.md`.
 
 ```json
 {
-  "id": "20260602-subscription-backend-7f2a9c14",
+  "id": "20260602-143052-subscription-backend-7f2a9c14",
   "title": "Add the subscription backend",
   "kind": "task",
   "state": "in_progress",
@@ -215,7 +219,7 @@ keep `journal/OPERATING.md`.
 
 | Field | Type | Set by | Purpose |
 |---|---|---|---|
-| `id` | string | scaffolder | `<YYYYMMDD>-<slug>-<uuid8>`. `slug` = ASCII-lowercase-hyphen slugified `--title` (or first H1 of the PRD), max 40 chars. `uuid8` = 8 hex chars from `secrets.token_hex(4)`. On collision the scaffolder regenerates the uuid once then hard-errors. Path-safety enforced (no `/`, no `..`, no hidden-file prefix). |
+| `id` | string | scaffolder | `<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>` (UTC; legacy date-only ids remain valid). `slug` = ASCII-lowercase-hyphen slugified `--title` (or first H1 of the PRD), max 40 chars. `uuid8` = 8 hex chars from `secrets.token_hex(4)`. On collision the scaffolder regenerates the uuid once then hard-errors. Path-safety enforced (no `/`, no `..`, no hidden-file prefix). |
 | `title` | string, required | scaffolder | Human label. Source: `--title` arg, else first H1 of the PRD, else `"task"`. |
 | `kind` | enum: `"task"` (Phase 1) or `"workflow"` (Phase 1.5+) | scaffolder | Phase 1 ships `task`; Phase 1.5 added `workflow` -- see [`journal-workflow-mode.md`](journal-workflow-mode.md). |
 | `persona` | string, required for `kind=task` | scaffolder | The persona this task is assigned to (must exist in the team's persona registry). |
@@ -229,6 +233,8 @@ keep `journal/OPERATING.md`.
 | `compile_phase` | enum (`kind=workflow` only): `pending` / `drafting` / `tier1_pre` / `critiquing` / `tier1_post` / `complete` / `failed` | compile sub-protocol | The compile sub-state machine. Absent for `kind=task`. |
 | `playbook_name` | string, required for `kind=workflow` | scaffolder | Bare name of the playbook the workflow was compiled from. Rejected for `kind=task`. |
 | `early_exit` | bool (default `false`) | scaffolder | When `false`, the driver runs the full `max_sessions` budget ("N iterations = exactly N"); when `true`, it may mark `done` as soon as acceptance criteria are met. Set via `journal new --early-exit`. See [`journal-instant-resume.md`](journal-instant-resume.md). |
+| `schedule_def` | string (optional) | scheduler | Present iff the task was materialized from a `schedule/` definition: the definition id. |
+| `schedule_due` | string (optional) | scheduler | The due timestamp (ISO UTC) this materialization satisfied; with `schedule_def` it makes crash-recovery duplicate-detection exact. |
 
 Three fields carry the design: `session_ref` (the **attach signal** —
 is a live session driving this right now?), `updated_at` (the
@@ -301,11 +307,11 @@ sweep and keeps going.
 **Context pressure is not a stop reason — compact instead.** Every
 session checkpoints to `progress.md` + `next_action`, so a context
 compaction loses nothing for continuity (re-orient from those after
-one). The driver relies on **auto-compaction** (triggers at ~50% of
-the window by default, via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`) rather
-than handing off early "to let the loop bridge"; it hands off only at
-the true hard ceiling, and even then a fresh fire resumes the idle
-task instantly. (Compaction is safe for *memory* too — provided a
+one). There is NO configured mid-task compaction (retired 2026-06-11);
+the driver works to the genuine ceiling, then checkpoints and hands
+off — a fresh fire resumes the idle task instantly with fresh
+context. The CLI's own near-limit auto-compact remains as a fallback
+only. (Compaction is safe for *memory* too — provided a
 `kind=task` done-note is assembled from the durable record; see
 [Per-persona memory](#per-persona-memory-the-worklog).)
 
@@ -500,8 +506,9 @@ an upgrade reaches them without clobbering local edits:
 - `tigerharness init --refresh-skills` installs any missing bundled
   skill, **refreshes** any skill byte-identical to a previously-shipped
   version to the current one, **leaves hand-edited skills untouched**,
-  and tops up `.claude/settings.json` (the journal-guard hook + the
-  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` compact threshold).
+  and removes the retired mid-task compact override from
+  `.claude/settings.json` (only when it still holds the old seeded
+  default).
 - `OPERATING.md` refreshes on the next `tigerharness journal new`: the
   scaffolder's `_ensure_operating_md` rewrites an on-disk file that
   matches a prior shipped template (`_PRIOR_OPERATING_HASHES`) to the
@@ -550,7 +557,6 @@ it.
 |---|---|---|
 | `TIGERHARNESS_JOURNAL_DIR` | `<team>/journal/` | Journal root the scaffolder and driver operate on. |
 | `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age (seconds) past which the sweep classifies an *attached* `in_progress` task as **crashed** (and below which it is **busy**). |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` | Claude Code auto-compaction threshold (% of the context window) that the harness **seeds** into a new team's `.claude/settings.json` `env` (and tops up on `init --refresh-skills`). Lets a long cascade compact proactively instead of handing off for "context heavy". It lives in the `env` block, not as a settings.json key. |
 
 ## The work loop
 

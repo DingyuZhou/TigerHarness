@@ -17,6 +17,27 @@ moves to API-token billing soon). See
 [`docs/journal-workflow-mode.md`](../../docs/journal-workflow-mode.md)
 for the workflow-mode details.
 
+## Slack-triggered? Stay lean (the API rail)
+
+When triggered from Slack to schedule a journal task, you are on the
+API-billed rail: do the minimum.
+
+1. Collect the brief — the Operator's message VERBATIM plus only what
+   this skill itself requires (title, kind, playbook, persona).
+2. Run exactly ONE scaffold command (`tigerharness journal new ...`).
+   The scaffolder is deliberately LLM-free pure Python — scheduling is
+   cheap and must stay that way.
+3. Reply with the task id (and task_dir) — one short message.
+4. STOP.
+
+Forbidden on this rail: repo exploration, file reads beyond this
+skill's own needs, design work, journal sweeps, claiming, driving,
+compile turns. All real work happens later, on the subscription rail,
+via `drive-journal` in an interactive session — and that is a hard
+rule, not a preference: Slack schedules, never drives (`journal claim`
+refuses bridge sessions mechanically). Rails and billing:
+`docs/subscription-backend.md`.
+
 ## When to use this skill
 
 Trigger when the user asks anything like:
@@ -39,6 +60,49 @@ If the user already has a PRD or brief file on disk: read its path.
 If they gave it inline in the message: write it to a temp file first
 (e.g. `/tmp/<short-name>.md`), then pass that path -- OR for workflow
 mode, use `--task-brief` to pass the text inline.
+
+## The verbatim Operator-message section (MANDATORY)
+
+Every PRD (`kind=task`) and every brief (`kind=workflow`) this skill
+scaffolds MUST end with an "Operator's original message (verbatim)"
+section. This is the relay-drift guard: the persona working the task
+weeks later reads what the Operator actually said, not a paraphrase
+of a paraphrase. If the PRD/brief you were handed lacks the section,
+ADD it before scaffolding (appending to the file or the inline brief
+text); do not scaffold without it.
+
+Copy-paste template:
+
+```markdown
+## Operator's original message (verbatim)
+
+> <the Operator's message, quoted verbatim -- no paraphrase, no
+> translation, no typo fixes; keep the original language. Multi-turn
+> context goes in as multiple quoted blocks in order.>
+
+(<attribution: who, date, channel -- e.g. "Operator, 2026-06-11,
+Slack DM thread 1781169418.787159" or "Operator, in-session
+instruction to Ayako">. If the wording above was relayed or
+translated by a persona rather than copied, say so here.)
+```
+
+Reading notes (clarifying nicknames, typos, or term mappings) may
+follow the quote, clearly marked as interpretation -- never edit the
+quote itself.
+
+**When there is no Operator message** (self-initiated follow-up, a
+scheduled/recurring task, or a task derived from another task's
+artifacts), the section still appears, stating that explicitly so its
+absence is informative rather than ambiguous:
+
+```markdown
+## Operator's original message (verbatim)
+
+None -- this task was not initiated by a direct Operator message.
+Origin: <e.g. "follow-up drafted in task <id>'s artifacts" /
+"scheduled self-diagnosis run" / "scaffolded by <persona> under
+standing authorization <where>">.
+```
 
 ## How to invoke -- task mode (`kind=task`)
 
@@ -74,6 +138,13 @@ Optional:
 - `--early-exit` -- let the driver stop as soon as the task is done per
   its acceptance criteria. Default off: run the full `--max-sessions`
   budget ("N iterations = exactly N").
+- `--autonomy ask|judgement` -- detached-run autonomy level (default
+  `ask`). `judgement` lets the working persona self-resolve
+  yellow-light judgment calls instead of releasing blocked, logging
+  each as a `Decision:` entry in progress.md and the final work note.
+  Red-light rules are never overridable; low-confidence decisions
+  still escalate. Boundary defined in `charter/README.md` ("Autonomy
+  levels for detached work"). Works for both kinds.
 - `--slug` -- override the slug portion of the task id.
 
 ## How to invoke -- workflow mode (`kind=workflow`)
@@ -169,7 +240,8 @@ graph-walking happens. Round-by-round progress is appended to
 
 For **task mode**, in `<journal>/active/<task-id>/`:
 
-- `task.md` -- the PRD verbatim.
+- `task.md` -- the PRD verbatim (including the mandatory
+  "Operator's original message (verbatim)" section).
 - `status.json` -- seeded with `state=pending`, `sessions=0`,
   `kind=task`, and the persona / title / max_sessions from the args.
 - `progress.md` -- empty starter file with a single H1.
@@ -177,7 +249,8 @@ For **task mode**, in `<journal>/active/<task-id>/`:
 
 For **workflow mode**, in `<journal>/active/<task-id>/`:
 
-- `task_brief.md` -- the brief verbatim.
+- `task_brief.md` -- the brief verbatim (including the mandatory
+  "Operator's original message (verbatim)" section).
 - `playbook_snapshot.md` -- the team playbook as it was at scaffold
   time (frozen here so a later playbook edit doesn't invalidate the
   task mid-flight).

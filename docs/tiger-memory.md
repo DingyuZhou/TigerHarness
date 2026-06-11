@@ -224,7 +224,7 @@ Add the source to each journal-working persona's config:
 ```yaml
 sources:
   - kind: journal_worklog
-    journal_root: /home/tigerleap/projects/teams/Shohoku/journal/
+    journal_root: <team-root>/journal/   # e.g. teams/Shohoku/journal/
     persona: Rukawa             # only ingest worklog entries stamped Rukawa
     # team: Shohoku             # optional; defaults to the journal root's
     #                           # parent dir name (set it for non-standard layouts)
@@ -261,6 +261,39 @@ activity-gate per persona), so a specialist with *only* worklog activity
 and no Slack threads is still swept — its new worklog entries surface at
 `tiger-memory plan` time through this source. See
 [`tiger-memory-sweep-protocol.md`](tiger-memory-sweep-protocol.md).
+
+## Multi-operator stores (shared summaries, local briefings)
+
+Since T12b a memory store supports MANY writers sharing one set of
+summaries (the open-sourced-team scenario: summaries are
+git-committed; each machine rebuilds its own briefing).
+
+- **Operator identity**: an 8-hex slug generated once per store and
+  persisted in the machine-local `journal/.state.json` — never
+  derived from mutable facts. Two laptops = two operators, honestly.
+- **Attribution**: every written summary carries an `operator`
+  frontmatter key, and the deterministic rollup uuids are seeded
+  `kind:period:operator` — re-rolls overwrite only your own file, and
+  two operators' same-period files can never collide (git pushes on
+  memory files are conflict-free by construction).
+- **Fold locality** (the invariant): a cascade folds ONLY the local
+  operator's files (plus segment-less *legacy* files iff this store
+  predates the upgrade — detected by a pre-existing state file, never
+  by mere file presence, which a fresh clone would false-positive
+  on). Foreign files are read-only inputs to the briefing, never fold
+  targets.
+- **Read order**: N same-period files read deterministically — the
+  legacy file first, then by filename — so last-mention-wins behaves
+  identically on every machine. The briefing's daily layer copies ALL
+  of a date's rollups.
+- **Migration**: nothing changes for single-operator stores; a
+  pre-upgrade store keeps re-rolling its legacy filenames
+  (`adopt_legacy`), so old and new naming never duplicate a period.
+- **Share boundary**: track `journal/*.md` + `archive/`; keep
+  `briefing/`, `cache/`, and `journal/.state.json` machine-local
+  (the state file holds the operator id). Public team templates
+  should make sharing OPT-IN (privacy: shared summaries are public
+  the moment the repo is).
 
 ## The auto_memory source (legacy)
 

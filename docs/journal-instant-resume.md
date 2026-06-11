@@ -95,11 +95,13 @@ and **continues the same task** (now the highest-priority idle
 `in_progress` task) rather than ending — looping until done / blocked /
 `sessions >= max_sessions` / nothing actionable / the human ends it /
 the **genuine context ceiling**. Context pressure is **not** a routine
-stop: the cascade-first redesign (2026-06-08) relies on **auto-compaction**
-(~50% of the window by default, via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`)
-and re-orients from `progress.md` after a compaction, so a single drive
-keeps going through many sessions rather than handing off when the
-conversation merely feels long.
+stop, but mid-task compaction is no longer configured either (retired
+2026-06-11: compacting mid-task can cause unexpected results). A drive
+nearing the ceiling checkpoints to `progress.md` + `next_action` and
+hands off; instant-resume picks the task back up immediately with
+fresh context — which is exactly what this document's mechanism makes
+cheap. The CLI's own auto-compact remains only as a near-limit
+fallback; if it fires, re-orient from `progress.md` and continue.
 
 The one floor we cannot remove: a single interactive session has a true
 hard context ceiling, so the driver must *eventually* end and a **fresh**

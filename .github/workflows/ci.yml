@@ -1,0 +1,37 @@
+# Test CI: runs the suite with the coverage gate exactly as
+# pyproject.toml pins it (fail_under owns the floor -- do not restate
+# numbers here). No lint step: the project configures no lint tool,
+# and CI must not introduce one by drift (T7 scope).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor (requires-python >=3.11) and current stable.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Sync dependencies (all extras)
+        run: uv sync --extra all
+
+      - name: Run tests with the coverage gate
+        # Plain pytest does NOT enforce the floor (see CONTRIBUTING's
+        # trap note) -- the gate only fires with --cov.
+        run: uv run pytest --cov=tigerharness --cov-report=term

@@ -67,6 +67,20 @@ _PRIOR_OPERATING_HASHES = {
     # per-persona-memory template (origin/main after PR #43/#44, before the
     # cascade redesign merged in).
     "7446e45e52745ae31548a192801173bacb01e36368b713dd8250eae1d1838ce8",
+    # f92eb69 render (workflow-mode termination clarification) -- shipped
+    # but never registered here; Shohoku's live journal carried it, so any
+    # journal on this version would otherwise never auto-refresh.
+    "e274e368d55f0f6bc838b09f827ca8c071877e7dfb6f994285092c3457d11841",
+    # pre-Slack-rail-rule template (before the cost-discipline section
+    # was added on work/2026-06-11-slack-cost-discipline).
+    "a48ca1f1df272f8c6911a92c4c1af94ecb3da477918793a92a9e05aadeb26cae",
+    # branch-only renders (consolidation, 2026-06-11): a journal
+    # refreshed from either branch holds one of these. Shohoku's live
+    # OPERATING.md carries the cost-discipline render ...
+    "353a4caccbe0b57f6fff0e546e67a2ade3f2707b575d128618b556f64bfd5f56",
+    # ... and the compaction-redesign render covers any journal
+    # refreshed from that branch before the merge.
+    "b8d70e4c009cda4a6ebe1201a456bd051c6e425ed058840e4dd97ecbc78bd3e5",
 }
 
 
@@ -207,6 +221,9 @@ def new_task(
     kind: str = "task",
     max_sessions: int = 3,
     early_exit: bool = False,
+    autonomy: str = "ask",
+    schedule_def: str | None = None,
+    schedule_due: str | None = None,
     slug: str | None = None,
 ) -> ScaffoldResult:
     """Create a new task in ``paths.active``. Returns ``ScaffoldResult``.
@@ -261,6 +278,9 @@ def new_task(
             kind=kind,
             max_sessions=max_sessions,
             early_exit=early_exit,
+            autonomy=autonomy,
+            schedule_def=schedule_def,
+            schedule_due=schedule_due,
         )
     except JournalModelError as exc:
         raise JournalScaffoldError(
@@ -679,6 +699,9 @@ def new_workflow_task(
     captain: str | None = None,
     max_sessions: int = 10,
     early_exit: bool = False,
+    autonomy: str = "ask",
+    schedule_def: str | None = None,
+    schedule_due: str | None = None,
     slug: str | None = None,
 ) -> ScaffoldResult:
     """Scaffold a new ``kind=workflow`` task. No LLM calls -- the
@@ -760,6 +783,9 @@ def new_workflow_task(
             captain=captain,
             max_sessions=max_sessions,
             early_exit=early_exit,
+            autonomy=autonomy,
+            schedule_def=schedule_def,
+            schedule_due=schedule_due,
         )
     except JournalModelError as exc:
         raise JournalScaffoldError(

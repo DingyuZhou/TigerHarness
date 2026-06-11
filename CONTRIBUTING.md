@@ -21,7 +21,21 @@ uv run pytest --cov=tigerharness --cov-report=term-missing
 uv run pytest tests/tiger_memory/test_lifecycle_full.py -v
 ```
 
-Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[tool.coverage.report] fail_under = 100`). Current: **100.00%** (1700+ tests).
+Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[tool.coverage.report] fail_under = 100`). Current: **100.00%** (2500+ tests).
+
+> **Trap:** plain `uv run pytest` does NOT enforce the floor -- the
+> gate only fires with `--cov` (second command above). A green plain
+> run proves tests pass, not that coverage holds. CI runs the gated
+> form.
+
+## Code review
+
+Every change is reviewed against the
+[code review standard](docs/code-review-standard.md) — numbered,
+citable sections covering correctness, tests, error paths, atomicity,
+docs, security, scope, dependencies, self-critique, commit hygiene,
+and review verdicts. Read it before opening a PR; reviewers cite it
+by section ("standard §2").
 
 ## Project structure
 
@@ -114,6 +128,18 @@ in `examples/tigers/`. Each persona lives at
 config at `<team>/memories/<name>/tiger-memory.config.yaml`. The
 generated `<team>/configs/personas.yaml` is the team registry (the
 yaml shape is documented in its own preamble comment).
+
+`init` also writes `<team>/configs/repos.yaml` -- the team's
+path-indirection map (`team_root: .` plus `project:`, the relative
+path to the tigerharness checkout, auto-detected case-insensitively
+from directories near the team dir -- the scan walks up to 3 levels,
+checking each level's immediate children for a matching
+`pyproject.toml`; a miss writes a commented placeholder to fill in). Team prose and config should reference paths
+relative to the team root -- sessions launch there -- so the same
+checked-in team repo works on any machine. Existing teams adopt
+`repos.yaml` automatically the next time `init` adds a persona;
+already-absolute `settings.json` env values are yours to relativize
+by hand (init never rewrites user-owned settings).
 
 ## Adding a custom memory backend
 

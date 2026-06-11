@@ -242,10 +242,15 @@ def _copy_layer2(store: Store, dates: list[str], tmp: Path) -> list[Path]:
     out: list[Path] = []
     dest = tmp / "daily"
     for date_str in dates:
-        daily = store.daily_for_date(date_str)
-        if daily is not None:
-            shutil.copy2(daily, dest / daily.name)
-            out.append(dest / daily.name)
+        # Multi-operator (T12b): a date legitimately has N sibling
+        # dailies (one per writer); copy them ALL, in the pinned
+        # deterministic order (legacy first, then by filename) so
+        # last-mention-wins behaves identically on every machine.
+        dailies = store.dailies_for_date(date_str)
+        if dailies:
+            for daily in dailies:
+                shutil.copy2(daily, dest / daily.name)
+                out.append(dest / daily.name)
         else:
             # Fallback per §8.2: include shorts for that day.
             for s in store.shorts_for_date(date_str):

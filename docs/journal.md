@@ -81,9 +81,19 @@ Driver (`drive-journal` skill, interactive session)
     <task-id>/                # finished tasks moved here by the next drive-journal sweep
 ```
 
-Task-id format: `<YYYYMMDD>-<slug>-<uuid8>`.
+Task-id format: `<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>`.
 
-- `YYYYMMDD` — UTC date at creation
+- `YYYYMMDD-HHmmSS` — UTC date and time at creation (one clock
+  reading). Same-day ids therefore sort in their creation order
+  under a plain lexicographic sort — scheduling several tasks in one
+  day preserves their scheduled sequence.
+- Legacy ids minted before the time component
+  (`<YYYYMMDD>-<slug>-<uuid8>`) stay fully valid: nothing parses the
+  timestamp back out of an id, so old and new folders coexist in one
+  journal with no migration. Relative order between a same-day legacy
+  id and a new-format id is plain lexicographic (a digit sorts before
+  a letter) — documented as-is, no machine distinguishability is
+  claimed.
 - `slug` — `slugify(--title or first H1 of PRD, max=40)` (ASCII
   lowercase, hyphen-separated; falls back to `"task"` if the source
   has no usable chars)
@@ -97,7 +107,6 @@ Task-id format: `<YYYYMMDD>-<slug>-<uuid8>`.
 |---|---|---|
 | `TIGERHARNESS_JOURNAL_DIR` | resolver (below) | Override the journal root. |
 | `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which an *attached* `in_progress` task (`session_ref` set) is treated as **crashed** and reclaimable. A detached task is **idle**/resumable regardless of age — the heartbeat is crash-detection only. |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` | Claude Code auto-compaction threshold (% of context window). `tigerharness init` seeds it into a new team's `.claude/settings.json` `env` (and tops it up on `--refresh-skills`) so a long-cascading drive compacts proactively instead of handing off for "context heavy". A Claude Code env var the harness seeds — not read by tigerharness itself; lives in the `env` block, not as a settings.json key. |
 
 Journal root resolution priority:
 
@@ -234,6 +243,52 @@ The driver is **skill-only by design**: there is no
 `tigerharness journal drive` CLI because a CLI driver would
 reintroduce programmatic billing and defeat the subscription model.
 Driving only happens inside an interactive Claude Code session.
+
+## Scheduled (recurring) tasks
+
+Recurring definitions live in `schedule/` beside `active/`, one JSON
+file each, and are materialized into normal pending tasks by the lazy
+sweep -- the drive is the only clock; there is no daemon.
+
+```bash
+# Daily self-diagnosis, materialized by the first drive after 08:00:
+tigerharness journal schedule add \
+    --title "Morning self-diagnosis" \
+    --period daily --at 08:00 \
+    --kind workflow --playbook self-diagnosis \
+    --task-brief "Run the morning bug hunt." \
+    --autonomy judgement
+
+tigerharness journal schedule list
+tigerharness journal schedule rm morning-self-diagnosis
+```
+
+Semantics (deliberately small in v1):
+
+- **Cadence** is `daily` or `weekly` at `HH:MM` local **wall clock**
+  (DST-safe: occurrences are recomputed from the calendar, never
+  `+86400s`); `next_due` is stored in UTC.
+- **Run-late-once**: a definition due at 08:00 whose first drive
+  happens at 15:00 materializes once, then `next_due` advances to the
+  next *future* occurrence. Missed days are never backfilled.
+- **Skip-if-in-flight**: while a prior instance of the same
+  definition is still in `active/`, nothing new is materialized and
+  `next_due` does not advance -- the first sweep after it finishes
+  fires.
+- **Exactly-once under concurrent drives**: materialization is a
+  two-phase intent protocol on the definition file (CAS lease +
+  `next_due` advance in one atomic write, then scaffold and close);
+  a crashed materialization is recovered by the next sweep -- a lost
+  run is completed and a completed run is never repeated.
+- The prd/brief is **inlined into the definition at add time**, so a
+  definition never dangles on a moved file. Materialized tasks are
+  stamped with `schedule_def` + `schedule_due` in their status.json.
+- v1 has **no disable verb**: `enabled: false` is honored if set by
+  hand, but the CLI levers are `add` and `rm` only -- disable =
+  `rm` now, re-`add` later.
+- A malformed definition is reported in the sweep summary
+  (`N malformed-definitions`) and skipped -- it never breaks the
+  sweep.
 
 ## status.json schema
 

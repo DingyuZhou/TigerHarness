@@ -106,6 +106,36 @@ slack_channel: D012ABCDEF
 
 Agents use this to route follow-up DMs via `--thread`.
 
+## Journal tasks over Slack (cost discipline)
+
+Every turn the bridge spawns runs over `claude -p` — the **API-billed
+rail**, expensive and hard to cap. Journal work follows two rules here
+(rails and billing: [`subscription-backend.md`](subscription-backend.md)):
+
+**1. Scheduling is allowed — and must stay lean.** When asked to
+schedule a journal task from Slack, the persona does the minimum:
+
+1. Collect the brief — the Operator's message verbatim plus only what
+   the `journal-new` skill itself requires (title, kind, playbook,
+   persona).
+2. Run exactly ONE scaffold command (`tigerharness journal new ...`).
+   The scaffolder is deliberately LLM-free pure Python — scheduling is
+   cheap and must stay that way.
+3. Reply with the task id (and task_dir) — one short message.
+4. Stop.
+
+No repo exploration, no design work, no sweeps. All real work happens
+later, on the subscription rail, via `drive-journal` in an interactive
+session.
+
+**2. Driving is forbidden (hard rule).** A Slack-triggered session
+must never drive the journal — no `drive-journal`, no claim, no
+graph-walk, no compile turns. `journal claim` enforces this
+mechanically: the bridge exports `TIGERHARNESS_SLACK_THREAD_TS` into
+every turn it spawns, and claim refuses when that marker is present
+(exit 1, nothing mutated). An Operator who deliberately wants an
+API-billed drive can pass `--allow-api-drive` to override.
+
 ## Multi-team mode
 
 A single bridge process can serve N teams concurrently — one Slack app
@@ -405,3 +435,25 @@ The reference [`examples/slack-bridge-multi.service`](../examples/slack-bridge-m
 
 - `EnvironmentFile=` points at a small `.env` containing only `TIGERHARNESS_BRIDGES_CONFIG=...` (per-lane tokens live in each team's `.env`, referenced by the YAML).
 - `TimeoutStopSec=120` still applies; the 90 s drain budget is shared across lanes (concurrent), not per-lane.
+
+## Idle compaction (ADR 0004)
+
+Opt-in: between tasks, when the journal is idle and the last turn's
+usage shows the session's context above a threshold, the bridge sends
+one `/compact` turn to the resumed session (the mechanism proved in
+`docs/adr/0004-bridge-idle-compaction.md`). Hard rules: never
+mid-task (the idle check is the guard), at most one compact per idle
+period (a per-thread latch cleared by the next real turn), and
+fail-soft everywhere — a failed compact logs and skips, never breaks
+a turn.
+
+Env surface (this section is the single home for these names):
+
+- `TIGERHARNESS_IDLE_COMPACT` — `1`/`true` to enable. **Default off.**
+- `TIGERHARNESS_IDLE_COMPACT_JOURNAL` — the journal root (REQUIRED;
+  an absent or invalid root disables the feature rather than
+  guessing — a guessed root could compact during real work).
+- `TIGERHARNESS_IDLE_COMPACT_THRESHOLD` — context fraction, default
+  `0.30`.
+- `TIGERHARNESS_IDLE_COMPACT_WINDOW` — window tokens, default
+  `200000`.

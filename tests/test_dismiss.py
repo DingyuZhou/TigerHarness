@@ -48,6 +48,14 @@ from tigerharness.dismiss import (
 # Fixtures & helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _isolated_xdg_state(tmp_path, monkeypatch):
+    """Point the journal's XDG root at a fresh tmp dir so the team-plan
+    T8 reminder (global journal root) never depends on the developer's
+    real ~/.local/state."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+
+
 def _make_team(
     teams_root: Path,
     team: str,
@@ -567,6 +575,191 @@ class TestBuildPersonaPlan:
 # ---------------------------------------------------------------------------
 # render_preview
 # ---------------------------------------------------------------------------
+
+class TestPersonaPlanGapAudit:
+    """T5 gap-audit patches: journal-default refusal (P5), dangling
+    compile_personas reminder (P6), zombie active-task reminder (P7),
+    prose-curation reminder (P10)."""
+
+    def _add_journal_default(self, team_dir: Path, name: str) -> None:
+        yaml_path = team_dir / "configs" / "personas.yaml"
+        yaml_path.write_text(
+            f"default_persona: {name}\n" + yaml_path.read_text()
+        )
+
+    def test_refuses_journal_default_persona(self, tmp_path: Path) -> None:
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        self._add_journal_default(team_dir, "ayako")
+        with pytest.raises(ValueError, match="default_persona"):
+            build_persona_plan(
+                team="tigers", persona="ayako", teams_root=tmp_path,
+            )
+
+    def test_non_default_persona_still_dismissible(
+        self, tmp_path: Path,
+    ) -> None:
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        self._add_journal_default(team_dir, "ayako")
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert plan.kind == "persona"
+
+    def test_missing_journal_default_key_is_fine(
+        self, tmp_path: Path,
+    ) -> None:
+        _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert plan.kind == "persona"
+
+    def test_workflow_yaml_direct_hit_reminds(self, tmp_path: Path) -> None:
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        (team_dir / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n  ayako: anzai\n"
+        )
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert any(
+            "compile_personas" in r for r in plan.manual_reminders
+        )
+
+    def test_workflow_yaml_alias_hit_reminds(self, tmp_path: Path) -> None:
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        yaml_path = team_dir / "configs" / "personas.yaml"
+        yaml_path.write_text(yaml_path.read_text().replace(
+            "  - name: anzai\n",
+            "  - name: anzai\n    aliases: [anzai, Coach]\n",
+        ))
+        (team_dir / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n  drafter: Coach\n"
+        )
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert any("Coach" in r for r in plan.manual_reminders)
+
+    def test_workflow_yaml_absent_or_clean_no_reminder(
+        self, tmp_path: Path,
+    ) -> None:
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert not any(
+            "compile_personas" in r for r in plan.manual_reminders
+        )
+        (team_dir / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n  drafter: ayako\n"
+        )
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert not any(
+            "compile_personas" in r for r in plan.manual_reminders
+        )
+
+    def test_active_task_assignment_reminds(self, tmp_path: Path) -> None:
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        tdir = team_dir / "journal" / "active" / "20260611-x-abc"
+        tdir.mkdir(parents=True)
+        (tdir / "status.json").write_text(
+            '{"persona": "anzai", "state": "pending"}'
+        )
+        # Malformed sibling is skipped, not fatal.
+        bad = team_dir / "journal" / "active" / "20260611-bad-def"
+        bad.mkdir(parents=True)
+        (bad / "status.json").write_text("{not json")
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert any("20260611-x-abc" in r for r in plan.manual_reminders)
+
+    def test_workflow_yaml_unreadable_returns_empty(
+        self, tmp_path: Path,
+    ) -> None:
+        # OSError branch: a directory where the file should be.
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        (team_dir / "configs" / "workflow.yaml").mkdir()
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert not any(
+            "compile_personas" in r for r in plan.manual_reminders
+        )
+
+    def test_active_task_other_persona_not_listed(
+        self, tmp_path: Path,
+    ) -> None:
+        # The non-matching valid-status loop branch.
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        tdir = team_dir / "journal" / "active" / "20260611-y-zzz"
+        tdir.mkdir(parents=True)
+        (tdir / "status.json").write_text(
+            '{"persona": "ayako", "state": "pending"}'
+        )
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert not any(
+            "journal/active" in r for r in plan.manual_reminders
+        )
+
+    def test_no_journal_dir_no_task_reminder(self, tmp_path: Path) -> None:
+        _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert not any(
+            "journal/active" in r for r in plan.manual_reminders
+        )
+
+    def test_prose_reminder_only_when_docs_exist(
+        self, tmp_path: Path,
+    ) -> None:
+        team_dir = _make_team(tmp_path, "tigers", ["ayako", "anzai"])
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert not any(
+            "Prose mentions" in r for r in plan.manual_reminders
+        )
+        (team_dir / "knowledge").mkdir()
+        plan = build_persona_plan(
+            team="tigers", persona="anzai", teams_root=tmp_path,
+        )
+        assert any("Prose mentions" in r for r in plan.manual_reminders)
+
+
+class TestTeamPlanXdgJournalReminder:
+    """T8: a global/XDG journal root gets a shared-state reminder on
+    team dismissal; absent root stays silent."""
+
+    def test_existing_xdg_root_reminds(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        xdg = tmp_path / "xdg-state"
+        (xdg / "tigerharness-journal").mkdir(parents=True)
+        monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+        _make_team(tmp_path, "tigers", ["ayako"])
+        plan = build_team_plan(
+            team="tigers", teams_root=tmp_path, home=tmp_path,
+        )
+        assert any(
+            "global journal root" in r for r in plan.manual_reminders
+        )
+
+    def test_absent_xdg_root_silent(self, tmp_path: Path) -> None:
+        _make_team(tmp_path, "tigers", ["ayako"])
+        plan = build_team_plan(
+            team="tigers", teams_root=tmp_path, home=tmp_path,
+        )
+        assert not any(
+            "global journal root" in r for r in plan.manual_reminders
+        )
+
 
 class TestRenderPreview:
     def test_empty_plan_still_renders(self) -> None:

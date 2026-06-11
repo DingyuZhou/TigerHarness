@@ -150,6 +150,17 @@ Outside a Slack-driven drive (a plain terminal with no `[bridge-context]`
 and no persona identity), **omit `--driver`** -- claim/release behave
 exactly as the plain subscription backend with no memory side-effect.
 
+## The Slack rail rule (hard, red-light)
+
+Slack-triggered (bridge-spawned) sessions bill API tokens: they may
+SCHEDULE journal tasks (`journal new`) but must NEVER drive them -- no
+`drive-journal`, no claim, no graph-walk, no compile turns; driving
+belongs to the subscription rail (interactive sessions). `journal
+claim` enforces this mechanically: it refuses when
+`TIGERHARNESS_SLACK_THREAD_TS` is set in the environment unless the
+deliberate `--allow-api-drive` override is passed. Rails and billing:
+`docs/subscription-backend.md` in the tigerharness repo.
+
 ## The decision procedure
 
 Run on every `drive-journal` invocation and looped after each
@@ -295,13 +306,15 @@ completed task until no actionable tasks remain.
    **Context is NOT a stop reason -- compact instead.** Every session
    checkpoints to `progress.md` + `next_action`, so a context
    **compaction loses nothing**: after one, just re-orient from those.
-   So do NOT hand off early "to let the loop bridge to fresh context" --
-   keep cascading and rely on **auto-compaction** (triggers at ~50% of the
-   window by default, set via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in the
-   team's `.claude/settings.json`) to reclaim room. Hand off (release idle
-   + end the turn) **only** at the
-   true hard ceiling -- and even then a fresh fire resumes the idle task
-   instantly. **After any compaction, re-sweep (step 1) and continue.**
+   There is NO configured mid-task compaction (retired by Operator
+   ruling 2026-06-11: compacting in the middle of a task can cause
+   unexpected results); the CLI's own auto-compact fires only near the
+   hard context limit. A session that nears the ceiling checkpoints to
+   `progress.md` + `next_action` and hands off (release idle + end the
+   turn) -- instant-resume picks the task back up with fresh context.
+   The only proactive compaction is the bridge's idle compaction
+   (between tasks, journal idle -- see docs/slack-bridge.md). **If a
+   compaction does happen, re-sweep (step 1) and continue.**
 
    Compaction loses nothing **for continuity** (you re-orient from
    `progress.md`) -- and nothing **for memory** *either*, **provided** a

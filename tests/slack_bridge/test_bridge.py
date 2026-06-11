@@ -465,6 +465,54 @@ class TestSlackBridge:
         assert "Hello from Sai" in call_kwargs["text"]
 
     @pytest.mark.asyncio
+    async def test_idle_compact_fires_after_hot_idle_turn(
+        self, bridge, tmp_path,
+    ):
+        """ADR 0004 hook: enabled config + hot usage + idle journal
+        -> exactly one extra /compact turn through the backend path,
+        and the per-thread latch blocks a repeat without a new turn."""
+        from unittest.mock import patch
+
+        from tigerharness.slack_bridge.idle_compact import (
+            IdleCompactConfig,
+        )
+
+        b, backend, fake_result = bridge
+        fake_result.usage = {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 30_000,
+            "cache_read_input_tokens": 50_000,
+        }
+        journal_root = tmp_path / "journal"
+        (journal_root / "active").mkdir(parents=True)
+        b._idle_compact_cfg = IdleCompactConfig(
+            enabled=True,
+            journal_root=journal_root,
+            threshold_fraction=0.30,
+            context_window_tokens=200_000,
+        )
+        calls: list[str] = []
+
+        async def fake_run(backend_, cfg_, prompt, **kw):
+            calls.append(prompt)
+            return fake_result
+
+        with patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry",
+            side_effect=fake_run,
+        ):
+            say = AsyncMock()
+            event = {"channel_type": "im", "user": "U0CEO",
+                     "text": "hello", "ts": "1.1"}
+            await b.handle_message(event, say)
+
+        assert calls[-1] == "/compact"  # the hook fired once
+        assert calls.count("/compact") == 1
+        # The latch is set on the thread state.
+        state = list(b._threads.values())[0]
+        assert state.idle_compacted is True
+
+    @pytest.mark.asyncio
     async def test_dispatch_injects_thread_ts_env(self, bridge):
         # Harness-enforced suppression: the per-turn AgentConfig handed to
         # the backend carries this thread's ts so an in-session
