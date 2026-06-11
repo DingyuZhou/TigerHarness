@@ -299,3 +299,24 @@ class TestSpacedPersonaResolution:
         )
         amap = read_team_alias_map(tmp_path)
         assert amap.get("chuanchuan") == "Chuan Ying"
+
+    def test_normalized_key_collision_last_declared_wins(
+        self, tmp_path: Path,
+    ) -> None:
+        """Documents (does not endorse) the collision behavior:
+        "Chuan Ying" and "Chuan-Ying" normalize to the same key, and
+        the LAST-declared canonical wins the map -- even an exact-name
+        query resolves to it. Pre-existing class (underscore/hyphen
+        pairs collide identically); the spaces grammar widens it.
+        Filed by QA (b2) for a future guard at init time.
+        """
+        cfg_dir = tmp_path / "configs"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Chuan Ying\n"
+            "  - name: Chuan-Ying\n",
+            encoding="utf-8",
+        )
+        from tigerharness.journal.scaffold import canonicalize_persona
+        assert canonicalize_persona(tmp_path, "Chuan Ying") == "Chuan-Ying"
