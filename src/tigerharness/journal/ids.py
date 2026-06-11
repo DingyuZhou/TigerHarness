@@ -1,4 +1,11 @@
-"""Task-id generation: ``<YYYYMMDD>-<slug>-<uuid8>``.
+"""Task-id generation: ``<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>``.
+
+The timestamp (UTC) carries the date AND time of day so same-day task
+ids sort in their scheduled order under a plain lexicographic sort.
+Legacy ids minted before the time component existed
+(``<YYYYMMDD>-<slug>-<uuid8>``) remain fully valid: nothing parses the
+timestamp back out of an id, so old and new formats coexist in one
+journal with no migration.
 
 Mirrors ``wfcore.ids`` in spirit but lives in its own module so
 the journal package has no dependency on the workflow-runner: this
@@ -69,7 +76,11 @@ def new_task_id(
     slug_overrider: str | None = None,
     exists_check: Callable[[str], bool] | None = None,
 ) -> str:
-    """Mint a fresh ``<YYYYMMDD>-<slug>-<uuid8>`` task id.
+    """Mint a fresh ``<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>`` task id.
+
+    The timestamp is UTC; date and time come from the same clock
+    reading, so the id's lexicographic order is its creation order
+    (within new-format ids).
 
     Parameters
     ----------
@@ -89,12 +100,12 @@ def new_task_id(
         hard-error. Path tests inject a stub.
     """
     when = now or _dt.datetime.now(_dt.timezone.utc)
-    date = when.strftime("%Y%m%d")
+    stamp = when.strftime("%Y%m%d-%H%M%S")
     slug_source = slug_overrider if slug_overrider else title_or_slug
     slug = slugify(slug_source)
     for attempt in range(2):  # original + one regenerate-on-collision
         uuid8 = _short_uuid()
-        candidate = f"{date}-{slug}-{uuid8}"
+        candidate = f"{stamp}-{slug}-{uuid8}"
         if exists_check is None or not exists_check(candidate):
             return candidate
         # Loop -- regenerate uuid8 once.

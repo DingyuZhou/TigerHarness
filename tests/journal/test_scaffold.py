@@ -62,6 +62,25 @@ class TestWriteAtomic:
 # new_task end-to-end
 # ---------------------------------------------------------------------------
 
+
+def _freeze_ids_clock(monkeypatch, id_mod):
+    """Patch the ids module's _dt binding to a frozen UTC clock so a
+    test can predict the minted <YYYYMMDD>-<HHmmSS> stamp without
+    racing the wall clock across a second boundary. Returns the stamp."""
+    import datetime as dt
+
+    class _FrozenDT:
+        timezone = dt.timezone
+
+        class datetime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 6, 11, 14, 30, 52, tzinfo=tz)
+
+    monkeypatch.setattr(id_mod, "_dt", _FrozenDT)
+    return "20260611-143052"
+
+
 class TestNewTask:
     @pytest.fixture
     def paths(self, tmp_path):
@@ -204,10 +223,10 @@ class TestNewTask:
             return "deadbeef" if len(calls) == 1 else "feedface"
 
         monkeypatch.setattr(id_mod.secrets, "token_hex", fake_token_hex)
-        # Pre-seed done/<...>-deadbeef as if it were already archived.
-        import datetime as dt
-        date = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
-        colliding_id = f"{date}-collision-deadbeef"
+        # Pre-seed done/<...>-deadbeef as if it were already archived,
+        # on a frozen clock so the stamp cannot race a second tick.
+        stamp = _freeze_ids_clock(monkeypatch, id_mod)
+        colliding_id = f"{stamp}-collision-deadbeef"
         (paths.done / colliding_id).mkdir(parents=True)
         (paths.done / colliding_id / "status.json").write_text("{}")
         result = new_task(
@@ -228,11 +247,11 @@ class TestNewTask:
         monkeypatch.setattr(
             id_mod.secrets, "token_hex", lambda n: "deadbeef",
         )
-        # Pre-seed both possible ids in done/.
-        import datetime as dt
-        date = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
-        (paths.done / f"{date}-collision-deadbeef").mkdir(parents=True)
-        (paths.done / f"{date}-collision-deadbeef" / "status.json").write_text("{}")
+        # Pre-seed both possible ids in done/ (frozen clock: the
+        # stamp is deterministic, and both attempts share it).
+        stamp = _freeze_ids_clock(monkeypatch, id_mod)
+        (paths.done / f"{stamp}-collision-deadbeef").mkdir(parents=True)
+        (paths.done / f"{stamp}-collision-deadbeef" / "status.json").write_text("{}")
         with pytest.raises(JournalScaffoldError):
             new_task(
                 prd_text="# Collision\nbody\n",

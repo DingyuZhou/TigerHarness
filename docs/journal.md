@@ -81,9 +81,19 @@ Driver (`drive-journal` skill, interactive session)
     <task-id>/                # finished tasks moved here by the next drive-journal sweep
 ```
 
-Task-id format: `<YYYYMMDD>-<slug>-<uuid8>`.
+Task-id format: `<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>`.
 
-- `YYYYMMDD` — UTC date at creation
+- `YYYYMMDD-HHmmSS` — UTC date and time at creation (one clock
+  reading). Same-day ids therefore sort in their creation order
+  under a plain lexicographic sort — scheduling several tasks in one
+  day preserves their scheduled sequence.
+- Legacy ids minted before the time component
+  (`<YYYYMMDD>-<slug>-<uuid8>`) stay fully valid: nothing parses the
+  timestamp back out of an id, so old and new folders coexist in one
+  journal with no migration. Relative order between a same-day legacy
+  id and a new-format id is plain lexicographic (a digit sorts before
+  a letter) — documented as-is, no machine distinguishability is
+  claimed.
 - `slug` — `slugify(--title or first H1 of PRD, max=40)` (ASCII
   lowercase, hyphen-separated; falls back to `"task"` if the source
   has no usable chars)
