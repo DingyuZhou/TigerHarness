@@ -122,9 +122,14 @@ class TestResolveTeamJournalRoot:
         (victim / "configs").mkdir(parents=True)
         (victim / "configs" / "personas.yaml").write_text("personas: []\n")
         monkeypatch.setenv("TIGERHARNESS_TEAMS_DIR", str(teams))
-        with pytest.raises(JournalRootRefusal):
+        with pytest.raises(JournalRootRefusal) as exc:
             resolve_team_journal_root(team="../outside/Victim")
         assert not (victim / "journal").exists()
+        # The message tells the truth (b2 finding): it's a
+        # name-vs-directory mismatch, not a wrong-cwd situation.
+        msg = str(exc.value)
+        assert "cwd is team" not in msg
+        assert "resolves to a directory named" in msg
 
 
 # ---------------------------------------------------------------------------

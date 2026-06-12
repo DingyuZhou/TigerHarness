@@ -119,17 +119,32 @@ def resolve_team_journal_root(
     root = resolve_team_root(team)
     cwd = Path.cwd()
     if _is_team_dir(root) and root.resolve().name != team:
-        # resolve_team_root's "cwd is a team root" convention matched a
-        # DIFFERENT team's folder -- scheduling team X's work from team
-        # Y's root must refuse, not land in Y's journal.
-        raise JournalRootRefusal(
-            cwd=cwd,
-            expected_root=root / "journal",
-            fix_hint=(
+        # The resolved directory's name doesn't match the requested
+        # team. Two distinct causes deserve two truthful messages
+        # (b2 defense finding: the old single message claimed a false
+        # cwd fact): either resolve_team_root's "cwd is a team root"
+        # convention matched a DIFFERENT team's folder, or the team
+        # NAME itself resolved to a directory named something else
+        # (e.g. a path-shaped name like "../outside/Victim" under
+        # TIGERHARNESS_TEAMS_DIR). Both refuse; each says what
+        # actually happened.
+        if root.resolve() == cwd.resolve():
+            hint = (
                 f"cwd is team {root.resolve().name!r}'s root, not "
                 f"{team!r}'s. Run from {team!r}'s own root, or pass "
                 f"--team-dir <path-to-{team}>."
-            ),
+            )
+        else:
+            hint = (
+                f"team name {team!r} resolves to a directory named "
+                f"{root.resolve().name!r} ({root}) -- team names must "
+                f"match their directory. Pass --team-dir for unusual "
+                f"layouts."
+            )
+        raise JournalRootRefusal(
+            cwd=cwd,
+            expected_root=root / "journal",
+            fix_hint=hint,
         )
     if not _is_team_dir(root):
         raise JournalRootRefusal(
