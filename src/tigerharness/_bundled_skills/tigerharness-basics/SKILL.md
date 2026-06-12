@@ -133,6 +133,8 @@ What `tigerharness init` scaffolds, and who owns each piece.
 **Source-of-truth** files are yours to edit; **generated** files are
 maintained by the tooling.
 
+- `.gitignore` — seeded so secrets (`configs/.env`) and local state
+  never land in git. Generated once; extend it as your team needs.
 - `AGENTS.md` — the always-loaded session bootstrap (vendor-neutral;
   source of truth). `CLAUDE.md` just imports it for Claude Code.
 - `configs/personas.yaml` — THE team roster + `default_persona`.
