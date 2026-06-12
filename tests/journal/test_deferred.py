@@ -110,6 +110,22 @@ class TestResolveTeamJournalRoot:
         with pytest.raises(ValueError):
             resolve_team_journal_root()
 
+    def test_team_name_traversal_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """Defense pin (b2): a path-shaped --team ("../outside/Victim")
+        must never escape the teams dir into another root -- the
+        name-mismatch check refuses it before anything is written."""
+        teams = tmp_path / "teams"
+        teams.mkdir()
+        victim = tmp_path / "outside" / "Victim"
+        (victim / "configs").mkdir(parents=True)
+        (victim / "configs" / "personas.yaml").write_text("personas: []\n")
+        monkeypatch.setenv("TIGERHARNESS_TEAMS_DIR", str(teams))
+        with pytest.raises(JournalRootRefusal):
+            resolve_team_journal_root(team="../outside/Victim")
+        assert not (victim / "journal").exists()
+
 
 # ---------------------------------------------------------------------------
 # defer: the API-rail half
@@ -308,6 +324,29 @@ class TestMaterialize:
         envelope = json.loads(capsys.readouterr().out)
         assert any("ghost" in e for e in envelope["errors"])
         assert list_deferred(paths) == [did]
+
+    def test_double_materialize_second_attempt_fails_cleanly(
+        self, team_env, capsys
+    ):
+        """Defense pin (b2): materializing the same entry twice cannot
+        double-deliver -- the entry was consumed, the second attempt
+        is an envelope, no duplicate task appears."""
+        journal = str(team_env / "journal")
+        did = self._defer(team_env)
+        rc = main(["--journal-dir", journal, "materialize", did])
+        assert rc == 0
+        capsys.readouterr()
+        paths = JournalPaths(root=team_env / "journal")
+        tasks_after_first = sorted(
+            p.name for p in (paths.active).iterdir()
+        )
+        rc = main(["--journal-dir", journal, "materialize", did])
+        assert rc == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is False
+        assert sorted(
+            p.name for p in (paths.active).iterdir()
+        ) == tasks_after_first
 
     def test_unknown_id_exits_1(self, team_env, capsys):
         journal = str(team_env / "journal")
