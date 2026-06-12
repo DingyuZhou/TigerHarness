@@ -512,6 +512,35 @@ class TestScaffoldClaudeDir:
             '[project]\nname = "TigerHarness"\n')
         assert _detect_project_dir(team) == proj
 
+    def test_detection_tolerates_unstatable_sibling(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """A level-mate whose entries can't even be stat()ed (e.g.
+        /tmp's systemd-private-* dirs, mode 700 root-owned) must be
+        skipped, not crash init: pathlib's is_file() re-raises EACCES
+        -- only the ENOENT class is swallowed. Regression: found by
+        the fresh-init smoke run against a real /tmp."""
+        from tigerharness.init import _detect_project_dir
+        projects = tmp_path / "projects"
+        team = projects / "teams" / "myteam"
+        team.mkdir(parents=True)
+        locked = projects / "aa-locked"
+        locked.mkdir()
+        (locked / "pyproject.toml").write_text("secret")
+        real_is_file = Path.is_file
+
+        def denied_is_file(self):
+            if "aa-locked" in str(self):
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_is_file(self)
+
+        monkeypatch.setattr(Path, "is_file", denied_is_file)
+        proj = projects / "zz-tigerharness"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "TigerHarness"\n')
+        assert _detect_project_dir(team) == proj
+
     def test_detection_tolerates_unlistable_parent(
         self, tmp_path: Path, monkeypatch,
     ):
@@ -559,6 +588,9 @@ class TestScaffoldClaudeDir:
         team.mkdir()
         created = _scaffold_claude_dir(team)
         assert (team / ".claude" / "skills" / "slack-notify" / "SKILL.md").exists()
+        assert (
+            team / ".claude" / "skills" / "tigerharness-basics" / "SKILL.md"
+        ).exists()
         # At least settings.json + 2 skills
         assert len(created) >= 3
 
@@ -691,7 +723,8 @@ class TestRemoveCompactEnvInFile:
         assert _remove_compact_env_in_file(path) is False
 
 class TestScaffoldGuardHook:
-    """_scaffold_claude_dir wires the guard hook on create and on merge."""
+    """_scaffold_claude_dir creates settings.json and tidies an existing
+    one (removes the retired compact key; nothing is injected)."""
 
     def test_existing_settings_merged_additively(self, tmp_path: Path):
         """An existing settings.json gains the compact env additively --
@@ -1764,8 +1797,9 @@ class TestRefreshSkills:
     """`tigerharness init --refresh-skills` brings an existing team's
     bundled skills current without touching personas: installs missing
     skills, refreshes any skill byte-identical to a previously-shipped
-    version, leaves hand-edited skills alone, and tops up
-    `.claude/settings.json` (guard hook + compact threshold). Idempotent."""
+    version, leaves hand-edited skills alone, and tidies
+    `.claude/settings.json` (removes the retired mid-task compact
+    override if still at the old seeded default). Idempotent."""
 
     def test_installs_missing_bundled_skills(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
@@ -1792,6 +1826,32 @@ class TestRefreshSkills:
         out = capsys.readouterr().out
         assert "Installed" in out
         assert "journal-new" in out
+
+    def test_refresh_installs_tigerharness_basics(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """A team scaffolded before the tigerharness-basics skill existed
+        picks it up via --refresh-skills (the brief's acceptance path)."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        team_dir = tmp_path / "tigers"
+        target = (
+            team_dir / ".claude" / "skills" / "tigerharness-basics"
+            / "SKILL.md"
+        )
+        assert target.is_file()  # fresh scaffold already installs it
+        target.unlink()
+        target.parent.rmdir()
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        assert target.is_file()
+        out = capsys.readouterr().out
+        assert "Installed" in out
+        assert "tigerharness-basics" in out
 
     def test_idempotent_when_nothing_missing(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
@@ -2065,6 +2125,53 @@ class TestBundledDriveJournalSkill:
         text = self._bundled("drive-journal").read_text(encoding="utf-8")
         assert "graph walk" in text.lower()
         assert "land-compile" in text
+
+
+# Canonical invocation anchors for the tigerharness-basics skill. ONE
+# home for these strings (the SKILL.md is authored against this list):
+# each anchor is the exact backticked form the doc must use, so a CLI
+# rename or a doc rewrite that drops a sub-command fails here instead
+# of shipping silently. Plain `in` checks on short aliases ("j", "tm")
+# would pass any text -- hence full backticked forms only.
+_BASICS_SKILL_ANCHORS = [
+    "`tigerharness init`",
+    "`tigerharness dismiss`",
+    "`tigerharness journal` (alias: `j`)",
+    "`tigerharness tiger-memory` (alias: `tm`)",
+    "`tigerharness slack-bridge` (alias: `sb`)",
+    "`--refresh-skills`",
+    "## Recruiting a new persona",
+    "## Creating a workflow task",
+]
+
+
+class TestBundledBasicsSkill:
+    """The tigerharness-basics skill teaches the CLI surface and team
+    layout; pin its load-bearing claims so drift fails loudly."""
+
+    def _text(self) -> str:
+        import tigerharness.init as _init
+        p = (
+            Path(_init.__file__).parent / "_bundled_skills"
+            / "tigerharness-basics" / "SKILL.md"
+        )
+        return p.read_text(encoding="utf-8")
+
+    def test_anchored_invocation_forms(self):
+        """Every dispatched sub-command (and the two walkthroughs the
+        brief demands) appears in its canonical anchored form."""
+        text = self._text()
+        for anchor in _BASICS_SKILL_ANCHORS:
+            assert anchor in text, f"missing anchor: {anchor!r}"
+
+    def test_describes_skill_only_driving(self):
+        """The skill must repeat the rail rule: journal driving is
+        skill-only, never CLI-driven."""
+        text = self._text()
+        assert "drive-journal" in text
+        assert "journal-new" in text
+        assert "skill-only" in text
+
 
 # ---------------------------------------------------------------------------
 # Integration: generated artifacts actually work
