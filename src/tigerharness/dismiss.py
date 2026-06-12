@@ -52,12 +52,20 @@ log = logging.getLogger("tigerharness.dismiss")
 # tolerance the line silently fails to match -- the lane stays in the
 # index, state_dir cleanup is skipped, the default_persona refusal
 # check misses, etc.
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-_LANE_LINE_RE = re.compile(r"^\s*-\s*(\S+)\s*(?:#.*)?$")
-_DEFAULT_PERSONA_LINE_RE = re.compile(
-    r"^default_persona\s*:\s*(\S+)\s*(?:#.*)?$"
+# Mirror of init._NAME_RE: space-separated words of [A-Za-z0-9_-],
+# each starting with an alphanumeric (single internal spaces only).
+_NAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_-]*(?: [A-Za-z0-9][A-Za-z0-9_-]*)*$"
 )
-_LEGACY_PERSONA_LINE_RE = re.compile(r"^persona\s*:\s*(\S+)\s*(?:#.*)?$")
+# Name captures use ``.+?`` (not ``\S+``) because names may contain
+# single internal spaces; the trailing-comment match requires a
+# whitespace boundary so an internal token isn't eaten as a comment
+# (same pattern as _STATE_DIR_LINE_RE below).
+_LANE_LINE_RE = re.compile(r"^\s*-\s*(.+?)\s*(?:\s#.*)?$")
+_DEFAULT_PERSONA_LINE_RE = re.compile(
+    r"^default_persona\s*:\s*(.+?)\s*(?:\s#.*)?$"
+)
+_LEGACY_PERSONA_LINE_RE = re.compile(r"^persona\s*:\s*(.+?)\s*(?:\s#.*)?$")
 # state_dir uses ``.+?`` because the value can contain spaces (e.g.
 # ``~/My Folder/state``). Anchor the trailing-comment match with a
 # whitespace-required boundary so a literal ``#`` inside a path
@@ -65,7 +73,7 @@ _LEGACY_PERSONA_LINE_RE = re.compile(r"^persona\s*:\s*(\S+)\s*(?:#.*)?$")
 _STATE_DIR_LINE_RE = re.compile(
     r"^state_dir\s*:\s*(.+?)\s*(?:\s#.*)?$"
 )
-_PERSONA_ENTRY_START_RE = re.compile(r"^  - name:\s*(\S+)\s*(?:#.*)?$")
+_PERSONA_ENTRY_START_RE = re.compile(r"^  - name:\s*(.+?)\s*(?:\s#.*)?$")
 _ENV_FILE_LINE_RE = re.compile(r"^EnvironmentFile\s*=\s*(.+?)\s*(?:\s#.*)?$")
 
 # Must exceed the unit template's `TimeoutStopSec=120` so a legitimate
@@ -341,7 +349,7 @@ def _read_persona_aliases(yaml_text: str, persona: str) -> list[str]:
     aliases: list[str] = []
     in_entry = False
     for line in yaml_text.splitlines():
-        m = re.match(r"^\s*-\s*name\s*:\s*(\S+)\s*$", line)
+        m = re.match(r"^\s*-\s*name\s*:\s*(.+?)\s*$", line)
         if m:
             in_entry = m.group(1).strip("'\"") == persona
             continue
@@ -371,7 +379,7 @@ def _workflow_yaml_mentions(
         return []
     for line in text.splitlines():
         stripped = line.split("#", 1)[0]
-        m = re.match(r"^\s*(drafter|akagi|ayako)\s*:\s*(\S+)\s*$", stripped)
+        m = re.match(r"^\s*(drafter|akagi|ayako)\s*:\s*(.+?)\s*$", stripped)
         if m:
             value = m.group(2).strip("'\"")
             if value in names and value not in hits:

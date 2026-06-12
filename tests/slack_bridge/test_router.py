@@ -182,10 +182,12 @@ class TestFormatRouterPrompt:
 # ---------------------------------------------------------------------------
 
 class TestBuildRouterConfig:
-    def test_has_strict_one_token_instructions(self):
+    def test_has_strict_single_reply_instructions(self):
+        # The instruction demands exactly one roster entry, verbatim
+        # (names may contain spaces, so "one token" would be wrong).
         cfg = _build_router_config()
         assert cfg.name == "slack-bridge-router"
-        assert "EXACTLY one token" in cfg.instructions
+        assert "EXACTLY one roster entry" in cfg.instructions
         assert "default" in cfg.instructions
 
     def test_tools_locked_down(self):
@@ -435,3 +437,53 @@ class TestDetectPersona:
             aliases=aliases,
         )
         assert result[0] == "Anzai"
+
+
+# ---------------------------------------------------------------------------
+# Space-containing persona names
+# ---------------------------------------------------------------------------
+
+class TestSpacedNames:
+    """Multi-word canonical names through the router parse path and
+    the prompt contract.
+
+    The parser does a whole-reply lowercase lookup against an index
+    keyed by full names, so a spaced reply parses; the prompt must ask
+    for the roster entry VERBATIM (not "one token") or the model is
+    coaxed into replying a single word, which lands off-index and
+    silently falls back to default_persona.
+    """
+
+    ROSTER = ["Chuan Ying", "ayako"]
+
+    def test_parses_spaced_canonical_reply(self) -> None:
+        assert _parse_router_response(
+            "Chuan Ying", self.ROSTER
+        ) == "Chuan Ying"
+
+    def test_parses_spaced_reply_with_formatting(self) -> None:
+        assert _parse_router_response(
+            '"Chuan Ying".', self.ROSTER
+        ) == "Chuan Ying"
+
+    def test_alias_maps_to_spaced_canonical(self) -> None:
+        aliases = {"Chuan Ying": ["Chuanchuan", "C-Y"]}
+        assert _parse_router_response(
+            "chuanchuan", self.ROSTER, aliases
+        ) == "Chuan Ying"
+
+    def test_single_word_prefix_is_off_index(self) -> None:
+        # The failure class the prompt fix prevents: a model that
+        # answers just the first word lands off-index -> None ->
+        # caller falls back to default_persona silently.
+        assert _parse_router_response("Chuan", self.ROSTER) is None
+
+    def test_prompt_demands_verbatim_roster_entry(self) -> None:
+        # Contract test: the system prompt must not ask for "one
+        # token" -- it must demand the roster entry verbatim, spaces
+        # included, or spaced personas get mis-routed.
+        from tigerharness.slack_bridge.router import _ROUTER_SYSTEM_PROMPT
+        assert "one token" not in _ROUTER_SYSTEM_PROMPT
+        assert "verbatim, even when it contains a space" in (
+            _ROUTER_SYSTEM_PROMPT
+        )

@@ -31,6 +31,7 @@ from tigerharness.dismiss import (
     _prompt_yes_no,
     _read_default_persona,
     _read_env_files_from_unit,
+    _read_persona_aliases,
     _read_lanes_from_index,
     _read_state_dir,
     _remove_lane_from_index,
@@ -2310,3 +2311,92 @@ class TestPickerQuitAborts:
         rc = dismiss_main(["--dir", str(tmp_path)])
         assert rc == 130
         assert "aborted" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Space-containing names (dismiss side)
+# ---------------------------------------------------------------------------
+
+class TestSpacedNames:
+    """Space-containing names through dismiss's validators and its
+    hand-rolled personas.yaml / fragment / index line parsers."""
+
+    def test_grammar_parity_with_init(self, tmp_path: Path) -> None:
+        # Same grammar as init: single internal spaces valid,
+        # everything else still rejected.
+        _make_team(tmp_path, "shohoku", ["Chuan Ying", "sakuragi"])
+        plan = build_persona_plan(
+            team="shohoku", persona="Chuan Ying", teams_root=tmp_path,
+        )
+        assert plan.target_name == "shohoku/Chuan Ying"
+
+    # (Leading/trailing spaces are stripped before validation --
+    # parity with init -- so only internal-spacing violations reject.)
+    @pytest.mark.parametrize("bad", ["Chuan  Ying", "Chuan\tYing"])
+    def test_rejects_non_grammar_spacing(
+        self, tmp_path: Path, bad: str,
+    ) -> None:
+        _make_team(tmp_path, "shohoku", ["ayako", "sakuragi"])
+        with pytest.raises(ValueError, match="invalid persona name"):
+            build_persona_plan(
+                team="shohoku", persona=bad, teams_root=tmp_path,
+            )
+
+    def test_plan_finds_and_removes_exactly_the_spaced_persona(
+        self, tmp_path: Path,
+    ) -> None:
+        # The find-and-remove path: the plan must locate the spaced
+        # persona's folders AND strip exactly her personas.yaml entry.
+        _make_team(tmp_path, "shohoku", ["Chuan Ying", "ayako"])
+        plan = build_persona_plan(
+            team="shohoku", persona="Chuan Ying", teams_root=tmp_path,
+        )
+        rm_paths = [r.path for r in plan.removals]
+        assert tmp_path / "shohoku" / "personas" / "Chuan Ying" in rm_paths
+        assert tmp_path / "shohoku" / "memories" / "Chuan Ying" in rm_paths
+        assert len(plan.edits) == 1
+        new_yaml = plan.edits[0].new_content
+        assert "- name: Chuan Ying" not in new_yaml
+        assert "- name: ayako" in new_yaml
+
+    def test_entry_detection_quoted_and_unquoted(self) -> None:
+        assert _has_persona_entry("  - name: Chuan Ying\n", "Chuan Ying")
+        assert _has_persona_entry('  - name: "Chuan Ying"\n', "Chuan Ying")
+        assert _has_persona_entry(
+            "  - name: Chuan Ying  # QA\n", "Chuan Ying"
+        )
+        # A spaced query must not match a prefix-only row.
+        assert not _has_persona_entry("  - name: Chuan\n", "Chuan Ying")
+
+    def test_remove_entry_quoted_form(self) -> None:
+        yaml_text = (
+            "personas:\n"
+            '  - name: "Chuan Ying"\n'
+            "    cwd: ..\n"
+            "  - name: ayako\n"
+            "    cwd: ..\n"
+        )
+        out = _remove_persona_entry_from_yaml(yaml_text, "Chuan Ying")
+        assert "Chuan Ying" not in out
+        assert "- name: ayako" in out
+
+    def test_read_default_persona_spaced(self, tmp_path: Path) -> None:
+        frag = tmp_path / "slack-bridge.yaml"
+        frag.write_text("default_persona: Chuan Ying  # coordinator\n")
+        assert _read_default_persona(frag) == "Chuan Ying"
+
+    def test_lane_index_round_trip_spaced_team(self) -> None:
+        index = "lanes:\n  - Tiger Team\n  - shohoku\n"
+        out = _remove_lane_from_index(index, "Tiger Team")
+        assert "Tiger Team" not in out
+        assert "  - shohoku\n" in out
+
+    def test_read_persona_aliases_spaced(self) -> None:
+        yaml_text = (
+            "personas:\n"
+            "  - name: Chuan Ying\n"
+            "    aliases: [Chuan, 'C Y']\n"
+        )
+        assert _read_persona_aliases(yaml_text, "Chuan Ying") == [
+            "Chuan", "C Y",
+        ]

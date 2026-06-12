@@ -217,3 +217,16 @@ class TestIsSafeTaskId:
     ])
     def test_unsafe(self, bad):
         assert is_safe_task_id(bad) is False
+
+
+class TestSlugifySpacedNames:
+    def test_spaced_persona_slug(self):
+        # Worklog filenames embed slugify(persona); spaces are handled
+        # by construction (token split on non-alphanumerics).
+        assert slugify("Chuan Ying") == "chuan-ying"
+
+    def test_spaced_and_hyphenated_names_collide_by_design(self):
+        # Documented collision: the filename slug is a readability
+        # aid only -- the worklog frontmatter `persona` field is the
+        # authoritative attribution, so sharing a slug is acceptable.
+        assert slugify("Chuan Ying") == slugify("Chuan-Ying")

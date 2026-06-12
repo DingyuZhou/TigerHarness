@@ -339,3 +339,17 @@ def test_maybe_sweep_noop_when_busy(tmp_path: Path) -> None:
     write_sweep_state(team, {"claim_token": "other", "claim_at": _iso(0.1)})
     dec = maybe_sweep_roster(team, now=NOW, token="A")
     assert dec.ran is False and dec.reason == "busy" and dec.plan is None
+
+
+def test_enumerate_spaced_persona_store(tmp_path: Path) -> None:
+    # Persona names may contain single internal spaces; the store dir
+    # memories/<Name>/ and its config resolve like any other name.
+    roster = (
+        "personas:\n"
+        "  - name: Chuan Ying\n"
+        "  - name: Ayako\n"
+    )
+    team = _make_team(tmp_path, roster, with_config=["Chuan Ying"])
+    targets = enumerate_persona_configs(team)
+    assert [t.name for t in targets] == ["Chuan Ying"]
+    assert targets[0].config_path.parent.name == "Chuan Ying"

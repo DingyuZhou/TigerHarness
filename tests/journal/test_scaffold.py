@@ -12,8 +12,11 @@ from tigerharness.journal.paths import JournalPaths
 from tigerharness.journal.scaffold import (
     JournalScaffoldError,
     _first_h1,
+    _normalize_persona_key,
     _write_atomic,
     new_task,
+    read_team_alias_map,
+    read_team_roster,
 )
 
 
@@ -259,3 +262,61 @@ class TestNewTask:
                 paths=paths,
                 slug="collision",
             )
+
+
+class TestSpacedPersonaResolution:
+    """Persona/captain resolution with space-containing names."""
+
+    def test_read_team_roster_spaced_name(self, tmp_path: Path) -> None:
+        cfg_dir = tmp_path / "configs"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Chuan Ying\n"
+            "  - name: Ayako\n",
+            encoding="utf-8",
+        )
+        assert read_team_roster(tmp_path) == {"Chuan Ying", "Ayako"}
+
+    def test_normalize_key_collapses_spaces(self) -> None:
+        # --persona/--captain matching is case- and separator-
+        # insensitive; spaces normalize to hyphens like underscores do.
+        assert _normalize_persona_key("Chuan Ying") == "chuan-ying"
+        assert (
+            _normalize_persona_key("chuan ying")
+            == _normalize_persona_key("Chuan-Ying")
+            == _normalize_persona_key("chuan_ying")
+        )
+
+    def test_alias_map_spaced_canonical(self, tmp_path: Path) -> None:
+        cfg_dir = tmp_path / "configs"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Chuan Ying\n"
+            "    aliases: [Chuanchuan]\n",
+            encoding="utf-8",
+        )
+        amap = read_team_alias_map(tmp_path)
+        assert amap.get("chuanchuan") == "Chuan Ying"
+
+    def test_normalized_key_collision_last_declared_wins(
+        self, tmp_path: Path,
+    ) -> None:
+        """Documents (does not endorse) the collision behavior:
+        "Chuan Ying" and "Chuan-Ying" normalize to the same key, and
+        the LAST-declared canonical wins the map -- even an exact-name
+        query resolves to it. Pre-existing class (underscore/hyphen
+        pairs collide identically); the spaces grammar widens it.
+        Filed by QA (b2) for a future guard at init time.
+        """
+        cfg_dir = tmp_path / "configs"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Chuan Ying\n"
+            "  - name: Chuan-Ying\n",
+            encoding="utf-8",
+        )
+        from tigerharness.journal.scaffold import canonicalize_persona
+        assert canonicalize_persona(tmp_path, "Chuan Ying") == "Chuan-Ying"
