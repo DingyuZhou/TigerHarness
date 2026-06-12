@@ -379,7 +379,13 @@ class TestBuildTeamPlan:
         home = tmp_path / "home"
         unit_dir = home / ".config" / "systemd" / "user"
         unit_dir.mkdir(parents=True)
-        (unit_dir / "slack-bridge-multi.service").write_text("[Unit]\n")
+        # Realistic gen-service output: the unit references this
+        # root's env file -- under content-based discovery, that
+        # reference is what makes it THIS root's unit.
+        (unit_dir / "slack-bridge-multi.service").write_text(
+            f"[Unit]\n[Service]\n"
+            f"EnvironmentFile={tmp_path}/multi-bridge.env\n"
+        )
         _make_team(
             tmp_path, "shohoku", ["ayako"],
             with_slack_env=True, with_fragment="default_persona",
@@ -405,6 +411,182 @@ class TestBuildTeamPlan:
         ]
         # Journalctl reminder is added
         assert any("journalctl" in r for r in plan.manual_reminders)
+
+    def test_last_team_never_touches_another_roots_bridge(
+        self, tmp_path: Path
+    ) -> None:
+        """The 2026-06-12 incident, as a regression test: dismissing
+        the last lane of root B must not name, stop, or delete
+        anything belonging to root A -- and the refusal is loud."""
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        root_a = tmp_path / "teams"
+        root_a.mkdir()
+        (root_a / "multi-bridge.env").write_text(
+            f"TIGERHARNESS_BRIDGES_CONFIG={root_a}/slack-bridge.yaml\n"
+        )
+        # The legacy global unit name, owned by root A.
+        (unit_dir / "slack-bridge-multi.service").write_text(
+            f"[Service]\nEnvironmentFile={root_a}/multi-bridge.env\n"
+        )
+        root_b = tmp_path / "my-teams"
+        root_b.mkdir()
+        _make_team(
+            root_b, "inkstone", ["scribe"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(root_b, ["inkstone"])
+
+        plan = build_team_plan(
+            team="inkstone", teams_root=root_b, home=home,
+        )
+        rm_paths = [r.path.resolve() for r in plan.removals]
+        # Root A's env file survives; root A's unit is untouched.
+        assert (root_a / "multi-bridge.env").resolve() not in rm_paths
+        assert plan.service_actions == ()
+        # The refusal is loud and names what was scanned + excluded.
+        joined = "\n".join(plan.manual_reminders)
+        assert "slack-bridge-multi.service" in joined
+        assert str(root_b) in joined
+        # Root B's own index still gets cleaned up.
+        assert (root_b / "slack-bridge.yaml").resolve() in rm_paths
+
+    def test_last_team_matches_per_root_unit_and_spares_others(
+        self, tmp_path: Path
+    ) -> None:
+        """Two roots, two per-root units: dismissal tears down only
+        the operated root's unit; ownership via env-file location."""
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        root_a = tmp_path / "teams"
+        root_a.mkdir()
+        (root_a / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=x\n"
+        )
+        (unit_dir / "slack-bridge-multi-teams-abc123.service").write_text(
+            f"[Service]\nEnvironmentFile={root_a}/multi-bridge.env\n"
+        )
+        root_b = tmp_path / "my-teams"
+        root_b.mkdir()
+        _make_team(
+            root_b, "inkstone", ["scribe"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(root_b, ["inkstone"])
+        (root_b / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=y\n"
+        )
+        (unit_dir / "slack-bridge-multi-my-teams-def456.service").write_text(
+            f"[Service]\nEnvironmentFile={root_b}/multi-bridge.env\n"
+        )
+
+        plan = build_team_plan(
+            team="inkstone", teams_root=root_b, home=home,
+        )
+        rm_paths = [r.path.resolve() for r in plan.removals]
+        assert (root_b / "multi-bridge.env").resolve() in rm_paths
+        assert (root_a / "multi-bridge.env").resolve() not in rm_paths
+        targets = [s.target for s in plan.service_actions]
+        assert "slack-bridge-multi-my-teams-def456.service" in targets
+        assert not any("teams-abc123" in t for t in targets)
+        unit_removals = [
+            s.target for s in plan.service_actions
+            if s.kind == "remove_unit_file"
+        ]
+        assert unit_removals == [
+            str(unit_dir / "slack-bridge-multi-my-teams-def456.service")
+        ]
+
+    def test_owned_unit_with_outside_env_file_is_not_cross_deleted(
+        self, tmp_path: Path
+    ) -> None:
+        """A unit owned via its bridges-config (env file parked outside
+        the root) is stopped, but the outside env file is never
+        deleted -- manual reminder instead."""
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        root_b = tmp_path / "my-teams"
+        root_b.mkdir()
+        _make_team(
+            root_b, "inkstone", ["scribe"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(root_b, ["inkstone"])
+        outside_env = tmp_path / "elsewhere.env"
+        outside_env.write_text(
+            f"TIGERHARNESS_BRIDGES_CONFIG={root_b}/slack-bridge.yaml\n"
+        )
+        (unit_dir / "slack-bridge-multi-custom.service").write_text(
+            f"[Service]\nEnvironmentFile={outside_env}\n"
+        )
+
+        plan = build_team_plan(
+            team="inkstone", teams_root=root_b, home=home,
+        )
+        rm_paths = [r.path.resolve() for r in plan.removals]
+        assert outside_env.resolve() not in rm_paths
+        targets = [s.target for s in plan.service_actions]
+        assert "slack-bridge-multi-custom.service" in targets
+        assert any(str(outside_env) in r for r in plan.manual_reminders)
+
+    def test_owned_unit_with_missing_env_file_skips_removal(
+        self, tmp_path: Path
+    ) -> None:
+        """A unit owned via bridges-config whose env path no longer
+        exists: unit is torn down, nothing scheduled for the dead
+        path."""
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        root_b = tmp_path / "my-teams"
+        root_b.mkdir()
+        _make_team(
+            root_b, "inkstone", ["scribe"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(root_b, ["inkstone"])
+        gone_env = root_b / "multi-bridge.env"  # never created
+        (unit_dir / "slack-bridge-multi-x.service").write_text(
+            f"[Service]\nEnvironmentFile={gone_env}\n"
+        )
+        plan = build_team_plan(
+            team="inkstone", teams_root=root_b, home=home,
+        )
+        rm_paths = [r.path.resolve() for r in plan.removals]
+        assert gone_env.resolve() not in rm_paths
+        assert "slack-bridge-multi-x.service" in [
+            s.target for s in plan.service_actions
+        ]
+
+    def test_last_team_no_candidate_units_is_loud(
+        self, tmp_path: Path
+    ) -> None:
+        """Zero unit files at all: the canonical env file is still
+        cleaned and the operator is told nothing was found."""
+        home = tmp_path / "home"
+        home.mkdir()
+        _make_team(
+            tmp_path, "shohoku", ["ayako"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(tmp_path, ["shohoku"])
+        (tmp_path / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=x\n"
+        )
+
+        plan = build_team_plan(
+            team="shohoku", teams_root=tmp_path, home=home,
+        )
+        rm_paths = [r.path for r in plan.removals]
+        assert tmp_path / "multi-bridge.env" in rm_paths
+        assert plan.service_actions == ()
+        assert any(
+            "no slack-bridge-multi*.service unit files found" in r
+            for r in plan.manual_reminders
+        )
 
     def test_multi_team_last_team_without_unit_skips_service_actions(
         self, tmp_path: Path
@@ -1490,6 +1672,54 @@ class TestPlanRefusesUnsafeStateDir:
 # B3 -- _read_env_files_from_unit + plan integration
 # ---------------------------------------------------------------------------
 
+class TestOwnershipHelpers:
+    """_resolves_inside + _read_bridges_config_from_env -- the
+    content-based ownership signals behind the root-containment fix."""
+
+    def test_resolves_inside_none_and_outside(self, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        assert dismiss_mod._resolves_inside(None, root) is False
+        assert dismiss_mod._resolves_inside(root / "x.env", root) is True
+        assert dismiss_mod._resolves_inside(tmp_path / "y.env", root) is False
+
+    def test_resolves_inside_oserror_counts_as_outside(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        target = root / "x.env"
+        real_resolve = Path.resolve
+
+        def flaky_resolve(self, *a, **k):
+            if self.name == "x.env":
+                raise OSError("loop")
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", flaky_resolve)
+        assert dismiss_mod._resolves_inside(target, root) is False
+
+    def test_read_bridges_config_skips_comments_and_empty(
+        self, tmp_path: Path,
+    ) -> None:
+        env = tmp_path / "a.env"
+        env.write_text(
+            "# a comment\n"
+            "TIGERHARNESS_BRIDGES_CONFIG=\n"   # empty value -> keep looking
+            "TIGERHARNESS_BRIDGES_CONFIG='/x/y.yaml'\n"
+        )
+        assert dismiss_mod._read_bridges_config_from_env(env) == Path("/x/y.yaml")
+
+    def test_read_bridges_config_absent_or_unreadable(
+        self, tmp_path: Path,
+    ) -> None:
+        missing = tmp_path / "missing.env"
+        assert dismiss_mod._read_bridges_config_from_env(missing) is None
+        other = tmp_path / "other.env"
+        other.write_text("SOMETHING_ELSE=1\n")
+        assert dismiss_mod._read_bridges_config_from_env(other) is None
+
+
 class TestReadEnvFilesFromUnit:
     def test_returns_empty_when_unit_missing(self, tmp_path: Path) -> None:
         assert _read_env_files_from_unit(tmp_path / "no.service") == []
@@ -1530,12 +1760,17 @@ class TestReadEnvFilesFromUnit:
 
 
 class TestPlanUsesUnitEnvFile:
-    def test_env_file_from_unit_used_instead_of_default(
+    def test_env_file_from_unit_used_and_in_root_default_cleaned(
         self, tmp_path: Path
     ) -> None:
-        # Unit references a custom env file; the canonical
-        # `multi-bridge.env` is also present but should be IGNORED
-        # because the unit is authoritative.
+        # Unit references a custom env file inside the root; the
+        # canonical `multi-bridge.env` is also present. Full teardown
+        # of this root's bridge removes BOTH -- the custom one because
+        # the owned unit references it, the canonical one because it
+        # lives inside the operated root by construction and is this
+        # root's bridge debris either way. (Behavior change with the
+        # 2026-06 root-containment fix: the old plan left the stale
+        # default behind.)
         home = tmp_path / "home"
         unit_dir = home / ".config" / "systemd" / "user"
         unit_dir.mkdir(parents=True)
@@ -1557,8 +1792,7 @@ class TestPlanUsesUnitEnvFile:
         )
         rm_paths = [r.path for r in plan.removals]
         assert custom_env in rm_paths
-        # The hardcoded default is NOT scheduled for removal.
-        assert (tmp_path / "multi-bridge.env") not in rm_paths
+        assert (tmp_path / "multi-bridge.env") in rm_paths
 
     def test_falls_back_to_default_env_file_when_unit_absent(
         self, tmp_path: Path
