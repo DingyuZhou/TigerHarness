@@ -198,6 +198,16 @@ completed task until no actionable tasks remain.
       hand-off) or crashed (the owner's heartbeat ages out).
    c. **Else, start the oldest `pending` task** -- reached only when
       nothing is `in_progress`.
+   d. **Else, if the sweep listed a `deferred/` inbox entry,
+      materialize the oldest** -- run `tigerharness journal
+      materialize <deferred-id>` (subscription rail; it scaffolds via
+      the same path as `journal new`, persona preflight included),
+      then re-sweep and claim the new task. A malformed entry exits 1
+      with a JSON envelope and STAYS in the inbox: surface it to the
+      human, skip it, and continue. Deferred entries are written by
+      the Slack-side `journal defer` verb (the cheap API-rail
+      scheduler -- verbatim conversation only; see the journal-new
+      skill).
 
    **Claim it atomically.** Once you have chosen a task, run
    `tigerharness journal claim <task-id>` BEFORE doing any work. Claim

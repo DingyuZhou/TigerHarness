@@ -64,6 +64,87 @@ class JournalPathError(ValueError):
     generic ValueError so callers can pattern-match the journal layer."""
 
 
+class JournalRootRefusal(RuntimeError):
+    """Team context exists, but resolution would land the work outside
+    that team's own ``journal/``. Loud by design: silently falling back
+    to the per-user XDG journal is how team-scheduled tasks got lost
+    (2026-06-12 incident). Callers map this to exit 2 with the message.
+    """
+
+    def __init__(self, *, cwd: Path, expected_root: Path, fix_hint: str):
+        self.cwd = cwd
+        self.expected_root = expected_root
+        self.fix_hint = fix_hint
+        super().__init__(
+            f"refusing to schedule outside the team's journal: cwd is "
+            f"{cwd}, the team's journal root is {expected_root}. "
+            f"{fix_hint}"
+        )
+
+
+def resolve_team_journal_root(
+    team: str | None = None,
+    team_dir: Path | None = None,
+) -> Path:
+    """The ONE team-pinning resolver (this task's plan, b0): given team
+    context, return the pinned ``<team-root>/journal`` -- or raise
+    :class:`JournalRootRefusal`. Never silently falls back to the XDG
+    state dir; cwd is evidence for error messages only.
+
+    ``team_dir`` (an explicit team root) wins over ``team`` (a name
+    resolved per the scaffolder's team-root rules). With NEITHER, this
+    function does not apply -- plain personal use keeps
+    :func:`default_journal_root`.
+    """
+    if team_dir is not None:
+        root = team_dir.expanduser()
+        if not _is_team_dir(root):
+            raise JournalRootRefusal(
+                cwd=Path.cwd(),
+                expected_root=root / "journal",
+                fix_hint=(
+                    "the --team-dir you passed has no "
+                    "configs/personas.yaml -- point it at a real team "
+                    "root."
+                ),
+            )
+        return root / "journal"
+    if team is None:
+        raise ValueError(
+            "resolve_team_journal_root needs team or team_dir"
+        )
+    # Late import: scaffold imports paths at module level; the reverse
+    # edge stays function-local to avoid the cycle.
+    from tigerharness.journal.scaffold import resolve_team_root
+    root = resolve_team_root(team)
+    cwd = Path.cwd()
+    if _is_team_dir(root) and root.resolve().name != team:
+        # resolve_team_root's "cwd is a team root" convention matched a
+        # DIFFERENT team's folder -- scheduling team X's work from team
+        # Y's root must refuse, not land in Y's journal.
+        raise JournalRootRefusal(
+            cwd=cwd,
+            expected_root=root / "journal",
+            fix_hint=(
+                f"cwd is team {root.resolve().name!r}'s root, not "
+                f"{team!r}'s. Run from {team!r}'s own root, or pass "
+                f"--team-dir <path-to-{team}>."
+            ),
+        )
+    if not _is_team_dir(root):
+        raise JournalRootRefusal(
+            cwd=cwd,
+            expected_root=root / "journal",
+            fix_hint=(
+                f"no team root found for {team!r} from {cwd} (looked "
+                f"for configs/personas.yaml at {root}). Run from the "
+                f"team's root, set TIGERHARNESS_TEAMS_DIR, or pass "
+                f"--team-dir."
+            ),
+        )
+    return root / "journal"
+
+
 @dataclass(frozen=True)
 class JournalPaths:
     """File layout for a single journal root.
@@ -84,6 +165,15 @@ class JournalPaths:
     @property
     def done(self) -> Path:
         return self.root / "done"
+
+    @property
+    def deferred(self) -> Path:
+        """Deferred-task inbox (Phase 3 cheap Slack-side scheduling):
+        each entry is a verbatim conversation payload + a small JSON
+        sidecar, written by ``journal defer`` (API rail, LLM-free) and
+        turned into a real task by ``journal materialize`` inside a
+        drive (subscription rail)."""
+        return self.root / "deferred"
 
     @property
     def operating_md(self) -> Path:

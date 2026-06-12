@@ -20,23 +20,37 @@ for the workflow-mode details.
 ## Slack-triggered? Stay lean (the API rail)
 
 When triggered from Slack to schedule a journal task, you are on the
-API-billed rail: do the minimum.
+API-billed rail: do the minimum -- which since the deferred inbox
+landed means **don't even scaffold**.
 
-1. Collect the brief — the Operator's message VERBATIM plus only what
-   this skill itself requires (title, kind, playbook, persona).
-2. Run exactly ONE scaffold command (`tigerharness journal new ...`).
-   The scaffolder is deliberately LLM-free pure Python — scheduling is
-   cheap and must stay that way.
-3. Reply with the task id (and task_dir) — one short message.
+1. Collect the Operator's message VERBATIM (the whole conversation
+   that defines the ask) plus a short title and the team name --
+   nothing else.
+2. Run exactly ONE command, the defer verb:
+
+   tigerharness journal defer --title "..." --team <Team> \
+       --payload-file <verbatim.md> [--thread-ts <ts>] [--requester <who>]
+
+   (or pipe the verbatim text on stdin). It copies the conversation
+   into the team journal's `deferred/` inbox -- no playbook read, no
+   validation beyond team pinning, no LLM, strictly cheaper than
+   `journal new`. The scaffold + persona preflight + compile all
+   happen later, inside `drive-journal` on the subscription rail
+   (`journal materialize` -- the driver runs it, not you).
+3. Reply with the deferred id — one short message.
 4. STOP.
+
+`journal new` directly from Slack is still allowed when the Operator
+explicitly asks for an immediate scaffold, but the defer verb is the
+default — it is the cheapest possible Slack-side path.
 
 Forbidden on this rail: repo exploration, file reads beyond this
 skill's own needs, design work, journal sweeps, claiming, driving,
-compile turns. All real work happens later, on the subscription rail,
-via `drive-journal` in an interactive session — and that is a hard
-rule, not a preference: Slack schedules, never drives (`journal claim`
-refuses bridge sessions mechanically). Rails and billing:
-`docs/subscription-backend.md`.
+compile turns, materializing. All real work happens later, on the
+subscription rail, via `drive-journal` in an interactive session --
+and that is a hard rule, not a preference: Slack schedules, never
+drives (`journal claim` refuses bridge sessions mechanically). Rails
+and billing: `docs/subscription-backend.md`.
 
 ## When to use this skill
 
