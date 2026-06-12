@@ -82,10 +82,38 @@ def cmd_new(args: argparse.Namespace) -> int:
     workflow mode wraps ``new_workflow_task`` (which validates the
     team's compile-time personas and then writes the brief + playbook
     snapshot + status.json)."""
+    guard_rc = _refuse_xdg_fallback_for_scheduling(args)
+    if guard_rc is not None:
+        return guard_rc
     paths = _paths_from_args(args)
     if args.kind == "workflow":
         return _cmd_new_workflow(args, paths)
     return _cmd_new_task(args, paths)
+
+
+def _refuse_xdg_fallback_for_scheduling(
+    args: argparse.Namespace,
+) -> int | None:
+    """Scheduling verbs must never silently land work in the per-user
+    XDG journal (the 2026-06-12 misplaced-task class). When no explicit
+    --journal-dir / $TIGERHARNESS_JOURNAL_DIR is given and the cwd is
+    not a team root, refuse with exit 2 naming the cwd and the fix.
+    Explicit overrides are honored -- the operator said where."""
+    if args.journal_dir:
+        return None
+    if os.environ.get("TIGERHARNESS_JOURNAL_DIR", "").strip():
+        return None
+    cwd = Path.cwd()
+    if (cwd / "configs" / "personas.yaml").is_file():
+        return None  # team root: lands in the team's own journal/.
+    print(
+        f"error: refusing to schedule into the per-user journal at "
+        f"{default_journal_root()}: cwd {cwd} is not a team root "
+        f"(no configs/personas.yaml). Run from the team's root, or "
+        f"pass --journal-dir explicitly to opt in.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
@@ -526,6 +554,11 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             ],
             "actionable": [s.id for s in result.actionable()],
             "deferred": list_deferred(paths),
+            "misplaced": [
+                {"task_id": tid, "recorded_root": root}
+                for tid, root in result.misplaced
+            ],
+            "provenance_unknown": result.provenance_unknown,
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -556,6 +589,20 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         print("Malformed status.json (sweep skipped these):")
         for m in result.malformed:
             print(f"  - {m.task_id}: {m.error}")
+    if result.misplaced:
+        print()
+        print(
+            "MISPLACED tasks (sitting in this journal but scheduled "
+            "into another -- migrate or investigate):"
+        )
+        for tid, root in result.misplaced:
+            print(f"  - {tid}  (scheduled into: {root})")
+    if result.provenance_unknown:
+        print()
+        print(
+            f"({len(result.provenance_unknown)} task(s) predate "
+            f"provenance recording -- placement unknown, not checked.)"
+        )
     deferred_ids = list_deferred(paths)
     if deferred_ids:
         print()
@@ -1227,6 +1274,9 @@ def _check_workflow_walk_complete(
 def cmd_schedule_add(args: argparse.Namespace) -> int:
     """Create a recurring definition. The prd/brief file is read NOW
     and inlined, so a definition can never dangle on a moved file."""
+    guard_rc = _refuse_xdg_fallback_for_scheduling(args)
+    if guard_rc is not None:
+        return guard_rc
     import datetime as _dt
 
     from tigerharness.journal.schedule import (

@@ -257,8 +257,14 @@ class TestMaterialize:
         assert set(materialized) == set(direct)
         for field in ("kind", "state", "compile_pending", "compile_phase",
                       "max_sessions", "early_exit", "autonomy",
-                      "playbook_name"):
+                      "playbook_name", "journal_root"):
             assert materialized[field] == direct[field], field
+        # Provenance survives materialization (item 5's invariant):
+        # the deferred entry's recorded root and the task's agree.
+        origin = json.loads(
+            (task_dir / "deferred_origin.json").read_text()
+        )
+        assert materialized["journal_root"] == origin["journal_root"]
 
     def test_malformed_sidecar_exits_1_and_entry_stays(
         self, team_env, capsys

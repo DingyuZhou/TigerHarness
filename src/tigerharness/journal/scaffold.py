@@ -281,6 +281,7 @@ def new_task(
             autonomy=autonomy,
             schedule_def=schedule_def,
             schedule_due=schedule_due,
+            journal_root=str(paths.root.resolve()),
         )
     except JournalModelError as exc:
         raise JournalScaffoldError(
@@ -786,6 +787,7 @@ def new_workflow_task(
             autonomy=autonomy,
             schedule_def=schedule_def,
             schedule_due=schedule_due,
+            journal_root=str(paths.root.resolve()),
         )
     except JournalModelError as exc:
         raise JournalScaffoldError(
