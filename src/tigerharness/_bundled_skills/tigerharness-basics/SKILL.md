@@ -82,7 +82,7 @@ Scheduling and inspection (safe to run by hand):
     tigerharness journal new --kind workflow --title "..." --playbook <name> --brief-file brief.md --team <Team>
     tigerharness journal list
     tigerharness journal status <task-id>
-    tigerharness journal validate-personas
+    tigerharness journal validate-personas <Team>
 
 Other sub-commands exist (`sweep`, `claim`, `release`, `step-done`,
 `schedule`, the `compile-*` family, `validate-graph`, `land-compile`,
@@ -176,11 +176,25 @@ maintained by the tooling.
    The template marks what to fill in.
 3. Edit the new roster row: description, aliases, and (if this team
    uses Slack) make sure the persona is reachable by name.
-4. Verify: `tigerharness journal validate-personas` from the team
-   root checks every roster entry has a readable prompt.
+4. Verify what the recruit produced: `personas/<NewName>/prompt.md`
+   exists and is filled in, and `configs/personas.yaml` has the new
+   row with the right `prompt_file`. (`journal validate-personas` is
+   NOT this check — it is the workflow-compile preflight; see the
+   next walkthrough.)
 
 ## Creating a workflow task
 
+0. Precondition — the compile roles must exist. Compiling a workflow
+   uses three personas (drafter + two critics); the role -> persona
+   mapping comes from `configs/workflow.yaml` and **defaults to
+   Anzai/Akagi/Ayako**. A team without personas of those names must
+   either recruit them or write `configs/workflow.yaml` mapping the
+   roles onto its own roster (keys: `compile_personas.drafter` /
+   `.akagi` / `.ayako`). Preflight check:
+   `tigerharness journal validate-personas <Team>` — exit 0 prints
+   the resolved mapping; exit 1 lists which prompts are missing.
+   Skip this and `journal new --kind workflow` refuses with the same
+   missing-personas error.
 1. Write (or pick) a playbook — the markdown file describing the
    phases and seats your team runs. It must live at
    `<team-root>/workflow/<name>.md`: the scaffolder resolves the bare

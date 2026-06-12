@@ -2181,6 +2181,20 @@ class TestBundledBasicsSkill:
         assert "name-or-path" not in text
         assert "workflow/<name>.md" in text
 
+    def test_validate_personas_taught_correctly(self):
+        """validate-personas requires a positional team and checks the
+        COMPILE-role personas, not the whole roster -- taught wrong, a
+        fresh team concludes its successful recruit failed (b2
+        user-perspective finding: the bare invocation exits 2, and the
+        'roster check' reading exits 1 on any fresh team)."""
+        text = self._text()
+        assert "validate-personas <Team>" in text
+        assert "every roster entry" not in text
+        # The workflow walkthrough must carry its precondition: the
+        # compile roles (default Anzai/Akagi/Ayako) have to exist.
+        assert "Anzai/Akagi/Ayako" in text
+        assert "compile_personas" in text
+
 
 # ---------------------------------------------------------------------------
 # Integration: generated artifacts actually work
