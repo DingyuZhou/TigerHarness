@@ -116,6 +116,41 @@ Journal root resolution priority:
 3. `$XDG_STATE_HOME/tigerharness-journal`
 4. `~/.local/state/tigerharness-journal`
 
+**Scheduling never falls back silently.** The XDG fallback (3/4) is
+for *inspection* of a personal journal — but `journal new` and
+`journal schedule add` REFUSE to run from a non-team cwd without an
+explicit `--journal-dir` / `$TIGERHARNESS_JOURNAL_DIR` (exit 2, the
+error names the cwd and the fix). A team-scheduled task can only land
+in that team's own `journal/`; this is what prevents the
+misplaced-task class (a task scheduled from the wrong directory
+silently landing in the per-user state dir). Every scaffolded task
+also records a `journal_root` provenance field (see status.json
+schema); `journal sweep` flags any task whose recorded root doesn't
+match where it sits as **MISPLACED**, and reports pre-provenance
+tasks as placement-unknown rather than guessing.
+
+**Migrating a misplaced task.** If a task did land in the wrong
+journal (e.g. scheduled before this guard existed), move it while it
+is detached (no live session): stop any drive, then
+`mv <wrong-journal>/active/<task-id> <team-journal>/active/`. The next
+`journal sweep` from the team root picks it up normally. Worked
+example: a task scaffolded into `~/.local/state/tigerharness-journal/`
+on 2026-06-12 was relocated this way into the team journal mid-drive
+with no state edited.
+
+**Cheap Slack-side scheduling (the deferred inbox).** Scheduling from
+Slack bills API tokens, so the Slack side runs one dumb verb —
+`journal defer --title ... --team <Team>` (payload on stdin or
+`--payload-file`) — which copies the conversation verbatim into the
+team journal's `deferred/` inbox (no playbook read, no compile, no
+LLM). A later `drive-journal` session materializes it on the
+subscription rail: `journal materialize <id>` turns the inbox entry
+into a real `kind=workflow` task via the same scaffolder `journal new`
+uses (persona preflight included), indistinguishable from a direct
+scaffold. Malformed entries exit 1 with a JSON envelope and stay in
+the inbox for repair; `journal sweep` surfaces the inbox so the driver
+materializes the oldest when nothing else is actionable.
+
 ## Team-level defaults (`configs/personas.yaml`)
 
 A team's `personas.yaml` carries two optional knobs that make the
@@ -301,6 +336,7 @@ Phase 1.5 adds three workflow-only fields to that schema:
 | `kind` | `"task"` \| `"workflow"` | always | Selects the protocol branch at step 4. |
 | `compile_pending` | `bool` | workflow only | `true` until `land-compile` flips it. The driver runs the compile sub-protocol while this is `true`. |
 | `compile_phase` | enum | workflow only | One of `pending`, `drafting`, `tier1_pre`, `critiquing`, `tier1_post`, `complete`, `failed`. |
+| `journal_root` | str \| absent | both kinds | Provenance: the journal root the task was scaffolded into, stamped at every scheduling write point. The sweep flags a task whose recorded root != where it sits as MISPLACED; tasks predating the field (absent) are reported placement-unknown, never guessed. |
 
 For workflows, `persona` becomes the optional `--captain` (the
 accountable owner shown in `journal list`); per-step personas come
