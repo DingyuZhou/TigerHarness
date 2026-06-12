@@ -78,8 +78,8 @@ state falls back to `~/.local/state/tigerharness-journal`).
 
 Scheduling and inspection (safe to run by hand):
 
-    tigerharness journal new --kind task --title "..." --prd brief.md --persona <Name> --team <Team>
-    tigerharness journal new --kind workflow --title "..." --playbook <name-or-path> --brief-file brief.md --team <Team>
+    tigerharness journal new --kind task --title "..." --prd brief.md --persona <Name>
+    tigerharness journal new --kind workflow --title "..." --playbook <name> --brief-file brief.md --team <Team>
     tigerharness journal list
     tigerharness journal status <task-id>
     tigerharness journal validate-personas
@@ -158,9 +158,11 @@ maintained by the tooling.
 - `memories/<Name>/` — per-persona tiger-memory config + store.
 - `journal/` — NOT scaffolded by init: created on first journal use at
   the team root (then holds `OPERATING.md`, `active/`, `done/`).
-- Playbooks — also NOT scaffolded: markdown files your team keeps
-  where it likes (a `workflow/` folder is a common convention) and
-  passes to `journal new --kind workflow --playbook <path>`.
+- `workflow/` — also NOT scaffolded, but its location is fixed, not a
+  style choice: `journal new --kind workflow --playbook <name>`
+  resolves the bare name to `<team-root>/workflow/<name>.md` (and
+  rejects path-like values). Create the folder when you write your
+  first playbook.
 
 ## Recruiting a new persona
 
@@ -180,11 +182,13 @@ maintained by the tooling.
 ## Creating a workflow task
 
 1. Write (or pick) a playbook — the markdown file describing the
-   phases and seats your team runs.
+   phases and seats your team runs. It must live at
+   `<team-root>/workflow/<name>.md`: the scaffolder resolves the bare
+   playbook name against that folder and rejects path-like values.
 2. Write the task brief as a markdown file.
 3. Scaffold with the `journal-new` skill, or directly:
    `tigerharness journal new --kind workflow --title "..."
-   --playbook <name-or-path> --brief-file <brief.md> --team <Team>`.
+   --playbook <name> --brief-file <brief.md> --team <Team>`.
 4. A `kind=task` (single persona, no playbook) takes `--prd <file>`
    and `--persona <Name>` instead.
 5. The scaffolder is LLM-free and cheap. Execution happens later: an

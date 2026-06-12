@@ -2172,6 +2172,15 @@ class TestBundledBasicsSkill:
         assert "journal-new" in text
         assert "skill-only" in text
 
+    def test_playbook_described_as_bare_name(self):
+        """--playbook takes a BARE name resolving to
+        <team-root>/workflow/<name>.md; the CLI rejects path-like
+        values (journal/cli.py + scaffold.py's name regex). The skill
+        must not re-teach the path variant (b2 defense finding)."""
+        text = self._text()
+        assert "name-or-path" not in text
+        assert "workflow/<name>.md" in text
+
 
 # ---------------------------------------------------------------------------
 # Integration: generated artifacts actually work
