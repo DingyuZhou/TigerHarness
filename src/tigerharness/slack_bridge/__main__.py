@@ -1,15 +1,21 @@
 """Run the Slack bridge: ``python -m tigerharness.slack_bridge``.
 
-Two modes, dispatched by env var:
+There is **one** bridge; it serves 1..N teams (lanes). It is selected by
+one env var:
 
-* **Single-tenant (default).** Reads tokens from ``.env`` / process env
-  via ``config.load()``, builds one bridge, opens one Socket-Mode
-  connection.
-* **Multi-tenant.** When ``TIGERHARNESS_BRIDGES_CONFIG`` points at a
-  ``slack-bridge.yaml`` index, loads N lanes via ``multi.load_multi()``,
-  builds N bridges, opens N Socket-Mode connections in one process.
+* **Multi-lane (recommended).** When ``TIGERHARNESS_BRIDGES_CONFIG``
+  points at a ``slack-bridge.yaml`` index, loads N lanes via
+  ``multi.load_multi()``, builds N bridges, opens N Socket-Mode
+  connections in one process. A single team is just a one-lane index.
   Each lane's logs are tagged with ``lane=<name>`` (contextvar-based,
   inherited by Bolt's dispatch tasks).
+* **Single-tenant (DEPRECATED).** When that env var is unset, the bridge
+  falls back to a single-team deployment: tokens from ``.env`` / process
+  env via ``config.load()``, one bridge, one Socket-Mode connection. This
+  path is a one-lane case of the same module and is deprecated -- it
+  still works but emits a migration notice on startup (see
+  ``_warn_single_tenant_deprecated``). Migrate to a one-lane
+  ``TIGERHARNESS_BRIDGES_CONFIG`` index; nothing is removed today.
 
 On SIGTERM the bridge drains in-flight dispatches across all lanes
 before exiting so replies are posted before the process dies.
@@ -168,8 +174,29 @@ async def _drive_handlers(
 # Single-tenant entrypoint (default; backward compatible)
 # ---------------------------------------------------------------------------
 
+def _warn_single_tenant_deprecated() -> None:
+    """Emit the single-tenant deprecation notice.
+
+    Single-tenant mode is a one-lane deployment of the same bridge module;
+    it is deprecated in favour of the multi-lane bridge driven by a
+    ``TIGERHARNESS_BRIDGES_CONFIG`` index. Extracted as a helper (rather
+    than an inline ``log.warning``) so the notice is unit-testable without
+    standing up a live Socket-Mode connection. The path still works today;
+    this only steers operators toward the migration.
+    """
+    log.warning(
+        "single-tenant mode is DEPRECATED -- it is a one-lane case of the "
+        "multi-lane bridge and may be removed in a future release. To "
+        "migrate, create a one-lane slack-bridge.yaml index and set "
+        "TIGERHARNESS_BRIDGES_CONFIG to it (run `tigerharness slack-bridge "
+        "gen-service` to emit the systemd unit); see docs/slack-bridge.md. "
+        "This bridge will keep running for now."
+    )
+
+
 async def _run_single() -> None:
     _setup_logging(multi=False)
+    _warn_single_tenant_deprecated()
     cfg = load()
     bridge = build_bridge(cfg, state_path=default_state_path())
     handler = AsyncSocketModeHandler(bridge.app, cfg.slack_app_token)
