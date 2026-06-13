@@ -21,6 +21,7 @@ from tigerharness.slack_bridge.__main__ import (
     _run_multi,
     _run_single,
     _warn_single_tenant_deprecated,
+    main,
 )
 from tigerharness.slack_bridge.bridge import build_team_bridge
 from tigerharness.slack_bridge.multi import load_multi
@@ -166,6 +167,44 @@ class TestSinglePathStillWorks:
 # ---------------------------------------------------------------------------
 # Migration equivalence: a one-lane index builds a working bridge
 # ---------------------------------------------------------------------------
+
+class TestMainDispatchHitsDeprecatedPathByDefault:
+    """B2 defense: the env-var SELECTOR is what a user actually hits. Prove a
+    default invocation (no TIGERHARNESS_BRIDGES_CONFIG) routes to the
+    deprecated single path, and that setting the index routes to multi — so
+    the deprecation isn't bypassed and the migration target is real."""
+
+    def test_main_routes_to_single_when_index_unset(self, monkeypatch):
+        monkeypatch.delenv("TIGERHARNESS_BRIDGES_CONFIG", raising=False)
+        with patch("tigerharness.slack_bridge.__main__._run_single") as single, \
+             patch("tigerharness.slack_bridge.__main__._run_multi") as multi, \
+             patch("tigerharness.slack_bridge.__main__.asyncio.run"):
+            main()
+        single.assert_called_once()
+        multi.assert_not_called()
+
+    def test_main_routes_to_single_when_index_blank(self, monkeypatch):
+        # A whitespace-only value is treated as unset (stripped) -> the
+        # deprecated fallback, not a crash.
+        monkeypatch.setenv("TIGERHARNESS_BRIDGES_CONFIG", "   ")
+        with patch("tigerharness.slack_bridge.__main__._run_single") as single, \
+             patch("tigerharness.slack_bridge.__main__._run_multi") as multi, \
+             patch("tigerharness.slack_bridge.__main__.asyncio.run"):
+            main()
+        single.assert_called_once()
+        multi.assert_not_called()
+
+    def test_main_routes_to_multi_when_index_set(self, monkeypatch, tmp_path):
+        _make_valid_team(tmp_path, "shohoku")
+        idx = _write_index(tmp_path, ["shohoku"])
+        monkeypatch.setenv("TIGERHARNESS_BRIDGES_CONFIG", str(idx))
+        with patch("tigerharness.slack_bridge.__main__._run_single") as single, \
+             patch("tigerharness.slack_bridge.__main__._run_multi") as multi, \
+             patch("tigerharness.slack_bridge.__main__.asyncio.run"):
+            main()
+        multi.assert_called_once()
+        single.assert_not_called()
+
 
 class TestMigrationEquivalence:
     def test_one_lane_index_builds_equivalent_bridge(self, tmp_path):
