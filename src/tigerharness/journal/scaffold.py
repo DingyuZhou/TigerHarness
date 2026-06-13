@@ -61,8 +61,14 @@ _PRIOR_OPERATING_HASHES = {
     # Each entry is a previously-shipped rendered OPERATING.md an existing
     # journal may still have on disk; all refresh to the current (merged
     # cascade + per-persona-memory) template.
-    # pre-redesign template (origin/main before the cascade rewrite) --
-    # what Shohoku's journal has on disk now.
+    # pre-cascade-after-materialize render (origin/main before the step-2d
+    # "materialize is not a turn-end" clarification).
+    "95b1f0667cd6f260770727ab35f662f1421f66412d6c0e35fc1d1180260ad634",
+    # a live-team render carried on disk (Shohoku's journal) that predates
+    # this clarification and was not previously registered -- register it so
+    # that journal auto-refreshes rather than looking hand-edited.
+    "f3f82feeea1b8b751861877ca084aa40cdacbedbc7b5068b969b4a431d6514ba",
+    # pre-redesign template (origin/main before the cascade rewrite).
     "fe942cf538e662ce7fd4de854e38023c64f11a4a197e14caff2594ed4dfbbf1c",
     # per-persona-memory template (origin/main after PR #43/#44, before the
     # cascade redesign merged in).

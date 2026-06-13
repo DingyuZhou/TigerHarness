@@ -1,7 +1,7 @@
 # tiger-memory team sweep — in-session sub-agent protocol (B1/B3)
 
 > **Status:** wired & shipped. The full Python + CLI stack this protocol
-> drives is shipped and tested (see `tiger-memory-rework.md`, B1/B3
+> drives is shipped and tested (see `history/tiger-memory-rework.md`, B1/B3
 > sections), and the bridge wiring + convenience CLIs that activate it are
 > live (see "Wiring + status"). The only outstanding item is an
 > end-to-end live sweep run in a real persona session for final

@@ -60,6 +60,13 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    subscription rail, same scaffolder as `journal new`), then re-sweep
    and claim the materialized task. A malformed entry exits 1 with a
    JSON envelope and stays in the inbox: surface it, skip it, continue.
+   **Materialize is a preparatory step, NOT a turn-end — do NOT stop
+   here.** It lands the new task as `pending`; continue in the SAME turn
+   (re-sweep → claim → compile → walk it or the next actionable task),
+   per the step-6 cascade. Stopping at this seam to wait for the next
+   fire is the one-session-per-loop-fire anti-pattern the cascade kills;
+   the only turn-ends are nothing-actionable / a real blocker / the human
+   / the genuine context ceiling.
    **Claim it atomically:** `tigerharness journal claim <id>` *before*
    working (sets `session_ref`, bumps `sessions`, refreshes the heartbeat,
    compare-and-set). If claim exits non-zero (another session won the

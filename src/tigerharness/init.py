@@ -65,6 +65,9 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-06-13 (7543935): rukawa: deferred-task inbox -- the ship before
+        #   the cascade-after-materialize clarification.
+        "072b5d76b8c71c4119367b3881f5dbcb30ce9758f5f52e026e7bed946d27bab8",
         # 2026-06-11 (1c370b4): miyagi: Slack rail cost discipline -- lean scheduling...
         "a1217e8c9c09e532d6593e73d0b4f0d9bab09e4a3bc4b8b53cf44a79a8cad56b",
         # 2026-06-11 (5a27262): ayako: remove mid-task Layer A compaction entirely
@@ -135,7 +138,7 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "072b5d76b8c71c4119367b3881f5dbcb30ce9758f5f52e026e7bed946d27bab8",
+    "drive-journal": "d0b1f3704b12a3642211408fd2d2f9ed9dc1b555c856ca1acd2ceb02b5201666",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
     "tigerharness-basics": "13e4192d65d15c6ba9bc475a01cb5a96870e53141a2baf0b1d30a395f5501b87",

@@ -6,7 +6,7 @@ drafter emits a candidate set of step files (already parsed into
 call. They are the part of the compile defense-in-depth that *cannot*
 be silently bypassed by a hallucinating critic (ADR 0002, D2).
 
-Five validators, per ``docs/workflow-runner-phase2.md`` section
+Five validators, per ``docs/adr/0002-workflow-runner-phase2.md`` section
 "Tier 1 -- mechanical validators":
 
 * **schema** -- required fields / types (the model's ``__post_init__``

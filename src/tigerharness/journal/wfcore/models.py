@@ -167,7 +167,7 @@ def now_iso() -> str:
 class StepFrontmatter:
     """YAML frontmatter of a compiled step file.
 
-    See the "Frontmatter contract" table in ``docs/workflow-runner.md``.
+    See the "Frontmatter contract" table in ``docs/adr/0001-workflow-runner.md``.
     """
 
     id: str
@@ -348,7 +348,7 @@ class WorkflowConfig:
         self.human_gate_approvers = _require_list_of_str(
             self.human_gate_approvers, "human_gate_approvers"
         )
-        # Spec invariant (docs/workflow-runner.md, "Human gate"):
+        # Spec invariant (docs/adr/0001-workflow-runner.md, "Human gate"):
         # the allowlist is mandatory when human_gate=True. Compile must
         # fail loudly rather than silently produce a config that the
         # runtime would later refuse to honour.
@@ -581,7 +581,7 @@ class StepHistoryEntry:
 class Status:
     """Runtime pointer + counters + verdict history.
 
-    See ``docs/workflow-runner.md`` -- the executor writes this
+    See ``docs/adr/0001-workflow-runner.md`` -- the executor writes this
     atomically on every state transition (write-tmp-then-rename) and
     treats it as the single source of truth for "where the task is".
     """

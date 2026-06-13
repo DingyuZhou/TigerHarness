@@ -1,5 +1,15 @@
 # tiger-memory
 
+## At a glance
+- **What:** per-persona persistent memory — archive / journal / briefing
+  stores with lazy rebuild, decay, pinning, and drill-down; substring search
+  by default, semantic via local fastembed or OpenAI embeddings per extras.
+- **When you need it:** configuring or querying a persona's memory. For the
+  team-wide refresh protocol see
+  [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md).
+- **Must-not-miss:** semantic search needs the `[memory-rag]` / `[memory-rag-openai]`
+  extra; without it, search is substring-only.
+
 Persistent memory management for Claude Code agents: archive, journal,
 briefing with lazy rebuild, kind-decay must-memorize, and drill-down.
 

@@ -7,6 +7,9 @@
 A generic Claude Code agent harness: iterative task execution, Slack
 integration, and persistent memory management.
 
+> **Docs:** [`docs/INDEX.md`](docs/INDEX.md) is the home — it routes you to the
+> right doc in one hop (and separates current reference from design history).
+
 ## Sub-packages
 
 | Package | Description |

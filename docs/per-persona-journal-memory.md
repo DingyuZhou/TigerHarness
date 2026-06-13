@@ -1,5 +1,16 @@
 # Per-persona memory from journal-driven work
 
+## At a glance
+- **What:** how journal work becomes per-persona memory — the gates
+  (`claim`/`release`/`step-done`/`land-compile`) write persona-stamped
+  worklog notes; tiger-memory ingests those, not the raw drive transcript.
+- **When you need it:** understanding `--driver`/`--output`, why the worklog
+  is the memory rail, or why a drive doesn't double-count its transcript.
+- **Must-not-miss:** the worklog note is the attribution record — never
+  hand-write `worklog/`; the gates stamp the persona.
+
+## Details
+
 Status: **shipped & live** (2026-06-08). Merged to `main` (PR #43) and
 deployed to the running multi-team Slack bridge; phases 1-4 shipped (see
 "Phasing & dependencies" for the per-phase commit trail). Phase 0

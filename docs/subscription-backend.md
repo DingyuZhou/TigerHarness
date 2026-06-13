@@ -1,5 +1,15 @@
 # subscription backend
 
+## At a glance
+- **What:** the rails/billing model + `status.json` contract behind `journal`
+  — work runs on the interactive (subscription) rail, not token-billed API.
+- **When you need it:** scheduling/driving cost rules, the Slack rail rule, or
+  the `status.json` field semantics.
+- **Must-not-miss:** a Slack-triggered session may SCHEDULE journal tasks but
+  must NEVER drive them — `journal claim` enforces it.
+
+## Details
+
 A file-based, human-driven execution model that runs agent work —
 single-persona tasks and multi-persona workflows alike — through the
 **interactive** Claude Code app, so the work counts against a monthly
