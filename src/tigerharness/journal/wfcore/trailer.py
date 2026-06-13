@@ -12,7 +12,7 @@ structured trailer line in each persona's reply:
 This module turns that final line into a typed verdict. It is a pure
 function with no I/O and no logging -- the orchestrator owns the
 re-prompt-once / route / escalate policy described in
-``docs/workflow-runner.md``.
+``docs/adr/0001-workflow-runner.md``.
 
 Grammar -- deliberately tight; this is the only place AI-generated text
 meets deterministic routing:

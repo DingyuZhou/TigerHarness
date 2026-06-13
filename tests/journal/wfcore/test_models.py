@@ -606,7 +606,7 @@ def test_status_accepts_cancelling_phase_round_trip():
     """``cancelling`` is the active transition state set by
     ``workflow cancel`` while the executor finishes its current iter
     and releases the lock; it must round-trip cleanly. Spec:
-    docs/workflow-runner.md, Cancel/Resume section."""
+    docs/adr/0001-workflow-runner.md, Cancel/Resume section."""
     raw = _good_status(phase="cancelling")
     s = Status.from_dict(raw)
     assert s.phase == "cancelling"

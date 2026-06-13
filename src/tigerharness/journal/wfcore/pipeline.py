@@ -15,7 +15,7 @@ together the three Wave-1/Wave-2 components:
   two modules can land in parallel; we never import ``compile.critique``
   directly. See "Cross-module seam" below.
 
-Flow (mirrors ``docs/workflow-runner-phase2.md`` section 1):
+Flow (mirrors ``docs/adr/0002-workflow-runner-phase2.md`` section 1):
 
 1. Read the playbook text + derive the roster from
    ``team_root/configs/personas.yaml``.
@@ -51,7 +51,7 @@ Cross-module seam
 * Accepts ``critique_loop`` as an **optional keyword argument** and
   default-resolves it (lazy import) to
   ``compile.critique.run_critique_loop`` -- so the CLI does not need to
-  pass it explicitly (matches ``docs/workflow-runner-phase2.md`` Public
+  pass it explicitly (matches ``docs/adr/0002-workflow-runner-phase2.md`` Public
   API). Tests inject a fake.
 * Recognises the loop's "exhausted without convergence" abort by the
   exception *class name* ``"CritiqueAbortedError"`` rather than importing

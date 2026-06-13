@@ -75,6 +75,10 @@ plain `claude -p` subprocess.
 ## Current reference vs history
 
 The docs above (plus README/CONTRIBUTING) are the **current reference**.
-Past design narratives and decisions live in [adr/](adr/) and are being moved
-out of the current set (see the docs-restructure plan); don't treat a design
-narrative as current behavior — `src/tigerharness/` is the ground truth.
+Past design narratives and decisions live in [adr/](adr/) and the design
+record below; don't treat a design narrative as current behavior —
+`src/tigerharness/` is the ground truth.
+
+**Design record / history (not current reference):**
+[tiger-memory-rework.md](tiger-memory-rework.md) — the tiger-memory redesign
+narrative (a follow-up task will relocate it under a `history/` area).
