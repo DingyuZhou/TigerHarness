@@ -263,7 +263,7 @@ def _finalize_rebuild(
     longer-memory, decay must-memorize, write state, rebuild the briefing.
 
     This is the ``finalize`` stage of the P2 plan -> execute -> finalize
-    split (see ``docs/tiger-memory-rework.md``, "B1/B8 — implementation
+    split (see ``docs/history/tiger-memory-rework.md``, "B1/B8 — implementation
     design"): the in-session summarization path will call this same tail
     once its sub-agents have written the per-session artifacts.
     """
