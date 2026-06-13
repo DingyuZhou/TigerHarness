@@ -29,8 +29,11 @@ class TestDeriveUnitName:
         name_a = derive_unit_name(a)
         assert name_a == derive_unit_name(a)  # stable across calls
         assert name_a != derive_unit_name(b)  # roots never collide
-        assert name_a.startswith("slack-bridge-multi-teams-")
+        assert name_a.startswith("slack-bridge-teams-")
         assert name_a.endswith(".service")
+        # The vestigial ``multi-`` infix is gone: the name reads as
+        # slack-bridge-<root>-<hash>, not slack-bridge-multi-<root>-<hash>.
+        assert "slack-bridge-multi-" not in name_a
 
     def test_same_basename_different_roots_do_not_collide(
         self, tmp_path: Path,

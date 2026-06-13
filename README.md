@@ -172,7 +172,9 @@ tigerharness init --persona chief --team tigers --no-memory --no-slack --yes
 removes a team (or a single persona inside a team) and all of the
 associated state: configs, prompts, per-persona memory data, the
 multi-team index entry, and — for the *last* team in a multi-team
-setup — the `slack-bridge-multi` systemd user unit too.
+setup — the root's per-root `slack-bridge-<root>-<hash>` systemd user
+unit too (discovered by content, so older `slack-bridge-multi-*` names
+and the legacy global `slack-bridge-multi.service` are found as well).
 
 The command is always interactive and gated behind two confirmations
 (a backup acknowledgement and a type-the-name check), so it's hard to
@@ -299,7 +301,7 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
 ### Bridge boot environment
 
 - **`claude` not found on PATH when the bridge auto-starts at boot.** On distros where the Claude Code CLI is installed outside `/usr/bin` (e.g. NixOS at `/run/current-system/sw/bin/`, npm-global at `~/.npm-global/bin/`, pipx at `~/.local/bin/`), the systemd unit emitted by `tigerharness slack-bridge gen-service` has no `Environment=PATH=...` line. Restarting from an interactive shell works (the rich PATH is inherited from the live user session), but a **cold boot auto-start** sees only the minimal systemd PATH (`/usr/bin:/bin`), so `shutil.which("claude")` in the SDK fails with `backend error: \`claude\` not found on PATH`.
-  - **Workaround**: a systemd drop-in at `~/.config/systemd/user/slack-bridge-multi.service.d/path.conf` containing `[Service]\nEnvironment="PATH=/run/current-system/sw/bin:/usr/bin:/bin"` (adapted to the local install location). Drop-ins survive `gen-service` regeneration.
+  - **Workaround**: a systemd drop-in at `~/.config/systemd/user/<your-bridge-unit>.service.d/path.conf` (e.g. `slack-bridge-teams-4a8c8b.service.d/`) containing `[Service]\nEnvironment="PATH=/run/current-system/sw/bin:/usr/bin:/bin"` (adapted to the local install location). Drop-ins survive `gen-service` regeneration.
   - **Fix candidates**: (a) `gen-service` emits a sensible default `Environment=PATH=` covering common install locations; (b) add a `CLAUDE_CLI` env var the bridge reads and forwards as `cli=` to `ClaudePBackend()`, mirroring the existing `TIGER_MEMORY_CLI` knob.
 - **Same shape applies to the `tiger-memory` binary** used by the bridge's post-thread rebuild trigger. The existing `TIGER_MEMORY_CLI` env var already provides the per-team-`.env` workaround, but a PATH default in `gen-service` would fix both at once.
 

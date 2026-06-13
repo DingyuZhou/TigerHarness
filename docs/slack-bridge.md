@@ -317,7 +317,8 @@ _(empty reply)_                                       # ← bridge voice, unpref
 Adding a new persona via `tigerharness init --persona <name> --team <existing>`
 updates the team's `personas.yaml` but the running multi-bridge has
 already cached the roster. **Restart the bridge** (`systemctl --user
-restart slack-bridge-multi`) for the new persona to become routable.
+restart <your-bridge-unit>`, e.g. `slack-bridge-teams-4a8c8b`) for the
+new persona to become routable.
 
 #### Cost tracking
 
@@ -369,9 +370,9 @@ tool is idempotent — safe to re-run.
 > safely:
 >
 > ```bash
-> systemctl --user stop slack-bridge-multi
+> systemctl --user stop <your-bridge-unit>    # e.g. slack-bridge-teams-4a8c8b
 > python -m tigerharness.slack_bridge.migrate --state-dir <path> --to <persona>
-> systemctl --user start slack-bridge-multi
+> systemctl --user start <your-bridge-unit>
 > ```
 
 This mirrors the deferred hot-reload decision: lane add/remove also
@@ -428,9 +429,13 @@ systemctl --user enable --now <printed-unit-name>.service
 ```
 
 `gen-service` prints the **per-root unit name** on stderr (e.g.
-`slack-bridge-multi-teams-4a8c8b.service`) along with the exact save
+`slack-bridge-teams-4a8c8b.service`) along with the exact save
 + enable commands — each teams root gets its own unit name (derived
 from the root path) so two roots never share one bridge instance.
+The name is `slack-bridge-<root-basename>-<hash6>.service`: the
+basename says which root at a glance, and the 6-hex digest of the
+full resolved root path keeps two roots that share a basename from
+colliding.
 This is what lets `tigerharness dismiss` tear down a team's bridge
 without touching another root's: dismiss discovers the owning unit by
 **content** (which root each `slack-bridge-multi*.service` unit's

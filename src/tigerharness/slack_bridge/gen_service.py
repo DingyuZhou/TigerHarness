@@ -9,7 +9,7 @@ expected to write (single line: ``TIGERHARNESS_BRIDGES_CONFIG=...``).
 
 The user redirects the output to ``~/.config/systemd/user/`` under the
 **per-root unit name** the command prints on stderr (e.g.
-``slack-bridge-multi-teams-1a2b3c.service``), then runs::
+``slack-bridge-teams-1a2b3c.service``), then runs::
 
     systemctl --user daemon-reload
     systemctl --user enable --now <printed-unit-name>
@@ -17,9 +17,11 @@ The user redirects the output to ``~/.config/systemd/user/`` under the
 The unit name is derived from the teams root so every root owns its
 own bridge instance: two roots can never collide on one global unit,
 and ``tigerharness dismiss`` can match a unit back to its root (it
-scans ``slack-bridge-multi*.service`` and checks which root each
-unit's config resolves into -- the name is a convenience, the content
-is the truth).
+scans ``slack-bridge-*.service`` and checks which root each unit's
+config resolves into -- the name is a convenience, the content is the
+truth). The scan glob is deliberately broad so it still finds units
+named under the older ``slack-bridge-multi-<root>-<hash>`` scheme and
+the legacy global ``slack-bridge-multi.service``.
 
 Linux-only. macOS / other platforms get a friendly stderr message
 explaining the manual setup.
@@ -53,7 +55,7 @@ def derive_unit_name(teams_root: Path) -> str:
     resolved = teams_root.resolve()
     base = re.sub(r"[^A-Za-z0-9_.-]+", "-", resolved.name).strip("-") or "root"
     digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:6]
-    return f"slack-bridge-multi-{base}-{digest}.service"
+    return f"slack-bridge-{base}-{digest}.service"
 
 
 def render_systemd_unit(
