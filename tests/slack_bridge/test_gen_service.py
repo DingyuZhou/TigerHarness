@@ -29,8 +29,11 @@ class TestDeriveUnitName:
         name_a = derive_unit_name(a)
         assert name_a == derive_unit_name(a)  # stable across calls
         assert name_a != derive_unit_name(b)  # roots never collide
-        assert name_a.startswith("slack-bridge-multi-teams-")
+        assert name_a.startswith("slack-bridge-teams-")
         assert name_a.endswith(".service")
+        # The vestigial ``multi-`` infix is gone: the name reads as
+        # slack-bridge-<root>-<hash>, not slack-bridge-multi-<root>-<hash>.
+        assert "slack-bridge-multi-" not in name_a
 
     def test_same_basename_different_roots_do_not_collide(
         self, tmp_path: Path,
@@ -46,6 +49,39 @@ class TestDeriveUnitName:
         name = derive_unit_name(root)
         # systemd-safe: no spaces or shell-hostile chars in the name.
         assert " " not in name and "!" not in name and "?" not in name
+
+    def test_basename_sanitising_to_empty_falls_back_to_root(
+        self, tmp_path: Path,
+    ):
+        """A basename made entirely of disallowed chars (or non-ASCII
+        that the regex strips) sanitises to '' -> the `or "root"`
+        fallback keeps the unit name well-formed and still hashed."""
+        special = tmp_path / "!!!"
+        special.mkdir()
+        name = derive_unit_name(special)
+        assert name.startswith("slack-bridge-root-")
+        assert name.endswith(".service")
+        # The digest still disambiguates two empty-sanitising roots.
+        other = tmp_path / "sub" / "???"
+        other.mkdir(parents=True)
+        assert derive_unit_name(special) != derive_unit_name(other)
+
+    def test_basename_literally_named_multi_is_hashed_not_confused(
+        self, tmp_path: Path,
+    ):
+        """A root whose basename starts with 'multi' yields a name of the
+        same SHAPE as the legacy 'slack-bridge-multi-<root>-<hash>' scheme.
+        That is cosmetic only: nothing parses the basename out of the unit
+        name (dismiss discovers by content), and the per-path hash keeps it
+        distinct. Lock the shape so the coincidence stays understood."""
+        root = tmp_path / "multi-teams"
+        root.mkdir()
+        name = derive_unit_name(root)
+        assert name.startswith("slack-bridge-multi-teams-")
+        # Distinct from a DIFFERENT root that shares the basename shape.
+        other = tmp_path / "sub" / "multi-teams"
+        other.mkdir(parents=True)
+        assert derive_unit_name(root) != derive_unit_name(other)
 
 
 class TestRenderSystemdUnit:

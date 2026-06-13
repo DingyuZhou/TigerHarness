@@ -499,6 +499,171 @@ class TestBuildTeamPlan:
             str(unit_dir / "slack-bridge-multi-my-teams-def456.service")
         ]
 
+    def test_last_team_discovers_new_scheme_unit(
+        self, tmp_path: Path
+    ) -> None:
+        """After the `multi-` rename, a current-scheme
+        slack-bridge-<root>-<hash>.service owned by this root is still
+        found by the broadened glob and torn down by content."""
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        _make_team(
+            tmp_path, "shohoku", ["ayako"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(tmp_path, ["shohoku"])
+        (tmp_path / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=x\n"
+        )
+        # Current naming scheme: no `multi-` infix.
+        (unit_dir / "slack-bridge-teams-abc123.service").write_text(
+            f"[Service]\nEnvironmentFile={tmp_path}/multi-bridge.env\n"
+        )
+
+        plan = build_team_plan(
+            team="shohoku", teams_root=tmp_path, home=home,
+        )
+        targets = [s.target for s in plan.service_actions]
+        assert "slack-bridge-teams-abc123.service" in targets
+        assert (tmp_path / "multi-bridge.env") in [
+            r.path for r in plan.removals
+        ]
+
+    def test_old_scheme_unit_dismissed_while_foreign_root_spared(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward-compat regression in the 2026-06-12 INCIDENT SHAPE.
+
+        One unit_dir holds two units: an OLD
+        `slack-bridge-multi-<root>-<hash>.service` owned by THIS (operated)
+        root, and a current-scheme unit owned by ANOTHER root. A single
+        plan-build must tear down the owned old-scheme unit AND its in-root
+        env file WHILE leaving the foreign root's unit and env file
+        untouched -- the two directions proven together, since testing them
+        in isolation can both pass while the mixed case regresses.
+        """
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        # Foreign root A -- must be spared entirely. Current scheme name.
+        root_a = tmp_path / "teams"
+        root_a.mkdir()
+        (root_a / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=a\n"
+        )
+        (unit_dir / "slack-bridge-teams-aaa111.service").write_text(
+            f"[Service]\nEnvironmentFile={root_a}/multi-bridge.env\n"
+        )
+        # Operated root B owns a unit under the OLD `multi-` scheme.
+        root_b = tmp_path / "my-teams"
+        root_b.mkdir()
+        _make_team(
+            root_b, "inkstone", ["scribe"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(root_b, ["inkstone"])
+        (root_b / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=b\n"
+        )
+        (unit_dir / "slack-bridge-multi-my-teams-bbb222.service").write_text(
+            f"[Service]\nEnvironmentFile={root_b}/multi-bridge.env\n"
+        )
+
+        plan = build_team_plan(
+            team="inkstone", teams_root=root_b, home=home,
+        )
+        rm_paths = [r.path.resolve() for r in plan.removals]
+        targets = [s.target for s in plan.service_actions]
+        # Owned OLD-scheme unit + its in-root env file are torn down.
+        assert "slack-bridge-multi-my-teams-bbb222.service" in targets
+        assert (root_b / "multi-bridge.env").resolve() in rm_paths
+        # Foreign root's unit + env file are untouched (the incident).
+        assert not any("teams-aaa111" in t for t in targets)
+        assert (root_a / "multi-bridge.env").resolve() not in rm_paths
+
+    def test_operated_root_named_multi_is_discovered_by_content(
+        self, tmp_path: Path
+    ) -> None:
+        """A root whose basename starts with 'multi' produces a unit named
+        slack-bridge-multi-<root>-<hash>.service -- the same SHAPE as the
+        legacy scheme. dismiss must still tear it down for ITS root by
+        content (it never parses the basename out of the name), and must
+        still spare a foreign root's unit of the same shape."""
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        # Foreign root, also 'multi'-shaped name -- must be spared.
+        root_a = tmp_path / "multi-teams"
+        root_a.mkdir()
+        (root_a / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=a\n"
+        )
+        (unit_dir / "slack-bridge-multi-teams-aaa111.service").write_text(
+            f"[Service]\nEnvironmentFile={root_a}/multi-bridge.env\n"
+        )
+        # Operated root, ALSO 'multi'-shaped name.
+        root_b = tmp_path / "multi-inkstone"
+        root_b.mkdir()
+        _make_team(
+            root_b, "inkstone", ["scribe"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(root_b, ["inkstone"])
+        (root_b / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=b\n"
+        )
+        (unit_dir / "slack-bridge-multi-inkstone-bbb222.service").write_text(
+            f"[Service]\nEnvironmentFile={root_b}/multi-bridge.env\n"
+        )
+
+        plan = build_team_plan(
+            team="inkstone", teams_root=root_b, home=home,
+        )
+        rm_paths = [r.path.resolve() for r in plan.removals]
+        targets = [s.target for s in plan.service_actions]
+        assert "slack-bridge-multi-inkstone-bbb222.service" in targets
+        assert (root_b / "multi-bridge.env").resolve() in rm_paths
+        assert not any("multi-teams-aaa111" in t for t in targets)
+        assert (root_a / "multi-bridge.env").resolve() not in rm_paths
+
+    def test_single_tenant_unit_not_swept_by_broadened_glob(
+        self, tmp_path: Path
+    ) -> None:
+        """The broadened `slack-bridge-*.service` glob must NOT match the
+        legacy single-tenant `slack-bridge.service` (no trailing `-`), even
+        when its env resolves inside the operated root -- it predates the
+        multi-team layout and stays untouched (audit T9)."""
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        _make_team(
+            tmp_path, "shohoku", ["ayako"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(tmp_path, ["shohoku"])
+        (tmp_path / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=x\n"
+        )
+        # Single-tenant unit whose env points inside this root.
+        (unit_dir / "slack-bridge.service").write_text(
+            f"[Service]\nEnvironmentFile={tmp_path}/multi-bridge.env\n"
+        )
+
+        plan = build_team_plan(
+            team="shohoku", teams_root=tmp_path, home=home,
+        )
+        # Not discovered, not torn down, not named anywhere as a target.
+        assert plan.service_actions == ()
+        assert not any(
+            "slack-bridge.service" in s.target for s in plan.service_actions
+        )
+        # And the operator is told plainly that nothing matched.
+        assert any(
+            "no slack-bridge-*.service unit files found" in r
+            for r in plan.manual_reminders
+        )
+
     def test_owned_unit_with_outside_env_file_is_not_cross_deleted(
         self, tmp_path: Path
     ) -> None:
@@ -584,7 +749,7 @@ class TestBuildTeamPlan:
         assert tmp_path / "multi-bridge.env" in rm_paths
         assert plan.service_actions == ()
         assert any(
-            "no slack-bridge-multi*.service unit files found" in r
+            "no slack-bridge-*.service unit files found" in r
             for r in plan.manual_reminders
         )
 

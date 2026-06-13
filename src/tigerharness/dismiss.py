@@ -2,8 +2,13 @@
 
 Removes filesystem state, edits the multi-team index (if present), and
 - for the *last* team in a multi-team setup - stops & disables the
-``slack-bridge-multi.service`` systemd user unit and deletes its env
-file + the multi-team index.
+root's slack-bridge systemd user unit and deletes its env file + the
+multi-team index. The owning unit is found by CONTENT, not name: the
+scan glob is broad (``slack-bridge-*.service``) so it covers the
+current per-root ``slack-bridge-<root>-<hash>.service``, the older
+``slack-bridge-multi-<root>-<hash>.service``, and the legacy global
+``slack-bridge-multi.service`` alike; ownership is then decided by which
+root each unit's config resolves into.
 
 The Slack app on ``api.slack.com`` is **out of scope** -- the command
 prints a reminder for the user to delete it by hand.
@@ -452,11 +457,15 @@ def build_team_plan(
     Raises ValueError when the team doesn't exist or the name is
     syntactically invalid.
 
-    Known limitation: only the multi-team unit
-    (``slack-bridge-multi.service``) is handled. A legacy
-    single-tenant ``slack-bridge.service`` predates the layout this
-    tool scaffolds, cannot be attributed to one team safely, and is
-    left untouched (audit T9, deliberate).
+    Known limitation: only multi-team bridge units are handled --
+    those matching ``slack-bridge-*.service`` (the current per-root
+    ``slack-bridge-<root>-<hash>``, the older
+    ``slack-bridge-multi-<root>-<hash>``, and the legacy global
+    ``slack-bridge-multi.service``). A legacy single-tenant
+    ``slack-bridge.service`` predates the layout this tool scaffolds,
+    cannot be attributed to one team safely, and is left untouched
+    (audit T9, deliberate) -- the scan glob's trailing ``-`` excludes
+    it by construction.
     """
     team = team.strip()
     if not _NAME_RE.fullmatch(team):
@@ -542,9 +551,12 @@ def build_team_plan(
         else:
             # Last team of THIS root -- multi-bridge teardown, scoped
             # to this root only. The unit name is no longer assumed:
-            # one machine may run several roots' bridges (legacy
-            # global `slack-bridge-multi.service` plus per-root
-            # `slack-bridge-multi-<slug>.service` names), so we
+            # one machine may run several roots' bridges under several
+            # naming schemes -- the current per-root
+            # `slack-bridge-<root>-<hash>.service`, the older
+            # `slack-bridge-multi-<root>-<hash>.service`, and the legacy
+            # global `slack-bridge-multi.service`. So the scan glob is
+            # deliberately broad (`slack-bridge-*.service`) and we
             # DISCOVER ownership by content -- a unit belongs to this
             # root iff its EnvironmentFile (or the bridges-config that
             # env file points at) resolves inside *teams_root*. A unit
@@ -552,13 +564,15 @@ def build_team_plan(
             # refuse it by name, never touch it. (This containment is
             # the fix for the 2026-06-12 incident where dismissing the
             # last team of one root deleted another root's env file
-            # and unit.)
+            # and unit.) The glob requires the trailing `-` after
+            # `slack-bridge`, so the legacy SINGLE-TENANT
+            # `slack-bridge.service` (audit T9) is NOT swept in.
             removals.append(FileRemoval(
                 index_path,
                 "multi-bridge index (no lanes remain)",
             ))
             unit_dir = home / ".config" / "systemd" / "user"
-            candidates = sorted(unit_dir.glob("slack-bridge-multi*.service"))
+            candidates = sorted(unit_dir.glob("slack-bridge-*.service"))
             owned_units: list[Path] = []
             excluded: list[str] = []
             env_removals: list[Path] = []
@@ -653,7 +667,7 @@ def build_team_plan(
                 )
             else:
                 manual_reminders.append(
-                    f"no slack-bridge-multi*.service unit files found "
+                    f"no slack-bridge-*.service unit files found "
                     f"under {unit_dir}; if this root's bridge runs "
                     f"under a custom unit name, stop and remove it by "
                     f"hand."

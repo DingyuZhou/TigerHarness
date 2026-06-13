@@ -1,6 +1,15 @@
 # systemd user unit for the multi-team slack-bridge.
 #
-# Install:
+# RECOMMENDED: don't hand-edit this template. Run
+#   tigerharness slack-bridge gen-service --teams-root <your-root>
+# which bakes in absolute paths and prints a PER-ROOT unit name of the
+# form `slack-bridge-<root>-<hash>.service` (e.g.
+# slack-bridge-teams-1a2b3c.service) so every root owns its own bridge
+# instance. Save the output under that printed name.
+#
+# This file documents the older global name `slack-bridge-multi.service`,
+# which still works and stays discoverable by `tigerharness dismiss`.
+# To install THIS template by hand:
 #   mkdir -p ~/.config/systemd/user
 #   cp slack-bridge-multi.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload

@@ -123,8 +123,10 @@ Both take `--thread <thread_ts>` to reply inside a thread. Token/config
 come from the team's `configs/.env` and `configs/slack-bridge.yaml`.
 `tigerharness sb gen-service` emits the systemd user unit that runs
 the multi-team bridge (flags: `--teams-root`, `--bridges-config`,
-`--env-file`, `--venv-python`); redirect its output to
-`~/.config/systemd/user/slack-bridge-multi.service`. Deep dive:
+`--env-file`, `--venv-python`); it prints a **per-root** unit name on
+stderr (`slack-bridge-<root>-<hash>.service`, e.g.
+`slack-bridge-teams-4a8c8b.service`) — redirect its output to
+`~/.config/systemd/user/<that-printed-name>`. Deep dive:
 `docs/slack-bridge.md`.
 
 ## The team file structure
