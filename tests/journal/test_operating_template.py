@@ -148,3 +148,23 @@ def test_per_persona_memory_gates_documented():
     # The "note is the ticket" enforcement phrasing must survive edits --
     # it is the load-bearing mental model for the gates.
     assert "the ticket" in text.lower()
+
+
+def test_materialize_is_not_a_turn_end_callout_present():
+    """The deferred/materialize seam must explicitly say it is NOT a
+    turn-end (the cascade-after-materialize fix). Regression-lock the
+    load-bearing phrasing so a future edit can't silently re-open the
+    "stop at the materialize seam" defect."""
+    import pathlib
+    import tigerharness.init as _init
+
+    skill = (
+        pathlib.Path(_init.__file__).parent
+        / "_bundled_skills" / "drive-journal" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    for text in (OPERATING_MD, skill):
+        low = text.lower()
+        assert "materialize" in low
+        # the no-stop callout, phrased either way
+        assert "not a turn-end" in low or "not a turn end" in low
+        assert "do not stop" in low or "do NOT stop".lower() in low

@@ -209,6 +209,16 @@ completed task until no actionable tasks remain.
       scheduler -- verbatim conversation only; see the journal-new
       skill).
 
+      **Materialize is a preparatory step, NOT a turn-end. Do NOT stop
+      here.** Materializing lands the new task as `pending` -- continue
+      in the SAME turn: re-sweep -> claim -> compile -> walk it (or the
+      next actionable task), exactly as the step-6 cascade demands.
+      Stopping at this seam (leaving the fresh task `pending` for the
+      next drive fire) re-introduces the one-session-per-loop-fire
+      anti-pattern step 6 exists to kill. The only legitimate turn-ends
+      remain: nothing actionable in the sweep, a real blocker, the human
+      ends the session, or the genuine context ceiling.
+
    **Claim it atomically.** Once you have chosen a task, run
    `tigerharness journal claim <task-id>` BEFORE doing any work. Claim
    sets `session_ref` to a fresh token, flips the task to `in_progress`,
