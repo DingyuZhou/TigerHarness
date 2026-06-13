@@ -1,5 +1,15 @@
 # slack-bridge
 
+## At a glance
+- **What:** one Socket-Mode bridge process serving 1..N teams (lanes) — DMs
+  and @mentions in, persona replies in-thread, with a `notify` CLI for
+  proactive messages.
+- **When you need it:** standing up / operating the bridge, multi-lane config,
+  or migrating off the deprecated single-tenant mode.
+- **Must-not-miss:** `dismiss` is scoped to the operated root by content (the
+  2026-06-12 cross-root incident class) — see "The bridge: one process, 1..N
+  lanes" below.
+
 Slack Socket Mode bridge that connects allowlisted users to a Claude
 Code agent via DM or @mention.
 

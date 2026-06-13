@@ -1,5 +1,15 @@
 # journal
 
+## At a glance
+- **What:** the journal backend's concepts + task lifecycle — `kind=task`
+  (single-persona) and `kind=workflow` (multi-persona), scheduled → driven →
+  done on the subscription rail.
+- **When you need it:** the big picture and the task lifecycle. For workflow
+  compile/walk see [journal-workflow-mode.md](journal-workflow-mode.md); for
+  rails/billing + `status.json` see [subscription-backend.md](subscription-backend.md);
+  for crash/idle resume see [journal-instant-resume.md](journal-instant-resume.md).
+- **Must-not-miss:** driving is the subscription rail; Slack only schedules.
+
 File-based, human-driven subscription backend (Phase 1 + Phase 1.5 + Phase 2 + Phase 3).
 
 > **Status:** Phase 1 + Phase 1.5 + Phase 2 (closeout) + Phase 3

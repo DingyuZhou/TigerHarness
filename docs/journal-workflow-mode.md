@@ -1,5 +1,16 @@
 # journal — workflow mode (Phase 1.5)
 
+## At a glance
+- **What:** how a `kind=workflow` task is compiled in-session (drafter +
+  two critics over Tier-1 validators) and then walked step-by-step through
+  gates that enforce order and write a persona-stamped note per step.
+- **When you need it:** authoring/driving multi-persona workflows, the compile
+  sub-protocol, or the graph edge/routing semantics.
+- **Must-not-miss:** follow `journal step-done`'s next-step output — don't
+  hand-follow edges (the gate is what records each persona's memory).
+
+## Details
+
 Extending the file-based subscription backend to support multi-persona
 workflow tasks (`kind=workflow`). Single-persona task mode
 (`kind=task`) shipped in Phase 1 (PR #25, commit `7d6b9f8` on main).
