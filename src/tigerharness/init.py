@@ -53,40 +53,125 @@ log = logging.getLogger("tigerharness.init")
 # whose content matches one of these (an unmodified earlier ship) is
 # overwritten with the current bundled version; a hand-edited skill (no
 # match) is left alone. **When you change a bundled SKILL.md, append the
-# OLD content's sha256 here** so existing teams pick the update up on
-# refresh without losing a customized copy.
+# OLD content's sha256 here** (and roll its entry in
+# ``_CURRENT_SKILL_HASHES`` below) so existing teams pick the update up on
+# refresh without losing a customized copy. Both steps are CI-enforced by
+# the hash guard (``tests/test_skill_hash_guard.py``): change a skill
+# without doing them and the guard fails, naming the fix.
+#
+# The set is the full distinct git history of each bundled SKILL.md (every
+# version whose hash differs from the current bundle), so a team holding
+# ANY earlier ship -- not only the most recent -- auto-refreshes. Comments
+# are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
-    # drive-journal: each entry is a previously-shipped SKILL.md an
-    # existing team may still have on disk; all refresh to the current
-    # (merged cascade + per-persona-memory) bundle.
     "drive-journal": {
-        # pre-redesign long-form skill (shipped through origin/main before
-        # the cascade rewrite).
-        "e9fabddd6be40ceffe739a22c71480da25d073b8feb35da091f9e66aed2a82f1",
-        # per-persona-memory skill (origin/main after PR #43/#44, before
-        # the cascade redesign merged in) -- what Shohoku has on disk now.
-        "25d2c223c976e14ed4441660d6fb064fbaedb65a898f65250a4fc0bc1447cb6c",
-        # pre-Slack-rail-rule AND pre-compaction-redesign skill (both
-        # 2026-06-11 branches started from this main-shipped version;
-        # registered once, comments merged at consolidation).
-        "3ea99c3d99de7f6cecd7185d8b1769bf907b02f4967466a445998eeee19e1f17",
-        # branch-only renders, both "shipped" in the sense that a team
-        # may hold them (Shohoku's team copy carries the cost-discipline
-        # render): slack-cost-discipline's SKILL.md ...
+        # 2026-06-11 (1c370b4): miyagi: Slack rail cost discipline -- lean scheduling...
         "a1217e8c9c09e532d6593e73d0b4f0d9bab09e4a3bc4b8b53cf44a79a8cad56b",
-        # ... and compaction-redesign's SKILL.md.
+        # 2026-06-11 (5a27262): ayako: remove mid-task Layer A compaction entirely
         "fe5d54603c5f68a9f9d7eba929bbba1bb0678ba2bec204a9362fce1716417727",
+        # 2026-06-08 (422835a): Critique R5: build the kind=task done-note from the d...
+        "3ea99c3d99de7f6cecd7185d8b1769bf907b02f4967466a445998eeee19e1f17",
+        # 2026-06-08 (1c76f62): Critique R4: scope step-done in the skill + guard the...
+        "c1bc40e33de36b759483bbacfe7e3aa54621aa3fd93647ce7e36c1bcbde41f60",
+        # 2026-06-08 (b5dc026): anzai: make drive-transcript suppression harness-enfo...
+        "25d2c223c976e14ed4441660d6fb064fbaedb65a898f65250a4fc0bc1447cb6c",
+        # 2026-06-08 (6a4350c): anzai: teach drive protocol the per-persona memory ga...
+        "841a52a8d6bba5b8089de611bba98a7647b0479a9dabf53b3f6defade0476f63",
+        # 2026-06-08 (ff62ced): Critique R2: restore the busy-blocks-pending guard in...
+        "de412e0d1afc032e5612bb1967f7b96e82a0831ab8ddf349a22ed56f8b68e0d6",
+        # 2026-06-08 (6a200eb): drive-journal: compact threshold 50% + hash-gated upd...
+        "9480feffbaf01259fe000087e31cb6e9fcf5cc1abff12164b6b26a326a5bc6de",
+        # 2026-06-08 (b556052): drive-journal: cascade-first redesign -- tight ToDo e...
+        "5833f30db3608ac71e9e6b127a4d0f4a81bd9b392cef06d707971d969b318d6c",
+        # 2026-06-06 (0183ffb): anzai: review-round fixes for the journal iteration work
+        "e9fabddd6be40ceffe739a22c71480da25d073b8feb35da091f9e66aed2a82f1",
+        # 2026-06-06 (249b0ec): anzai: add early_exit toggle (run-exactly-N vs stop-w...
+        "b3f4f7ea67ee00c60ef1c8edad589e2813356b6ba573a4c860cf4e8dd0a1308d",
+        # 2026-06-06 (9468c6a): anzai: task max_sessions default 3 + drive sessions b...
+        "606db494a12958dcfa2d8060d2c3c7838d3e16b620f9b0691485e829d1773caa",
+        # 2026-06-06 (bb0cfe7): anzai: instant session hand-off -- protocol + docs
+        "8612c9f6e35897c0d22af58862e0b43fac1a13328becb0b9ec567c019b4268f6",
+        # 2026-06-05 (7d9b48f): anzai: journal pick rule = finish-before-start (seria...
+        "fa087aafa1a34ed6052fcf9253da2ffcc86366b80a154278e271034c0b950af2",
+        # 2026-06-04 (106860d): anzai: bundle journal skills + `tigerharness init --r...
+        "e882a7820610975b9bbd24d0594dc0f5fd89d3db5557ec0a1208869476f37e10",
     },
     "journal-new": {
-        # pre-Slack-rail-rule bundle (also predates the team-side
-        # verbatim-Operator-message section, which this refresh ships).
+        # 2026-06-11 (1c370b4): miyagi: Slack rail cost discipline -- lean scheduling...
+        "df0105db8bbfa6adfdf1ad27494712ae480e1c23fa1abc10b6d6e44404c52816",
+        # 2026-06-10 (00443fb): miyagi: purge live runner references from docs, READM...
         "f31c4503e33616fe6d24f5495192dca912eb5ac3648af67dec923650ed5770e5",
+        # 2026-06-06 (0183ffb): anzai: review-round fixes for the journal iteration work
+        "fa8559f5e275ad1f1797586434eab173c3eb4addb613165b164e73b6c2fe6a11",
+        # 2026-06-06 (249b0ec): anzai: add early_exit toggle (run-exactly-N vs stop-w...
+        "53314324920e1746aec281478588f534af3be1cd88e6143cdccc868b2a44d607",
+        # 2026-06-06 (9468c6a): anzai: task max_sessions default 3 + drive sessions b...
+        "ac43e9d3e0caf1ea2d964c0a1c3338598ce372a92a63b6717f398b2eb03f6c0b",
+        # 2026-06-04 (106860d): anzai: bundle journal skills + `tigerharness init --r...
+        "f9667640cda40128909f86f25f2d4d78b51c5986545c38bf337b25e1cc443d1d",
     },
+    "slack-notify": {
+        # 2026-05-27 (ba4fa65): anzai: scaffold .claude/settings.json + skills on tig...
+        "0bc91d13201769b6327e762bc9763db3c8b97c7923d3830171effedad9e56691",
+    },
+    "tigerharness-basics": {
+        # 2026-06-12 (083f83f): anzai: add the scaffolded .gitignore to the basics sk...
+        "203ba77acfbc23ba3608b856a65a6c06d2731b8cd01da5f3169b4fcc90252ea9",
+        # 2026-06-12 (ceceef1): miyagi: fix walkthrough breakages in tigerharness-bas...
+        "173d88d68a4b7dd92a1bf9c451d80f5faa0602b37393ee1d3475390b46a96450",
+        # 2026-06-12 (b453ad5): miyagi: fix playbook semantics in tigerharness-basics...
+        "887d2ce987e0fd41aa7928624c48e42a5d42d9ca2bae7cf9a8e20b1acdf77c16",
+        # 2026-06-12 (4033e04): miyagi: add tigerharness-basics bundled skill + init ...
+        "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
+    },
+    # workflow-append-steps: only ever shipped once (current == sole history) --
+    #   no prior version to register.
+}
+
+# Last-shipped manifest: skill dir name -> sha256 of the CURRENT bundled
+# SKILL.md, recomputed and checked by tests/test_skill_hash_guard.py. A
+# mismatch there means a bundled SKILL.md was edited without rolling this
+# manifest; the guard tells you to (i) append the OLD value below into
+# _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
+# entry here to the new hash.
+_CURRENT_SKILL_HASHES: dict[str, str] = {
+    "drive-journal": "072b5d76b8c71c4119367b3881f5dbcb30ce9758f5f52e026e7bed946d27bab8",
+    "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
+    "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
+    "tigerharness-basics": "13e4192d65d15c6ba9bc475a01cb5a96870e53141a2baf0b1d30a395f5501b87",
+    "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }
 
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _bundled_skills_dir() -> Path:
+    """The package's ``_bundled_skills/`` directory."""
+    return Path(__file__).resolve().parent / "_bundled_skills"
+
+
+def bundled_skill_hashes(skills_dir: Path | None = None) -> dict[str, str]:
+    """Map each bundled skill dir name -> sha256 of its current SKILL.md.
+
+    Computed the same way the refresh path hashes on-disk skills
+    (``_sha256_text`` over the utf-8 text). Defaults to the package's
+    ``_bundled_skills/``; the directory is injectable so the hash guard
+    can exercise it against a simulated tree. Skill dirs without a
+    ``SKILL.md`` are skipped (mirrors ``install_bundled_skills``).
+    """
+    root = skills_dir if skills_dir is not None else _bundled_skills_dir()
+    out: dict[str, str] = {}
+    if not root.is_dir():
+        return out
+    for skill_dir in sorted(root.iterdir()):
+        skill_md = skill_dir / "SKILL.md"
+        if skill_md.is_file():
+            out[skill_dir.name] = _sha256_text(
+                skill_md.read_text(encoding="utf-8")
+            )
+    return out
 
 
 @dataclass

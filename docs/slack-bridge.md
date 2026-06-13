@@ -46,6 +46,13 @@ Reply posted to thread
 
 ## Configuration
 
+> **One bridge, 1..N lanes.** The recommended way to run the bridge is a
+> `TIGERHARNESS_BRIDGES_CONFIG` index (see [below](#the-bridge-one-process-1n-lanes));
+> a single team is just a one-lane index. The env vars in the table below
+> drive the **deprecated** single-tenant fallback (used only when
+> `TIGERHARNESS_BRIDGES_CONFIG` is unset) — see
+> [migrating off single-tenant](#migrating-off-single-tenant).
+
 | Env var | Default | Purpose |
 |---|---|---|
 | `SLACK_APP_TOKEN` | (required) | Socket Mode app token (xapp-...) |
@@ -58,17 +65,23 @@ Reply posted to thread
 | `TIGERHARNESS_ATTACHMENT_DIR` | `/tmp/slack-attachments` | File staging dir |
 | `TIGER_MEMORY_CONFIG` | (none) | Auto-trigger memory rebuild on new threads |
 | `TIGER_MEMORY_CLI` | (none) | Path to tiger-memory binary |
-| `TIGERHARNESS_BRIDGES_CONFIG` | (none) | Path to a top-level `slack-bridge.yaml` index. When set, the bridge runs in **multi-team mode** ([details below](#multi-team-mode)). Single-team config vars above are ignored. |
+| `TIGERHARNESS_BRIDGES_CONFIG` | (none) | Path to a top-level `slack-bridge.yaml` index — the **recommended** way to run the bridge, for one team or many ([details below](#the-bridge-one-process-1n-lanes)). When set, the single-tenant vars above are ignored. |
 
 ## Running
 
 ```bash
-# As a daemon
+# Point at your lanes index (one team = a one-lane index), then:
+export TIGERHARNESS_BRIDGES_CONFIG=~/projects/teams/slack-bridge.yaml
 python -m tigerharness.slack_bridge
 
-# As a systemd user unit (recommended)
-# See the .service file template
+# As a systemd user unit (recommended) — `gen-service` bakes the index
+# path in for you; see the gen-service section below.
 ```
+
+Running `python -m tigerharness.slack_bridge` with **no**
+`TIGERHARNESS_BRIDGES_CONFIG` falls back to the **deprecated** single-tenant
+mode (it still works but logs a migration notice on startup). See
+[migrating off single-tenant](#migrating-off-single-tenant).
 
 ## Notify CLI
 
@@ -136,27 +149,33 @@ every turn it spawns, and claim refuses when that marker is present
 (exit 1, nothing mutated). An Operator who deliberately wants an
 API-billed drive can pass `--allow-api-drive` to override.
 
-## Multi-team mode
+## The bridge: one process, 1..N lanes
 
-A single bridge process can serve N teams concurrently — one Slack app
-per team (own bot identity, own tokens, own persona, own
-`threads.json`), all multiplexed through one event loop. This is the
-"one bridge process, many bots" deployment shape.
+There is **one** Slack bridge. One process serves 1..N teams (lanes)
+concurrently — each lane is one Slack app (own bot identity, own tokens,
+own persona, own `threads.json`), all multiplexed through one event loop.
+**A single team is just a one-lane index** — there is no separate
+"single-team bridge" to stand up.
 
 ### When to use it
 
-- You have 2–10 teams and don't want N systemd units.
-- Each team needs its own bot identity in Slack (different name + avatar).
-- You're already using `tigerharness init` to scaffold teams.
+- Always — it is the one supported deployment shape, for one team or many.
+- One team → a one-lane index. Several teams (2–10) → more lanes, still one
+  process and one systemd unit.
+- Each team gets its own bot identity in Slack (different name + avatar).
+- Pairs with `tigerharness init`, which auto-registers each new team's lane.
 
-If you only have one team, single-tenant is simpler — multi-team adds
-a small config layer for no benefit at one team.
+> **Single-tenant mode is deprecated.** Running the bridge with no
+> `TIGERHARNESS_BRIDGES_CONFIG` falls back to a legacy single-team
+> deployment of the same module. It still works and emits a migration
+> notice on startup, but it is deprecated and may be removed in a future
+> release — use a one-lane index instead (see
+> [migrating off single-tenant](#migrating-off-single-tenant)).
 
 ### Opt in
 
-Multi-team mode activates when `TIGERHARNESS_BRIDGES_CONFIG` points at
-a top-level **index file**. Until that env var is set, the bridge runs
-in single-tenant mode exactly as before.
+Point `TIGERHARNESS_BRIDGES_CONFIG` at a top-level **index file**. (With it
+unset, the bridge falls back to the deprecated single-tenant mode.)
 
 To opt in once:
 
@@ -168,6 +187,36 @@ touch slack-bridge.yaml
 From then on, every `tigerharness init` auto-appends the new team's
 lane to this index and writes a per-team fragment under
 `<team>/configs/slack-bridge.yaml`.
+
+### Migrating off single-tenant
+
+If you run the legacy single-tenant bridge (no `TIGERHARNESS_BRIDGES_CONFIG`,
+tokens in a plain `.env`), move to a one-lane index — it reproduces your
+setup and is the supported path:
+
+1. Make your single team a lane. Ensure the team dir has
+   `configs/.env` (the same `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` you used)
+   and `configs/personas.yaml`; add a per-team fragment
+   `configs/slack-bridge.yaml` with `default_persona`, `allowed_user_ids`,
+   and `state_dir`. (`tigerharness init` writes these for you.)
+2. Create the top-level index listing that one lane:
+
+   ```bash
+   # in your teams dir
+   printf 'lanes:\n  - <your-team>\n' > slack-bridge.yaml
+   ```
+
+3. Point the bridge at it and regenerate the unit:
+
+   ```bash
+   export TIGERHARNESS_BRIDGES_CONFIG=$PWD/slack-bridge.yaml
+   tigerharness slack-bridge gen-service --teams-root "$PWD"   # emits the unit
+   ```
+
+A one-lane index behaves exactly like the old single-team bridge — same
+module, same one bot — it just drops the deprecated env-var entrypoint. The
+single-tenant path keeps working until a future release removes it, so there
+is no rush, but new setups should start here.
 
 ### Config layout
 
@@ -378,7 +427,7 @@ tool is idempotent — safe to re-run.
 This mirrors the deferred hot-reload decision: lane add/remove also
 requires a restart.
 
-### Running the multi-team bridge
+### Running the bridge
 
 ```bash
 export TIGERHARNESS_BRIDGES_CONFIG=~/projects/teams/slack-bridge.yaml
