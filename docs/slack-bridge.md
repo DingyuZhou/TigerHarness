@@ -421,11 +421,13 @@ manual editing.
 
 ```bash
 cd ~/projects/teams
+# gen-service prints the exact `Save as:` path on stderr; use that name
+# (it already ends in .service), e.g. slack-bridge-teams-4a8c8b.service:
 uv run tigerharness slack-bridge gen-service \
-    > ~/.config/systemd/user/<printed-unit-name>.service
+    > ~/.config/systemd/user/slack-bridge-teams-4a8c8b.service
 
 systemctl --user daemon-reload
-systemctl --user enable --now <printed-unit-name>.service
+systemctl --user enable --now slack-bridge-teams-4a8c8b.service
 ```
 
 `gen-service` prints the **per-root unit name** on stderr (e.g.
