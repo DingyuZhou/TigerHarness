@@ -438,10 +438,15 @@ full resolved root path keeps two roots that share a basename from
 colliding.
 This is what lets `tigerharness dismiss` tear down a team's bridge
 without touching another root's: dismiss discovers the owning unit by
-**content** (which root each `slack-bridge-multi*.service` unit's
+**content** (which root each `slack-bridge-*.service` unit's
 `EnvironmentFile` / `TIGERHARNESS_BRIDGES_CONFIG` resolves into), so
-the filename is a convenience and the legacy global
-`slack-bridge-multi.service` name is handled for free. A unit whose
+the filename is a convenience. The scan glob is deliberately broad, so
+units named under the current `slack-bridge-<root>-<hash>` scheme, the
+older `slack-bridge-multi-<root>-<hash>` scheme, and the legacy global
+`slack-bridge-multi.service` are all found and torn down by content —
+no live unit has to be renamed for dismiss to keep working. (The
+trailing `-` in the glob means the legacy single-tenant
+`slack-bridge.service` is deliberately *not* matched.) A unit whose
 config resolves outside the operated root is refused by name, never
 stopped or deleted. (Before this, a single global unit name meant
 dismissing the last team of one root could stop and delete another
