@@ -582,6 +582,51 @@ class TestBuildTeamPlan:
         assert not any("teams-aaa111" in t for t in targets)
         assert (root_a / "multi-bridge.env").resolve() not in rm_paths
 
+    def test_operated_root_named_multi_is_discovered_by_content(
+        self, tmp_path: Path
+    ) -> None:
+        """A root whose basename starts with 'multi' produces a unit named
+        slack-bridge-multi-<root>-<hash>.service -- the same SHAPE as the
+        legacy scheme. dismiss must still tear it down for ITS root by
+        content (it never parses the basename out of the name), and must
+        still spare a foreign root's unit of the same shape."""
+        home = tmp_path / "home"
+        unit_dir = home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        # Foreign root, also 'multi'-shaped name -- must be spared.
+        root_a = tmp_path / "multi-teams"
+        root_a.mkdir()
+        (root_a / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=a\n"
+        )
+        (unit_dir / "slack-bridge-multi-teams-aaa111.service").write_text(
+            f"[Service]\nEnvironmentFile={root_a}/multi-bridge.env\n"
+        )
+        # Operated root, ALSO 'multi'-shaped name.
+        root_b = tmp_path / "multi-inkstone"
+        root_b.mkdir()
+        _make_team(
+            root_b, "inkstone", ["scribe"],
+            with_slack_env=True, with_fragment="default_persona",
+        )
+        _write_index(root_b, ["inkstone"])
+        (root_b / "multi-bridge.env").write_text(
+            "TIGERHARNESS_BRIDGES_CONFIG=b\n"
+        )
+        (unit_dir / "slack-bridge-multi-inkstone-bbb222.service").write_text(
+            f"[Service]\nEnvironmentFile={root_b}/multi-bridge.env\n"
+        )
+
+        plan = build_team_plan(
+            team="inkstone", teams_root=root_b, home=home,
+        )
+        rm_paths = [r.path.resolve() for r in plan.removals]
+        targets = [s.target for s in plan.service_actions]
+        assert "slack-bridge-multi-inkstone-bbb222.service" in targets
+        assert (root_b / "multi-bridge.env").resolve() in rm_paths
+        assert not any("multi-teams-aaa111" in t for t in targets)
+        assert (root_a / "multi-bridge.env").resolve() not in rm_paths
+
     def test_single_tenant_unit_not_swept_by_broadened_glob(
         self, tmp_path: Path
     ) -> None:
