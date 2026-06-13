@@ -217,22 +217,26 @@ tigerharness journal sweep
 
 ### Slack bridge
 
-```bash
-# 1. Fill in your Slack tokens in tigers/configs/.env (from api.slack.com)
-#    SLACK_APP_TOKEN=xapp-...
-#    SLACK_BOT_TOKEN=xoxb-...
-#    ALLOWED_SLACK_USER_IDS=U0123ABC
+One bridge process serves 1..N teams (lanes) — one Slack app per team,
+separate bot identities, separate `threads.json`. A single team is just a
+one-lane index.
 
-# 2. Run the bridge
+```bash
+# 1. Fill in each team's Slack tokens in <team>/configs/.env (from api.slack.com)
+#    SLACK_APP_TOKEN=xapp-...  SLACK_BOT_TOKEN=xoxb-...  ALLOWED_SLACK_USER_IDS=U0123ABC
+# 2. Create a lanes index listing your team(s):
+printf 'lanes:\n  - tigers\n' > slack-bridge.yaml
+# 3. Point the bridge at it and run:
+export TIGERHARNESS_BRIDGES_CONFIG=$PWD/slack-bridge.yaml
 python -m tigerharness.slack_bridge
 ```
 
-**Multi-team mode** — one bridge process can serve N teams (one Slack
-app per team, separate bot identities, separate `threads.json`). Opt
-in by creating `slack-bridge.yaml` in your teams dir; subsequent
-`tigerharness init` runs auto-register each team. See
-[`docs/slack-bridge.md#multi-team-mode`](docs/slack-bridge.md#multi-team-mode)
-for the full setup.
+`tigerharness init` auto-registers each new team's lane. Running with **no**
+`TIGERHARNESS_BRIDGES_CONFIG` falls back to the **deprecated** single-tenant
+mode (still works, warns on startup). See
+[`docs/slack-bridge.md`](docs/slack-bridge.md#the-bridge-one-process-1n-lanes)
+for the full setup and
+[migrating off single-tenant](docs/slack-bridge.md#migrating-off-single-tenant).
 
 ### Tiger memory
 
