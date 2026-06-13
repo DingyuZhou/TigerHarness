@@ -18,11 +18,13 @@ integration, and persistent memory management.
 
 ## Bundled Claude Code skills
 
-`tigerharness init` installs four Claude Code skills into a new
+`tigerharness init` installs five Claude Code skills into a new
 team's `.claude/skills/`: `drive-journal` (the subscription drive
 loop), `journal-new` (task/workflow scaffolding), `slack-notify`
-(proactive Slack messages), and `workflow-append-steps` (runtime
-graph extension). Refreshes are hash-aware: a skill that still
+(proactive Slack messages), `workflow-append-steps` (runtime
+graph extension), and `tigerharness-basics` (how to operate the team
+itself: the CLI, the file layout, recruiting personas, creating
+workflows). Refreshes are hash-aware: a skill that still
 matches a previously shipped version is updated in place, while a
 hand-edited skill is left alone (`src/tigerharness/init.py`).
 
@@ -117,7 +119,8 @@ tigers/
 ├── .claude/
 │   ├── settings.json             # wires TIGERHARNESS_PERSONAS_CONFIG
 │   └── skills/                   # bundled skills (drive-journal, journal-new,
-│                                 #   slack-notify, workflow-append-steps)
+│                                 #   slack-notify, workflow-append-steps,
+│                                 #   tigerharness-basics)
 ├── configs/
 │   ├── personas.yaml              # team registry (auto-updated)
 │   └── .env                       # Slack tokens (gitignored)

@@ -790,19 +790,21 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     - ``TIGERHARNESS_PERSONAS_CONFIG`` wired up automatically, so
       tigerharness components find the team's personas.
     - the bundled skills (``drive-journal``, ``journal-new``,
-      ``slack-notify``, ``workflow-append-steps``), so agents know how
-      to drive the journal and send Slack messages.
+      ``slack-notify``, ``workflow-append-steps``,
+      ``tigerharness-basics``), so agents know how to drive the
+      journal, send Slack messages, and operate their own team.
 
-    Skills are read from the ``skills/`` directory shipped inside the
-    tigerharness package. If a skill file already exists on disk, it's
-    left untouched (idempotent, user edits preserved). An existing
-    ``settings.json`` is *additively merged* -- the guard hook is added
-    without clobbering pre-existing keys.
+    Skills are read from the ``_bundled_skills/`` directory shipped
+    inside the tigerharness package. If a skill file already exists on
+    disk, it's left untouched (idempotent, user edits preserved). An
+    existing ``settings.json`` is never clobbered: the only mutation is
+    removing the retired mid-task compact override if it still holds
+    the old seeded default (``_remove_compact_env_in_file``).
     """
     created: list[Path] = []
 
-    # settings.json: create fresh, or additively merge the guard hook into
-    # an existing file so a pre-existing team gets the protection too.
+    # settings.json: create fresh, or tidy an existing file (remove the
+    # retired compact key) without touching anything an operator set.
     # Team-root-relative on purpose: Claude Code launches sessions at
     # the team root, and tigerharness components resolve the env var
     # against the cwd -- so the same checked-in settings file works on
@@ -1638,9 +1640,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Don't create a persona; instead bring an existing team's "
              "bundled skills current: install any missing skill, refresh "
              "any skill byte-identical to a previously-shipped version to "
-             "the latest, and leave hand-edited skills untouched. Also tops "
-             "up .claude/settings.json (journal-guard hook + compact "
-             "threshold). Idempotent.",
+             "the latest, and leave hand-edited skills untouched. Also "
+             "tidies .claude/settings.json (removes the retired mid-task "
+             "compact override if still at the old seeded default). "
+             "Idempotent.",
     )
     args = parser.parse_args(argv)
 
