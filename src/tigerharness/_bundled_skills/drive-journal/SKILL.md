@@ -54,7 +54,12 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    exit cleanly** (the soft lease: a live session owns it right now; let it
    finish before any `pending` task begins — a later fire resumes it once it
    goes idle or crashed);
-   (c) **else** the oldest **pending** task.
+   (c) **else** the oldest **pending** task;
+   (d) **else, if the sweep listed `deferred/` inbox entries,
+   materialize the oldest** (`tigerharness journal materialize <id>` --
+   subscription rail, same scaffolder as `journal new`), then re-sweep
+   and claim the materialized task. A malformed entry exits 1 with a
+   JSON envelope and stays in the inbox: surface it, skip it, continue.
    **Claim it atomically:** `tigerharness journal claim <id>` *before*
    working (sets `session_ref`, bumps `sessions`, refreshes the heartbeat,
    compare-and-set). If claim exits non-zero (another session won the

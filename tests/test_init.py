@@ -2412,6 +2412,8 @@ class TestMainPromptsForUserIds:
         responses = iter([
             "y",                     # slack .env? yes -> fragment will be made
             "n",                     # memory? no
+            "",                      # team goal (optional) -> skip
+            "",                      # persona traits (optional) -> skip
             "U0ABC,U0DEF",           # allowed_user_ids prompt
         ])
         monkeypatch.setattr(builtins, "input", lambda _: next(responses))
@@ -2433,8 +2435,8 @@ class TestMainPromptsForUserIds:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
         (tmp_path / "slack-bridge.yaml").write_text("")
-        # Same order as above: slack -> memory -> user-IDs.
-        responses = iter(["y", "n", ""])
+        # Same order as above: slack -> memory -> goal -> traits -> user-IDs.
+        responses = iter(["y", "n", "", "", ""])
         monkeypatch.setattr(builtins, "input", lambda _: next(responses))
         with patch("tigerharness.init.subprocess.run"):
             rc = main([
@@ -2483,7 +2485,7 @@ class TestMultiTeamEnvTemplate:
     ):
         """`--multi-team` works without `--yes`; covers the elif branch
         in main()."""
-        responses = iter(["n", "n", ""])
+        responses = iter(["n", "n", "", "", ""])
         monkeypatch.setattr(builtins, "input", lambda _: next(responses))
         with patch("tigerharness.init.subprocess.run"):
             rc = main([
@@ -2651,6 +2653,8 @@ class TestInitMultiTeamGating:
         responses = [
             "y",     # slack .env prompt -> yes (so fragment gets made)
             "n",     # memory prompt -> skip
+            "",      # team goal (optional) -> skip
+            "",      # persona traits (optional) -> skip
         ]
         idx = iter(responses)
 
@@ -2678,6 +2682,132 @@ class TestInitMultiTeamGating:
 # ---------------------------------------------------------------------------
 # Space-containing names (init side)
 # ---------------------------------------------------------------------------
+
+class TestSlackOptionalAndInitExtras:
+    """Items 2 + 4 of the 2026-06-12 multiroot task: Slack is genuinely
+    optional (zero artifacts on opt-out), and init can capture an
+    initial team goal + persona traits without ever calling an LLM."""
+
+    def test_no_slack_creates_zero_slack_artifacts(self, tmp_path: Path):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers",
+            "--no-slack", "--no-memory", "--no-multi-team", "--yes",
+        ])
+        assert rc == 0
+        team = tmp_path / "tigers"
+        assert not (team / "configs" / ".env").exists()
+        assert not (team / "configs" / "slack-bridge.yaml").exists()
+        assert not (tmp_path / "slack-bridge.yaml").exists()
+        assert not (tmp_path / "multi-bridge.env").exists()
+
+    def test_interactive_decline_also_creates_zero_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+    ):
+        responses = iter([
+            "n",  # slack?
+            "n",  # memory?
+            "",   # goal
+            "",   # traits
+        ])
+        monkeypatch.setattr(builtins, "input", lambda _: next(responses))
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers",
+            "--no-multi-team",
+        ])
+        assert rc == 0
+        team = tmp_path / "tigers"
+        assert not (team / "configs" / ".env").exists()
+        assert not (team / "configs" / "slack-bridge.yaml").exists()
+        # The decline path tells the user how to enable Slack later.
+        assert "Slack skipped" in capsys.readouterr().out
+
+    def test_explicit_no_slack_flag_skips_the_hint(
+        self, tmp_path: Path, capsys,
+    ):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers",
+            "--no-slack", "--no-memory", "--no-multi-team", "--yes",
+        ])
+        assert rc == 0
+        assert "Slack skipped" not in capsys.readouterr().out
+
+    def test_slack_yes_prints_token_walkthrough(
+        self, tmp_path: Path, capsys,
+    ):
+        """The just-created .env gets the step-by-step app/token
+        walkthrough, not a bare 'fill it in'."""
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers",
+            "--no-memory", "--no-multi-team", "--yes",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Slack setup walkthrough" in out
+        assert "xapp-" in out
+        assert "xoxb-" in out
+        assert "api.slack.com/apps" in out
+
+    def test_goal_flag_seeds_charter_mission(self, tmp_path: Path):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers",
+            "--no-slack", "--no-memory", "--no-multi-team", "--yes",
+            "--goal", "Ship the v1 data pipeline by August.",
+        ])
+        assert rc == 0
+        charter = (tmp_path / "tigers" / "charter" / "README.md").read_text()
+        assert "Ship the v1 data pipeline by August." in charter
+        assert "TODO: One paragraph" not in charter
+        assert "Operator's words at init time" in charter
+
+    def test_traits_flag_lands_verbatim_with_expansion_instruction(
+        self, tmp_path: Path,
+    ):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers",
+            "--no-slack", "--no-memory", "--no-multi-team", "--yes",
+            "--traits", "Stoic, dry humor, allergic to scope creep.",
+        ])
+        assert rc == 0
+        prompt = (
+            tmp_path / "tigers" / "personas" / "chief" / "prompt.md"
+        ).read_text()
+        assert "Stoic, dry humor, allergic to scope creep." in prompt
+        assert "Initial personality traits (Operator's words" in prompt
+        assert "First-session instruction" in prompt
+
+    def test_no_traits_no_block(self, tmp_path: Path):
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers",
+            "--no-slack", "--no-memory", "--no-multi-team", "--yes",
+        ])
+        assert rc == 0
+        prompt = (
+            tmp_path / "tigers" / "personas" / "chief" / "prompt.md"
+        ).read_text()
+        assert "Initial personality traits" not in prompt
+
+    def test_yes_mode_never_prompts_for_extras(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """--yes must stay fully non-interactive: a prompt firing here
+        would hang scripted callers."""
+        def explode(_):
+            raise AssertionError("input() called under --yes")
+        monkeypatch.setattr(builtins, "input", explode)
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers",
+            "--no-slack", "--no-memory", "--no-multi-team", "--yes",
+        ])
+        assert rc == 0
+
 
 class TestSpacedNames:
     """End-to-end coverage for space-containing persona/team names.

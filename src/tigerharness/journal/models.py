@@ -172,6 +172,14 @@ class Status:
     # strict.
     compile_pending: bool = False
     compile_phase: CompilePhase | None = None
+    # Provenance (2026-06 multiroot fix): the journal root this task
+    # was scaffolded INTO, recorded at write time by every scheduling
+    # path (new / schedule / defer-materialize). Lets the sweep detect
+    # a task sitting in a journal it was never meant for (the
+    # misplaced-task class). Optional: statuses written before the
+    # field exist report "provenance unknown" -- never guessed.
+    # Suppressed from JSON when None (both kinds).
+    journal_root: str | None = None
     # Phase 2: the bare playbook name (e.g. ``"default"``) the workflow
     # was scaffolded from. Stored on disk so ``cmd_land_compile`` can
     # emit the truthful name into ``orchestration.json`` and so an
@@ -197,6 +205,7 @@ class Status:
         autonomy: str = "ask",
         schedule_def: str | None = None,
         schedule_due: str | None = None,
+        journal_root: str | None = None,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded Status in ``state=pending``.
@@ -242,6 +251,7 @@ class Status:
             autonomy=autonomy,
             schedule_def=schedule_def,
             schedule_due=schedule_due,
+            journal_root=journal_root,
             compile_pending=False,
             compile_phase=None,
         )
@@ -260,6 +270,7 @@ class Status:
         autonomy: str = "ask",
         schedule_def: str | None = None,
         schedule_due: str | None = None,
+        journal_root: str | None = None,
         now: str | None = None,
     ) -> "Status":
         """Build a freshly-scaffolded ``kind=workflow`` Status.
@@ -321,6 +332,7 @@ class Status:
             autonomy=autonomy,
             schedule_def=schedule_def,
             schedule_due=schedule_due,
+            journal_root=journal_root,
             compile_pending=True,
             compile_phase=CompilePhase.PENDING,
             playbook_name=playbook_name.strip(),
@@ -342,6 +354,8 @@ class Status:
             d.pop("schedule_def", None)
         if self.schedule_due is None:
             d.pop("schedule_due", None)
+        if self.journal_root is None:
+            d.pop("journal_root", None)
         # Workflow-only fields: emit iff kind=workflow, suppress
         # otherwise so task-mode JSON stays Phase 1 byte-shape.
         if self.kind == "workflow":
@@ -386,7 +400,7 @@ class Status:
             )
         optional_keys = {
             "persona", "next_action", "session_ref", "early_exit",
-            "autonomy", "schedule_def", "schedule_due",
+            "autonomy", "schedule_def", "schedule_due", "journal_root",
             "compile_pending", "compile_phase", "playbook_name",
         }
         unknown = set(data) - (required | optional_keys)
@@ -531,6 +545,7 @@ class Status:
             autonomy=autonomy_val,
             schedule_def=data.get("schedule_def"),
             schedule_due=data.get("schedule_due"),
+            journal_root=data.get("journal_root"),
             compile_pending=compile_pending_val,
             compile_phase=compile_phase,
             playbook_name=playbook_name,

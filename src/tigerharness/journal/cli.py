@@ -29,10 +29,19 @@ from tigerharness.journal.models import (
     Status,
     _utcnow_iso,
 )
+from tigerharness.journal.deferred import (
+    DeferredError,
+    consume_entry,
+    defer_entry,
+    list_deferred,
+    read_entry,
+)
 from tigerharness.journal.paths import (
     JournalPathError,
     JournalPaths,
+    JournalRootRefusal,
     default_journal_root,
+    resolve_team_journal_root,
 )
 from tigerharness.journal.scaffold import (
     JournalScaffoldError,
@@ -73,10 +82,38 @@ def cmd_new(args: argparse.Namespace) -> int:
     workflow mode wraps ``new_workflow_task`` (which validates the
     team's compile-time personas and then writes the brief + playbook
     snapshot + status.json)."""
+    guard_rc = _refuse_xdg_fallback_for_scheduling(args)
+    if guard_rc is not None:
+        return guard_rc
     paths = _paths_from_args(args)
     if args.kind == "workflow":
         return _cmd_new_workflow(args, paths)
     return _cmd_new_task(args, paths)
+
+
+def _refuse_xdg_fallback_for_scheduling(
+    args: argparse.Namespace,
+) -> int | None:
+    """Scheduling verbs must never silently land work in the per-user
+    XDG journal (the 2026-06-12 misplaced-task class). When no explicit
+    --journal-dir / $TIGERHARNESS_JOURNAL_DIR is given and the cwd is
+    not a team root, refuse with exit 2 naming the cwd and the fix.
+    Explicit overrides are honored -- the operator said where."""
+    if args.journal_dir:
+        return None
+    if os.environ.get("TIGERHARNESS_JOURNAL_DIR", "").strip():
+        return None
+    cwd = Path.cwd()
+    if (cwd / "configs" / "personas.yaml").is_file():
+        return None  # team root: lands in the team's own journal/.
+    print(
+        f"error: refusing to schedule into the per-user journal at "
+        f"{default_journal_root()}: cwd {cwd} is not a team root "
+        f"(no configs/personas.yaml). Run from the team's root, or "
+        f"pass --journal-dir explicitly to opt in.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
@@ -280,6 +317,117 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
 
 
 # ---------------------------------------------------------------------------
+# defer / materialize (Phase 3: cheap Slack-side scheduling)
+# ---------------------------------------------------------------------------
+
+def cmd_defer(args: argparse.Namespace) -> int:
+    """API-rail half of deferred scheduling: copy the conversation
+    VERBATIM into the team journal's deferred/ inbox. LLM-free, no
+    playbook read -- the minimum a Slack-triggered session must do.
+    Team pinning is mandatory: this never falls back to the XDG
+    journal (exit 2 with the refusal instead)."""
+    try:
+        journal_root = resolve_team_journal_root(
+            team=args.team or None,
+            team_dir=(
+                Path(args.team_dir).expanduser() if args.team_dir else None
+            ),
+        )
+    except JournalRootRefusal as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    paths = JournalPaths(root=journal_root)
+    if args.payload_file:
+        payload_path = Path(args.payload_file).expanduser()
+        if not payload_path.exists():
+            print(
+                f"error: payload file not found: {payload_path}",
+                file=sys.stderr,
+            )
+            return 2
+        payload_text = payload_path.read_text(encoding="utf-8")
+    else:
+        payload_text = sys.stdin.read()
+    try:
+        entry = defer_entry(
+            paths,
+            title=args.title,
+            team=args.team,
+            payload_text=payload_text,
+            playbook=args.playbook,
+            requester=args.requester,
+            thread_ts=args.thread_ts,
+        )
+    except DeferredError as exc:
+        print(json.dumps({"ok": False, "errors": [str(exc)]}))
+        return 1
+    log.info("deferred %s into %s", entry.id, paths.deferred)
+    print(f"Deferred: {entry.id}")
+    print(f"  inbox:   {entry.path}")
+    print(
+        "  next:    a drive-journal session materializes it "
+        f"(`tigerharness journal materialize {entry.id}`) and runs it."
+    )
+    return 0
+
+
+def cmd_materialize(args: argparse.Namespace) -> int:
+    """Subscription-rail half: turn an inbox entry into a real
+    kind=workflow task via the SAME scaffolder `journal new` uses, so
+    the result is indistinguishable from a directly-scheduled task.
+    The inbox entry is consumed only after the scaffolder succeeded;
+    malformed entries exit 1 with a JSON envelope and stay in the
+    inbox for repair."""
+    paths = _paths_from_args(args)
+    try:
+        entry = read_entry(paths, args.deferred_id)
+    except DeferredError as exc:
+        print(json.dumps({"ok": False, "errors": [str(exc)]}))
+        return 1
+    team_root = resolve_team_root(entry.team)
+    playbook_path = team_root / "workflow" / f"{entry.playbook}.md"
+    if not playbook_path.is_file():
+        print(json.dumps({
+            "ok": False,
+            "errors": [
+                f"playbook {entry.playbook}.md not found under "
+                f"{team_root / 'workflow'}/ for deferred entry "
+                f"{entry.id}"
+            ],
+        }))
+        return 1
+    playbook_text = playbook_path.read_text(encoding="utf-8")
+    captain = resolve_playbook_default_captain(playbook_text, team_root)
+    try:
+        result = new_workflow_task(
+            brief_text=entry.payload,
+            playbook_text=playbook_text,
+            playbook_name=entry.playbook,
+            team_root=team_root,
+            paths=paths,
+            title=entry.title,
+            captain=captain,
+        )
+    except MissingPersonaError as exc:
+        print(json.dumps({"ok": False, "errors": [str(exc)]}))
+        return 1
+    except (JournalScaffoldError, JournalModelError) as exc:
+        print(json.dumps({"ok": False, "errors": [str(exc)]}))
+        return 1
+    consume_entry(entry, result.task_dir)
+    log.info(
+        "materialized deferred %s -> task %s", entry.id, result.task_id
+    )
+    print(f"Materialized: {result.task_id}")
+    print(f"  from:         deferred/{entry.id}")
+    print(f"  title:        {result.status.title}")
+    print(f"  kind:         {result.status.kind}")
+    print(f"  playbook:     {entry.playbook}")
+    print(f"  task_dir:     {result.task_dir}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
 
@@ -405,6 +553,12 @@ def cmd_sweep(args: argparse.Namespace) -> int:
                 for m in result.malformed
             ],
             "actionable": [s.id for s in result.actionable()],
+            "deferred": list_deferred(paths),
+            "misplaced": [
+                {"task_id": tid, "recorded_root": root}
+                for tid, root in result.misplaced
+            ],
+            "provenance_unknown": result.provenance_unknown,
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -435,6 +589,29 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         print("Malformed status.json (sweep skipped these):")
         for m in result.malformed:
             print(f"  - {m.task_id}: {m.error}")
+    if result.misplaced:
+        print()
+        print(
+            "MISPLACED tasks (sitting in this journal but scheduled "
+            "into another -- migrate or investigate):"
+        )
+        for tid, root in result.misplaced:
+            print(f"  - {tid}  (scheduled into: {root})")
+    if result.provenance_unknown:
+        print()
+        print(
+            f"({len(result.provenance_unknown)} task(s) predate "
+            f"provenance recording -- placement unknown, not checked.)"
+        )
+    deferred_ids = list_deferred(paths)
+    if deferred_ids:
+        print()
+        print(
+            "Deferred inbox (materialize inside a drive, oldest "
+            "first -- `journal materialize <id>`):"
+        )
+        for did in deferred_ids:
+            print(f"  - {did}")
     return 0
 
 
@@ -1097,6 +1274,9 @@ def _check_workflow_walk_complete(
 def cmd_schedule_add(args: argparse.Namespace) -> int:
     """Create a recurring definition. The prd/brief file is read NOW
     and inlined, so a definition can never dangle on a moved file."""
+    guard_rc = _refuse_xdg_fallback_for_scheduling(args)
+    if guard_rc is not None:
+        return guard_rc
     import datetime as _dt
 
     from tigerharness.journal.schedule import (
@@ -1444,6 +1624,54 @@ def build_parser() -> argparse.ArgumentParser:
     sr = sch_sub.add_parser("rm", help="Remove a definition.")
     sr.add_argument("def_id")
     sr.set_defaults(func=cmd_schedule_rm)
+
+    df = sub.add_parser(
+        "defer",
+        help=(
+            "Cheap Slack-side scheduling: park the Operator's "
+            "conversation VERBATIM in the team journal's deferred/ "
+            "inbox (no playbook read, no compile, no LLM). A later "
+            "drive-journal session materializes it into a real task "
+            "on the subscription rail."
+        ),
+    )
+    df.add_argument("--title", required=True)
+    df.add_argument(
+        "--team", required=True,
+        help="Team whose journal receives the entry (pinned; never "
+             "falls back to the per-user journal).",
+    )
+    df.add_argument(
+        "--team-dir", default="",
+        help="Explicit team root (overrides --team name resolution).",
+    )
+    df.add_argument(
+        "--payload-file", default="",
+        help="File holding the verbatim conversation (default: stdin).",
+    )
+    df.add_argument(
+        "--playbook", default="default",
+        help="Playbook name recorded for materialization "
+             "(default: default).",
+    )
+    df.add_argument("--requester", default="",
+                    help="Who asked (recorded in the sidecar).")
+    df.add_argument("--thread-ts", default="",
+                    help="Slack thread_ts (recorded in the sidecar).")
+    df.set_defaults(func=cmd_defer)
+
+    mz = sub.add_parser(
+        "materialize",
+        help=(
+            "Subscription-rail half of deferred scheduling: turn a "
+            "deferred/ inbox entry into a real kind=workflow task via "
+            "the same scaffolder `new` uses (persona preflight "
+            "included). Run inside a drive; the inbox entry is "
+            "consumed only on success."
+        ),
+    )
+    mz.add_argument("deferred_id")
+    mz.set_defaults(func=cmd_materialize)
 
     li = sub.add_parser("list", help="List active tasks.")
     li.add_argument(

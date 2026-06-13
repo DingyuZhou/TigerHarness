@@ -15,7 +15,9 @@ runners were removed — ADR 0003.)
 
 **Journal (subscription backend).** Scaffolds single-persona tasks
 (`kind=task`) and multi-persona workflows (`kind=workflow`) from
-team playbooks; 16 CLI verbs cover the lifecycle. Workflows are
+team playbooks; 19 CLI verbs cover the lifecycle (incl. the
+deferred-inbox pair `defer`/`materialize` and team-pinned,
+provenance-stamped scheduling). Workflows are
 compiled in-session by a drafter/two-critic loop over mechanical
 Tier-1 validators, then walked step by step through gates that
 enforce step order, require a work note per step, and stamp each

@@ -13,9 +13,39 @@ import pytest
 
 from tigerharness.slack_bridge.gen_service import (
     _is_linux,
+    derive_unit_name,
     main,
     render_systemd_unit,
 )
+
+
+class TestDeriveUnitName:
+    def test_per_root_name_is_deterministic_and_distinct(
+        self, tmp_path: Path,
+    ):
+        a = tmp_path / "teams"
+        b = tmp_path / "my-teams"
+        a.mkdir(); b.mkdir()
+        name_a = derive_unit_name(a)
+        assert name_a == derive_unit_name(a)  # stable across calls
+        assert name_a != derive_unit_name(b)  # roots never collide
+        assert name_a.startswith("slack-bridge-multi-teams-")
+        assert name_a.endswith(".service")
+
+    def test_same_basename_different_roots_do_not_collide(
+        self, tmp_path: Path,
+    ):
+        a = tmp_path / "one" / "teams"
+        b = tmp_path / "two" / "teams"
+        a.mkdir(parents=True); b.mkdir(parents=True)
+        assert derive_unit_name(a) != derive_unit_name(b)
+
+    def test_weird_basename_is_sanitized(self, tmp_path: Path):
+        root = tmp_path / "my teams!?"
+        root.mkdir()
+        name = derive_unit_name(root)
+        # systemd-safe: no spaces or shell-hostile chars in the name.
+        assert " " not in name and "!" not in name and "?" not in name
 
 
 class TestRenderSystemdUnit:
@@ -87,6 +117,28 @@ class TestMainCLI:
         assert "custom.env" in out
         # Custom python path
         assert str(tmp_path / "py" / "python") in out
+
+    def test_prints_per_root_install_instructions_on_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        """stdout stays clean unit content; the per-root unit name and
+        enable commands go to stderr so redirects don't swallow them."""
+        root = tmp_path / "teams"
+        root.mkdir()
+        with patch(
+            "tigerharness.slack_bridge.gen_service._is_linux",
+            return_value=True,
+        ):
+            rc = main(["--teams-root", str(root)])
+        assert rc == 0
+        captured = capsys.readouterr()
+        expected = derive_unit_name(root)
+        assert expected in captured.err
+        assert "enable --now" in captured.err
+        # The unit name never leaks into the unit content on stdout
+        # except as the journalctl hint comment.
+        assert f"Save as" not in captured.out
+        assert expected.removesuffix(".service") in captured.out
 
     def test_non_linux_returns_1_with_friendly_message(
         self, capsys: pytest.CaptureFixture,

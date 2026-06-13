@@ -421,11 +421,26 @@ manual editing.
 ```bash
 cd ~/projects/teams
 uv run tigerharness slack-bridge gen-service \
-    > ~/.config/systemd/user/slack-bridge-multi.service
+    > ~/.config/systemd/user/<printed-unit-name>.service
 
 systemctl --user daemon-reload
-systemctl --user enable --now slack-bridge-multi.service
+systemctl --user enable --now <printed-unit-name>.service
 ```
+
+`gen-service` prints the **per-root unit name** on stderr (e.g.
+`slack-bridge-multi-teams-4a8c8b.service`) along with the exact save
++ enable commands — each teams root gets its own unit name (derived
+from the root path) so two roots never share one bridge instance.
+This is what lets `tigerharness dismiss` tear down a team's bridge
+without touching another root's: dismiss discovers the owning unit by
+**content** (which root each `slack-bridge-multi*.service` unit's
+`EnvironmentFile` / `TIGERHARNESS_BRIDGES_CONFIG` resolves into), so
+the filename is a convenience and the legacy global
+`slack-bridge-multi.service` name is handled for free. A unit whose
+config resolves outside the operated root is refused by name, never
+stopped or deleted. (Before this, a single global unit name meant
+dismissing the last team of one root could stop and delete another
+root's bridge — the 2026-06-12 incident.)
 
 `gen-service` is Linux-only. On other platforms it prints a friendly
 message and returns 1 (you'd write your own launchd plist / Docker

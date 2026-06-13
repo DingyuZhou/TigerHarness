@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 
 from tigerharness.journal.models import (
@@ -104,6 +105,13 @@ class SweepResult:
     # T8 scheduler counts (populated before classification).
     schedule_materialized: list[str] = field(default_factory=list)
     schedule_malformed: list[str] = field(default_factory=list)
+    # Provenance check (2026-06 multiroot fix): tasks whose recorded
+    # ``journal_root`` doesn't match the root they sit in -- a task
+    # living in a journal it was never scheduled into. Tuples of
+    # (task_id, recorded_root). ``provenance_unknown`` counts tasks
+    # predating the field (reported, never guessed at).
+    misplaced: list[tuple[str, str]] = field(default_factory=list)
+    provenance_unknown: list[str] = field(default_factory=list)
 
     def actionable(self) -> list[Status]:
         """Tasks the driver may pick at step 2 of OPERATING.md, in
@@ -197,6 +205,18 @@ def sweep(
                 MalformedEntry(task_id=task_id, error=str(exc))
             )
             continue
+
+        # Provenance check runs for every parseable status,
+        # whatever its state -- a misplaced done task matters too.
+        if status.journal_root is None:
+            result.provenance_unknown.append(task_id)
+        elif Path(status.journal_root).resolve() != paths.root.resolve():
+            result.misplaced.append((task_id, status.journal_root))
+            log.warning(
+                "sweep: %s is MISPLACED -- scheduled into %s but "
+                "sitting in %s", task_id, status.journal_root,
+                paths.root,
+            )
 
         if status.state is State.DONE:
             # Archive: move active/<id>/ -> done/<id>/.

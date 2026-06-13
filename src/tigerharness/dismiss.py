@@ -286,6 +286,42 @@ def _read_env_files_from_unit(unit_path: Path) -> list[Path]:
     return paths
 
 
+def _resolves_inside(path: Path | None, root: Path) -> bool:
+    """True iff *path* resolves to somewhere inside *root* (both
+    resolved; symlink-safe). None is never inside anything. Resolution
+    errors (dangling symlink loops, permission) count as outside --
+    the caller treats outside as "do not touch", the safe default.
+    """
+    if path is None:
+        return False
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
+def _read_bridges_config_from_env(env_path: Path) -> Path | None:
+    """Pull ``TIGERHARNESS_BRIDGES_CONFIG=...`` out of a multi-bridge
+    env file, or None when the file is missing/unreadable or the
+    variable is absent. Secondary ownership signal for dismiss: an env
+    file parked outside a teams-root can still point its bridge at a
+    config INSIDE one.
+    """
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("TIGERHARNESS_BRIDGES_CONFIG="):
+            value = stripped.split("=", 1)[1].strip().strip("'\"")
+            if value:
+                return Path(value).expanduser()
+    return None
+
+
 def _is_safe_state_dir(state_dir: Path, team: str) -> bool:
     """Defense in depth before ``rmtree``-ing a path that came out of a
     user-edited YAML file.
@@ -504,61 +540,123 @@ def build_team_plan(
                 new_index,
             ))
         else:
-            # Last team -- full multi-bridge teardown.
+            # Last team of THIS root -- multi-bridge teardown, scoped
+            # to this root only. The unit name is no longer assumed:
+            # one machine may run several roots' bridges (legacy
+            # global `slack-bridge-multi.service` plus per-root
+            # `slack-bridge-multi-<slug>.service` names), so we
+            # DISCOVER ownership by content -- a unit belongs to this
+            # root iff its EnvironmentFile (or the bridges-config that
+            # env file points at) resolves inside *teams_root*. A unit
+            # whose config resolves elsewhere is another root's bridge:
+            # refuse it by name, never touch it. (This containment is
+            # the fix for the 2026-06-12 incident where dismissing the
+            # last team of one root deleted another root's env file
+            # and unit.)
             removals.append(FileRemoval(
                 index_path,
                 "multi-bridge index (no lanes remain)",
             ))
-            unit_path = (
-                home / ".config" / "systemd" / "user"
-                / "slack-bridge-multi.service"
-            )
-            # Prefer the unit's own EnvironmentFile= -- if the user
-            # generated their unit with a custom --env-file path, the
-            # default <teams-root>/multi-bridge.env would leak it.
-            env_paths_from_unit = _read_env_files_from_unit(unit_path)
-            env_paths_seen: set[Path] = set()
-            for env_path in env_paths_from_unit:
-                if env_path in env_paths_seen or not env_path.exists():
+            unit_dir = home / ".config" / "systemd" / "user"
+            candidates = sorted(unit_dir.glob("slack-bridge-multi*.service"))
+            owned_units: list[Path] = []
+            excluded: list[str] = []
+            env_removals: list[Path] = []
+            for unit_path in candidates:
+                env_paths = _read_env_files_from_unit(unit_path)
+                inside = [
+                    p for p in env_paths
+                    if _resolves_inside(p, teams_root)
+                    or _resolves_inside(
+                        _read_bridges_config_from_env(p), teams_root
+                    )
+                ]
+                if not inside:
+                    targets = (
+                        ", ".join(str(p) for p in env_paths)
+                        if env_paths else "no EnvironmentFile lines"
+                    )
+                    excluded.append(
+                        f"{unit_path.name} (config resolves outside "
+                        f"{teams_root}: {targets})"
+                    )
                     continue
-                env_paths_seen.add(env_path)
+                owned_units.append(unit_path)
+                for p in env_paths:
+                    if not p.exists():
+                        continue
+                    if _resolves_inside(p, teams_root):
+                        if p not in env_removals:
+                            env_removals.append(p)
+                    else:
+                        # Owned unit, env file parked outside the
+                        # root: never delete across the boundary.
+                        manual_reminders.append(
+                            f"unit {unit_path.name} references env "
+                            f"file {p} OUTSIDE {teams_root} -- not "
+                            f"auto-deleted; remove it by hand if "
+                            f"appropriate."
+                        )
+            # The canonical default env file lives inside this root by
+            # construction -- clean it up whether or not any unit was
+            # matched (an index without an installed service, or a
+            # unit that never referenced it, still leaves it behind).
+            multi_env = teams_root / "multi-bridge.env"
+            if multi_env.exists() and multi_env.resolve() not in {
+                p.resolve() for p in env_removals
+            }:
+                env_removals.append(multi_env)
+            for p in env_removals:
                 removals.append(FileRemoval(
-                    env_path,
-                    "multi-bridge env file (from unit's EnvironmentFile)",
+                    p,
+                    "multi-bridge env file (inside this root)",
                 ))
-            # Fall back to the canonical default if the unit doesn't
-            # exist yet (rare: user has the index but never installed
-            # the service) or didn't reference any env file.
-            if not env_paths_seen:
-                multi_env = teams_root / "multi-bridge.env"
-                if multi_env.exists():
-                    removals.append(FileRemoval(
-                        multi_env,
-                        "multi-bridge env file",
-                    ))
-            if unit_path.exists():
+            for unit_path in owned_units:
                 service_actions.extend([
                     ServiceAction(
                         "stop_disable_unit",
-                        "slack-bridge-multi.service",
-                        "stop & disable slack-bridge-multi.service",
+                        unit_path.name,
+                        f"stop & disable {unit_path.name}",
                     ),
                     ServiceAction(
                         "remove_unit_file",
                         str(unit_path),
                         f"remove unit file {unit_path}",
                     ),
-                    ServiceAction(
-                        "daemon_reload",
-                        "",
-                        "run `systemctl --user daemon-reload`",
-                    ),
                 ])
                 manual_reminders.append(
-                    "journalctl entries for slack-bridge-multi remain "
-                    "on disk. Run `journalctl --user --vacuum-time=1s "
-                    "--unit=slack-bridge-multi` if you want them "
-                    "removed."
+                    f"journalctl entries for "
+                    f"{unit_path.name.removesuffix('.service')} remain "
+                    f"on disk. Run `journalctl --user --vacuum-time=1s "
+                    f"--unit={unit_path.name.removesuffix('.service')}` "
+                    f"if you want them removed."
+                )
+            if owned_units:
+                service_actions.append(ServiceAction(
+                    "daemon_reload",
+                    "",
+                    "run `systemctl --user daemon-reload`",
+                ))
+            elif candidates:
+                # Units exist but none belong to this root: say so
+                # loudly (never silent) -- an operator-renamed unit
+                # outside the scan glob would otherwise keep running
+                # against a deleted index.
+                manual_reminders.append(
+                    "no multi-bridge unit owned by this root was "
+                    "found; scanned "
+                    + ", ".join(c.name for c in candidates)
+                    + " under " + str(unit_dir) + " and excluded: "
+                    + "; ".join(excluded)
+                    + ". If this root's bridge runs under another "
+                    "unit name, stop and remove it by hand."
+                )
+            else:
+                manual_reminders.append(
+                    f"no slack-bridge-multi*.service unit files found "
+                    f"under {unit_dir}; if this root's bridge runs "
+                    f"under a custom unit name, stop and remove it by "
+                    f"hand."
                 )
 
     # The global/XDG journal root is shared across teams -- never

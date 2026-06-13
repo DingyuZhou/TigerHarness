@@ -358,6 +358,21 @@ edit `AGENTS.md`.
 # the team fills in the team-specific bits, but the structure is fixed.
 # AGENTS.md (the auto-loaded entry point) points every persona here for
 # mission and scope before any work.
+_TRAITS_BLOCK_TEMPLATE = """
+
+## Initial personality traits (Operator's words, verbatim)
+
+> {traits}
+
+**First-session instruction:** before substantive work, expand these
+traits into the full persona prompt above -- voice, working style,
+strengths, how you handle disagreement -- then REPLACE this whole
+section with the polished result. Don't copy the words; embody them.
+Quote the original traits in your first commit/work note so the
+Operator can check the expansion against the source.
+"""
+
+
 _CHARTER_README = """\
 # Team charter -- {team}
 
@@ -870,12 +885,15 @@ def install_bundled_skills(team_dir: Path, *, refresh: bool = False) -> SkillSyn
 
 def create_team(
     team_dir: Path, *, include_slack: bool, multi_team: bool = False,
+    initial_goal: str = "",
 ) -> list[Path]:
     """Create the empty scaffold for a team. Returns paths created.
 
     *multi_team* selects which .env template to use: the multi-team
     one carries tokens only (allowlist lives in the yaml fragment),
     the legacy one bundles the allowlist via ``ALLOWED_SLACK_USER_IDS``.
+    *initial_goal* (optional, the Operator's words) seeds the charter's
+    Mission section instead of the TODO placeholder.
     """
     created: list[Path] = []
 
@@ -909,7 +927,16 @@ def create_team(
     # (knowledge) wired in from day one. Seeded with TODO markers; the
     # team fills in the specifics during onboarding.
     charter = team_dir / "charter" / "README.md"
-    if _write_if_missing(charter, _CHARTER_README.format(team=team_dir.name)):
+    charter_text = _CHARTER_README.format(team=team_dir.name)
+    if initial_goal.strip():
+        charter_text = charter_text.replace(
+            "> TODO: One paragraph -- why this team exists and what "
+            "success looks like.",
+            f"> {initial_goal.strip()}\n>\n"
+            f"> (Operator's words at init time -- refine as the team "
+            f"learns.)",
+        )
+    if _write_if_missing(charter, charter_text):
         created.append(charter)
 
     knowledge = team_dir / "knowledge" / "README.md"
@@ -1043,6 +1070,7 @@ def add_persona(
     include_memory: bool,
     description: str = "",
     multi_team: bool = False,
+    traits: str = "",
     home: Path | None = None,
 ) -> list[Path]:
     """Add a persona to a team. Returns paths created or updated.
@@ -1066,10 +1094,17 @@ def add_persona(
 
     # prompt.md is guaranteed missing (asserted above).
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(
-        _PERSONA_TEMPLATE.format(persona=persona, team=team_dir.name),
-        encoding="utf-8",
+    prompt_text = _PERSONA_TEMPLATE.format(
+        persona=persona, team=team_dir.name,
     )
+    if traits.strip():
+        # The Operator's words land VERBATIM; the polishing happens in
+        # the persona's own first interactive session (subscription
+        # rail) -- the scaffolder stays LLM-free by design.
+        prompt_text += _TRAITS_BLOCK_TEMPLATE.format(
+            persona=persona, traits=traits.strip(),
+        )
+    prompt_path.write_text(prompt_text, encoding="utf-8")
     created.append(prompt_path)
 
     if include_memory:
@@ -1227,12 +1262,19 @@ def init(
     include_memory: bool | None = None,
     include_slack: bool | None = None,
     include_multi_team: bool | None = None,
+    goal: str | None = None,
+    traits: str | None = None,
+    ask_extras: bool = False,
     search_root: Path | None = None,
     home: Path | None = None,
 ) -> tuple[Path, str, list[Path]]:
     """Run the init flow.
 
     Any non-None argument suppresses the matching interactive prompt.
+    *goal* seeds the new team's charter Mission; *traits* seeds the
+    persona prompt's verbatim personality block. Both prompt
+    interactively ONLY when *ask_extras* is True (main() sets it for
+    interactive runs; direct callers/tests never see a prompt).
     *home* overrides ``~`` for Claude transcripts auto-detect (testing).
     Returns ``(team_dir, persona, created_paths)``.
 
@@ -1357,11 +1399,28 @@ def init(
     # 4. create
     is_new_team = not (final_team_dir / "configs" / "personas.yaml").exists()
     is_multi_team = include_multi_team
+    if goal is None and ask_extras and is_new_team:
+        try:
+            goal = _prompt_optional_text(
+                f"Team {team}'s initial goal (one sentence; optional, "
+                f"Enter to skip)"
+            )
+        except (EOFError, OSError):
+            goal = ""
+    if traits is None and ask_extras:
+        try:
+            traits = _prompt_optional_text(
+                f"{persona}'s initial personality traits (a few words "
+                f"or a sentence; optional, Enter to skip)"
+            )
+        except (EOFError, OSError):
+            traits = ""
     if is_new_team:
         created.extend(create_team(
             final_team_dir,
             include_slack=include_slack,
             multi_team=is_multi_team,
+            initial_goal=goal or "",
         ))
     elif include_slack:
         env_template = _ENV_TEMPLATE_MULTI_TEAM if is_multi_team else _ENV_TEMPLATE
@@ -1377,6 +1436,7 @@ def init(
         final_team_dir, persona,
         include_memory=include_memory,
         multi_team=is_multi_team,
+        traits=traits or "",
         home=home,
     ):
         if p not in created:
@@ -1564,6 +1624,17 @@ def main(argv: list[str] | None = None) -> int:
              "(default: current directory).",
     )
     parser.add_argument(
+        "--goal", default=None,
+        help="The new team's initial goal (one sentence) -- seeds the "
+             "charter's Mission section. Skips the interactive prompt.",
+    )
+    parser.add_argument(
+        "--traits", default=None,
+        help="The persona's initial personality traits -- recorded "
+             "verbatim in prompt.md with a first-session instruction "
+             "to expand them into a full prompt. Skips the prompt.",
+    )
+    parser.add_argument(
         "--refresh-skills",
         action="store_true",
         help="Don't create a persona; instead bring an existing team's "
@@ -1683,6 +1754,9 @@ def main(argv: list[str] | None = None) -> int:
             include_memory=memory_kw,
             include_slack=slack_kw,
             include_multi_team=multi_team_kw,
+            goal=args.goal,
+            traits=args.traits,
+            ask_extras=not args.yes,
             search_root=search_root,
         )
     except ValueError as e:
@@ -1735,8 +1809,38 @@ def main(argv: list[str] | None = None) -> int:
             f"fill in the Mission and 'Primary project this team owns' TODOs"
         )
     env_path = team_dir / "configs" / ".env"
-    if env_path.exists():
-        steps.append(f"Fill in {_format_path(env_path, search_root)} (Slack tokens)")
+    if env_path in created:
+        # The env template was JUST written: walk the user through the
+        # Slack app setup token by token instead of a bare "fill it in".
+        env_rel = _format_path(env_path, search_root)
+        steps.append(
+            f"Slack setup walkthrough for {env_rel}:\n"
+            f"       a. Create (or open) your Slack app at "
+            f"https://api.slack.com/apps\n"
+            f"       b. Enable Socket Mode (Settings -> Socket Mode) and "
+            f"generate an app-level token with `connections:write` -- "
+            f"that's SLACK_APP_TOKEN (starts `xapp-`)\n"
+            f"       c. OAuth & Permissions: add bot scopes `chat:write`, "
+            f"`im:history`, `im:read`, `im:write`, `files:read`, then "
+            f"install to your workspace -- the Bot User OAuth token is "
+            f"SLACK_BOT_TOKEN (starts `xoxb-`)\n"
+            f"       d. Paste both into {env_rel} (gitignored; never "
+            f"commit tokens)"
+        )
+    elif env_path.exists():
+        steps.append(
+            f"Fill in {_format_path(env_path, search_root)} (Slack tokens)"
+        )
+    elif not args.no_slack:
+        # Interactive decline gets the how-to-enable-later pointer;
+        # an explicit --no-slack flag means the user already knows.
+        steps.append(
+            "Slack skipped -- enable it later by re-running "
+            f"`{_command_prefix()}tigerharness init --team "
+            f"{shlex.quote(team_dir.name)}` (answer yes to the Slack "
+            "prompt), or create configs/.env from another team's "
+            "template by hand"
+        )
     mem_cfg = team_dir / "memories" / persona / "tiger-memory.config.yaml"
     if mem_cfg.exists():
         mem_rel = _format_path(mem_cfg, search_root)
