@@ -187,9 +187,13 @@ cost is visible:
 - **A legacy absolute-path index** (built before this became portable): it
   is detected and rebuilt once so its paths become relative/portable.
 
-**Rebuild** any time with `tiger-memory rebuild` (or just run a search —
-indexing is incremental and happens on demand). A full rebuild of a few
-hundred archive entries is ~30s with the model cached.
+**Rebuild.** The index (re)builds **incrementally on the next
+`tiger-memory search --mode rag`/`hybrid`** — there is no separate
+RAG-rebuild command. (`tiger-memory rebuild` is the session-start
+rollup/briefing rebuild; it does *not* touch the embeddings index.) To
+force a full rebuild — e.g. after a merge conflict on the binary file —
+delete `<store>/journal/.embeddings.db` and run a search. A full rebuild of
+a few hundred archive entries is ~30s with the model cached.
 
 **Limitation — not mergeable.** The binary sqlite index is not a
 text-mergeable artifact: two machines that both re-embed and commit will
