@@ -166,6 +166,8 @@ briefing/  the assembled view the agent reads at session start
 - **OpenAI**: text-embedding-3-small (1536-dim), requires `OPENAI_API_KEY`
 
 Install with `pip install tigerharness[memory-rag]` or `[memory-rag-openai]`.
+The index built from these is portable and shareable — see
+[Portable, shared RAG index](#portable-shared-rag-index) below.
 
 ## Portable, shared RAG index
 
@@ -177,9 +179,18 @@ working RAG immediately. The index is deliberately **tracked in git** (not
 gitignored); only the transient `memories/*/.sweep-staging/` stays ignored.
 
 Zero-rebuild reuse requires the **same embedder** on both ends. The index
-is keyed to one embedder (its name + vector dim). Two cases trigger a
-one-time automatic rebuild instead of reuse, each logged at WARNING so the
-cost is visible:
+is keyed to one embedder (its name + vector dim).
+
+**Which embedder will my machine use?** `pick_embedder` picks OpenAI iff
+`OPENAI_API_KEY` is set and `openai` is installed, otherwise the default
+fastembed (`BAAI/bge-small-en-v1.5`). So a committed index built with the
+default reuses immediately on any default setup; a machine configured for
+OpenAI (different dim) takes one self-healing rebuild. Either way it
+"just works" — the only difference is whether the first search reuses or
+rebuilds.
+
+Two cases trigger a one-time automatic rebuild instead of reuse, each
+logged at WARNING so the cost is visible:
 
 - **Different embedder dim** (e.g. opening a fastembed-built index with
   OpenAI): the fixed-width vector table is dropped and rebuilt at the new
@@ -194,6 +205,12 @@ rollup/briefing rebuild; it does *not* touch the embeddings index.) To
 force a full rebuild — e.g. after a merge conflict on the binary file —
 delete `<store>/journal/.embeddings.db` and run a search. A full rebuild of
 a few hundred archive entries is ~30s with the model cached.
+
+**Verifying.** A rebuild prints the WARNING `rag index rebuilt ...` on
+stderr (default-visible) — so its **absence** on the first search after a
+clone confirms the committed index was reused as-is. Confirm the index is
+actually shared with `git ls-files | grep embeddings.db` (it only helps
+collaborators once the Operator has committed it).
 
 **Limitation — not mergeable.** The binary sqlite index is not a
 text-mergeable artifact: two machines that both re-embed and commit will
