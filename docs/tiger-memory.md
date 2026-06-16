@@ -42,7 +42,7 @@ Agent reads briefing/ at session start
 
 | Module | Purpose |
 |---|---|
-| `cli.py` | CLI. Writers: init, bootstrap, rebuild, pin, resummarize. Readers: drill, tree, raw, search, state. Stage-2 executor (subscription rail): plan, ingest-summary. Team sweep gating: sweep-plan, sweep-done, sweep-complete, sweep-release |
+| `cli.py` | CLI. Writers: init, bootstrap, rebuild, pin, resummarize. Readers: drill, tree, raw, search, state. Stage-2 executor (subscription rail): plan (stages prompts + packs stacks), ingest-summary (one bundle via stdin), ingest-staged (single-process glue of all `.summary.md` cards). Team sweep gating: sweep-plan, sweep-done, sweep-complete, sweep-release |
 | `config.py` | YAML config loading + validation |
 | `lifecycle.py` | The core engine: extract, summarize, rollup, rebuild |
 | `briefing.py` | Assemble the briefing/ directory from the store |

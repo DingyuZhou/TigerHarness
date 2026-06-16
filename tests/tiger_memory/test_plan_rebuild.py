@@ -8,7 +8,11 @@ from pathlib import Path
 from textwrap import dedent
 
 from tigerharness.tiger_memory.config import load_config
-from tigerharness.tiger_memory.lifecycle import _sweep_staging_dir, plan_rebuild
+from tigerharness.tiger_memory.lifecycle import (
+    _pack_stacks,
+    _sweep_staging_dir,
+    plan_rebuild,
+)
 from tigerharness.tiger_memory.store import Store
 
 _BIG = "X" * 3000
@@ -202,3 +206,55 @@ def test_plan_caps_at_max_sessions(tmp_path: Path) -> None:
         _backdate(project / f"{uid}.jsonl", hours=3)
     items = plan_rebuild(cfg, store, max_sessions=2)
     assert len(items) == 2
+
+
+# ----- stack packing -------------------------------------------------------
+
+
+def test_pack_stacks_empty() -> None:
+    assert _pack_stacks([], char_budget=100, max_items=5) == []
+
+
+def test_pack_stacks_single() -> None:
+    assert _pack_stacks([("a", 5)], char_budget=100, max_items=5) == [["a"]]
+
+
+def test_pack_stacks_groups_by_char_budget() -> None:
+    # a fills a stack; b would overflow (60+60>100) so opens a new one; c fits
+    # alongside b (60+10<=100).
+    items = [("a", 60), ("b", 60), ("c", 10)]
+    assert _pack_stacks(items, char_budget=100, max_items=10) == [["a"], ["b", "c"]]
+
+
+def test_pack_stacks_groups_by_max_items() -> None:
+    items = [("a", 1), ("b", 1), ("c", 1), ("d", 1), ("e", 1)]
+    assert _pack_stacks(items, char_budget=1000, max_items=2) == [
+        ["a", "b"], ["c", "d"], ["e"],
+    ]
+
+
+def test_pack_stacks_oversized_item_is_solo() -> None:
+    # An item heavier than the whole budget still lands as its own stack (it
+    # opens a fresh stack, and the over-budget check only fires on a non-empty
+    # one), and it does not absorb the following item.
+    items = [("big", 500), ("x", 10)]
+    assert _pack_stacks(items, char_budget=100, max_items=10) == [["big"], ["x"]]
+
+
+def test_plan_emits_stacks_covering_every_item(tmp_path: Path) -> None:
+    cfg, store, project = _setup(tmp_path)
+    uids = []
+    for i in range(3):
+        uid = f"7777777{i}-7777-7777-7777-777777777777"
+        _simple_jsonl(project / f"{uid}.jsonl", uid)
+        _backdate(project / f"{uid}.jsonl", hours=3)
+        uids.append(uid)
+    plan_rebuild(cfg, store)
+    manifest = json.loads(
+        (_sweep_staging_dir(store) / "manifest.json").read_text()
+    )
+    assert "stacks" in manifest
+    flattened = [u for stack in manifest["stacks"] for u in stack]
+    # Every staged item appears in exactly one stack.
+    assert sorted(flattened) == sorted(it["conversation_uuid"] for it in manifest["items"])
+    assert sorted(flattened) == sorted(uids)

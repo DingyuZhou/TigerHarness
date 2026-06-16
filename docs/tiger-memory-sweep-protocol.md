@@ -27,7 +27,10 @@ staleness floor, so triggering on every session start is safe.
 ## The procedure
 
 All gating is `tigerharness.tiger_memory.sweep` (non-AI). The per-persona
-summarize work is the two CLIs `tiger-memory plan` + `ingest-summary`.
+summarize work is `tiger-memory plan` (stages prompts + packs **stacks**),
+the summarize sub-agents (which only write bundle **cards**), and
+`tiger-memory ingest-staged` (the single-process, race-free **glue** that
+merges every card). `ingest-summary` remains for the one-bundle path.
 
 1. **Claim the team sweep.** Compute `team_memories_dir =
    cfg.store.root.parent` for any persona on the team (= `<team>/memories/`).
@@ -38,48 +41,57 @@ summarize work is the two CLIs `tiger-memory plan` + `ingest-summary`.
    - `ran=True` → you hold the claim; `decision.plan.targets` is the list
      of `PersonaTarget(name, config_path)` to process this wake.
 
-2. **Per target persona, summarize via a sub-agent.** For each target:
-   a. `tiger-memory --config <target.config_path> plan
-      [--max-sessions N]` → stages one prompt per flagged transcript under
-      `<store>/.sweep-staging/<uuid>.prompt.md` and prints the manifest
-      `{"items":[{conversation_uuid, prompt_path, ...}]}`.
-   b. For each manifest item, spawn **one constrained sub-agent** (Task
-      tool) — the B7 trust boundary:
-      - **Read**: the item's `prompt_path` (it already embeds the
-        prefiltered transcript — staged in full up to the
-        `max_staged_content_chars` ceiling, clipped only beyond it — so
-        the bulky content never enters *your* context) **and** the
-        persona's store.
-      - **Write**: that persona's store path **only**. **No shell, no
-        network.**
-      - **Instruction**: read the prompt file; emit ONLY the
-        `@@SHORT@@/@@DETAILED@@/@@MUST_MEMORIZE@@` bundle per the prompt's
-        output contract; **self-validate** (all three markers present, in
-        order; short + detailed non-empty); then write it back by piping
-        the bundle to `tiger-memory --config <target.config_path>
-        ingest-summary --uuid <conversation_uuid>` and **return only a
-        short confirmation** (e.g. "ingested <uuid>"). The bulky bundle
-        must never be returned to you (B8 fresh-window).
-      - `ingest-summary` exit codes: `0` ok; `1` malformed bundle
-        (re-ask the sub-agent once, then skip); `2` operator error
-        (unknown uuid / no manifest — a planning bug, surface it).
-      - **Serialize ingest per persona.** `ingest-summary` does a
-        read-modify-write merge into the persona's single
-        `must_memorize.md`, so for ONE persona the sub-agents' bundles
-        must be ingested **one at a time** (the sub-agents may *run* in
-        parallel, but pipe their bundles to `ingest-summary`
-        sequentially), or two concurrent merges will lose updates.
-        Different personas are independent (separate stores) and may
-        ingest in parallel. (A future hardening could defer the merge to
-        the finalize step via per-uuid pending files.)
-   c. After the persona's items are all ingested, `tiger-memory --config
-      <target.config_path> rebuild` is **not** needed for summaries (the
-      sub-agents wrote them); run the **finalize** tail — rollups, decay,
-      briefing — by calling `lifecycle.finalize_rebuild` (or, until a
-      `tiger-memory finalize` CLI exists, a plain `rebuild` with the
-      summaries already present is a clean no-op on the summarize step and
-      does the rollups/briefing). Then `sweep.record_persona_done(
-      team_memories_dir, target.name)`.
+2. **Per target persona: stage → summarize in stacks → glue.** For each
+   target:
+   a. `tiger-memory --config <target.config_path> plan [--max-sessions N]`
+      → stages one prompt per flagged transcript under
+      `<store>/.sweep-staging/<uuid>.prompt.md` and prints a manifest with
+      two keys: `items` (per-uuid metadata: `conversation_uuid`,
+      `prompt_path`, …) and **`stacks`** — a list of uuid-lists, **one
+      stack per summarize sub-agent**. The packer (`lifecycle._pack_stacks`)
+      groups transcripts in plan order until a stack would exceed
+      `sweep_stack_content_chars` of summed (clipped) content or reach
+      `sweep_stack_max_items`; a transcript heavier than the char budget
+      becomes its own solo stack. This bounds how much any single sub-agent
+      ingests, so a backlog fans out across many fresh contexts instead of
+      one agent looping over — and re-reading — every transcript (the
+      worse-than-linear cost the stacking fixes).
+   b. For each **stack**, spawn **one constrained sub-agent** (Task tool)
+      — the B7 trust boundary. Stacks are independent, so run the
+      sub-agents in parallel (a sane concurrency cap). Each sub-agent:
+      - **Reads**: each `<uuid>.prompt.md` in its stack (the prompt embeds
+        the prefiltered transcript — staged in full up to the
+        `max_staged_content_chars` ceiling, clipped only beyond it — so the
+        bulky content never enters *your* context) **and** the persona's
+        store.
+      - **Writes**: a bundle **card**
+        `<store>/.sweep-staging/<uuid>.summary.md` per uuid — and nothing
+        else. It does **not** ingest and runs no `tiger-memory` command.
+      - **Instruction**: for each uuid in the stack, read the prompt; emit
+        ONLY the `@@SHORT@@/@@DETAILED@@/@@MUST_MEMORIZE@@` bundle per the
+        prompt's output contract; **self-validate** (all three markers
+        present, in order; short + detailed non-empty); write it to the
+        card; then **return only a short confirmation** (e.g. "carded N
+        uuids"). The bulky bundle must never be returned to you (B8
+        fresh-window) — it lives only in the card.
+   c. **Glue** once all of this persona's stacks have carded: `tiger-memory
+      --config <target.config_path> ingest-staged`. It reads every
+      `<uuid>.summary.md` card and merges it in a **single process**, so
+      the per-persona read-modify-write into `must_memorize.md` is
+      **serialized by construction** — no agent-side coordination, no
+      lost-update race (this is the merge earlier drafts deferred to "a
+      future hardening … per-uuid pending files"; it now ships). It prints
+      `{"ingested": N, "malformed": [...], "skipped_no_card": M}` and exits
+      `0` (clean), `1` (≥1 malformed card — re-summarize just those uuids,
+      or leave them to re-stage next wake), or `2` (no manifest — a planning
+      bug, surface it). A no-card item simply was not summarized this wake;
+      the **store**, not the card, is the durable ledger (a re-`plan` wipes
+      the staging dir), so it re-stages next wake.
+   d. **Finalize**: `tiger-memory --config <target.config_path> rebuild` —
+      `ingest-staged` already wrote the summaries, so the summarize step is
+      a clean no-op and `rebuild` just runs the finalize tail (rollups,
+      decay, briefing). Then `sweep.record_persona_done(team_memories_dir,
+      target.name)`.
 
 3. **Close the run.**
    - All due personas processed → `sweep.mark_sweep_complete(
@@ -102,7 +114,15 @@ summarize work is the two CLIs `tiger-memory plan` + `ingest-summary`.
   stale claim is stolen after the lease.
 - **Per-wake cap** → a big backlog spreads across several wakes.
 - **Per-persona resumable progress** → an interrupted sweep resumes where
-  it stopped.
+  it stopped. The **store** (not the staged cards) is the ledger: an item
+  summarized-but-not-yet-glued has no stored summary, so a re-`plan`
+  re-stages it next wake.
+- **Serialization is structural** → the summarize sub-agents only write
+  cards; `ingest-staged` performs the single-process merge, so per-persona
+  ingest ordering is never hand-coordinated.
+- **Stacks bound sub-agent context** → `plan` packs transcripts into
+  stacks (`sweep_stack_content_chars` / `sweep_stack_max_items`) so a
+  backlog runs as many fresh contexts, not one ballooning one.
 - **Subscription-safe** → the executor is always the sub-agent; the
   trigger context's billing is irrelevant.
 

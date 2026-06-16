@@ -288,6 +288,8 @@ class TestCreateTeam:
         # but NOT archive/journal (those are git-tracked memory summaries).
         gi_text = (team / ".gitignore").read_text()
         assert "configs/.env" in gi_text
+        # Transient sweep staging is excluded (it embeds raw transcripts).
+        assert "memories/*/.sweep-staging/" in gi_text
         assert "memories/*/archive/" not in gi_text
         assert "memories/*/journal/" not in gi_text
         # personas.yaml header references team name

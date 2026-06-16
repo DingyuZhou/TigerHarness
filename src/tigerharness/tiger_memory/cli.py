@@ -122,6 +122,13 @@ def main(argv: list[str] | None = None) -> int:
     p_ing.add_argument("--uuid", required=True,
                        help="conversation_uuid from the plan manifest.")
 
+    sub.add_parser(
+        "ingest-staged",
+        help="Glue: ingest every staged <uuid>.summary.md card in ONE process "
+             "(per-persona merge serialized by construction -- no race). Run "
+             "after the summarize sub-agents have written their cards.",
+    )
+
     # ----- B3 team-sweep gating convenience CLIs (non-AI) -----
     # Thin wrappers over tiger_memory.sweep so an interactive persona
     # session drives the gating (see docs/tiger-memory-sweep-protocol.md)
@@ -209,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_plan(cfg, store, args.max_sessions)
     if args.cmd == "ingest-summary":
         return _cmd_ingest_summary(cfg, store, args.uuid)
+    if args.cmd == "ingest-staged":
+        return _cmd_ingest_staged(cfg, store)
     if args.cmd == "sweep-plan":
         return _cmd_sweep_plan(
             cfg,
@@ -250,10 +259,49 @@ def _cmd_state(cfg: Config, store: Store) -> int:
 
 
 def _cmd_plan(cfg: Config, store: Store, max_sessions: int | None) -> int:
-    from .lifecycle import plan_rebuild
-    items = plan_rebuild(cfg, store, max_sessions=max_sessions)
-    print(json.dumps({"items": items}, indent=2))
+    from .lifecycle import _sweep_staging_dir, plan_rebuild
+    plan_rebuild(cfg, store, max_sessions=max_sessions)
+    # Print the persisted manifest verbatim so the CLI output and the file
+    # the driver reads are the same single source of truth -- it carries both
+    # ``items`` (per-uuid metadata) and ``stacks`` (the sub-agent grouping).
+    manifest_path = _sweep_staging_dir(store) / "manifest.json"
+    print(manifest_path.read_text(encoding="utf-8").rstrip("\n"))
     return 0
+
+
+def _load_plan_manifest(store: Store) -> dict | None:
+    """Return the plan manifest dict, or ``None`` (after printing why) when it
+    is missing/unreadable. Shared by both ingest paths."""
+    from .lifecycle import _sweep_staging_dir
+    manifest_path = _sweep_staging_dir(store) / "manifest.json"
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(f"no plan manifest at {manifest_path}; run `tiger-memory plan` "
+              f"first", file=sys.stderr)
+        return None
+
+
+def _ingest_item_bundle(cfg: Config, store: Store, item: dict, bundle_text: str):
+    """Parse + write back one collapsed bundle for a manifest *item*, then drop
+    the now-consumed staged prompt. Raises ``CollapseParseError`` on a
+    malformed bundle BEFORE any write, so the store + prompt are left intact
+    and the transcript can be re-summarized."""
+    from .executor import ingest_collapsed_summary
+    result = ingest_collapsed_summary(
+        store, cfg,
+        conversation_uuid=item["conversation_uuid"],
+        source=item["source"],
+        source_id=item["source_id"],
+        first_event_at=datetime.fromisoformat(item["first_event_at"]),
+        last_event_at=datetime.fromisoformat(item["last_event_at"]),
+        bundle_text=bundle_text,
+        raw_path=Path(item["raw_path"]),
+    )
+    # The staged prompt embeds the (prefiltered) transcript; once ingested it
+    # is consumed, so drop it to avoid leaving transcript content at rest.
+    Path(item["prompt_path"]).unlink(missing_ok=True)
+    return result
 
 
 def _cmd_ingest_summary(cfg: Config, store: Store, uuid: str) -> int:
@@ -261,15 +309,8 @@ def _cmd_ingest_summary(cfg: Config, store: Store, uuid: str) -> int:
     conversation. The metadata comes from the plan manifest so the caller
     only needs the uuid + the bundle."""
     from .collapse import CollapseParseError
-    from .executor import ingest_collapsed_summary
-    from .lifecycle import _sweep_staging_dir
-
-    manifest_path = _sweep_staging_dir(store) / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        print(f"no plan manifest at {manifest_path}; run `tiger-memory plan` "
-              f"first", file=sys.stderr)
+    manifest = _load_plan_manifest(store)
+    if manifest is None:
         return 2
     item = next(
         (it for it in manifest.get("items", [])
@@ -282,26 +323,62 @@ def _cmd_ingest_summary(cfg: Config, store: Store, uuid: str) -> int:
 
     bundle = sys.stdin.read()
     try:
-        result = ingest_collapsed_summary(
-            store, cfg,
-            conversation_uuid=item["conversation_uuid"],
-            source=item["source"],
-            source_id=item["source_id"],
-            first_event_at=datetime.fromisoformat(item["first_event_at"]),
-            last_event_at=datetime.fromisoformat(item["last_event_at"]),
-            bundle_text=bundle,
-            raw_path=Path(item["raw_path"]),
-        )
+        result = _ingest_item_bundle(cfg, store, item, bundle)
     except CollapseParseError as exc:
         print(f"malformed summary bundle for {uuid}: {exc}", file=sys.stderr)
         return 1
-    # The staged prompt embeds the (prefiltered) transcript; once ingested
-    # it is consumed, so drop it to avoid leaving transcript content at rest.
-    # (A malformed bundle above keeps it so the sub-agent can re-ask.)
-    Path(item["prompt_path"]).unlink(missing_ok=True)
     print(f"ingested {result.conversation_uuid} "
           f"(+{result.must_memorize_added} must-memorize)")
     return 0
+
+
+def _cmd_ingest_staged(cfg: Config, store: Store) -> int:
+    """Deferred glue: ingest every staged ``<uuid>.summary.md`` card in ONE
+    process, so the per-persona must-memorize merge is serialized by
+    construction — no agent-side coordination, no lost-update race. The cards
+    are written by the summarize sub-agents; this consumes them.
+
+    Per manifest item that has a card: parse + write it back, then delete the
+    card (its prompt is dropped by ``_ingest_item_bundle``). A malformed card
+    is left in place and reported. An item with no card yet is skipped — it was
+    not summarized this wake and re-stages next wake (the store, not the card,
+    is the durable ledger; a re-``plan`` wipes the staging dir).
+
+    Exit: 0 = no malformed cards; 1 = at least one malformed card (re-summarize
+    those); 2 = no plan manifest.
+    """
+    from .collapse import CollapseParseError
+    from .lifecycle import _sweep_card_path
+    manifest = _load_plan_manifest(store)
+    if manifest is None:
+        return 2
+
+    ingested: list[str] = []
+    malformed: list[str] = []
+    skipped_no_card = 0
+    for item in manifest.get("items", []):
+        uuid = item.get("conversation_uuid")
+        card_path = _sweep_card_path(store, uuid)
+        try:
+            bundle = card_path.read_text(encoding="utf-8")
+        except OSError:
+            skipped_no_card += 1
+            continue
+        try:
+            result = _ingest_item_bundle(cfg, store, item, bundle)
+        except CollapseParseError as exc:
+            print(f"malformed summary card for {uuid}: {exc}", file=sys.stderr)
+            malformed.append(uuid)
+            continue
+        card_path.unlink(missing_ok=True)
+        ingested.append(result.conversation_uuid)
+
+    print(json.dumps({
+        "ingested": len(ingested),
+        "malformed": malformed,
+        "skipped_no_card": skipped_no_card,
+    }, indent=2))
+    return 1 if malformed else 0
 
 
 # ----- B3 team-sweep gating helpers ----------------------------------------
