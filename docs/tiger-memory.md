@@ -226,7 +226,11 @@ search to regenerate), not a three-way merge.
   contained out-of-root archive path ...` means a stored path pointed
   outside the store and was clamped to a safe location — that should never
   happen for an index your team produced, so treat it as a sign of a
-  corrupt or tampered `.embeddings.db` and rebuild it from scratch.
+  corrupt or tampered `.embeddings.db` and rebuild it from scratch (the
+  force-rebuild step under **Rebuild** above: delete the index and run a
+  search). This containment behavior is pinned by
+  `tests/tiger_memory/test_rag_portable.py::test_containment_logs_warning`,
+  so it can be verified/regressed without hand-crafting a bad index.
 - *Commit deliberately; expect binary churn.* Every re-embed rewrites the
   binary, so committing it on every incidental rebuild churns git history.
   Commit the index when you mean to share a meaningful update, not on every
