@@ -584,6 +584,11 @@ memories/*/state.json
 memories/*/.sweep-staging/
 # archive/ and journal/ are version-controlled (memory summaries).
 # .gitkeep files inside them ensure the empty dirs are tracked.
+# The RAG index (each store's journal/.embeddings.db) is ALSO tracked on
+# purpose: it stores archive paths relative to the store root, so a
+# committed index is portable and works after a fresh clone with no
+# rebuild (provided the cloner uses the same embedder). Do NOT add it to
+# this ignore list -- sharing it is the whole point.
 """
 
 # .claude/settings.json -- env vars that Claude Code injects into agent
