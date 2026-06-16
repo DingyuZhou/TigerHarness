@@ -143,9 +143,22 @@ def _resolve_stored_path(store: Store, stored: str) -> Path:
     file after a cross-machine clone. A legacy absolute path is returned
     unchanged (the migration in ``_open_db`` rewrites such rows on next
     index, so this branch is the defensive belt-and-suspenders path).
+
+    The index is a SHARED, committed artifact, so a stored relative path
+    is untrusted input. A ``..``-escaping path is contained to the store
+    root (falls back to the basename under ``archive/``) rather than
+    resolving to an arbitrary filesystem location the hybrid reader would
+    then open.
     """
     p = Path(stored)
-    return p if p.is_absolute() else (store.root / p)
+    if p.is_absolute():
+        return p
+    candidate = store.root / p
+    try:
+        candidate.resolve().relative_to(store.root)
+    except ValueError:
+        return store.paths.archive / p.name
+    return candidate
 
 
 def _display_path(store: Store, stored: str) -> str:

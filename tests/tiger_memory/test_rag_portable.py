@@ -277,3 +277,18 @@ def test_display_path_absolute_under_root(tmp_path):
 def test_display_path_foreign_absolute(tmp_path):
     store = Store(tmp_path / "A")
     assert rag._display_path(store, "/foreign/archive/x.md") == "x.md"
+
+
+# --- 6. containment: a shared index must not resolve OUTSIDE the root -------
+
+
+def test_resolve_stored_path_contains_traversal(tmp_path):
+    """The index is now a SHARED, committed artifact, so a stored path is
+    untrusted input. A `..`-escaping relative path must NOT resolve to an
+    arbitrary filesystem location that the hybrid reader would then open."""
+    store = Store(tmp_path / "A")
+    store.init_layout()
+    resolved = rag._resolve_stored_path(store, "../../../../../../etc/passwd").resolve()
+    assert str(resolved).startswith(str(store.root)), (
+        f"path escaped store root: {resolved}"
+    )
