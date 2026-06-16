@@ -129,6 +129,9 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     },
     # workflow-append-steps: only ever shipped once (current == sole history) --
     #   no prior version to register.
+    # sweep-memory: newly bundled (the stacks + deferred-glue rewrite) -- no
+    #   earlier *bundled* ship to register; teams that hand-authored a local
+    #   copy keep it (refresh leaves a non-matching skill alone).
 }
 
 # Last-shipped manifest: skill dir name -> sha256 of the CURRENT bundled
@@ -141,6 +144,7 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "drive-journal": "d0b1f3704b12a3642211408fd2d2f9ed9dc1b555c856ca1acd2ceb02b5201666",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
+    "sweep-memory": "fe6455719d5c9bf688b9d9de5f1b9653e9a67d59f2438a920f6e27c2237d3323",
     "tigerharness-basics": "13e4192d65d15c6ba9bc475a01cb5a96870e53141a2baf0b1d30a395f5501b87",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }
@@ -574,6 +578,10 @@ configs/.env
 memories/*/briefing/
 memories/*/cache/
 memories/*/state.json
+# Transient sweep working dir: the prompts / summary cards / manifest the
+# in-session memory sweep stages and then consumes (each `tiger-memory plan`
+# rmtrees + rebuilds it). It embeds raw transcript content -- never commit it.
+memories/*/.sweep-staging/
 # archive/ and journal/ are version-controlled (memory summaries).
 # .gitkeep files inside them ensure the empty dirs are tracked.
 """

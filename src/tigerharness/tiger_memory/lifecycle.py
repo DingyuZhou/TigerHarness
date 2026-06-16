@@ -287,6 +287,54 @@ def _sweep_staging_dir(store: Store) -> Path:
     return store.root / ".sweep-staging"
 
 
+# A summarize sub-agent drops its collapsed bundle here as a "card"; the
+# deferred glue step (``tiger-memory ingest-staged``) reads every card in a
+# single process, so the per-persona must-memorize merge is serialized by
+# construction -- no agent-side coordination, no lost-update race.
+SUMMARY_CARD_SUFFIX = ".summary.md"
+
+
+def _sweep_card_path(store: Store, conversation_uuid: str) -> Path:
+    return _sweep_staging_dir(store) / f"{conversation_uuid}{SUMMARY_CARD_SUFFIX}"
+
+
+def _pack_stacks(
+    weighted: list[tuple[str, int]],
+    *,
+    char_budget: int,
+    max_items: int,
+) -> list[list[str]]:
+    """Greedily group ``(uuid, weight)`` pairs -- in plan order -- into
+    "stacks", one per summarize sub-agent.
+
+    A stack closes when adding the next transcript would push the summed
+    weight over *char_budget*, or once it already holds *max_items*. A
+    transcript heavier than the budget on its own still lands as a solo
+    stack: it opens a fresh stack, and the over-budget check only fires on a
+    non-empty stack, so a single item is never split. Order is preserved and
+    the result is deterministic, so a re-plan reproduces the same grouping.
+
+    This is the load-bearing cost fix: a backlog fans out across many small
+    stacks (each a fresh sub-agent context) instead of one agent looping over
+    every transcript and re-reading all prior ones each turn.
+    """
+    stacks: list[list[str]] = []
+    current: list[str] = []
+    running = 0
+    for conversation_uuid, weight in weighted:
+        if current and (
+            running + weight > char_budget or len(current) >= max_items
+        ):
+            stacks.append(current)
+            current = []
+            running = 0
+        current.append(conversation_uuid)
+        running += weight
+    if current:
+        stacks.append(current)
+    return stacks
+
+
 def plan_rebuild(
     cfg: Config,
     store: Store,
@@ -324,6 +372,10 @@ def plan_rebuild(
 
     prompts_root = _prompts_root(cfg)
     items: list[dict] = []
+    # (uuid, weight) per staged transcript -- the weight is the clipped
+    # content length, which the stack packer below uses to bound how much a
+    # single summarize sub-agent ingests.
+    weighted: list[tuple[str, int]] = []
     processed = 0
     for d in decisions:
         if d.action not in (SUMMARIZE_NEW, RE_SUMMARIZE):
@@ -338,6 +390,12 @@ def plan_rebuild(
                 drop_tool_results=cfg.prefilter.drop_tool_results,
                 drop_system_reminders=cfg.prefilter.drop_system_reminders,
             )
+        # The sub-agent (not an in-process summarizer) owns the reduce here
+        # and has a large context window, so stage the FULL transcript up to
+        # the sub-agent ceiling — no lossy middle elision in the common case.
+        # Only a transcript beyond the (configurable) staged ceiling is
+        # clipped, as a last resort. The clipped length is the stack weight.
+        clipped = _clip(content, max_chars=cfg.budgets.max_staged_content_chars)
         prompt = _fill_prompt(
             prompts_root / "combined_summary.md",
             agent_name=cfg.agent.name,
@@ -348,12 +406,7 @@ def plan_rebuild(
             source_id=rec.source_id,
             first_event_at=rec.first_event_at.isoformat(),
             last_event_at=rec.last_event_at.isoformat(),
-            # The sub-agent (not an in-process summarizer) owns the reduce
-            # here and has a large context window, so stage the FULL
-            # transcript up to the sub-agent ceiling — no lossy middle
-            # elision in the common case. Only a transcript beyond the
-            # (configurable) staged ceiling is clipped, as a last resort.
-            content=_clip(content, max_chars=cfg.budgets.max_staged_content_chars),
+            content=clipped,
         )
         prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -367,10 +420,21 @@ def plan_rebuild(
             "prompt_path": str(prompt_path),
             "action": d.action,
         })
+        weighted.append((rec.conversation_uuid, len(clipped)))
         processed += 1
 
+    # Group the staged transcripts into stacks (one summarize sub-agent per
+    # stack). The driver fans these out -- a fresh context per stack -- so a
+    # big backlog stays roughly linear instead of one looping agent paying a
+    # worse-than-linear re-read cost. See ``docs/tiger-memory-sweep-protocol.md``.
+    stacks = _pack_stacks(
+        weighted,
+        char_budget=cfg.budgets.sweep_stack_content_chars,
+        max_items=cfg.budgets.sweep_stack_max_items,
+    )
     (staging / "manifest.json").write_text(
-        json.dumps({"items": items}, indent=2), encoding="utf-8"
+        json.dumps({"items": items, "stacks": stacks}, indent=2),
+        encoding="utf-8",
     )
     return items
 

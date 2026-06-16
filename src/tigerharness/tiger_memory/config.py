@@ -89,6 +89,18 @@ class BudgetsConfig:
     # ≈ ~75 K tokens) rather than the smaller per-API-call budget above.
     # Only a transcript exceeding *this* is clipped, as a last resort.
     max_staged_content_chars: int = 300_000
+    # Sweep stacking (subscription-billed in-session path). The plan groups
+    # staged transcripts into "stacks" -- one per summarize sub-agent -- so a
+    # backlog fan-out amortizes per-sub-agent setup WITHOUT any single context
+    # accumulating every transcript (the worse-than-linear cost of one looping
+    # agent re-reading all prior transcripts each turn). A stack closes when
+    # adding the next transcript would push summed (clipped) content over
+    # ``sweep_stack_content_chars``, or once it already holds
+    # ``sweep_stack_max_items`` transcripts. A single transcript heavier than
+    # the char budget becomes its own solo stack (never split). See
+    # ``docs/tiger-memory-sweep-protocol.md``.
+    sweep_stack_content_chars: int = 200_000
+    sweep_stack_max_items: int = 8
 
 
 @dataclass(frozen=True)
@@ -378,6 +390,12 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         ),
         max_staged_content_chars=int(
             budgets_raw.get("max_staged_content_chars", 300_000)
+        ),
+        sweep_stack_content_chars=int(
+            budgets_raw.get("sweep_stack_content_chars", 200_000)
+        ),
+        sweep_stack_max_items=int(
+            budgets_raw.get("sweep_stack_max_items", 8)
         ),
     )
 
