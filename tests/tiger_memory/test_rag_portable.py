@@ -292,3 +292,46 @@ def test_resolve_stored_path_contains_traversal(tmp_path):
     assert str(resolved).startswith(str(store.root)), (
         f"path escaped store root: {resolved}"
     )
+
+
+def test_containment_logs_warning(tmp_path, caplog):
+    """Containment is visible: an escaping path logs exactly one WARNING;
+    a normal relative path logs none."""
+    store = Store(tmp_path / "A")
+    store.init_layout()
+    with caplog.at_level(logging.WARNING, logger="tigerharness.tiger_memory.rag"):
+        rag._resolve_stored_path(store, "../../../../etc/passwd")
+    escapes = [r for r in caplog.records if "contained out-of-root" in r.message]
+    assert len(escapes) == 1  # exactly one per offending row
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tigerharness.tiger_memory.rag"):
+        rag._resolve_stored_path(store, "archive/normal.md")
+    assert not [r for r in caplog.records if "contained out-of-root" in r.message]
+
+
+def test_display_path_relative_escape(tmp_path):
+    """A relative path that escapes the root displays as its basename, so a
+    traversal string is never shown as if it were a real archive entry."""
+    store = Store(tmp_path / "A")
+    store.init_layout()
+    assert rag._display_path(store, "../../../etc/passwd") == "passwd"
+
+
+def test_containment_holds_under_symlinked_root(tmp_path):
+    """Proving the deferred symlinked-root claim: Store resolves the root, so
+    containment and normal resolution both hold when the root is reached via
+    a symlink."""
+    realroot = tmp_path / "real"
+    realroot.mkdir()
+    linkroot = tmp_path / "link"
+    linkroot.symlink_to(realroot, target_is_directory=True)
+    store = Store(linkroot)
+    store.init_layout()
+    # Escaping path is still contained under the (resolved) real root.
+    escaped = rag._resolve_stored_path(store, "../../../../etc/passwd").resolve()
+    assert str(escaped).startswith(str(store.root))
+    # A normal relative path resolves under the real root.
+    normal = rag._resolve_stored_path(store, "archive/x.md")
+    assert normal == store.root / "archive" / "x.md"
+    assert str(store.root) == str(realroot.resolve())

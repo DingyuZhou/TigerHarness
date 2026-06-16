@@ -157,20 +157,37 @@ def _resolve_stored_path(store: Store, stored: str) -> Path:
     try:
         candidate.resolve().relative_to(store.root)
     except ValueError:
-        return store.paths.archive / p.name
+        fallback = store.paths.archive / p.name
+        # The index is shared/committed, so an out-of-root path means a
+        # poisoned or corrupt index — surface it (once per offending row)
+        # instead of silently swallowing the containment.
+        log.warning(
+            "rag index: contained out-of-root archive path %r -> %r",
+            stored,
+            str(fallback),
+        )
+        return fallback
     return candidate
 
 
 def _display_path(store: Store, stored: str) -> str:
     """Human-facing archive path, relative to the local store root.
 
-    Never raises. A stored relative path is already root-relative. A
-    foreign absolute path (pre-migration, from another machine) is NOT
-    under the local ``store.root`` — falling back to its basename instead
-    of letting ``relative_to`` raise ``ValueError`` (the original crash).
+    Never raises. A stored relative path is already root-relative — unless
+    it escapes the root via ``..`` (a poisoned/corrupt shared index), in
+    which case it displays as its basename, consistent with
+    ``_resolve_stored_path`` (so a traversal string is never shown as if it
+    were a real archive entry). A foreign absolute path (pre-migration, from
+    another machine) is NOT under the local ``store.root`` — also falls back
+    to its basename instead of letting ``relative_to`` raise ``ValueError``
+    (the original crash).
     """
     p = Path(stored)
     if not p.is_absolute():
+        try:
+            (store.root / p).resolve().relative_to(store.root)
+        except ValueError:
+            return p.name
         return stored
     try:
         return str(p.relative_to(store.root))

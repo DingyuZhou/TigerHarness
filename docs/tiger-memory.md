@@ -217,6 +217,22 @@ text-mergeable artifact: two machines that both re-embed and commit will
 conflict at the file level. Sharing is "rebuild on conflict" (re-run a
 search to regenerate), not a three-way merge.
 
+**Operational notes.**
+- *One embedder per shared index.* A committed index is keyed to the
+  embedder that built it; collaborators should use the same one (the
+  default fastembed) to get zero-rebuild reuse.
+- *Two WARNING signals, two meanings.* `rag index rebuilt ...` means the
+  index was rebuilt (dim/scheme change — expected, one-time). `rag index:
+  contained out-of-root archive path ...` means a stored path pointed
+  outside the store and was clamped to a safe location — that should never
+  happen for an index your team produced, so treat it as a sign of a
+  corrupt or tampered `.embeddings.db` and rebuild it from scratch.
+- *Commit deliberately; expect binary churn.* Every re-embed rewrites the
+  binary, so committing it on every incidental rebuild churns git history.
+  Commit the index when you mean to share a meaningful update, not on every
+  search. Concurrent re-embeds on different machines conflict at the file
+  level (see the not-mergeable limitation) — rebuild on conflict.
+
 ## Per-persona filtering (multi-bridge integration)
 
 When the slack-bridge runs in **multi-persona mode** (one Slack app
