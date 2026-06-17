@@ -54,8 +54,11 @@ NO_LOGGER_BY_AUDIT = {
                                               # logged by compile_cli)
     "tigerharness.slack_bridge",          # re-exports
     "tigerharness.tiger_memory",          # re-exports
+    "tigerharness.tiger_memory.emotional",    # pure signed-weight scoring
     "tigerharness.tiger_memory.frontmatter",  # pure parser/writer
     "tigerharness.tiger_memory.metrics",      # pure counters
+    "tigerharness.tiger_memory.ranking",      # pure recency/date math
+    "tigerharness.tiger_memory.skills",       # pure skill-importance scoring
     "tigerharness.tiger_memory.sources",      # re-exports
     "tigerharness.tiger_memory.sources.base",  # ABC surface
     "tigerharness.tiger_memory.summarizers.mock",  # deterministic test double

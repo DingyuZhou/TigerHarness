@@ -1,0 +1,462 @@
+"""Tests for the meditation engine (meditation.py, design §5; plan §2 dev-2).
+
+Runs entirely under a scripted mock summarizer (plan §5b) — zero live-model
+calls. Covers the ordered recipe, the relevance-downgrade-before-forget
+ordering, the terminal "nothing safe to forget" path, idempotent no-op,
+hysteresis (no meditation in the [max, overflow) band), merge clamping, and
+compaction.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from textwrap import dedent
+
+import pytest
+
+from tigerharness.tiger_memory.bounded_store import BoundedStore, StoreLockHeld
+from tigerharness.tiger_memory.config import load_config
+from tigerharness.tiger_memory.entries import (
+    KIND_DECISION,
+    KIND_OWNER_EXPLICIT,
+    KIND_PREFERENCE,
+    EmotionalEntry,
+    MustRememberEntry,
+    SkillEntry,
+)
+from tigerharness.tiger_memory.meditation import (
+    MeditationLog,
+    keep_rank,
+    meditate,
+)
+from tigerharness.tiger_memory.store import Store
+from tigerharness.tiger_memory.summarizers.base import Summarizer
+
+NOW = "2026-06-17T00:00:00Z"
+OLD = "2025-01-01T00:00:00Z"
+MISSION = "Ship the bounded memory revamp."
+
+
+# ----- scripted mock summarizer (plan §5b) ----------------------------------
+
+
+class ScriptedSummarizer(Summarizer):
+    """A deterministic summarizer driven by scripted verdicts (no model).
+
+    - ``similar_pairs``: set of frozenset({textA, textB}) the merge step should
+      treat as near-duplicates (everything else -> NO).
+    - ``stale_texts``: set of directive texts the relevance step should judge
+      stale (-> downgrade); everything else -> still relevant.
+    - ``compact_map``: text -> shorter rewrite for the compact step.
+    - ``raw_override``: if set, returned verbatim (to test tolerant parsing).
+    """
+
+    name = "scripted"
+    version = "v1"
+
+    def __init__(
+        self,
+        *,
+        similar_pairs=(),
+        stale_texts=(),
+        compact_map=None,
+        raw_override=None,
+    ) -> None:
+        super().__init__()
+        self.similar_pairs = {frozenset(p) for p in similar_pairs}
+        self.stale_texts = set(stale_texts)
+        self.compact_map = dict(compact_map or {})
+        self.raw_override = raw_override
+        self.calls: list[str] = []
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        self.calls.append(prompt)
+        if self.raw_override is not None:
+            return self.raw_override
+        if prompt.startswith("Are these two memory entries"):
+            return self._judge_similarity(prompt)
+        if "STALE" in prompt:
+            return self._judge_stale(prompt)
+        # compact prompt
+        body = prompt.split("Return ONLY the rewritten text.\n\n", 1)[1].rstrip("\n")
+        return self.compact_map.get(body, body)
+
+    def _judge_similarity(self, prompt: str) -> str:
+        a = prompt.split("ENTRY A:\n", 1)[1].split("\n\nENTRY B:", 1)[0]
+        b = prompt.split("ENTRY B:\n", 1)[1].rstrip("\n")
+        return "YES" if frozenset({a, b}) in self.similar_pairs else "NO"
+
+    def _judge_stale(self, prompt: str) -> str:
+        directive = prompt.split("DIRECTIVE:\n", 1)[1].rstrip("\n")
+        return "YES" if directive in self.stale_texts else "NO"
+
+
+# ----- fixtures -------------------------------------------------------------
+
+
+def _make_store(tmp_path: Path, **memory) -> BoundedStore:
+    mem_yaml = dedent(
+        f"""\
+        memory:
+          skills:
+            max_count: {memory.get('skills_max', 2)}
+            overflow_limit: {memory.get('skills_overflow', 3)}
+          must_remember:
+            max_length: {memory.get('mr_max', 30)}
+            overflow_limit: {memory.get('mr_overflow', 50)}
+          emotional_log:
+            max_length: {memory.get('emo_max', 30)}
+            overflow_limit: {memory.get('emo_overflow', 50)}
+            weight_cap: 10
+        """
+    )
+    p = tmp_path / "cfg.yaml"
+    p.write_text(
+        dedent(
+            f"""\
+            agent:
+              name: Rukawa
+              role: r
+            store:
+              root: {tmp_path}/memory
+            sources:
+              - kind: claude_code
+                project_path: {tmp_path}/p/
+            summarizer:
+              backend: anthropic
+              model: m
+              prompts: default/v1
+            """
+        )
+        + mem_yaml
+    )
+    cfg = load_config(p)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    return BoundedStore(cfg, store)
+
+
+def _mr(kind: str, text: str, last_used: str = NOW, imp: float = 0.0):
+    return MustRememberEntry(
+        text=text, created_at=NOW, last_used=last_used, source="pin",
+        kind=kind, importance=imp,
+    )
+
+
+def _emo(weight: float, text: str, last_used: str = NOW):
+    return EmotionalEntry(
+        text=text, created_at=NOW, last_used=last_used, source="extract",
+        weight=weight, reaction="r",
+    )
+
+
+def _skill(name: str, usage: int = 0, last_used: str = NOW):
+    return SkillEntry(
+        text="b", created_at=NOW, last_used=last_used, source="extract",
+        name=name, trigger="t", procedure="p", usage_count=usage,
+    )
+
+
+# ----- idempotent no-op + hysteresis ----------------------------------------
+
+
+def test_under_max_is_noop(tmp_path: Path) -> None:
+    bs = _make_store(tmp_path, mr_max=100, mr_overflow=200)
+    bs.save_atomic("must_remember", [_mr(KIND_PREFERENCE, "short")])
+    summ = ScriptedSummarizer()
+    log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
+    assert log.skipped_no_op is True
+    assert log.changed is False
+    assert summ.calls == []  # no LLM calls in a no-op
+
+
+def test_in_hysteresis_band_is_noop(tmp_path: Path) -> None:
+    """A store in [max, overflow) is over max-target only after the caller
+    fires it; meditation still treats already-under-max as a no-op, but a
+    store the caller fired in-band (over max) compacts. Here we assert the
+    pure no-op when under max even if the caller fired it."""
+    bs = _make_store(tmp_path, mr_max=50, mr_overflow=80)
+    bs.save_atomic("must_remember", [_mr(KIND_PREFERENCE, "x" * 40)])
+    summ = ScriptedSummarizer()
+    log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
+    # 40 chars <= max(50) -> no-op.
+    assert log.skipped_no_op is True
+
+
+# ----- merge (raises survivor scalar, clamped) ------------------------------
+
+
+def test_merge_emotional_raises_magnitude_clamped(tmp_path: Path) -> None:
+    # Two ~26-char entries (52 > overflow) merge into one ~26-char survivor
+    # (< max 40) so forget never runs — isolating the merge+clamp behavior.
+    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
+    a = _emo(8.0, "a" * 25)
+    b = _emo(7.0, "b" * 25)
+    bs.save_atomic("emotional", [a, b])
+    summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
+    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    assert b.id in log.merged and log.merged[b.id] == a.id
+    assert log.forgotten == []  # survivor fits; no forget
+    survivors = bs.load("emotional")
+    assert len(survivors) == 1
+    # merged magnitude (8+7=15) clamps to the cap of 10.
+    assert survivors[0].weight == 10.0
+
+
+def test_merge_skills_accrues_usage(tmp_path: Path) -> None:
+    bs = _make_store(tmp_path, skills_max=1, skills_overflow=2)
+    a = _skill("Alpha", usage=2)
+    b = _skill("Beta", usage=3)
+    bs.save_atomic("skills", [a, b])
+    summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
+    log = meditate("skills", "ctx", MISSION, summ, bs.cfg, bs)
+    survivors = bs.load("skills")
+    assert len(survivors) == 1
+    # usage 2 + (3 + 1) = 6, importance re-derived (>0).
+    assert survivors[0].usage_count == 6
+    assert survivors[0].importance > 0.0
+    assert b.id in log.merged
+
+
+def test_merge_must_remember_bumps_importance(tmp_path: Path) -> None:
+    # max sized so the single merged survivor fits (isolate merge bump).
+    bs = _make_store(tmp_path, mr_max=40, mr_overflow=50)
+    a = _mr(KIND_PREFERENCE, "use tabs not spaces here ok", imp=1.0)
+    b = _mr(KIND_PREFERENCE, "tabs over spaces please now")
+    bs.save_atomic("must_remember", [a, b])
+    summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
+    log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
+    assert log.forgotten == []
+    survivors = bs.load("must_remember")
+    assert len(survivors) == 1
+    assert survivors[0].importance == 2.0  # 1.0 + 1.0 bump
+
+
+# ----- relevance-check + downgrade BEFORE forget ----------------------------
+
+
+def test_relevance_downgrades_stale_owner_directive(tmp_path: Path) -> None:
+    bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
+    stale = _mr(KIND_OWNER_EXPLICIT, "old retired feature directive xx", OLD)
+    bs.save_atomic("must_remember", [stale])
+    summ = ScriptedSummarizer(stale_texts=[stale.text])
+    log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
+    assert stale.id in log.downgraded
+    survivors = bs.load("must_remember")
+    # Downgraded to a normal kind and then forgotten (it was the lowest-rank).
+    assert all(e.kind != KIND_OWNER_EXPLICIT for e in survivors)
+
+
+def test_relevance_keeps_relevant_owner_then_terminal_overmax(
+    tmp_path: Path,
+) -> None:
+    """A store of all still-relevant owner directives over max stays intact
+    and emits the over-max warning (terminal nothing-safe-to-forget)."""
+    bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
+    o1 = _mr(KIND_OWNER_EXPLICIT, "ship the revamp by friday hard")
+    o2 = _mr(KIND_OWNER_EXPLICIT, "never push to remote without approval")
+    bs.save_atomic("must_remember", [o1, o2])
+    # No similar pairs, none stale -> nothing merges, nothing downgrades.
+    summ = ScriptedSummarizer()
+    log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
+    assert log.over_max is True
+    assert log.forgotten == []
+    survivors = bs.load("must_remember")
+    # Both still present, both still owner_explicit (nothing force-dropped).
+    assert len(survivors) == 2
+    assert all(e.kind == KIND_OWNER_EXPLICIT for e in survivors)
+
+
+def test_ordering_relevance_before_forget_allows_downgraded_drop(
+    tmp_path: Path,
+) -> None:
+    """A stale owner directive is downgraded (step 2) then forgotten (step 4)
+    without the forget-guard tripping — proves the ordering invariant."""
+    bs = _make_store(tmp_path, mr_max=15, mr_overflow=25)
+    keep = _mr(KIND_PREFERENCE, "keep me short", NOW, imp=5.0)
+    stale = _mr(KIND_OWNER_EXPLICIT, "stale directive to be dropped", OLD)
+    bs.save_atomic("must_remember", [keep, stale])
+    summ = ScriptedSummarizer(stale_texts=[stale.text])
+    log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
+    assert stale.id in log.downgraded
+    assert stale.id in log.forgotten  # downgraded THEN dropped, no guard error
+    survivors = bs.load("must_remember")
+    assert [e.id for e in survivors] == [keep.id]
+
+
+# ----- compaction -----------------------------------------------------------
+
+
+def test_compact_shortens_verbose_survivor(tmp_path: Path) -> None:
+    bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
+    long = _emo(9.0, "x" * 40)  # over max, strong feeling (kept)
+    bs.save_atomic("emotional", [long])
+    summ = ScriptedSummarizer(compact_map={"x" * 40: "short"})
+    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    assert long.id in log.compacted
+    survivors = bs.load("emotional")
+    assert survivors[0].text == "short"
+    assert log.over_max is False
+
+
+def test_compact_rejected_when_not_shorter(tmp_path: Path) -> None:
+    bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
+    long = _emo(9.0, "y" * 40)
+    bs.save_atomic("emotional", [long])
+    # compact returns same text -> not accepted; falls through to forget.
+    summ = ScriptedSummarizer(compact_map={})  # echoes body unchanged
+    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    assert long.id not in log.compacted
+    # Single strong entry can't be forgotten below max either (only entry):
+    # it is dropped because emotional has no guard -> store empties.
+    assert long.id in log.forgotten
+
+
+def test_skills_store_skips_compaction(tmp_path: Path) -> None:
+    """Skills are count-bounded: compaction is skipped (no LLM compact calls)."""
+    bs = _make_store(tmp_path, skills_max=1, skills_overflow=2)
+    a = _skill("Alpha", usage=1)
+    b = _skill("Beta", usage=10)
+    bs.save_atomic("skills", [a, b])
+    summ = ScriptedSummarizer()  # nothing similar
+    log = meditate("skills", "ctx", MISSION, summ, bs.cfg, bs)
+    assert log.compacted == []
+    survivors = bs.load("skills")
+    # count over max(1) -> forget the least-used (Alpha).
+    assert len(survivors) == 1 and survivors[0].name == "Beta"
+
+
+# ----- forget ordering (lowest keep-rank first) -----------------------------
+
+
+def test_forget_drops_lowest_ranked_first(tmp_path: Path) -> None:
+    bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
+    weak = _emo(0.5, "a" * 15)
+    strong = _emo(9.0, "b" * 15)
+    bs.save_atomic("emotional", [weak, strong])  # 30 chars > max 20
+    summ = ScriptedSummarizer()
+    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    survivors = bs.load("emotional")
+    assert weak.id in log.forgotten
+    assert [e.id for e in survivors] == [strong.id]
+
+
+# ----- lock backoff ---------------------------------------------------------
+
+
+def test_meditate_backs_off_when_locked(tmp_path: Path) -> None:
+    import os
+
+    bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
+    bs.save_atomic("must_remember", [_mr(KIND_PREFERENCE, "x" * 40)])
+    lock_file = bs.store.paths.journal / ".must_remember.lock"
+    lock_file.write_text(f"{os.getpid()} 0")  # live holder
+    summ = ScriptedSummarizer()
+    with pytest.raises(StoreLockHeld):
+        meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
+    lock_file.unlink()
+
+
+# ----- keep_rank dispatch ---------------------------------------------------
+
+
+def test_keep_rank_dispatch_by_store(tmp_path: Path) -> None:
+    bs = _make_store(tmp_path)
+    cfg = bs.cfg
+    e = _emo(5.0, "feeling")
+    s = _skill("Sk", usage=3)
+    m = _mr(KIND_PREFERENCE, "memo", imp=2.0)
+    assert keep_rank(e, NOW, cfg)[0] == 5.0
+    assert keep_rank(s, NOW, cfg)[0] > 0.0
+    assert keep_rank(m, NOW, cfg)[0] == 2.0
+
+
+# ----- tolerant verdict parsing ---------------------------------------------
+
+
+def test_unparseable_similarity_verdict_defaults_to_not_similar(
+    tmp_path: Path,
+) -> None:
+    """A backend that returns neither YES nor NO -> safe default (not similar)."""
+    bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
+    a = _emo(9.0, "c" * 15)
+    b = _emo(8.0, "d" * 15)
+    bs.save_atomic("emotional", [a, b])
+    summ = ScriptedSummarizer(raw_override="I am not sure about that")
+    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    # Nothing merged (default NO); compaction echoes body (raw_override is the
+    # same string but longer-or-equal so not accepted) -> falls to forget.
+    assert log.merged == {}
+
+
+def test_meditation_log_changed_flag() -> None:
+    log = MeditationLog(store_name="emotional")
+    assert log.changed is False
+    log.forgotten.append("x")
+    assert log.changed is True
+
+
+# ----- internal helpers: _ask_yes_no tolerant parsing -----------------------
+
+
+def test_ask_yes_no_neither_token_returns_default() -> None:
+    from tigerharness.tiger_memory.meditation import _ask_yes_no
+
+    summ = ScriptedSummarizer(raw_override="hmm, unclear")  # no YES, no NO
+    assert _ask_yes_no(summ, "p", default=True) is True
+    assert _ask_yes_no(summ, "p", default=False) is False
+
+
+def test_ask_yes_no_both_tokens_earliest_wins() -> None:
+    from tigerharness.tiger_memory.meditation import _ask_yes_no
+
+    yes_first = ScriptedSummarizer(raw_override="YES, definitely NOT otherwise")
+    assert _ask_yes_no(yes_first, "p", default=False) is True
+    no_first = ScriptedSummarizer(raw_override="NO, this is not a YES case")
+    assert _ask_yes_no(no_first, "p", default=True) is False
+
+
+def test_ask_yes_no_only_yes_or_only_no() -> None:
+    from tigerharness.tiger_memory.meditation import _ask_yes_no
+
+    assert _ask_yes_no(
+        ScriptedSummarizer(raw_override="affirmative YES"), "p", default=False
+    ) is True
+    # "NO" alone (avoid words containing it) -> False.
+    assert _ask_yes_no(
+        ScriptedSummarizer(raw_override="answer: NO"), "p", default=True
+    ) is False
+
+
+# ----- internal helpers: _absorb_emotional sign-follows-larger --------------
+
+
+def test_absorb_emotional_dropped_larger_positive(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.meditation import _absorb_emotional
+
+    bs = _make_store(tmp_path)
+    target = _emo(2.0, "t")
+    dropped = _emo(6.0, "d")  # larger magnitude, positive
+    _absorb_emotional(target, dropped, bs.cfg)
+    # sign follows dropped (positive); magnitude = max(2,6,8)=8.
+    assert target.weight == 8.0
+
+
+def test_absorb_emotional_dropped_larger_negative(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.meditation import _absorb_emotional
+
+    bs = _make_store(tmp_path)
+    target = _emo(2.0, "t")
+    dropped = _emo(-6.0, "d")  # larger magnitude, negative
+    _absorb_emotional(target, dropped, bs.cfg)
+    # sign follows dropped (negative); magnitude = max(2,6,|2-6|=4)=6.
+    assert target.weight == -6.0
+
+
+def test_absorb_emotional_target_larger_negative(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.meditation import _absorb_emotional
+
+    bs = _make_store(tmp_path)
+    target = _emo(-7.0, "t")  # larger magnitude, negative
+    dropped = _emo(3.0, "d")
+    _absorb_emotional(target, dropped, bs.cfg)
+    assert target.weight == -7.0  # max(7,3,|-4|)=7, sign from target (neg)
