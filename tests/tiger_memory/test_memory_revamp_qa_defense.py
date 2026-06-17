@@ -340,8 +340,10 @@ def test_merge_clamps_at_cap_on_combine(tmp_path: Path) -> None:
     """Merging two strong same-sign feelings clamps the survivor at the cap —
     repeated merges can never inflate past ±cap (design §4.3)."""
     bs = _make_store(tmp_path, emo_max=40, emo_overflow=50, cap=10)
-    a = _emo(8.0, "a" * 25)
-    b = _emo(7.0, "b" * 25)
+    # Share content words so the QI-2 prefilter lets the pair reach the
+    # (scripted) summarizer — a real near-duplicate always shares tokens.
+    a = _emo(8.0, "loved the clean api design")
+    b = _emo(7.0, "loved that clean api so much")
     bs.save_atomic("emotional", [a, b])
     summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
     meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)

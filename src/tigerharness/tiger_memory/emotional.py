@@ -23,8 +23,10 @@ to drop the lowest-ranked entries.
 """
 from __future__ import annotations
 
+import math
+
 from .config import Config
-from .entries import EmotionalEntry
+from .entries import EmotionalEntry, EntryError
 from .ranking import days_between, recency_score
 
 
@@ -34,7 +36,27 @@ def clamp_weight(weight: float, cfg: Config) -> float:
     Applied on every merge/update: merging bumps a survivor's magnitude, and
     this guarantees the bump can never push it past the configured hard cap.
     Returns a plain ``float`` (never ``-0.0`` — see :func:`_zero_safe`).
+
+    **Non-finite defense (GAP-3, defense in depth).** Mitsui's
+    :meth:`EmotionalEntry.validate` already rejects a non-finite weight at the
+    schema/load gate, so a ``NaN``/``±inf`` should never reach here. But the
+    scoring math must not *silently* propagate one if it ever does (a ``NaN``
+    poisons the keep-rank ``sorted()`` into a non-deterministic order — the
+    GAP-3 symptom). So:
+
+    - ``+inf`` clamps to ``+cap`` and ``-inf`` to ``-cap`` (an over-cap value
+      is, semantically, exactly what the cap exists to bound — the existing
+      ``> cap`` / ``< -cap`` branches already do this; documented here so it
+      is intentional, not incidental);
+    - ``NaN`` has no defensible clamp target (it is unordered against the cap),
+      so it is **rejected** with :class:`EntryError` rather than returned —
+      consistent with the schema gate, and it can never silently enter the
+      ranking math.
     """
+    if math.isnan(weight):
+        raise EntryError(
+            "emotional.weight must be finite (no NaN); cannot clamp NaN."
+        )
     cap = cfg.memory.emotional_log.weight_cap
     if weight > cap:
         return cap

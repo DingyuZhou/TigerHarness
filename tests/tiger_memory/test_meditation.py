@@ -186,11 +186,14 @@ def test_in_hysteresis_band_is_noop(tmp_path: Path) -> None:
 
 
 def test_merge_emotional_raises_magnitude_clamped(tmp_path: Path) -> None:
-    # Two ~26-char entries (52 > overflow) merge into one ~26-char survivor
+    # Two 25-char entries (50 > max 40) merge into one ~25-char survivor
     # (< max 40) so forget never runs — isolating the merge+clamp behavior.
+    # The bodies share content words ("loved the clean api ...") so the QI-2
+    # prefilter lets the pair reach the (scripted) summarizer — a realistic
+    # near-duplicate always shares tokens.
     bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
-    a = _emo(8.0, "a" * 25)
-    b = _emo(7.0, "b" * 25)
+    a = _emo(8.0, "loved the clean api design")
+    b = _emo(7.0, "loved that clean api so much")
     bs.save_atomic("emotional", [a, b])
     summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
     log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
@@ -338,6 +341,72 @@ def test_forget_drops_lowest_ranked_first(tmp_path: Path) -> None:
     survivors = bs.load("emotional")
     assert weak.id in log.forgotten
     assert [e.id for e in survivors] == [strong.id]
+
+
+# ----- QI-2: merge prefilter keeps summarizer calls sub-quadratic -----------
+
+
+def _similarity_calls(summ: ScriptedSummarizer) -> int:
+    """Count only the merge-similarity judgement prompts (QI-2's hot path)."""
+    return sum(
+        1 for p in summ.calls if p.startswith("Are these two memory entries")
+    )
+
+
+def test_merge_prefilter_dissimilar_calls_are_subquadratic(tmp_path: Path) -> None:
+    """N all-distinct entries (no shared content word) must NOT cost
+    O(n²) summarizer calls. The cheap Python prefilter gates every pair out
+    before the LLM, so the similarity-judgement call count is ~0, far under
+    the naive n·(n−1)/2 (= 190 for n=20)."""
+    n = 20
+    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
+    # Each entry shares no token with any other (distinct word per entry),
+    # and each is short so together they exceed the overflow limit and the
+    # merge pass actually runs.
+    entries = [_emo(1.0 + i * 0.1, f"alpha{i}word") for i in range(n)]
+    bs.save_atomic("emotional", entries)
+    summ = ScriptedSummarizer()  # nothing scripted similar anyway
+    meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+
+    quadratic = n * (n - 1) // 2  # 190 — what the naive pairwise loop would do
+    calls = _similarity_calls(summ)
+    # Sub-quadratic: bounded by c*n, not n². Here the prefilter gates ALL
+    # pairs (zero shared tokens) so it is 0 << 190.
+    assert calls <= 2 * n
+    assert calls < quadratic
+
+
+def test_merge_prefilter_lets_similar_pairs_merge(tmp_path: Path) -> None:
+    """The prefilter must not block a genuine merge: two entries sharing
+    content words reach the summarizer and (when it judges YES) still merge."""
+    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
+    a = _emo(8.0, "shipped the bounded memory revamp")
+    b = _emo(7.0, "bounded memory revamp shipped today")
+    bs.save_atomic("emotional", [a, b])
+    summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
+    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    # The shared words ("bounded memory revamp shipped") passed the gate, the
+    # scripted summarizer judged YES, so b folded into a (and clamped to cap).
+    assert b.id in log.merged and log.merged[b.id] == a.id
+    assert _similarity_calls(summ) >= 1  # the pair DID reach the LLM
+    survivors = bs.load("emotional")
+    assert len(survivors) == 1 and survivors[0].weight == 10.0
+
+
+def test_might_be_similar_gate_unit(tmp_path: Path) -> None:
+    """Unit-cover the gate: no shared token -> skip; shared token -> defer;
+    an entry with no content tokens -> defer (never silently gated out)."""
+    from tigerharness.tiger_memory.meditation import _might_be_similar
+
+    share = _emo(1.0, "loved the clean api")
+    other = _emo(1.0, "loved that clean api too")
+    disjoint = _emo(1.0, "hated verbose yaml configs")
+    empty_tokens = _emo(1.0, "!!! ??? ...")  # punctuation-only -> no tokens
+
+    assert _might_be_similar(share, other) is True   # share "loved/clean/api"
+    assert _might_be_similar(share, disjoint) is False  # zero shared tokens
+    assert _might_be_similar(empty_tokens, share) is True  # defer, don't gate
+    assert _might_be_similar(share, empty_tokens) is True  # symmetric defer
 
 
 # ----- lock backoff ---------------------------------------------------------
