@@ -7,8 +7,6 @@ from pathlib import Path
 import pytest
 
 from tigerharness.tiger_memory.config import (
-    MIN_DAILIES_WORKING_DAYS,
-    MIN_WEEKLIES_WORKING_DAYS,
     ConfigError,
     _deep_merge,
     load_config,
@@ -26,34 +24,36 @@ def test_loads_minimal(minimal_config_yaml: Path) -> None:
     assert cfg.budgets.max_prompt_content_chars == 120_000
     assert cfg.budgets.max_staged_content_chars == 300_000
     assert len(cfg.sources) == 1 and cfg.sources[0].kind == "claude_code"
-    # Defaults take effect.
-    assert cfg.briefing.walking.dailies_working_days == 7
-    assert cfg.briefing.walking.weeklies_working_days == 28
-    assert cfg.budgets.short_summary_words == 400
+    # New session-start briefing defaults take effect.
+    assert cfg.briefing.emotional_top == 20
+    # Extraction word budgets default.
+    assert cfg.memory_extract.memo_words == 25
+    assert cfg.memory_extract.skill_procedure_words == 120
 
 
-def test_rejects_dailies_below_min(invalid_dailies_config_yaml: Path) -> None:
-    with pytest.raises(ConfigError, match="dailies_working_days"):
-        load_config(invalid_dailies_config_yaml)
+def test_briefing_emotional_top_override(tmp_path: Path) -> None:
+    cfg = load_config(_briefing_cfg(tmp_path, "briefing:\n  emotional_top: 5\n"))
+    assert cfg.briefing.emotional_top == 5
 
 
-def test_rejects_weeklies_below_min(tmp_path: Path) -> None:
-    cfg = tmp_path / "bad.yaml"
-    cfg.write_text(
-        f"""\
-agent: {{name: t, role: t}}
-store: {{root: {tmp_path}/mem}}
-sources:
-  - kind: claude_code
-    project_path: {tmp_path}/p/
-summarizer: {{backend: anthropic, model: m, prompts: default/v1}}
-briefing:
-  walking:
-    weeklies_working_days: 14
-"""
-    )
-    with pytest.raises(ConfigError, match="weeklies_working_days"):
-        load_config(cfg)
+def test_briefing_emotional_top_negative_raises(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="emotional_top"):
+        load_config(_briefing_cfg(tmp_path, "briefing:\n  emotional_top: -1\n"))
+
+
+def test_memory_extract_explicit_overrides(tmp_path: Path) -> None:
+    cfg = load_config(_briefing_cfg(
+        tmp_path,
+        "memory_extract:\n"
+        "  skill_procedure_words: 80\n"
+        "  memo_words: 15\n"
+        "  reaction_words: 30\n"
+        "  max_output_words: 400\n",
+    ))
+    assert cfg.memory_extract.skill_procedure_words == 80
+    assert cfg.memory_extract.memo_words == 15
+    assert cfg.memory_extract.reaction_words == 30
+    assert cfg.memory_extract.max_output_words == 400
 
 
 def test_uses_env_var_when_no_path(
@@ -82,6 +82,65 @@ def test_errors_on_bad_yaml(tmp_path: Path) -> None:
         load_config(cfg)
 
 
+def test_top_level_not_dict_load(tmp_path: Path) -> None:
+    """A YAML whose root is a list (not a mapping) skips defaults merge and
+    fails in _from_dict requiring `agent`."""
+    cfg = tmp_path / "list.yaml"
+    cfg.write_text("- a\n- b\n")
+    with pytest.raises(ConfigError, match="config.agent is required"):
+        load_config(cfg)
+
+
+def test_require_missing_key(tmp_path: Path) -> None:
+    cfg = tmp_path / "noagent.yaml"
+    cfg.write_text(f"store: {{root: {tmp_path}/m}}\n")
+    with pytest.raises(ConfigError, match="config.agent is required"):
+        load_config(cfg)
+
+
+def test_require_wrong_type_list(tmp_path: Path) -> None:
+    cfg = tmp_path / "badsources.yaml"
+    cfg.write_text(
+        f"agent: {{name: t, role: t}}\n"
+        f"store: {{root: {tmp_path}/m}}\n"
+        f"sources: not-a-list\n"
+        f"summarizer: {{backend: a, model: m, prompts: default/v1}}\n"
+    )
+    with pytest.raises(ConfigError, match="config.sources must be a list"):
+        load_config(cfg)
+
+
+def test_require_wrong_type_mapping(tmp_path: Path) -> None:
+    cfg = tmp_path / "badagent.yaml"
+    cfg.write_text(f"agent: not-a-map\nstore: {{root: {tmp_path}/m}}\n")
+    with pytest.raises(ConfigError, match="config.agent must be a mapping"):
+        load_config(cfg)
+
+
+def test_require_empty_string(tmp_path: Path) -> None:
+    cfg = tmp_path / "emptyname.yaml"
+    cfg.write_text(
+        f"agent: {{name: '', role: t}}\n"
+        f"store: {{root: {tmp_path}/m}}\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer: {{backend: a, model: m, prompts: default/v1}}\n"
+    )
+    with pytest.raises(ConfigError, match="config.name must be a non-empty"):
+        load_config(cfg)
+
+
+def test_invalid_source_entry_not_dict(tmp_path: Path) -> None:
+    cfg = tmp_path / "badsrc.yaml"
+    cfg.write_text(
+        f"agent: {{name: t, role: t}}\n"
+        f"store: {{root: {tmp_path}/m}}\n"
+        f"sources:\n  - just-a-string\n"
+        f"summarizer: {{backend: a, model: m, prompts: default/v1}}\n"
+    )
+    with pytest.raises(ConfigError, match="Invalid source entry"):
+        load_config(cfg)
+
+
 def test_errors_on_unknown_source_kind(tmp_path: Path) -> None:
     cfg = tmp_path / "bad.yaml"
     cfg.write_text(
@@ -95,12 +154,6 @@ summarizer: {{backend: anthropic, model: m, prompts: default/v1}}
     )
     with pytest.raises(ConfigError, match="Unknown source kind"):
         load_config(cfg)
-
-
-def test_min_constants_match_design_doc() -> None:
-    """Sanity: the minimums in code match what the design doc states."""
-    assert MIN_DAILIES_WORKING_DAYS == 7
-    assert MIN_WEEKLIES_WORKING_DAYS == 28
 
 
 def test_agent_slug_appended_to_store_root(tmp_path: Path) -> None:
@@ -454,11 +507,6 @@ def test_collapse_explicit_on(tmp_path: Path) -> None:
     assert cfg.collapse.enabled is True
 
 
-def test_resident_layers_default_all(minimal_config_yaml: Path) -> None:
-    cfg = load_config(minimal_config_yaml)
-    assert cfg.briefing.resident_layers == ("recent", "daily", "weekly", "monthly")
-
-
 def _briefing_cfg(tmp_path: Path, briefing_block: str) -> Path:
     cfg_path = tmp_path / "rl.yaml"
     cfg_path.write_text(
@@ -469,27 +517,3 @@ def _briefing_cfg(tmp_path: Path, briefing_block: str) -> Path:
         f"{briefing_block}"
     )
     return cfg_path
-
-
-def test_resident_layers_explicit_subset(tmp_path: Path) -> None:
-    cfg = load_config(_briefing_cfg(
-        tmp_path, "briefing:\n  resident_layers: [recent, daily]\n"))
-    assert cfg.briefing.resident_layers == ("recent", "daily")
-
-
-def test_resident_layers_empty_allowed(tmp_path: Path) -> None:
-    cfg = load_config(_briefing_cfg(
-        tmp_path, "briefing:\n  resident_layers: []\n"))
-    assert cfg.briefing.resident_layers == ()
-
-
-def test_resident_layers_unknown_raises(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="unknown layer"):
-        load_config(_briefing_cfg(
-            tmp_path, "briefing:\n  resident_layers: [recent, bogus]\n"))
-
-
-def test_resident_layers_not_a_list_raises(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="must be a list"):
-        load_config(_briefing_cfg(
-            tmp_path, "briefing:\n  resident_layers: recent\n"))

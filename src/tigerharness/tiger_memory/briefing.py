@@ -1,147 +1,147 @@
-"""Briefing rebuild — event-driven walking + atomic folder swap.
+"""Session-start briefing assembly (bounded-store revamp; design §6; plan §2 dev-3).
 
-Implements §8 of the design doc:
-    Layer 1: full shorts (newest F working days)
-    Layer 2: dailies (next D working days; shorts on fallback)
-    Layer 3: weeklies (next W working days; covers a calendar range)
-    Layer 4: monthlies (next M working days; covers a calendar range)
-    + longer_memory.md and must_memorize.md (always read first)
+The session-start working set is now exactly:
 
-Output layout:
-    briefing/
-        MANIFEST.md
-        must_memorize.md
-        longer_memory.md
-        recent/   layer 1 shorts
-        daily/    layer 2
-        weekly/   layer 3
-        monthly/  layer 4
+- the **full must_remember** store (bounded, so cheap to load whole);
+- an **emotional view** — the top entries by ``|weight|`` (strong feelings,
+  positive or negative, survive; near-neutral/decayed items rank lower);
+- the **skill index** — name + trigger + a one-line summary per skill,
+  rebuilt by Python at session start (design §4.1 progressive disclosure: only
+  the index loads; the persona pulls a full skill on demand);
+- the **unprocessed/active-session notice** (design §6): a short note that a
+  still-active recent session may not be in memory yet, with the rule to check
+  memory first, then unprocessed sessions, before claiming ignorance.
 
-All written to briefing.tmp/ then mv-swap with briefing/.
+The retired chronological rollup layers (shorts / daily / weekly / monthly /
+``longer_memory``) and the drill/search affordances are gone (design §3). The
+briefing is rebuilt atomically into ``briefing/`` via a temp-dir folder swap.
 """
 from __future__ import annotations
 
 import logging
-
-import json
 import shutil
 import tempfile
-from datetime import date, timedelta
 from pathlib import Path
 
-from . import frontmatter
+from .bounded_store import BoundedStore
 from .config import Config
-from .state import iso_now
-from .store import (
-    DAILY_RE,
-    MONTHLY_RE,
-    SHORT_RE,
-    WEEKLY_RE,
-    Store,
+from .entries import (
+    STORE_EMOTIONAL,
+    STORE_MUST_REMEMBER,
+    STORE_SKILLS,
+    EmotionalEntry,
+    MustRememberEntry,
+    SkillEntry,
 )
+from .state import iso_now
+from .store import Store
 
 log = logging.getLogger("tigerharness.tiger_memory.briefing")
 
+# Files written into the assembled briefing/ working set.
+README_NAME = "README.md"
+MUST_REMEMBER_NAME = "must_remember.md"
+EMOTIONAL_NAME = "emotional.md"
+SKILL_INDEX_NAME = "skill_index.md"
+MANIFEST_NAME = "MANIFEST.md"
+NOTICE_NAME = "UNPROCESSED.md"
+FINGERPRINT_NAME = ".fingerprint"
+
+# The store files whose content drives the briefing — a fingerprint over them
+# powers the no-op shortcut (skip the rebuild when nothing changed).
+_SOURCE_STORE_FILES = ("skills.md", "must_remember.md", "emotional.md")
+
 
 def rebuild_briefing(cfg: Config, store: Store) -> None:
-    """Atomic briefing rebuild. No-op shortcut: if journal/ unchanged, skip."""
-    if _briefing_up_to_date(store):
-        log.info("briefing rebuild: no-op (journal unchanged)")
-        return
-    log.info("briefing rebuild: starting (journal changed)")
+    """Atomically (re)assemble ``briefing/`` from the three bounded stores.
 
-    # Stage in a temp directory next to briefing/ so the rename is on the
-    # same filesystem (atomic on POSIX).
+    No-op shortcut: if the source store files are unchanged since the last
+    rebuild (fingerprint match), skip. Otherwise stage everything in a temp
+    dir next to ``briefing/`` and swap it in atomically (design §6 rebuild).
+    """
+    if _briefing_up_to_date(store):
+        log.info("briefing rebuild: no-op (stores unchanged)")
+        return
+    log.info("briefing rebuild: starting (stores changed)")
+    bstore = BoundedStore(cfg, store)
+
     parent = store.paths.briefing.parent
+    parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="briefing.tmp.", dir=parent))
     try:
-        for sub in ("recent", "daily", "weekly", "monthly"):
-            (tmp / sub).mkdir()
+        (tmp / README_NAME).write_text(_render_readme(cfg), encoding="utf-8")
+        (tmp / NOTICE_NAME).write_text(_render_notice(cfg), encoding="utf-8")
 
-        # README.md — agent-facing instructions (single source of truth).
-        (tmp / "README.md").write_text(
-            _render_readme(cfg), encoding="utf-8"
+        must = bstore.load(STORE_MUST_REMEMBER)
+        (tmp / MUST_REMEMBER_NAME).write_text(
+            _render_must_remember(must), encoding="utf-8"
         )
 
-        # must_memorize.md (always first)
-        mm_src = store.paths.journal / "must_memorize.md"
-        if mm_src.exists():
-            shutil.copy2(mm_src, tmp / "must_memorize.md")
-
-        # longer_memory.md
-        lm_src = store.paths.journal / "longer_memory.md"
-        if lm_src.exists():
-            shutil.copy2(lm_src, tmp / "longer_memory.md")
-
-        # Walk working days for layered copies.
-        working = store.working_days()  # newest-first
-        layer1_dates, layer2_dates, layer3_dates, layer4_dates = _slice_layers(
-            working, cfg
+        emotional = bstore.load(STORE_EMOTIONAL)
+        (tmp / EMOTIONAL_NAME).write_text(
+            _render_emotional(emotional, cfg.briefing.emotional_top),
+            encoding="utf-8",
         )
 
-        # P3 lean core: only copy the walking-window layers configured as
-        # resident; the rest stay in the journal and are listed as
-        # drill-on-demand in the MANIFEST (recall-safe — nothing deleted).
-        resident = cfg.briefing.resident_layers
-        layer1_files = (
-            _copy_layer1(store, layer1_dates, tmp) if "recent" in resident else []
-        )
-        layer2_files = (
-            _copy_layer2(store, layer2_dates, tmp) if "daily" in resident else []
-        )
-        layer3_files = (
-            _copy_layer3(store, layer3_dates, tmp) if "weekly" in resident else []
-        )
-        layer4_files = (
-            _copy_layer4(store, layer4_dates, tmp) if "monthly" in resident else []
+        skills = bstore.load(STORE_SKILLS)
+        (tmp / SKILL_INDEX_NAME).write_text(
+            _render_skill_index(skills), encoding="utf-8"
         )
 
-        # P3 read-side measurement: size the *resident* briefing (total +
-        # per-section) before the swap, so the read-side diet is provable.
-        stats = _briefing_stats(tmp)
-
-        manifest_text = _render_manifest(
-            cfg=cfg,
-            store=store,
-            layer1=layer1_files,
-            layer2=layer2_files,
-            layer3=layer3_files,
-            layer4=layer4_files,
-            has_longer=lm_src.exists(),
-            has_mm=mm_src.exists(),
-            stats=stats,
-            resident_layers=resident,
+        (tmp / MANIFEST_NAME).write_text(
+            _render_manifest(cfg, store, must, emotional, skills),
+            encoding="utf-8",
         )
-        (tmp / "MANIFEST.md").write_text(manifest_text, encoding="utf-8")
-        (tmp / ".fingerprint").write_text(_compute_fingerprint(store),
-                                          encoding="utf-8")
-        # Sidecar metrics, swapped in atomically with the briefing (like
-        # .fingerprint). Queryable for before/after read-side comparison.
-        (tmp / ".briefing_metrics.json").write_text(
-            json.dumps(stats, indent=2), encoding="utf-8"
+        (tmp / FINGERPRINT_NAME).write_text(
+            _compute_fingerprint(store), encoding="utf-8"
         )
 
-        # Atomic swap.
         store.atomic_swap_dir(tmp, store.paths.briefing)
     except Exception:
-        if tmp.exists():  # pragma: no branch  # mkdtemp always creates dir before exception
+        if tmp.exists():  # pragma: no branch  # mkdtemp always creates the dir
             shutil.rmtree(tmp, ignore_errors=True)
         raise
 
 
-# ----- README.md (agent-facing instructions) ------------------------------
+# ----- no-op shortcut -------------------------------------------------------
+
+
+def _briefing_up_to_date(store: Store) -> bool:
+    """True iff the briefing exists and its fingerprint still matches the stores."""
+    fingerprint_path = store.paths.briefing / FINGERPRINT_NAME
+    manifest = store.paths.briefing / MANIFEST_NAME
+    if not manifest.exists() or not fingerprint_path.exists():
+        return False
+    try:
+        saved = fingerprint_path.read_text(encoding="utf-8")
+    except OSError:  # pragma: no cover - best-effort read
+        return False
+    return saved == _compute_fingerprint(store)
+
+
+def _compute_fingerprint(store: Store) -> str:
+    """``<name>:<mtime_ns>:<size>`` per source store file (absent → 0:0).
+
+    Both mtime and size are included so a content change is detected even when
+    a rapid back-to-back rewrite lands within the same mtime tick.
+    """
+    lines = []
+    for name in _SOURCE_STORE_FILES:
+        p = store.paths.journal / name
+        try:
+            st = p.stat()
+            lines.append(f"{name}:{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            lines.append(f"{name}:0:0")
+    return "\n".join(lines) + "\n"
+
+
+# ----- README + unprocessed notice ------------------------------------------
 
 
 def _render_readme(cfg: Config) -> str:
-    """Substitute agent-specific values into the README template.
-
-    Uses a SafeFormat shim so any future ``{placeholder}`` added to the
-    template that isn't yet wired up here renders as a literal rather
-    than crashing the rebuild.
-    """
     template_path = Path(__file__).parent / "templates" / "briefing_readme.md"
     template = template_path.read_text(encoding="utf-8")
-    # Compute agent slug from the same logic used by config loader.
     from .config import _slugify
     return template.format_map(_SafeFormat({
         "agent_name": cfg.agent.name,
@@ -154,308 +154,128 @@ class _SafeFormat(dict):
         return "{" + key + "}"
 
 
-# ----- no-op shortcut (§7.3 step 5) ----------------------------------------
+def _render_notice(cfg: Config) -> str:
+    """The unprocessed/active-session awareness notice (design §6)."""
+    return (
+        "# Unprocessed sessions — read this rule\n\n"
+        f"You are **{cfg.agent.name}**. Memory is built from sessions only "
+        "after they go idle, so a **still-active or very recent session may "
+        "not be reflected in this briefing yet**.\n\n"
+        "**Rule:** if the Operator references something you do not recognise, "
+        "do NOT claim ignorance immediately. First check this memory "
+        "(must_remember + skill index + emotional), then check for "
+        "unprocessed / active recent sessions. Only then say you don't know.\n"
+    )
 
 
-def _briefing_up_to_date(store: Store) -> bool:
-    """No-op shortcut: detect whether journal/ has any change since last
-    briefing rebuild.
-
-    Uses a fingerprint stored in ``briefing/.fingerprint`` — the sorted
-    list of journal *.md filenames + their mtimes. Comparing this to the
-    live filesystem catches both (a) new/removed files and (b) re-writes
-    that bumped mtime, even when sub-second mtime precision would alias
-    the comparison to "equal".
-    """
-    manifest = store.paths.briefing / "MANIFEST.md"
-    fingerprint_path = store.paths.briefing / ".fingerprint"
-    if not manifest.exists() or not fingerprint_path.exists():
-        return False
-    try:
-        saved = fingerprint_path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return saved == _compute_fingerprint(store)
+# ----- must_remember view ---------------------------------------------------
 
 
-def _compute_fingerprint(store: Store) -> str:
-    """sorted list of "<name>:<mtime>\\n" for every journal/*.md."""
-    lines = []
-    for f in sorted(store.paths.journal.glob("*.md")):
-        try:
-            lines.append(f"{f.name}:{f.stat().st_mtime_ns}")
-        except OSError:
-            continue
+def _render_must_remember(entries: list[MustRememberEntry]) -> str:
+    """Full must_remember store, highest-importance first."""
+    if not entries:
+        return "# Must remember\n\n_(empty)_\n"
+    ordered = sorted(entries, key=lambda e: float(e.importance), reverse=True)
+    lines = ["# Must remember (read first, always load-bearing)", ""]
+    for e in ordered:
+        lines.append(
+            f"- **[{e.kind}]** (importance {float(e.importance):.1f}) {e.text}"
+        )
     return "\n".join(lines) + "\n"
 
 
-# ----- layer slicing (§8.1) ------------------------------------------------
+# ----- emotional view (top-by-|weight|) -------------------------------------
 
 
-def _slice_layers(
-    working_days: list[str], cfg: Config
-) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Slice the working_days list into 4 consecutive segments per config.
+def _render_emotional(entries: list[EmotionalEntry], top: int) -> str:
+    """Emotional log, strongest feelings first (top-N by ``|weight|``).
 
-    Inputs are newest-first; each layer keeps that order.
+    ``top == 0`` shows all. A signed weight: positive = liked/for, negative =
+    disliked/against; magnitude is how strongly it is felt.
     """
-    w = cfg.briefing.walking
-    F = w.full_shorts_working_days
-    D = w.dailies_working_days
-    W = w.weeklies_working_days
-    M = w.monthlies_working_days
-    a = 0
-    b = a + F
-    c = b + D
-    d = c + W
-    e = d + M
-    return (
-        working_days[a:b],
-        working_days[b:c],
-        working_days[c:d],
-        working_days[d:e],
-    )
+    if not entries:
+        return "# Emotional log\n\n_(empty)_\n"
+    ordered = sorted(entries, key=lambda e: abs(float(e.weight)), reverse=True)
+    if top > 0:
+        ordered = ordered[:top]
+    lines = ["# Emotional log (strongest feelings first)", ""]
+    for e in ordered:
+        sign = "+" if e.weight >= 0 else ""
+        lines.append(
+            f"- **({sign}{float(e.weight):.1f}) {e.reaction}** — {e.text}"
+        )
+    return "\n".join(lines) + "\n"
 
 
-def _date_range_from(working_days: list[str]) -> tuple[date, date] | None:
-    """Min/max date represented by a list of YYYYMMDD strings."""
-    if not working_days:
-        return None
-    dates = sorted(date(int(s[:4]), int(s[4:6]), int(s[6:8])) for s in working_days)
-    return dates[0], dates[-1]
+# ----- skill index (Python-rebuilt at session start) ------------------------
 
 
-# ----- per-layer copy helpers ----------------------------------------------
+def _render_skill_index(entries: list[SkillEntry]) -> str:
+    """The skill index: name + trigger + one-line summary per skill (design §4.1).
 
-
-def _copy_layer1(store: Store, dates: list[str], tmp: Path) -> list[Path]:
-    out: list[Path] = []
-    dest = tmp / "recent"
-    for date_str in dates:
-        for s in store.shorts_for_date(date_str):
-            shutil.copy2(s, dest / s.name)
-            out.append(dest / s.name)
-    return out
-
-
-def _copy_layer2(store: Store, dates: list[str], tmp: Path) -> list[Path]:
-    out: list[Path] = []
-    dest = tmp / "daily"
-    for date_str in dates:
-        # Multi-operator (T12b): a date legitimately has N sibling
-        # dailies (one per writer); copy them ALL, in the pinned
-        # deterministic order (legacy first, then by filename) so
-        # last-mention-wins behaves identically on every machine.
-        dailies = store.dailies_for_date(date_str)
-        if dailies:
-            for daily in dailies:
-                shutil.copy2(daily, dest / daily.name)
-                out.append(dest / daily.name)
-        else:
-            # Fallback per §8.2: include shorts for that day.
-            for s in store.shorts_for_date(date_str):
-                shutil.copy2(s, dest / s.name)
-                out.append(dest / s.name)
-    return out
-
-
-def _copy_layer3(store: Store, dates: list[str], tmp: Path) -> list[Path]:
-    out: list[Path] = []
-    dest = tmp / "weekly"
-    drange = _date_range_from(dates)
-    if drange is None:
-        return out
-    lo, hi = drange
-    for f in sorted(store.paths.journal.glob("*.md")):
-        m = WEEKLY_RE.match(f.name)
-        if not m:
-            continue
-        s = m.group(1)
-        monday = date(int(s[:4]), int(s[4:6]), int(s[6:8]))
-        if lo <= monday <= hi:
-            shutil.copy2(f, dest / f.name)
-            out.append(dest / f.name)
-    return out
-
-
-def _copy_layer4(store: Store, dates: list[str], tmp: Path) -> list[Path]:
-    out: list[Path] = []
-    dest = tmp / "monthly"
-    drange = _date_range_from(dates)
-    if drange is None:
-        return out
-    lo, hi = drange
-    lo_ym = lo.strftime("%Y%m")
-    hi_ym = hi.strftime("%Y%m")
-    for f in sorted(store.paths.journal.glob("*.md")):
-        m = MONTHLY_RE.match(f.name)
-        if not m:
-            continue
-        ym = m.group(1)
-        if lo_ym <= ym <= hi_ym:
-            shutil.copy2(f, dest / f.name)
-            out.append(dest / f.name)
-    return out
-
-
-# ----- MANIFEST.md render --------------------------------------------------
-
-
-def _render_manifest(
-    *,
-    cfg: Config,
-    store: Store,
-    layer1: list[Path],
-    layer2: list[Path],
-    layer3: list[Path],
-    layer4: list[Path],
-    has_longer: bool,
-    has_mm: bool,
-    stats: dict,
-    resident_layers: tuple[str, ...],
-) -> str:
-    """Generate the MANIFEST.md per §8.3."""
-    saved = store.read_state() or {}
-    last_rebuild = saved.get("last_rebuild_at") or iso_now()
-
-    parts = [
-        f"# Briefing manifest",
+    Only this index loads at session start; the persona pulls the full skill
+    (its procedure) on demand. Ordered most-important first.
+    """
+    if not entries:
+        return (
+            "# Skill index\n\n_(no skills learned yet)_\n\n"
+            "Skills are learned lessons you can reuse. As you work, the sweep "
+            "extracts them; they appear here once learned.\n"
+        )
+    ordered = sorted(entries, key=lambda e: float(e.importance), reverse=True)
+    lines = [
+        "# Skill index",
         "",
-        f"- Agent: {cfg.agent.name}",
-        f"- Last rebuild: {last_rebuild}",
-        f"- Briefing files: {len(layer1) + len(layer2) + len(layer3) + len(layer4)}",
-        f"- Briefing size: {stats['total_words']} words / "
-        f"{stats['total_chars']} chars",
+        "Learned, reusable lessons. Only this index is loaded; read the full "
+        "skill in `skills.md` (the journal store) when its trigger applies.",
         "",
     ]
-    if _is_stale(last_rebuild):
-        parts.append("- ⚠ briefing stale (last rebuild > 24h ago)")
-        parts.append("")
-
-    if has_mm:
-        parts.append("## Must memorize (read first)")
-        parts.append("- `must_memorize.md`")
-        parts.append("")
-    if has_longer:
-        parts.append("## Longer memory")
-        parts.append("- `longer_memory.md`")
-        parts.append("")
-    # Order monthlies → weeklies → dailies → shorts, each oldest → newest
-    if layer4:
-        parts.append("## Monthly summaries")
-        for f in sorted(layer4):
-            parts.append(f"- `monthly/{f.name}` — {_one_line_preview(f)}")
-        parts.append("")
-    if layer3:
-        parts.append("## Weekly summaries")
-        for f in sorted(layer3):
-            parts.append(f"- `weekly/{f.name}` — {_one_line_preview(f)}")
-        parts.append("")
-    if layer2:
-        parts.append("## Daily summaries")
-        for f in sorted(layer2):
-            parts.append(f"- `daily/{f.name}` — {_one_line_preview(f)}")
-        parts.append("")
-    if layer1:
-        parts.append("## Recent shorts (today + previous working days)")
-        for f in sorted(layer1):
-            parts.append(f"- `recent/{f.name}` — {_one_line_preview(f)}")
-        parts.append("")
-    non_resident = [n for n in _LAYER_DIRS if n not in resident_layers]
-    if non_resident:
-        parts.append("## Drill on demand (not loaded into context)")
-        parts.append(
-            "These layers stay in the journal; pull them with "
-            "`tiger-memory drill` / search when a turn needs them:"
+    for e in ordered:
+        lines.append(f"## {e.name}")
+        lines.append(f"- **When:** {e.trigger}")
+        lines.append(
+            f"- **Lesson:** {_one_line(e.procedure)} "
+            f"(used {e.usage_count}×, importance {float(e.importance):.2f})"
         )
-        for name in non_resident:
-            parts.append(f"- `{name}/` — {_LAYER_LABELS[name]}")
-        parts.append("")
-    parts.append(
-        "**Read order**: must_memorize → longer_memory → monthlies → weeklies "
-        "→ dailies → shorts. Last mention wins on factual conflict."
-    )
-    return "\n".join(parts) + "\n"
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
-def _is_stale(iso_ts: str) -> bool:
-    from datetime import datetime, timezone
-    try:
-        t = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
-    except ValueError:
-        return True
-    now = datetime.now(timezone.utc)
-    return (now - t).total_seconds() > 86400
-
-
-def _one_line_preview(path: Path) -> str:
-    """Pull the first non-empty content line from a summary file."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    _, body = frontmatter.parse(text)
-    for line in body.splitlines():
+def _one_line(text: str, limit: int = 100) -> str:
+    """First non-empty line of *text*, trimmed to *limit* chars."""
+    for line in text.splitlines():
         s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        if s.startswith("- "):
-            return s[2:].strip()[:80]
-        return s[:80]
+        if s:
+            return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
     return ""
 
 
-# ----- read-side measurement (P3 / Lever 2) --------------------------------
+# ----- MANIFEST -------------------------------------------------------------
 
 
-# The memory-bearing files the agent actually loads each session. The
-# `must_memorize.md` core + the four walking-window layers; README and
-# MANIFEST are scaffolding and excluded from the content measure.
-_CORE_FILES = ("must_memorize.md", "longer_memory.md")
-_LAYER_DIRS = ("recent", "daily", "weekly", "monthly")
-_LAYER_LABELS = {
-    "recent": "recent full short summaries",
-    "daily": "daily rollups",
-    "weekly": "weekly rollups",
-    "monthly": "monthly rollups",
-}
-
-
-def _wordcount(path: Path) -> tuple[int, int]:
-    """Return ``(chars, words)`` for *path*; ``(0, 0)`` if unreadable."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return (0, 0)
-    return (len(text), len(text.split()))
-
-
-def _briefing_stats(briefing_dir: Path) -> dict:
-    """Size the assembled briefing: total + per-section chars/words.
-
-    The read-side counterpart to the rebuild's write-side ``metrics``
-    (P3 / Lever 2). The per-section breakdown surfaces where the weight
-    sits (e.g. ``must_memorize.md`` typically dominates), so a lean-core
-    diet can be targeted and measured without regressing recall.
-    """
-    sections: dict[str, dict[str, int]] = {}
-    total_chars = total_words = 0
-    for name in _CORE_FILES:
-        c, w = _wordcount(briefing_dir / name)
-        sections[name] = {"chars": c, "words": w}
-        total_chars += c
-        total_words += w
-    for sub in _LAYER_DIRS:
-        c = w = 0
-        for f in sorted((briefing_dir / sub).glob("*.md")):
-            fc, fw = _wordcount(f)
-            c += fc
-            w += fw
-        sections[sub] = {"chars": c, "words": w}
-        total_chars += c
-        total_words += w
-    return {
-        "total_chars": total_chars,
-        "total_words": total_words,
-        "sections": sections,
-    }
+def _render_manifest(
+    cfg: Config,
+    store: Store,
+    must: list[MustRememberEntry],
+    emotional: list[EmotionalEntry],
+    skills: list[SkillEntry],
+) -> str:
+    saved = store.read_state() or {}
+    last_rebuild = saved.get("last_rebuild_at") or iso_now()
+    parts = [
+        "# Briefing manifest",
+        "",
+        f"- Agent: {cfg.agent.name}",
+        f"- Last rebuild: {last_rebuild}",
+        f"- must_remember: {len(must)} entries",
+        f"- emotional: {len(emotional)} entries",
+        f"- skills: {len(skills)} indexed",
+        "",
+        "## Read order",
+        f"1. `{NOTICE_NAME}` — the unprocessed-session rule.",
+        f"2. `{MUST_REMEMBER_NAME}` — external directives (load-bearing).",
+        f"3. `{SKILL_INDEX_NAME}` — reusable lessons (load full skill on demand).",
+        f"4. `{EMOTIONAL_NAME}` — your reactions, strongest first.",
+        "",
+    ]
+    return "\n".join(parts) + "\n"

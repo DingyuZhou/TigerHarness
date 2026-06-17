@@ -353,3 +353,108 @@ def test_enumerate_spaced_persona_store(tmp_path: Path) -> None:
     targets = enumerate_persona_configs(team)
     assert [t.name for t in targets] == ["Chuan Ying"]
     assert targets[0].config_path.parent.name == "Chuan Ying"
+
+
+# ----- post-ingest meditation (meditate_all_stores) ------------------------
+
+
+def _meditation_cfg(tmp_path: Path) -> object:
+    from textwrap import dedent
+
+    from tigerharness.tiger_memory.config import load_config
+
+    p = tmp_path / "cfg.yaml"
+    # Tight emotional bound so a couple of entries overflow.
+    p.write_text(dedent(f"""\
+        agent: {{name: T, role: t}}
+        store: {{root: {tmp_path}/memory}}
+        sources:
+          - kind: claude_code
+            project_path: {tmp_path}/proj/
+        summarizer: {{backend: anthropic, model: m, prompts: default/v1}}
+        memory:
+          emotional_log:
+            max_length: 20
+            overflow_limit: 40
+    """))
+    return load_config(p)
+
+
+def _emo_entry(text: str, weight: float):
+    from tigerharness.tiger_memory.entries import EmotionalEntry
+    return EmotionalEntry(
+        text=text, created_at="2026-06-17T00:00:00Z",
+        last_used="2026-06-17T00:00:00Z", source="x",
+        weight=weight, reaction="r",
+    )
+
+
+class _NoMergeSummarizer:
+    """Judges nothing similar/stale; compaction returns the same text."""
+
+    name = "noop"
+    version = "v1"
+
+    def __init__(self) -> None:
+        self.cost_so_far = 0.0
+
+    @property
+    def tag(self) -> str:
+        return "noop@v1"
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        if "STALE" in prompt:
+            return "NO"
+        if "duplicates" in prompt:
+            return "NO"
+        return prompt  # compaction "rewrite" longer → rejected
+
+
+def test_meditate_all_stores_skips_under_overflow(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.bounded_store import BoundedStore
+    from tigerharness.tiger_memory.entries import STORE_EMOTIONAL
+    from tigerharness.tiger_memory.store import Store
+    from tigerharness.tiger_memory.sweep import meditate_all_stores
+
+    cfg = _meditation_cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    BoundedStore(cfg, store).save_atomic(STORE_EMOTIONAL, [_emo_entry("a", 1.0)])
+    logs = meditate_all_stores(cfg, store, _NoMergeSummarizer())
+    assert logs == {}  # under overflow → no meditation
+
+
+def test_meditate_all_stores_runs_when_over_overflow(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.bounded_store import BoundedStore
+    from tigerharness.tiger_memory.entries import STORE_EMOTIONAL
+    from tigerharness.tiger_memory.store import Store
+    from tigerharness.tiger_memory.sweep import meditate_all_stores
+
+    cfg = _meditation_cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    # Several long-bodied entries → well over the 40-char overflow.
+    entries = [_emo_entry("x" * 30, w) for w in (1.0, 2.0, 3.0)]
+    BoundedStore(cfg, store).save_atomic(STORE_EMOTIONAL, entries)
+    logs = meditate_all_stores(cfg, store, _NoMergeSummarizer())
+    assert STORE_EMOTIONAL in logs  # meditation fired
+
+
+def test_meditate_all_stores_lock_held_is_skipped(tmp_path: Path, monkeypatch) -> None:
+    from tigerharness.tiger_memory import sweep as sweep_mod
+    from tigerharness.tiger_memory.bounded_store import BoundedStore, StoreLockHeld
+    from tigerharness.tiger_memory.entries import STORE_EMOTIONAL
+    from tigerharness.tiger_memory.store import Store
+
+    cfg = _meditation_cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    entries = [_emo_entry("x" * 30, w) for w in (1.0, 2.0, 3.0)]
+    BoundedStore(cfg, store).save_atomic(STORE_EMOTIONAL, entries)
+
+    def boom(*a, **kw):
+        raise StoreLockHeld("held by another session")
+
+    monkeypatch.setattr("tigerharness.tiger_memory.meditation.meditate", boom)
+    logs = sweep_mod.meditate_all_stores(cfg, store, _NoMergeSummarizer())
+    assert logs == {}  # lock held → skipped, no crash
