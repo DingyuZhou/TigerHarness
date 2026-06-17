@@ -127,8 +127,14 @@ in **characters**, never tokens (§8).
   Meditation runs a **relevance check against the live team goal / project
   focus**: a directive that was tied to an old feature and no longer serves
   the current mission is **downgraded to a normal kind** (`decision`), after
-  which it rejoins the ordinary decay/forgetting pool. Nothing is permanently
+  which it becomes forgettable like any other entry. Nothing is permanently
   locked; relevance to the live mission is the gate.
+  **No time-decay here:** unlike the emotional store, must_remember
+  `importance` does not tick down over time — the keep-rank is simply
+  `importance` + recency (`meditation.keep_rank`). Downgrading an
+  `owner_explicit` directive to `decision` does not start a decay clock; it
+  only drops the forget-guard, so the entry can be forgotten on the next
+  overflow if its `importance` + recency rank low enough.
 - On overflow, meditation: dedupe (merging bumps importance by 1.0),
   relevance-check and downgrade stale directives, compact verbose survivors,
   then guarded-forget old low-importance items until length < `max_length`.
@@ -149,6 +155,12 @@ in **characters**, never tokens (§8).
   `|weight|`** plus recency, so strong feelings — positive *or* negative —
   survive, while near-neutral / decayed items are compacted or forgotten
   first.
+- **When decay is materialized:** decay is applied to the stored `weight`
+  **only at meditation time** (`emotional.decay_entry`, which fires on
+  overflow). It is **not** computed live on every read. In particular the
+  session-start emotional VIEW (`briefing._render_emotional`) sorts on the
+  raw **stored** `|weight|`, not a freshly decayed value — between
+  meditations, an entry's briefing rank reflects the weight as last written.
 - **Length-based** bound: `max_length` + `overflow_limit`. On overflow,
   meditation merges similar items (merging bumps magnitude toward the
   stronger feeling, clamped), then compacts/forgets the lowest-magnitude /
@@ -230,8 +242,10 @@ The session-start working set (`briefing.rebuild_briefing`) is exactly:
 
 - **the full must_remember store** (bounded, so cheap), highest-importance
   first;
-- **an emotional view** — the top entries by `|weight|` (capped by
-  `briefing.emotional_top`; strong feelings, for or against, survive);
+- **an emotional view** — the top entries by **stored** `|weight|` (capped by
+  `briefing.emotional_top`; strong feelings, for or against, survive). The
+  view ranks on the raw weight as last written, not a live-decayed value —
+  decay is materialized only at meditation time (§4.3);
 - **the skill index** — name + trigger + one-line summary per skill,
   Python-rebuilt; only the index loads, the persona pulls a full skill on
   demand;
@@ -308,6 +322,8 @@ tuning later; `length_unit` and `weight_cap` are confirmed final.
 | `lifecycle.py` | extraction (`parse_extraction` / `extract_candidates` / `ingest_candidates`), the in-session staging (`plan_extraction`), fresh-start `rebuild`, `pin`, `team_mission_text` |
 | `sweep.py` | team-sweep gating + `meditate_all_stores` (post-ingest, over-overflow only) |
 | `briefing.py` | session-start assembly: must_remember + emotional view + skill index + unprocessed notice |
+| `state.py` | the `tiger-memory state` JSON snapshot (`compute_state`): per-store count / chars / `max` / `over_overflow` — the programmatic hook to check a store's size vs its bound |
+| `store.py` | on-disk store layout (`Paths`) + crash-safe serialization helpers (`atomic_write`, `atomic_swap_dir`, `write_state` / `read_state`) used by the bounded stores and the briefing swap |
 | `cli.py` | `init` / `rebuild` / `pin` / `state` / `plan` / `ingest-extraction` / `ingest-staged` / `sweep-*` |
 
 ## 10. Resolved decisions (Operator, 2026-06-17)

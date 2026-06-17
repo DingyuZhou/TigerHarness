@@ -159,7 +159,10 @@ tiger-memory --config my-config.yaml init
 # session-start briefing (skill index + must_remember + emotional + notice)
 tiger-memory --config my-config.yaml rebuild
 
-# Pin a must_remember entry directly
+# Pin a must_remember entry directly.
+# NOTE: --kind defaults to owner_explicit (importance 5.0) — the most
+# forget-protected kind. A bare `tiger-memory pin "..."` therefore writes an
+# owner_explicit directive; pass `--kind preference` for an ordinary note.
 tiger-memory --config my-config.yaml pin "Operator prefers tabular diffs" --kind preference
 tiger-memory --config my-config.yaml pin "Never force-push main" --kind owner_explicit
 
@@ -178,7 +181,7 @@ verbs (`plan` / `ingest-extraction` / `ingest-staged`) are driven by the
 |---|---|
 | `init` | create the empty store + validate the config |
 | `rebuild` | fresh-start: drop the retired legacy surface (first run), regenerate the briefing |
-| `pin <memo> --kind <k>` | write one `must_remember` entry (`owner_explicit` starts elevated) |
+| `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `owner_explicit`** (importance 5.0, the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
 | `state` | JSON snapshot of the three stores |
 | `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks) |
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
@@ -230,6 +233,12 @@ garbled verdict, and **never** drops a still-relevant `owner_explicit`
 directive (the forget-guard; if it cannot get under `max` without one, it
 leaves the store intact and warns). The full design and the ratified
 forget-guard semantics are in [DESIGN-memory.md](DESIGN-memory.md) §5.
+
+The broad acceptance/verification suite for the revamp invariants (forget
+order with nothing safe to drop, decay boundaries, relevance-downgrade
+ordering, concurrent meditation, character-length edges, idempotency, and
+malformed-input handling) is
+`tests/tiger_memory/test_memory_revamp_qa_defense.py`.
 
 ## Session start (the briefing)
 
