@@ -115,6 +115,10 @@ class BoundedStore:
         Reconstructs typed entries (``entries.py``) from each frontmatter
         block. Blocks with no parseable frontmatter are skipped (forward/
         backward tolerant), matching the rest of the module's lenient reads.
+        A block whose frontmatter parses but whose fields are corrupt (e.g. a
+        bad numeric type) raises ``EntryError`` from ``entry_from_frontmatter``;
+        that single block is skipped and logged so its good siblings still
+        load — a corrupt entry must never take the whole store down with it.
         """
         path = self._store_path(store_name)
         if not path.exists():
@@ -125,7 +129,17 @@ class BoundedStore:
             fm, body = frontmatter.parse(block)
             if not fm:
                 continue
-            out.append(entry_from_frontmatter(store_name, fm, body.rstrip("\n")))
+            try:
+                out.append(
+                    entry_from_frontmatter(store_name, fm, body.rstrip("\n"))
+                )
+            except EntryError as exc:
+                log.warning(
+                    "tiger-memory: skipping corrupt %s entry id=%r: %s",
+                    store_name,
+                    fm.get("id"),
+                    exc,
+                )
         return out
 
     def save_atomic(

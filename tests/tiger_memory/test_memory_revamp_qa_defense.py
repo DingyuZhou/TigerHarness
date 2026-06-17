@@ -690,23 +690,17 @@ def test_load_corrupt_yaml_block_is_skipped(tmp_path: Path) -> None:
     assert len(got) == 1 and got[0].name == "Good"
 
 
-@pytest.mark.xfail(
-    reason="FINDING (b2): a single entry with a bad NUMERIC type "
-    "(e.g. `importance: WAT`, `usage_count: not-an-int`, `weight: bad`) makes "
-    "entry_from_frontmatter raise a RAW ValueError from int()/float() — not a "
-    "clean EntryError, and it aborts the WHOLE store load, dropping the good "
-    "entries alongside the corrupt one. load()'s contract promises lenient "
-    "skipping; bad numeric coercion escapes it. Dev fix: coerce defensively "
-    "in entry_from_frontmatter (skip/raise EntryError per the lenient-read "
-    "contract). See b2-sakuragi.md.",
-    strict=True,
-    raises=ValueError,
-)
 def test_load_bad_numeric_type_should_skip_not_crash_whole_store(
     tmp_path: Path,
 ) -> None:
     """A good entry followed by one with a bad numeric type: the good entry
-    should still load (lenient read). Today the raw ValueError kills both."""
+    still loads (lenient read).
+
+    FIXED (b2 REVISE → b1-dev-1): ``entry_from_frontmatter`` now coerces
+    numerics through ``_coerce_int`` / ``_coerce_float``, raising a clean
+    ``EntryError`` on a bad value; ``BoundedStore.load`` catches it per-block,
+    skips+logs the corrupt entry, and keeps its good siblings. No raw
+    ``ValueError`` escapes and no good entry is lost. See b2-sakuragi.md."""
     bs = _make_store(tmp_path)
     path = bs.store.paths.journal / "must_remember.md"
     bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
@@ -746,6 +740,58 @@ def test_load_bad_numeric_type_should_skip_not_crash_whole_store(
         return  # a clean EntryError would also be acceptable
     assert any(e.id == "good1" for e in got), (
         "good entry must survive a sibling's bad numeric type"
+    )
+
+
+def test_load_bad_int_usage_count_skips_not_crashes(tmp_path: Path) -> None:
+    """Sibling case of the b2 finding for the int path: a skill with a bad
+    ``usage_count`` raises a clean ``EntryError`` from ``_coerce_int``, which
+    ``load`` catches and skips — the good skill survives."""
+    bs = _make_store(tmp_path)
+    path = bs.store.paths.journal / "skills.md"
+    bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        dedent(
+            """\
+            ---
+            id: skillgood
+            store: skills
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extraction
+            name: good skill
+            trigger: when X
+            procedure: do Y
+            usage_count: 3
+            importance: 1.0
+            ---
+            good skill body
+            <!-- tiger-memory-entry -->
+            ---
+            id: skillbad
+            store: skills
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extraction
+            name: bad skill
+            trigger: when Z
+            procedure: do W
+            usage_count: not-an-int
+            importance: 1.0
+            ---
+            bad skill body
+            """
+        )
+    )
+    try:
+        got = bs.load("skills")
+    except EntryError:
+        return  # a clean EntryError would also be acceptable
+    assert any(e.id == "skillgood" for e in got), (
+        "good skill must survive a sibling's bad usage_count"
+    )
+    assert not any(e.id == "skillbad" for e in got), (
+        "the corrupt skill must be skipped, not loaded"
     )
 
 

@@ -264,6 +264,27 @@ def entry_class_for(store_name: str) -> type[BaseEntry]:
         raise EntryError(f"unknown store_name: {store_name!r}") from None
 
 
+def _coerce_int(value: Any, field: str) -> int:
+    """``int(value)`` but a bad value raises the contracted ``EntryError``.
+
+    Frontmatter comes from external files; a corrupt numeric (``usage_count:
+    not-an-int``) must surface as ``EntryError`` so ``load`` can skip the one
+    bad entry rather than let a raw ``ValueError`` abort the whole store.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise EntryError(f"{field} must be an integer, got {value!r}.") from None
+
+
+def _coerce_float(value: Any, field: str) -> float:
+    """``float(value)`` but a bad value raises the contracted ``EntryError``."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise EntryError(f"{field} must be a number, got {value!r}.") from None
+
+
 def entry_from_frontmatter(
     store_name: str, fm: dict[str, Any], text: str
 ) -> BaseEntry:
@@ -286,19 +307,21 @@ def entry_from_frontmatter(
             name=str(fm.get("name", "")),
             trigger=str(fm.get("trigger", "")),
             procedure=str(fm.get("procedure", "")),
-            usage_count=int(fm.get("usage_count", 0)),
-            importance=float(fm.get("importance", 0.0)),
+            usage_count=_coerce_int(fm.get("usage_count", 0), "skill.usage_count"),
+            importance=_coerce_float(fm.get("importance", 0.0), "skill.importance"),
             **base_kwargs,
         )
     if cls is MustRememberEntry:
         return MustRememberEntry(
             kind=str(fm.get("kind", KIND_PREFERENCE)),
-            importance=float(fm.get("importance", 0.0)),
+            importance=_coerce_float(
+                fm.get("importance", 0.0), "must_remember.importance"
+            ),
             **base_kwargs,
         )
     # Only EmotionalEntry remains.
     return EmotionalEntry(
-        weight=float(fm.get("weight", 0.0)),
+        weight=_coerce_float(fm.get("weight", 0.0), "emotional.weight"),
         reaction=str(fm.get("reaction", "")),
         **base_kwargs,
     )
