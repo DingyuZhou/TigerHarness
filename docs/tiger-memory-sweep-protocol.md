@@ -9,12 +9,18 @@
 
 This is the vendor-neutral contract an **interactive persona session**
 executes to keep the whole team's tiger-memory fresh on the
-**subscription rail** — summarization runs in an isolated **sub-agent**
+**subscription rail** — extraction runs in an isolated **sub-agent**
 (Task tool), never a programmatic `claude -p`, so it bills to the
 subscription regardless of which conversation triggered it (B8). It is
 the memory analogue of the journal's `OPERATING.md`: non-AI bookkeeping in
 Python (the `tiger_memory.sweep` module + the `tiger-memory` CLI), AI in
 the session's own sub-agents.
+
+The memory model is the **three bounded stores** (`skills` /
+`must_remember` / `emotional`) — see [`DESIGN-memory.md`](DESIGN-memory.md).
+A sweep turns each stale persona's finished transcripts into entries in
+those stores; post-ingest **meditation** compacts any store that has gone
+over its overflow limit.
 
 ## When it runs
 
@@ -27,10 +33,11 @@ staleness floor, so triggering on every session start is safe.
 ## The procedure
 
 All gating is `tigerharness.tiger_memory.sweep` (non-AI). The per-persona
-summarize work is `tiger-memory plan` (stages prompts + packs **stacks**),
-the summarize sub-agents (which only write bundle **cards**), and
+extraction work is `tiger-memory plan` (stages prompts + packs **stacks**),
+the extraction sub-agents (which only write bundle **cards**), and
 `tiger-memory ingest-staged` (the single-process, race-free **glue** that
-merges every card). `ingest-summary` remains for the one-bundle path.
+merges every `.extract.md` card into the three stores). `ingest-extraction`
+remains for the one-bundle-over-stdin path (a single uuid).
 
 1. **Claim the team sweep.** Compute `team_memories_dir =
    cfg.store.root.parent` for any persona on the team (= `<team>/memories/`).
@@ -41,14 +48,14 @@ merges every card). `ingest-summary` remains for the one-bundle path.
    - `ran=True` → you hold the claim; `decision.plan.targets` is the list
      of `PersonaTarget(name, config_path)` to process this wake.
 
-2. **Per target persona: stage → summarize in stacks → glue.** For each
+2. **Per target persona: stage → extract in stacks → glue.** For each
    target:
    a. `tiger-memory --config <target.config_path> plan [--max-sessions N]`
       → stages one prompt per flagged transcript under
       `<store>/.sweep-staging/<uuid>.prompt.md` and prints a manifest with
       two keys: `items` (per-uuid metadata: `conversation_uuid`,
       `prompt_path`, …) and **`stacks`** — a list of uuid-lists, **one
-      stack per summarize sub-agent**. The packer (`lifecycle._pack_stacks`)
+      stack per extraction sub-agent**. The packer (`lifecycle._pack_stacks`)
       groups transcripts in plan order until a stack would exceed
       `sweep_stack_content_chars` of summed (clipped) content or reach
       `sweep_stack_max_items`; a transcript heavier than the char budget
@@ -63,35 +70,40 @@ merges every card). `ingest-summary` remains for the one-bundle path.
         the prefiltered transcript — staged in full up to the
         `max_staged_content_chars` ceiling, clipped only beyond it — so the
         bulky content never enters *your* context) **and** the persona's
-        store.
+        three stores (`skills.md` / `must_remember.md` / `emotional.md`).
       - **Writes**: a bundle **card**
-        `<store>/.sweep-staging/<uuid>.summary.md` per uuid — and nothing
+        `<store>/.sweep-staging/<uuid>.extract.md` per uuid — and nothing
         else. It does **not** ingest and runs no `tiger-memory` command.
-      - **Instruction**: for each uuid in the stack, read the prompt; emit
-        ONLY the `@@SHORT@@/@@DETAILED@@/@@MUST_MEMORIZE@@` bundle per the
-        prompt's output contract; **self-validate** (all three markers
-        present, in order; short + detailed non-empty); write it to the
-        card; then **return only a short confirmation** (e.g. "carded N
-        uuids"). The bulky bundle must never be returned to you (B8
-        fresh-window) — it lives only in the card.
+      - **Instruction**: for each uuid in the stack, act **as that persona,
+        in character**; read the prompt; emit ONLY the
+        `@@SKILLS@@/@@MUST_REMEMBER@@/@@EMOTIONAL@@` bundle per the prompt's
+        output contract; **self-validate** (all three markers present, each
+        on its own line, in that order; each section is well-formed blocks
+        or the literal `NONE`); write it to the card; then **return only a
+        short confirmation** (e.g. "carded N uuids"). The bulky bundle must
+        never be returned to you (B8 fresh-window) — it lives only in the
+        card. A `NONE`/`NONE`/`NONE` card is a valid, expected outcome.
    c. **Glue** once all of this persona's stacks have carded: `tiger-memory
       --config <target.config_path> ingest-staged`. It reads every
-      `<uuid>.summary.md` card and merges it in a **single process**, so
-      the per-persona read-modify-write into `must_memorize.md` is
-      **serialized by construction** — no agent-side coordination, no
-      lost-update race (this is the merge earlier drafts deferred to "a
-      future hardening … per-uuid pending files"; it now ships). It prints
+      `<uuid>.extract.md` card and merges each bundle's blocks into the
+      persona's three bounded stores in a **single process**, so the
+      per-persona store writes are **serialized by construction** — no
+      agent-side coordination, no lost-update race. It prints
       `{"ingested": N, "malformed": [...], "skipped_no_card": M}` and exits
-      `0` (clean), `1` (≥1 malformed card — re-summarize just those uuids,
-      or leave them to re-stage next wake), or `2` (no manifest — a planning
-      bug, surface it). A no-card item simply was not summarized this wake;
+      `0` (clean), `1` (≥1 malformed card — re-extract just those uuids, or
+      leave them to re-stage next wake), or `2` (no manifest — a planning
+      bug, surface it). A no-card item simply was not extracted this wake;
       the **store**, not the card, is the durable ledger (a re-`plan` wipes
       the staging dir), so it re-stages next wake.
    d. **Finalize**: `tiger-memory --config <target.config_path> rebuild` —
-      `ingest-staged` already wrote the summaries, so the summarize step is
-      a clean no-op and `rebuild` just runs the finalize tail (rollups,
-      decay, briefing). Then `sweep.record_persona_done(team_memories_dir,
-      target.name)`.
+      `ingest-staged` already wrote the entries, so `rebuild` does not
+      re-extract; it runs the fresh-start finalize tail (drops the retired
+      legacy surface on first run, then regenerates the briefing — skill
+      index + must_remember + emotional view + unprocessed notice). Then
+      `sweep.record_persona_done(team_memories_dir, target.name)`.
+      **Meditation** (compaction of any store over its overflow limit) runs
+      automatically inside the sweep, per store; it is a no-op when every
+      store is under bound and never invoked by hand.
 
 3. **Close the run.**
    - All due personas processed → `sweep.mark_sweep_complete(
@@ -115,9 +127,9 @@ merges every card). `ingest-summary` remains for the one-bundle path.
 - **Per-wake cap** → a big backlog spreads across several wakes.
 - **Per-persona resumable progress** → an interrupted sweep resumes where
   it stopped. The **store** (not the staged cards) is the ledger: an item
-  summarized-but-not-yet-glued has no stored summary, so a re-`plan`
+  extracted-but-not-yet-glued has no stored entries, so a re-`plan`
   re-stages it next wake.
-- **Serialization is structural** → the summarize sub-agents only write
+- **Serialization is structural** → the extraction sub-agents only write
   cards; `ingest-staged` performs the single-process merge, so per-persona
   ingest ordering is never hand-coordinated.
 - **Stacks bound sub-agent context** → `plan` packs transcripts into
@@ -141,7 +153,7 @@ still swept correctly, by design:
   whether that persona has new activity. "No persona left behind" (B3).
 - The "is there new work?" decision happens **later**, inside
   `tiger-memory plan`: its source adapters discover new records and the
-  rebuild state dedupes already-summarized ones. A persona with nothing
+  idle/clean decision skips still-active sessions. A persona with nothing
   new yields an empty manifest — a cheap no-op.
 - So the only requirements for a worklog-only persona to be remembered
   are (a) it has a store + config on the roster, and (b) its config

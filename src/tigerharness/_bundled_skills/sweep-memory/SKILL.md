@@ -1,17 +1,21 @@
 ---
 name: sweep-memory
-description: Keep the whole team's tiger-memory fresh on the subscription rail. Run at persona-session bootstrap (or when the user says "sweep memory", "refresh team memory", "rebuild memories"). Claims a team-wide sweep, then summarizes each stale persona's new transcripts via constrained Task-tool sub-agents (subscription-billed) -- never an inline `claude -p`. A cheap no-op inside the staleness floor, so triggering every session start is safe.
+description: Keep the whole team's tiger-memory fresh on the subscription rail. Run at persona-session bootstrap (or when the user says "sweep memory", "refresh team memory", "rebuild memories"). Claims a team-wide sweep, then extracts each stale persona's new transcripts into their three bounded memory stores via constrained Task-tool sub-agents (subscription-billed) -- never an inline `claude -p`. A cheap no-op inside the staleness floor, so triggering every session start is safe.
 ---
 
 # sweep-memory
 
-The **in-session, subscription-billed** memory rebuild. One invocation
+The **in-session, subscription-billed** memory refresh. One invocation
 keeps the *whole roster* fresh: any human contact with any teammate is
-the heartbeat. The bulky summarize work runs in isolated **Task-tool
+the heartbeat. The bulky extraction work runs in isolated **Task-tool
 sub-agents** so it bills to the **subscription**, regardless of which
 conversation triggered it.
 
-The canonical contract is `docs/tiger-memory-sweep-protocol.md` in the
+This skill drives the bounded-store memory model (design
+`docs/DESIGN-memory.md`): each persona has **three** bounded stores --
+`skills`, `must_remember`, `emotional` -- and a sweep turns a persona's
+finished transcripts into entries in those stores. The canonical
+runtime contract is `docs/tiger-memory-sweep-protocol.md` in the
 tigerharness package. If anything here seems to contradict it, that doc
 wins. This skill is the driver over the non-AI gating CLIs (`sweep-plan` /
 `sweep-done` / `sweep-complete` / `sweep-release`) plus the per-persona
@@ -32,12 +36,12 @@ running interactive session can spawn. A daemon (the slack-bridge) cannot
 
 ## The billing model (load-bearing -- do not get this wrong)
 
-- A programmatic `claude -p` bills **API tokens**. NEVER summarize by
+- A programmatic `claude -p` bills **API tokens**. NEVER extract by
   shelling out to `claude -p`.
 - A **Task-tool sub-agent** runs in isolated context, writes files,
   returns a short message, and bills to the **subscription** regardless
-  of the triggering context. THAT is the executor for every summary.
-- The bulky transcript and the bulky summary bundle must live in the
+  of the triggering context. THAT is the executor for every extraction.
+- The bulky transcript and the bulky extraction bundle must live in the
   **sub-agent's** context, never yours -- you only ever see short
   confirmations.
 
@@ -65,7 +69,7 @@ The per-target `plan` / `ingest-staged` / `rebuild` use
 **Sub-agent caveat:** a Task sub-agent runs in a *fresh* shell, so the
 `$TM` you exported in the driver shell is NOT inherited. In each
 sub-agent's brief, spell out the full invocation form literally -- but
-note the summarize sub-agents below do **not** run any `tiger-memory`
+note the extraction sub-agents below do **not** run any `tiger-memory`
 command at all (they only write card files); the driver runs the single
 glue command.
 
@@ -98,7 +102,7 @@ It prints JSON:
 - `ran == true` -> you hold the claim. `targets` is the persona list to
   process **this wake** (at most `--max-personas`).
 
-### 2. Per target persona: stage -> summarize in stacks -> glue
+### 2. Per target persona: stage -> extract in stacks -> glue
 
 For each `target` in `targets`:
 
@@ -108,10 +112,10 @@ a. **Stage the work** (non-AI; bulky content stays out of your context):
    $TM --config "<target.config_path>" plan        # optionally: --max-sessions N
    ```
 
-   It writes one prompt per flagged transcript under
+   It writes one prompt per idle, unprocessed transcript under
    `<store>/.sweep-staging/<uuid>.prompt.md` and prints a manifest with
    two keys: `items` (per-uuid metadata) and **`stacks`** -- a list of
-   uuid-lists, **one stack per summarize sub-agent**. The packer keeps
+   uuid-lists, **one stack per extraction sub-agent**. The packer keeps
    each stack within a content budget and an item cap
    (`sweep_stack_content_chars` / `sweep_stack_max_items`), and gives an
    oversized transcript its own solo stack. This is the cost fix: a
@@ -122,18 +126,28 @@ b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
    fresh-window). Stacks are independent, so run the sub-agents **in
    parallel** (a sane cap, e.g. ~6 concurrent). Each sub-agent's brief:
    - **Read**: each `<uuid>.prompt.md` in its assigned stack (the prompt
-     already embeds the prefiltered transcript) and the persona's store.
-     Nothing else.
-   - **Do**: for each uuid in the stack, in order -- read the prompt;
-     emit ONLY the `@@SHORT@@` / `@@DETAILED@@` / `@@MUST_MEMORIZE@@`
-     bundle per the prompt's output contract; **self-validate** (all
-     three markers present, in order; short + detailed non-empty); and
-     **write that bundle to a card file**
-     `<store>/.sweep-staging/<uuid>.summary.md`. **Do NOT ingest** and do
-     NOT run any `tiger-memory` command -- the driver glues all cards in
-     one step. Return only a short confirmation (e.g. `carded 5 uuids`).
+     already embeds the prefiltered transcript and the full output
+     contract) and, for context, the persona's current stores
+     (`skills.md` / `must_remember.md` / `emotional.md` under the store's
+     `journal/` dir). Nothing else.
+   - **Do**: for each uuid in the stack, in order -- read the prompt and
+     act **as that persona, in character**; emit ONLY the
+     `@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@EMOTIONAL@@` bundle per the
+     prompt's output contract; **self-validate** (all three markers
+     present, each on its own line, in that order; a section is either
+     well-formed blocks or the literal `NONE`); and **write that bundle
+     to a card file** `<store>/.sweep-staging/<uuid>.extract.md`. **Do
+     NOT ingest** and do NOT run any `tiger-memory` command -- the driver
+     glues all cards in one step. Return only a short confirmation (e.g.
+     `carded 5 uuids`).
    - The bulky bundle must NEVER be returned to you -- it lives only in
      the card file.
+   - **It is correct to emit `NONE` for a store.** Most sessions add
+     little; the stores are bounded and forgetting is first-class, so the
+     sub-agent should be selective -- only durable, reusable lessons
+     (skills), genuine external directives (must_remember), and real
+     reactions (emotional). A card that is `NONE` / `NONE` / `NONE` is a
+     valid, expected outcome.
 
 c. **Glue the cards** (non-AI, deterministic, race-free) once **all** of
    this persona's stacks have finished carding:
@@ -142,25 +156,40 @@ c. **Glue the cards** (non-AI, deterministic, race-free) once **all** of
    $TM --config "<target.config_path>" ingest-staged
    ```
 
-   It ingests every `<uuid>.summary.md` card in **one process**, so the
-   per-persona must-memorize merge is **serialized by construction** --
-   there is no ingest race to coordinate by hand. It prints
+   It ingests every `<uuid>.extract.md` card in **one process**, merging
+   each bundle's blocks into the persona's three bounded stores, so the
+   per-persona store writes are **serialized by construction** -- there
+   is no ingest race to coordinate by hand. It prints
    `{"ingested": N, "malformed": [...], "skipped_no_card": M}`. Exit
    codes: `0` clean; `1` at least one **malformed** card (its uuids are
-   listed -- re-summarize just those with a fresh sub-agent, or leave
-   them to re-stage next wake); `2` no manifest (a planning bug -- surface
-   it). A skipped (no-card) item simply was not summarized this wake; the
+   listed -- re-extract just those with a fresh sub-agent, or leave them
+   to re-stage next wake); `2` no manifest (a planning bug -- surface
+   it). A skipped (no-card) item simply was not extracted this wake; the
    store, not the card, is the durable ledger, so it re-stages next wake.
 
 d. **Finalize the persona**, then record it done:
 
    ```bash
-   $TM --config "<target.config_path>" rebuild   # rollups, decay, briefing
+   $TM --config "<target.config_path>" rebuild   # fresh-start drop + briefing
    $TM --config "$DRIVER" sweep-done --persona "<target.name>"
    ```
 
-   (`ingest-staged` already wrote the summaries, so `rebuild`'s summarize
-   step is a clean no-op; it just runs the finalize tail.)
+   `rebuild` is the **fresh-start** finalize: it drops the retired
+   legacy on-disk surface (old rollup summaries, `must_memorize.md`,
+   `longer_memory.md`, the `archive/` dir) the very first time, then
+   regenerates the session-start briefing (the **skill index** + the full
+   `must_remember` view + the top-by-magnitude `emotional` view + the
+   unprocessed-session notice) from the three stores. It does NOT
+   re-extract -- `ingest-staged` already wrote the entries.
+
+   **Meditation** (the bounded-store compaction: merge near-duplicates ->
+   relevance-check + downgrade stale owner directives -> compact ->
+   guarded-forget) runs automatically inside the sweep, per store, **only
+   when that store is over its `overflow_limit`** (the hysteresis
+   trigger). You do not invoke it by hand; it is a no-op when every store
+   is under bound. Its only model calls (similarity / staleness /
+   compaction judgements) go through the persona's summarizer, so they
+   also stay on the subscription rail.
 
 Different personas have separate stores and are independent -- you may
 process several `targets` concurrently (each its own plan -> stacks ->
@@ -186,6 +215,20 @@ process several `targets` concurrently (each its own plan -> stacks ->
   $TM --config "$DRIVER" sweep-release
   ```
 
+## The three bounded stores (what a sweep is feeding)
+
+- **`skills`** -- learned, reusable lessons (name + when-to-use trigger +
+  procedure). Count-bounded. Importance grows with use; the session-start
+  briefing loads only the **skill index** (name + trigger + one line),
+  and the persona reads the full skill on demand.
+- **`must_remember`** -- external directives (`owner_explicit` /
+  `preference` / `decision` / `incident`). Length-bounded (characters).
+  `owner_explicit` directives start elevated and are protected from
+  forgetting until meditation's relevance-check downgrades a stale one.
+- **`emotional`** -- the persona's signed reactions (`weight` in
+  `[-10, +10]`, decaying toward 0). Length-bounded. Strong feelings (for
+  or against) survive; near-neutral / decayed items are forgotten first.
+
 ## Guardrails (already enforced by the package)
 
 - **Staleness floor** (default 24h) + **team watermark** -> most triggers
@@ -194,31 +237,38 @@ process several `targets` concurrently (each its own plan -> stacks ->
   stale claim is stolen after the lease.
 - **Per-wake cap** (`--max-personas`) -> a big backlog spreads across
   wakes; `sweep-done` makes progress resumable.
-- **Serialization is structural, not manual.** The summarize sub-agents
+- **Serialization is structural, not manual.** The extraction sub-agents
   only WRITE cards; `ingest-staged` performs the single-process merge, so
   you never hand-coordinate per-persona ingest ordering.
 - **Stacks bound per-sub-agent context.** The plan packs transcripts into
   stacks so a backlog runs as many fresh contexts, not one ballooning
   one.
+- **Bounded + self-pruning.** Each store has a `max` + `overflow_limit`
+  (hysteresis); meditation only fires over the overflow limit and never
+  drops a still-relevant `owner_explicit` directive.
 - **Subscription-safe** -> the executor is always the Task sub-agent.
 
 ## What NOT to do
 
-- **Never** summarize via `claude -p` -- that bills API. The executor is
+- **Never** extract via `claude -p` -- that bills API. The executor is
   always a Task-tool sub-agent.
-- **Never** let the bulky transcript or summary bundle into your own
+- **Never** let the bulky transcript or extraction bundle into your own
   context -- a sub-agent reads the prompt files and writes card files; you
   see only short confirmations and the `ingest-staged` JSON summary.
 - **Never** ingest a card by hand mid-fan-out, and never call
-  `ingest-summary` per uuid in this flow -- `ingest-staged` owns the
-  merge so it stays a single, race-free process.
+  `ingest-extraction` per uuid in this flow -- `ingest-staged` owns the
+  merge so it stays a single, race-free process. (`ingest-extraction` is
+  the one-bundle-over-stdin path for a single uuid; the stacked sweep uses
+  `ingest-staged`.)
 - **Never** leave a claim dangling. Every `ran=true` path ends in exactly
   one of `sweep-complete` (done / empty) or `sweep-release` (cap hit).
 - **Never** hand-edit the sweep-state JSON or any store file -- drive
-  state only through the CLIs above.
+  state only through the CLIs above. Forgetting is irreversible with no
+  safety net; let meditation, not a hand-edit, prune a store.
 
 ## If you get confused
 
 `docs/tiger-memory-sweep-protocol.md` in the tigerharness package is the
-contract. Re-read it. This skill is the driver; the protocol doc is the
-source of truth.
+runtime contract, and `docs/DESIGN-memory.md` is the canonical design.
+Re-read them. This skill is the driver; those docs are the source of
+truth.

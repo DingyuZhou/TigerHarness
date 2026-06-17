@@ -23,7 +23,8 @@ plain `claude -p` subprocess.
 | Schedule from Slack **cheaply**, or understand rails/billing + `status.json` | [subscription-backend.md](subscription-backend.md) |
 | Understand per-persona memory from journal work (the worklog rail) | [per-persona-journal-memory.md](per-persona-journal-memory.md) |
 | Set up / operate the Slack bridge (1..N lanes) | [slack-bridge.md](slack-bridge.md) |
-| Use tiger-memory (stores, CLI, search) | [tiger-memory.md](tiger-memory.md) |
+| Use tiger-memory (the three bounded stores, CLI, config) | [tiger-memory.md](tiger-memory.md) |
+| Understand the memory design (stores + meditation, the rationale) | [DESIGN-memory.md](DESIGN-memory.md) |
 | Run the team-wide memory sweep | [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md) |
 | Use the backend-agnostic agent SDK | [agent_sdk.md](agent_sdk.md) |
 | Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai) |
@@ -58,11 +59,14 @@ plain `claude -p` subprocess.
 - **Slack bridge.** One Socket-Mode bridge serves 1..N teams (lanes), forwards
   DMs/@mentions to personas, posts replies in-thread, persists
   thread→session; a `notify` CLI sends proactive text/file messages.
-- **Tiger-memory.** Per-persona archive/journal/briefing stores with lazy
-  rebuild, pinning, decay, drill-down; substring search by default, semantic
-  via local fastembed or OpenAI embeddings per extras; a team-wide sweep
-  protocol keeps a roster fresh on the subscription rail under a lease,
-  watermark, and per-wake cap.
+- **Tiger-memory.** Per-persona memory as **three bounded, self-pruning
+  stores** (skills / must_remember / emotional): in-persona extraction turns
+  finished sessions into store entries, a meditation engine merges /
+  relevance-downgrades / compacts / forgets when a store overflows, and a
+  Python-rebuilt briefing (skill index + must_remember + emotional view) is
+  read at session start. A team-wide sweep protocol keeps a roster fresh on
+  the subscription rail under a lease, watermark, and per-wake cap. Design:
+  [DESIGN-memory.md](DESIGN-memory.md).
 - **Team tooling.** `tigerharness init` scaffolds a team and installs five
   bundled Claude Code skills (drive-journal, journal-new, slack-notify,
   workflow-append-steps, tigerharness-basics), hash-aware so hand-edited
