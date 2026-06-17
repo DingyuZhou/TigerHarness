@@ -19,6 +19,7 @@ is documented as an ``xfail`` (see ``test_load_bad_numeric_type_*``).
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from textwrap import dedent
@@ -203,6 +204,29 @@ def test_guard_skips_protected_owner_drops_droppable_neighbor(
     assert log.over_max is True
     survivors = bs.load("must_remember")
     assert [e.id for e in survivors] == [owner.id]
+
+
+def test_meditation_logs_irreversible_mutations_for_audit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """b2g logs gate: a meditation that forgets MUST emit an auditable INFO
+    log naming what was forgotten/merged/downgraded/compacted. Forgetting is
+    irreversible with no safety net, so the loss cannot be invisible to an
+    auditor (b2g-logs REVISE -> b1-dev-2 fix)."""
+    bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
+    owner = _mr(KIND_OWNER_EXPLICIT, "protected owner directive!!", imp=9.0)
+    pref = _mr(KIND_PREFERENCE, "droppable preference text!!", imp=0.0)
+    bs.save_atomic("must_remember", [owner, pref])
+    summ = ScriptedSummarizer()
+    with caplog.at_level(
+        logging.INFO, logger="tigerharness.tiger_memory.meditation"
+    ):
+        log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
+    assert pref.id in log.forgotten
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "meditation must_remember" in m and pref.id in m for m in msgs
+    ), "the forgotten id must be auditable in the logs"
 
 
 def test_forget_guard_raises_on_direct_unchecked_owner_drop(

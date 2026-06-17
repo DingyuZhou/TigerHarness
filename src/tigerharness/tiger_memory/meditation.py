@@ -245,6 +245,18 @@ def meditate(
 
         if log_rec.changed:
             store.save_atomic(store_name, entries)
+            # Forgetting is irreversible and has no safety net, so the
+            # mutations MUST be auditable (b2g logs gate): record exactly
+            # what merged/downgraded/compacted/forgotten at INFO.
+            log.info(
+                "meditation %s: merged=%s downgraded=%s compacted=%s "
+                "forgotten=%s",
+                store_name,
+                log_rec.merged,
+                log_rec.downgraded,
+                log_rec.compacted,
+                log_rec.forgotten,
+            )
 
     return log_rec
 
