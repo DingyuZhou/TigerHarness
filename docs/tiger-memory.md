@@ -162,10 +162,80 @@ briefing/  the assembled view the agent reads at session start
 
 ## RAG backends
 
-- **fastembed** (default): BAAI/bge-small-en-v1.5, local ONNX, no API key
-- **OpenAI**: text-embedding-3-small, requires `OPENAI_API_KEY`
+- **fastembed** (default): BAAI/bge-small-en-v1.5 (384-dim), local ONNX, no API key
+- **OpenAI**: text-embedding-3-small (1536-dim), requires `OPENAI_API_KEY`
 
 Install with `pip install tigerharness[memory-rag]` or `[memory-rag-openai]`.
+The index built from these is portable and shareable — see
+[Portable, shared RAG index](#portable-shared-rag-index) below.
+
+## Portable, shared RAG index
+
+The vector index lives at `<store>/journal/.embeddings.db`. It is
+**portable and meant to be shared**: archive paths are stored *relative*
+to the store root, so a committed `.embeddings.db` keeps working after a
+fresh clone on another machine with **no rebuild** — collaborators get
+working RAG immediately. The index is deliberately **tracked in git** (not
+gitignored); only the transient `memories/*/.sweep-staging/` stays ignored.
+
+Zero-rebuild reuse requires the **same embedder** on both ends. The index
+is keyed to one embedder (its name + vector dim).
+
+**Which embedder will my machine use?** `pick_embedder` picks OpenAI iff
+`OPENAI_API_KEY` is set and `openai` is installed, otherwise the default
+fastembed (`BAAI/bge-small-en-v1.5`). So a committed index built with the
+default reuses immediately on any default setup; a machine configured for
+OpenAI (different dim) takes one self-healing rebuild. Either way it
+"just works" — the only difference is whether the first search reuses or
+rebuilds.
+
+Two cases trigger a one-time automatic rebuild instead of reuse, each
+logged at WARNING so the cost is visible:
+
+- **Different embedder dim** (e.g. opening a fastembed-built index with
+  OpenAI): the fixed-width vector table is dropped and rebuilt at the new
+  dim and re-embedded — safely, never a dimension-mismatch crash.
+- **A legacy absolute-path index** (built before this became portable): it
+  is detected and rebuilt once so its paths become relative/portable.
+
+**Rebuild.** The index (re)builds **incrementally on the next
+`tiger-memory search --mode rag`/`hybrid`** — there is no separate
+RAG-rebuild command. (`tiger-memory rebuild` is the session-start
+rollup/briefing rebuild; it does *not* touch the embeddings index.) To
+force a full rebuild — e.g. after a merge conflict on the binary file —
+delete `<store>/journal/.embeddings.db` and run a search. A full rebuild of
+a few hundred archive entries is ~30s with the model cached.
+
+**Verifying.** A rebuild prints the WARNING `rag index rebuilt ...` on
+stderr (default-visible) — so its **absence** on the first search after a
+clone confirms the committed index was reused as-is. Confirm the index is
+actually shared with `git ls-files | grep embeddings.db` (it only helps
+collaborators once the Operator has committed it).
+
+**Limitation — not mergeable.** The binary sqlite index is not a
+text-mergeable artifact: two machines that both re-embed and commit will
+conflict at the file level. Sharing is "rebuild on conflict" (re-run a
+search to regenerate), not a three-way merge.
+
+**Operational notes.**
+- *One embedder per shared index.* A committed index is keyed to the
+  embedder that built it; collaborators should use the same one (the
+  default fastembed) to get zero-rebuild reuse.
+- *Two WARNING signals, two meanings.* `rag index rebuilt ...` means the
+  index was rebuilt (dim/scheme change — expected, one-time). `rag index:
+  contained out-of-root archive path ...` means a stored path pointed
+  outside the store and was clamped to a safe location — that should never
+  happen for an index your team produced, so treat it as a sign of a
+  corrupt or tampered `.embeddings.db` and rebuild it from scratch (the
+  force-rebuild step under **Rebuild** above: delete the index and run a
+  search). This containment behavior is pinned by
+  `tests/tiger_memory/test_rag_portable.py::test_containment_logs_warning`,
+  so it can be verified/regressed without hand-crafting a bad index.
+- *Commit deliberately; expect binary churn.* Every re-embed rewrites the
+  binary, so committing it on every incidental rebuild churns git history.
+  Commit the index when you mean to share a meaningful update, not on every
+  search. Concurrent re-embeds on different machines conflict at the file
+  level (see the not-mergeable limitation) — rebuild on conflict.
 
 ## Per-persona filtering (multi-bridge integration)
 

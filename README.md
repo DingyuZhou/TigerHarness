@@ -334,7 +334,7 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
 
 ### Tiger-memory
 
-- **Stores are not relocatable.** `.embeddings.db` holds absolute paths in the `docs` table. Moving a memory store (team rename, persona rename, workspace move) breaks `tiger-memory search` until those rows are rewritten. A `tiger-memory relocate <new-root>` subcommand (or a `--rewrite-paths` flag on `rebuild`) would smooth team/persona migrations.
+- **The RAG index is portable and shareable.** `.embeddings.db` stores archive paths *relative* to the store root, so a committed index works after a clone/move on another machine with no rebuild — as long as the same embedder is used. It is tracked in git on purpose. A legacy absolute-path index or an embedder-dim change rebuilds itself once automatically (logged at WARNING). The binary index is not mergeable, so concurrent re-embeds on different machines conflict at the file level — re-run a search to rebuild. See `docs/tiger-memory.md` → "Portable, shared RAG index".
 
 ## License
 
