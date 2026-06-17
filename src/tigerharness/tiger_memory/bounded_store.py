@@ -113,26 +113,46 @@ class BoundedStore:
         """Read all entries for *store_name* (empty list if the file is absent).
 
         Reconstructs typed entries (``entries.py``) from each frontmatter
-        block. Blocks with no parseable frontmatter are skipped (forward/
-        backward tolerant), matching the rest of the module's lenient reads.
-        A block whose frontmatter parses but whose fields are corrupt (e.g. a
-        bad numeric type) raises ``EntryError`` from ``entry_from_frontmatter``;
-        that single block is skipped and logged so its good siblings still
-        load — a corrupt entry must never take the whole store down with it.
+        block. The read is **lenient by design** — a corrupt entry (or even a
+        corrupt byte) must never take the whole store down with it (the
+        no-safety-net store has no backup to fall back on):
+
+        - The file is decoded with ``errors="replace"`` so a single non-UTF8
+          byte degrades to a replaced/garbled block (which then skips below)
+          rather than raising ``UnicodeDecodeError`` and denying every good
+          sibling entry. A warning is logged when replacement occurs.
+        - Blocks with no parseable frontmatter are skipped (forward/backward
+          tolerant).
+        - A block whose frontmatter parses but whose fields are corrupt (e.g. a
+          bad numeric type) raises ``EntryError`` from ``entry_from_frontmatter``;
+          that single block is skipped and logged.
+        - An entry that reconstructs but is schema-INVALID (e.g. an empty
+          ``reaction``, or a non-finite weight) is also skipped+logged: load is
+          symmetric with ``save_atomic``, which validates every entry. Without
+          this, a parseable-but-invalid entry would load fine yet crash the
+          next meditation's final ``save_atomic`` after merge/forget already
+          mutated state — so we drop it at load time instead (QI-1).
         """
         path = self._store_path(store_name)
         if not path.exists():
             return []
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
+        if "�" in text:
+            log.warning(
+                "tiger-memory: %s store file %s had non-UTF8 byte(s) replaced; "
+                "affected block(s) will be skipped, good siblings still load.",
+                store_name,
+                path,
+            )
         out: list[BaseEntry] = []
         for block in _split_blocks(text):
             fm, body = frontmatter.parse(block)
             if not fm:
                 continue
             try:
-                out.append(
-                    entry_from_frontmatter(store_name, fm, body.rstrip("\n"))
-                )
+                entry = entry_from_frontmatter(store_name, fm, body.rstrip("\n"))
+                self._validate_entry(entry)
             except EntryError as exc:
                 log.warning(
                     "tiger-memory: skipping corrupt %s entry id=%r: %s",
@@ -140,6 +160,8 @@ class BoundedStore:
                     fm.get("id"),
                     exc,
                 )
+                continue
+            out.append(entry)
         return out
 
     def save_atomic(

@@ -27,6 +27,7 @@ Length is measured in CHARACTERS, never tokens (vendor-neutral, design §8).
 from __future__ import annotations
 
 import logging
+import math
 import uuid as _uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -232,6 +233,16 @@ class EmotionalEntry(BaseEntry):
             self.weight, (int, float)
         ):
             raise EntryError("emotional.weight must be a signed number.")
+        # A non-finite weight (NaN / ±inf) is a non-value: ``abs(nan) > cap``
+        # is False, so it would slip past the cap check below and poison the
+        # keep-rank ordering that decides irreversible forgetting (design
+        # §4.3: a signed scalar with a hard cap, never a non-value). Reject it
+        # explicitly here — the schema gate — so it can never be persisted.
+        if not math.isfinite(self.weight):
+            raise EntryError(
+                f"emotional.weight must be finite (no NaN/inf); "
+                f"got {self.weight}."
+            )
         if abs(self.weight) > weight_cap:
             raise EntryError(
                 f"emotional.weight magnitude must be ≤ weight_cap "

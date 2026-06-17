@@ -142,6 +142,24 @@ def test_emotional_weight_at_cap_ok() -> None:
     EmotionalEntry(weight=-10, reaction="r", **_base()).validate()
 
 
+def test_emotional_rejects_nan_weight() -> None:
+    """GAP-3 (schema): a NaN weight is a non-value — ``abs(nan) > cap`` is
+    False so it would slip past the cap check and poison the keep-rank
+    ordering. ``validate`` must reject it as non-finite."""
+    e = EmotionalEntry(weight=float("nan"), reaction="r", **_base())
+    with pytest.raises(EntryError, match="finite"):
+        e.validate()
+
+
+@pytest.mark.parametrize("weight", [float("inf"), float("-inf")])
+def test_emotional_rejects_inf_weight(weight: float) -> None:
+    """GAP-3 (schema): ±inf are non-finite and explicitly rejected (the
+    finite check subsumes the over-cap path for them)."""
+    e = EmotionalEntry(weight=weight, reaction="r", **_base())
+    with pytest.raises(EntryError, match="finite"):
+        e.validate()
+
+
 # ----- base-field validation (shared) --------------------------------------
 
 

@@ -819,6 +819,182 @@ def test_load_bad_int_usage_count_skips_not_crashes(tmp_path: Path) -> None:
     )
 
 
+def test_load_non_utf8_byte_does_not_crash_store(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """GAP-4: a single non-UTF8 byte in one block must NOT raise
+    ``UnicodeDecodeError`` and deny the whole store. The file is decoded with
+    ``errors="replace"`` so the mangled block degrades to a skip while the
+    good sibling still loads; a warning is logged."""
+    bs = _make_store(tmp_path)
+    good = _skill("Good")
+    bs.save_atomic("skills", [good])
+    path = bs.store.paths.journal / "skills.md"
+    # Append a second block carrying a raw non-UTF8 byte in its body.
+    raw = path.read_bytes()
+    bad_block = (
+        b"\n<!-- tiger-memory-entry -->\n"
+        b"---\n"
+        b"id: badbyte\n"
+        b"store: skills\n"
+        b"created_at: 2026-06-17T00:00:00Z\n"
+        b"last_used: 2026-06-17T00:00:00Z\n"
+        b"source: extract\n"
+        b"name: byte skill\n"
+        b"trigger: when X\n"
+        b"procedure: do \xff Y\n"  # <- non-UTF8 byte
+        b"importance: 1.0\n"
+        b"---\n"
+        b"body \xff text\n"
+    )
+    path.write_bytes(raw + bad_block)
+    with caplog.at_level(logging.WARNING):
+        got = bs.load("skills")
+    # The good sibling survives; no exception was raised.
+    assert any(e.name == "Good" for e in got)
+    assert any("non-UTF8" in r.getMessage() for r in caplog.records)
+
+
+def test_load_skips_block_failing_validate(tmp_path: Path) -> None:
+    """QI-1: an entry that PARSES but is schema-invalid (empty ``reaction``)
+    must be skipped on load, not silently kept. Load is now symmetric with
+    ``save_atomic`` — the good sibling survives, the invalid one is dropped."""
+    bs = _make_store(tmp_path)
+    path = bs.store.paths.journal / "emotional.md"
+    bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        dedent(
+            """\
+            ---
+            id: emogood
+            store: emotional
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extract
+            weight: 2.0
+            reaction: glad it shipped
+            ---
+            good emotional body
+            <!-- tiger-memory-entry -->
+            ---
+            id: emobad
+            store: emotional
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extract
+            weight: 1.0
+            reaction: ""
+            ---
+            bad emotional body
+            """
+        )
+    )
+    got = bs.load("emotional")
+    assert any(e.id == "emogood" for e in got)
+    assert not any(e.id == "emobad" for e in got), (
+        "an empty-reaction entry must be skipped on load (load/save symmetry)"
+    )
+
+
+def test_load_skips_nan_weight_entry(tmp_path: Path) -> None:
+    """QI-1 / GAP-3 load side: a ``weight: .nan`` block parses but fails
+    ``validate`` (non-finite), so load skips it — a NaN entry can never reach
+    the keep-rank ordering or the next save."""
+    bs = _make_store(tmp_path)
+    path = bs.store.paths.journal / "emotional.md"
+    bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        dedent(
+            """\
+            ---
+            id: emofinite
+            store: emotional
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extract
+            weight: 9.0
+            reaction: strongest feeling
+            ---
+            finite body
+            <!-- tiger-memory-entry -->
+            ---
+            id: emonan
+            store: emotional
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extract
+            weight: .nan
+            reaction: poison
+            ---
+            nan body
+            """
+        )
+    )
+    got = bs.load("emotional")
+    assert [e.id for e in got] == ["emofinite"]
+
+
+def test_meditate_does_not_crash_on_preexisting_invalid_entry(
+    tmp_path: Path,
+) -> None:
+    """QI-1: a store carrying a previously-tolerated schema-invalid entry
+    (empty ``reaction``) used to crash meditation's FINAL ``save_atomic`` after
+    merge/forget already mutated state. With validate-on-load the invalid entry
+    is skipped on load, so meditation runs cleanly over only the good entries
+    and persists without raising."""
+    # emotional max_length=30, overflow_limit=50; push over overflow so
+    # meditation actually runs (not a no-op).
+    bs = _make_store(tmp_path, emo_max=30, emo_overflow=50)
+    path = bs.store.paths.journal / "emotional.md"
+    bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        dedent(
+            """\
+            ---
+            id: emoA
+            store: emotional
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extract
+            weight: 2.0
+            reaction: reaction about the long first emotional memory entry
+            ---
+            the first emotional memory body that is fairly long
+            <!-- tiger-memory-entry -->
+            ---
+            id: emoB
+            store: emotional
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extract
+            weight: 3.0
+            reaction: reaction about the long second emotional memory entry
+            ---
+            the second emotional memory body that is also fairly long
+            <!-- tiger-memory-entry -->
+            ---
+            id: emoinvalid
+            store: emotional
+            created_at: 2026-06-17T00:00:00Z
+            last_used: 2026-06-17T00:00:00Z
+            source: extract
+            weight: 1.0
+            reaction: ""
+            ---
+            invalid entry with empty reaction
+            """
+        )
+    )
+    summ = ScriptedSummarizer()  # nothing similar/stale
+    # Must NOT raise EntryError from the final save_atomic.
+    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    survivors = bs.load("emotional")
+    # The invalid entry never reached meditation; good entries persisted.
+    assert not any(e.id == "emoinvalid" for e in survivors)
+    assert all(e.reaction.strip() for e in survivors)
+    assert log.skipped_no_op is False
+
+
 def test_keep_rank_corrupt_timestamp_sinks_to_bottom(tmp_path: Path) -> None:
     """A corrupt last_used yields a -inf recency, so the entry sorts to the
     very bottom of the keep-rank (forgotten first), never raising."""
