@@ -191,6 +191,71 @@ class CollapseConfig:
     enabled: bool = False
 
 
+# ----- memory revamp config (design §7) ------------------------------------
+#
+# The three bounded stores (design §4). Each store carries a two-number
+# bound (``max`` + ``overflow_limit``) giving hysteresis: a store may drift
+# up to ``overflow_limit``, and only then does meditation fire and compact
+# it back below ``max`` (design §4 — prevents meditate-every-session thrash).
+# Length is measured in CHARACTERS, never tokens (vendor-neutral, design §8).
+
+# The only length unit we accept. Token units are vendor-specific and are
+# rejected at load time (design §7 / §8).
+VALID_LENGTH_UNIT = "characters"
+
+
+@dataclass(frozen=True)
+class SkillsStoreConfig:
+    """Bound for the skills store — count-based (design §4.1)."""
+
+    max_count: int = 40
+    overflow_limit: int = 50
+
+
+@dataclass(frozen=True)
+class MustRememberStoreConfig:
+    """Bound for the must-remember store — length-based (design §4.2)."""
+
+    max_length: int = 8000
+    overflow_limit: int = 10000
+
+
+@dataclass(frozen=True)
+class EmotionalDecayConfig:
+    """Signed-weight decay rate for the emotional log (design §4.3)."""
+
+    magnitude_per_day: float = 0.1
+
+
+@dataclass(frozen=True)
+class EmotionalStoreConfig:
+    """Bound + signed-weight cap + decay for the emotional log (design §4.3)."""
+
+    max_length: int = 12000
+    overflow_limit: int = 15000
+    weight_cap: float = 10.0
+    decay: EmotionalDecayConfig = field(default_factory=EmotionalDecayConfig)
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    """The ``memory:`` block (design §7).
+
+    ``length_unit`` is CONFIRMED final: ``characters``, never tokens.
+    The store bounds and decay rate are sensible defaults the Operator
+    approved tuning later (design §10.2).
+    """
+
+    length_unit: str = VALID_LENGTH_UNIT
+    skills: SkillsStoreConfig = field(default_factory=SkillsStoreConfig)
+    must_remember: MustRememberStoreConfig = field(
+        default_factory=MustRememberStoreConfig
+    )
+    emotional_log: EmotionalStoreConfig = field(
+        default_factory=EmotionalStoreConfig
+    )
+
+
 @dataclass(frozen=True)
 class Config:
     agent: AgentConfig
@@ -204,6 +269,7 @@ class Config:
     prefilter: PrefilterConfig = field(default_factory=PrefilterConfig)
     cap: CapConfig = field(default_factory=CapConfig)
     collapse: CollapseConfig = field(default_factory=CollapseConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     env_var: str = "TIGER_MEMORY_CONFIG"
     # Resolved at load time so tests can introspect.
     source_path: Path | None = None
@@ -466,6 +532,8 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         enabled=bool(collapse_raw.get("enabled", False)),
     )
 
+    memory = _parse_memory(raw.get("memory") or {})
+
     return Config(
         agent=agent,
         store=store,
@@ -478,9 +546,104 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         prefilter=prefilter,
         cap=cap,
         collapse=collapse,
+        memory=memory,
         env_var=str(raw.get("env_var", "TIGER_MEMORY_CONFIG")),
         source_path=source_path,
     )
+
+
+# ----- memory revamp parsing + validation (design §7) ---------------------
+
+
+def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
+    """Parse + validate the ``memory:`` block (design §7).
+
+    All keys are optional (sensible defaults, design §10.2) EXCEPT the
+    vendor-neutrality invariants: ``length_unit`` must be ``characters``
+    (token units are rejected, design §8), bounds must be positive with
+    ``overflow_limit > max`` (the hysteresis band, design §4), and the
+    emotional ``weight_cap`` / decay rate must be positive.
+    """
+    length_unit = str(memory_raw.get("length_unit", VALID_LENGTH_UNIT))
+    if length_unit != VALID_LENGTH_UNIT:
+        raise ConfigError(
+            f"memory.length_unit must be {VALID_LENGTH_UNIT!r} "
+            f"(token units are vendor-specific and rejected); "
+            f"got {length_unit!r}."
+        )
+
+    skills_raw = memory_raw.get("skills") or {}
+    skills = SkillsStoreConfig(
+        max_count=int(skills_raw.get("max_count", 40)),
+        overflow_limit=int(skills_raw.get("overflow_limit", 50)),
+    )
+    _validate_bound(
+        "memory.skills", "max_count", skills.max_count, skills.overflow_limit
+    )
+
+    mr_raw = memory_raw.get("must_remember") or {}
+    must_remember = MustRememberStoreConfig(
+        max_length=int(mr_raw.get("max_length", 8000)),
+        overflow_limit=int(mr_raw.get("overflow_limit", 10000)),
+    )
+    _validate_bound(
+        "memory.must_remember",
+        "max_length",
+        must_remember.max_length,
+        must_remember.overflow_limit,
+    )
+
+    el_raw = memory_raw.get("emotional_log") or {}
+    decay_raw = el_raw.get("decay") or {}
+    emotional_log = EmotionalStoreConfig(
+        max_length=int(el_raw.get("max_length", 12000)),
+        overflow_limit=int(el_raw.get("overflow_limit", 15000)),
+        weight_cap=float(el_raw.get("weight_cap", 10.0)),
+        decay=EmotionalDecayConfig(
+            magnitude_per_day=float(decay_raw.get("magnitude_per_day", 0.1)),
+        ),
+    )
+    _validate_bound(
+        "memory.emotional_log",
+        "max_length",
+        emotional_log.max_length,
+        emotional_log.overflow_limit,
+    )
+    if emotional_log.weight_cap <= 0:
+        raise ConfigError(
+            f"memory.emotional_log.weight_cap must be > 0; "
+            f"got {emotional_log.weight_cap}."
+        )
+    if emotional_log.decay.magnitude_per_day < 0:
+        raise ConfigError(
+            f"memory.emotional_log.decay.magnitude_per_day must be ≥ 0; "
+            f"got {emotional_log.decay.magnitude_per_day}."
+        )
+
+    return MemoryConfig(
+        length_unit=length_unit,
+        skills=skills,
+        must_remember=must_remember,
+        emotional_log=emotional_log,
+    )
+
+
+def _validate_bound(
+    label: str, max_key: str, max_value: int, overflow_limit: int
+) -> None:
+    """A store bound is valid iff ``0 < max < overflow_limit`` (design §4).
+
+    The two-number hysteresis band only exists when overflow sits strictly
+    above max; an inverted or collapsed band would make meditation thrash
+    (fire while still under max) or never compact.
+    """
+    if max_value <= 0:
+        raise ConfigError(f"{label}.{max_key} must be > 0; got {max_value}.")
+    if overflow_limit <= max_value:
+        raise ConfigError(
+            f"{label}.overflow_limit must be > {max_key} ({max_value}) "
+            f"to form a hysteresis band; got {overflow_limit}."
+        )
 
 
 # ----- helpers -------------------------------------------------------------
