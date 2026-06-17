@@ -499,6 +499,27 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
 # ----- memory revamp parsing + validation (design §7) ---------------------
 
 
+def _cfg_int(value: Any, field: str) -> int:
+    """``int(value)`` but a non-numeric value raises the contracted ``ConfigError``.
+
+    The ``memory:`` block comes from a user-edited YAML file; a non-numeric
+    bound (``max_count: lots``) must fail fast with an actionable ConfigError,
+    not leak a raw ``ValueError`` (QI-4).
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{field} must be an integer; got {value!r}.") from None
+
+
+def _cfg_float(value: Any, field: str) -> float:
+    """``float(value)`` but a non-numeric value raises the contracted ``ConfigError``."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{field} must be a number; got {value!r}.") from None
+
+
 def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     """Parse + validate the ``memory:`` block (design §7).
 
@@ -518,8 +539,10 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
 
     skills_raw = memory_raw.get("skills") or {}
     skills = SkillsStoreConfig(
-        max_count=int(skills_raw.get("max_count", 40)),
-        overflow_limit=int(skills_raw.get("overflow_limit", 50)),
+        max_count=_cfg_int(skills_raw.get("max_count", 40), "memory.skills.max_count"),
+        overflow_limit=_cfg_int(
+            skills_raw.get("overflow_limit", 50), "memory.skills.overflow_limit"
+        ),
     )
     _validate_bound(
         "memory.skills", "max_count", skills.max_count, skills.overflow_limit
@@ -527,8 +550,12 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
 
     mr_raw = memory_raw.get("must_remember") or {}
     must_remember = MustRememberStoreConfig(
-        max_length=int(mr_raw.get("max_length", 8000)),
-        overflow_limit=int(mr_raw.get("overflow_limit", 10000)),
+        max_length=_cfg_int(
+            mr_raw.get("max_length", 8000), "memory.must_remember.max_length"
+        ),
+        overflow_limit=_cfg_int(
+            mr_raw.get("overflow_limit", 10000), "memory.must_remember.overflow_limit"
+        ),
     )
     _validate_bound(
         "memory.must_remember",
@@ -540,11 +567,20 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     el_raw = memory_raw.get("emotional_log") or {}
     decay_raw = el_raw.get("decay") or {}
     emotional_log = EmotionalStoreConfig(
-        max_length=int(el_raw.get("max_length", 12000)),
-        overflow_limit=int(el_raw.get("overflow_limit", 15000)),
-        weight_cap=float(el_raw.get("weight_cap", 10.0)),
+        max_length=_cfg_int(
+            el_raw.get("max_length", 12000), "memory.emotional_log.max_length"
+        ),
+        overflow_limit=_cfg_int(
+            el_raw.get("overflow_limit", 15000), "memory.emotional_log.overflow_limit"
+        ),
+        weight_cap=_cfg_float(
+            el_raw.get("weight_cap", 10.0), "memory.emotional_log.weight_cap"
+        ),
         decay=EmotionalDecayConfig(
-            magnitude_per_day=float(decay_raw.get("magnitude_per_day", 0.1)),
+            magnitude_per_day=_cfg_float(
+                decay_raw.get("magnitude_per_day", 0.1),
+                "memory.emotional_log.decay.magnitude_per_day",
+            ),
         ),
     )
     _validate_bound(

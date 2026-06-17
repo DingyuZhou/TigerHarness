@@ -206,3 +206,34 @@ def test_zero_decay_rate_allowed(tmp_path: Path) -> None:
     )
     m = load_config(cfg).memory
     assert m.emotional_log.decay.magnitude_per_day == 0.0
+
+
+@pytest.mark.parametrize(
+    "block, field",
+    [
+        (
+            "memory:\n  skills:\n    max_count: lots\n",
+            "memory.skills.max_count",
+        ),
+        (
+            "memory:\n  must_remember:\n    max_length: big\n",
+            "memory.must_remember.max_length",
+        ),
+        (
+            "memory:\n  emotional_log:\n    weight_cap: heavy\n",
+            "memory.emotional_log.weight_cap",
+        ),
+        (
+            "memory:\n  emotional_log:\n    decay:\n      magnitude_per_day: fast\n",
+            "memory.emotional_log.decay.magnitude_per_day",
+        ),
+    ],
+)
+def test_rejects_non_numeric_memory_value_with_config_error(
+    tmp_path: Path, block: str, field: str
+) -> None:
+    """QI-4 (convergence pass #3): a non-numeric ``memory:`` value must raise the
+    contracted ``ConfigError`` with the field named, not leak a raw ValueError."""
+    cfg = _write_cfg(tmp_path, block)
+    with pytest.raises(ConfigError, match=field.replace(".", r"\.")):
+        load_config(cfg)
