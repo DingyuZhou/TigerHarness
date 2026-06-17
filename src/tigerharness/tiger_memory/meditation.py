@@ -132,45 +132,85 @@ def _judge_similar(summarizer: Summarizer, a: BaseEntry, b: BaseEntry) -> bool:
     return _ask_yes_no(summarizer, prompt, default=False)
 
 
-# ----- cheap Python prefilter gate (QI-2: keep merge sub-quadratic) ---------
+# ----- cheap Python prefilter gate (QI-2/QI-3: keep merge sub-quadratic) -----
 
-# A pair is only worth a summarizer call if its *words* overlap at all. The
-# merge step folds duplicate/near-duplicate entries; two entries that share
-# zero normalized word can't be near-duplicates of the same fact/lesson/
-# feeling, so asking the model about them is pure quadratic waste. This pure,
-# deterministic gate (no I/O, no model) runs in front of every
-# :func:`_judge_similar` call so obviously-dissimilar pairs never hit the LLM.
+# A pair is only worth a summarizer call if its *content* words overlap. The
+# merge step folds duplicate/near-duplicate entries; two entries that share no
+# content word can't be near-duplicates of the same fact/lesson/feeling, so
+# asking the model about them is pure quadratic waste. This pure, deterministic
+# gate (no I/O, no model) runs in front of every :func:`_judge_similar` call so
+# obviously-dissimilar pairs never hit the LLM.
+#
+# QI-3 fix: the original gate compared *all* normalized tokens, including
+# stopwords. Real prose entries ("the operator asked me to handle the deploy
+# task for the team") always share ubiquitous stopwords (``the``, ``a``, ``i``,
+# ``to``...), so on realistic data the gate matched every pair and meditation
+# stayed O(n²) in summarizer calls — exactly the workload QI-2 claimed to fix.
+# The gate now strips a small closed-class stopword set FIRST and requires at
+# least one shared **content** token. Stopword-only overlap (the realistic
+# false positive) is gated out; genuine near-duplicates still share the
+# concrete subject words (deploy, api, revamp...) that survive stripping.
 #
 # It is deliberately tuned CONSERVATIVE: it errs toward *letting a pair
 # through* to the model. A genuinely-similar pair the gate skips would be a
 # correctness regression (a missed merge), whereas a dissimilar pair the gate
-# lets through only costs one extra model call the model then answers NO. So
-# the gate skips a pair ONLY when the two entries share **no normalized
-# content token at all** — the unambiguous "these cannot be the same
-# fact/lesson/feeling" case. Any shared word at all defers to the LLM.
+# lets through only costs one extra model call the model then answers NO. So:
+#   - an entry whose *content* token set is empty after stripping (all tokens
+#     were stopwords / punctuation) is never token-matched — defer to the LLM;
+#   - otherwise the gate skips a pair ONLY when their content-token sets are
+#     disjoint. Any shared content word at all defers to the LLM.
 
 _WORD_RE = re.compile(r"[0-9a-z]+")
 
+# A small, closed-class English stopword set: high-frequency function words
+# (articles, pronouns, prepositions, conjunctions, auxiliaries) plus the
+# single-character tokens ``i``/``a`` that the original tokenizer emitted.
+# These carry no near-duplicate *subject* signal — two unrelated prose entries
+# routinely share several — so they are excluded from the overlap test. The
+# set is intentionally short and generic (it does NOT try to be a full NLP
+# stoplist): every word here is one whose presence in BOTH entries says
+# nothing about whether they record the same fact/lesson/feeling.
+_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
+        "did", "do", "does", "for", "from", "had", "has", "have", "he",
+        "her", "him", "his", "i", "if", "in", "into", "is", "it", "its",
+        "me", "my", "no", "not", "of", "on", "or", "our", "out", "she",
+        "so", "than", "that", "the", "their", "them", "then", "there",
+        "these", "they", "this", "to", "too", "up", "us", "was", "we",
+        "were", "what", "when", "which", "who", "will", "with", "would",
+        "you", "your",
+    }
+)
+
 
 def _norm_tokens(text: str) -> frozenset[str]:
-    """Lowercase content tokens of *text* (alphanumeric runs, deduped)."""
-    return frozenset(_WORD_RE.findall(text.lower()))
+    """Lowercase content tokens of *text* (alphanumeric runs, stopwords removed).
+
+    Stopwords (``_STOPWORDS``) are dropped so the overlap test in
+    :func:`_might_be_similar` keys on subject-bearing words, not on the
+    function words every prose entry shares (QI-3).
+    """
+    return frozenset(
+        t for t in _WORD_RE.findall(text.lower()) if t not in _STOPWORDS
+    )
 
 
 def _might_be_similar(a: BaseEntry, b: BaseEntry) -> bool:
     """Cheap gate: could *a* and *b* plausibly be near-duplicates?
 
-    Returns ``False`` only for pairs that share **no** normalized content
-    token — those can never be the same fact/lesson/feeling, so they skip the
-    summarizer entirely. Any positive token overlap (or an entry with no
-    content tokens, e.g. punctuation-only) returns ``True`` and the pair still
-    gets the full LLM judgement, so the gate never *causes* a missed merge: it
-    only removes calls the model would have answered NO to.
+    Returns ``False`` only for pairs whose **content** token sets (stopwords
+    stripped) are disjoint — those can never be the same fact/lesson/feeling,
+    so they skip the summarizer entirely. Any shared content token (or an entry
+    with no content tokens left after stripping, e.g. all-stopword or
+    punctuation-only) returns ``True`` and the pair still gets the full LLM
+    judgement, so the gate never *causes* a missed merge: it only removes calls
+    the model would have answered NO to.
     """
     ta, tb = _norm_tokens(a.text), _norm_tokens(b.text)
     if not ta or not tb:
-        # An entry with no content tokens can't be token-matched; defer to the
-        # model rather than silently gate it out.
+        # No content tokens to match on (all stopwords / punctuation): defer to
+        # the model rather than silently gate it out.
         return True
     return bool(ta & tb)
 
@@ -331,12 +371,14 @@ def _merge_pass(
     recorded in the log.
 
     A cheap Python prefilter (:func:`_might_be_similar`) gates each pair BEFORE
-    the LLM call (QI-2): a survivor sharing no normalized content token with
-    the candidate can't be a near-duplicate, so it never reaches the
-    summarizer. The naive form was O(n²) summarizer calls (n·(n−1)/2 — ~1225
-    for 50 distinct entries, ~11k at overflow); the gate drops the LLM calls
-    for all-distinct stores to ~0 while still asking the model about every
-    pair with any word overlap, so genuine merges are unaffected.
+    the LLM call (QI-2/QI-3): a survivor sharing no *content* token (stopwords
+    stripped) with the candidate can't be a near-duplicate, so it never reaches
+    the summarizer. The naive form was O(n²) summarizer calls (n·(n−1)/2 —
+    ~1225 for 50 distinct entries, ~11k at overflow). The gate strips stopwords
+    first (QI-3), so it stays selective on realistic prose — entries that merely
+    share function words like ``the``/``a``/``i`` are gated out — while every
+    pair with any shared subject word still reaches the model, so genuine merges
+    are unaffected.
     """
     survivors: list[BaseEntry] = []
     for entry in entries:

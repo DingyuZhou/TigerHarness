@@ -353,26 +353,109 @@ def _similarity_calls(summ: ScriptedSummarizer) -> int:
     )
 
 
-def test_merge_prefilter_dissimilar_calls_are_subquadratic(tmp_path: Path) -> None:
-    """N all-distinct entries (no shared content word) must NOT cost
-    O(n²) summarizer calls. The cheap Python prefilter gates every pair out
-    before the LLM, so the similarity-judgement call count is ~0, far under
-    the naive n·(n−1)/2 (= 190 for n=20)."""
-    n = 20
+# A bank of genuinely-varied, semantically-distinct prose entries. Each is a
+# different feeling about a different subject, the way a real persona's
+# emotional store reads — they share only function words (the/a/i/to/was/...),
+# never a subject word. The realistic workload QI-3 is about: the OLD gate
+# (raw-token overlap, no stopword stripping) matched almost every pair on those
+# stopwords and stayed O(n²); the QI-3 gate strips stopwords and gates them out.
+_PROSE_BANK = [
+    "felt proud when the deploy pipeline finally went green after days of red",
+    "was annoyed the standup ran twenty minutes over again this morning",
+    "loved how the new caching layer cut page loads almost in half",
+    "worried the schema migration would lock the table during peak hours",
+    "grateful a teammate spotted the off-by-one before it reached customers",
+    "frustrated by a flaky test that only fails on remote runners not here",
+    "relieved the rollback script worked exactly as documented under pressure",
+    "excited about moving search onto a proper inverted index next quarter",
+    "tired of chasing memory leaks in the long running worker process",
+    "happy the docs finally explain how to rotate the signing keys safely",
+    "uneasy about how much config now lives in environment variables",
+    "proud the rate limiter held during the unexpected traffic surge today",
+    "irritated that the linter and formatter disagree on import ordering",
+    "thankful the on call runbook covered the exact failure we hit at dawn",
+    "curious whether batching the webhook deliveries would reduce server load",
+    "disappointed the demo crashed on a path nobody had exercised before",
+    "satisfied after pairing to untangle the gnarly retry backoff logic",
+    "anxious the backup job silently skipped a database for a whole week",
+    "delighted a small refactor made the parser roughly twice as fast",
+    "concerned the alerting is so noisy that people ignore real pages now",
+    "glad we finally deleted the dead feature flag and all its old branches",
+    "stressed the release froze waiting on a slow dependency security audit",
+    "amused the bug turned out to be a timezone offset by one single hour",
+    "motivated after reading how another team structures their large monorepo",
+    "embarrassed the typo in the email template went out to every subscriber",
+]
+
+
+def _raw_token_overlap_calls(texts: list[str]) -> int:
+    """Pairs the OLD prefilter (raw tokens, NO stopword stripping) would pass.
+
+    Models the pre-QI-3 ``_might_be_similar``: any shared lowercase
+    alphanumeric run (stopwords included) → the pair reaches the LLM. This is
+    the regression baseline the new test must beat.
+    """
+    import re
+
+    word_re = re.compile(r"[0-9a-z]+")
+    raw = [frozenset(word_re.findall(t.lower())) for t in texts]
+    return sum(
+        1
+        for i in range(len(raw))
+        for j in range(i + 1, len(raw))
+        if raw[i] & raw[j]
+    )
+
+
+def test_merge_prefilter_subquadratic_on_prose_sharing_stopwords(
+    tmp_path: Path,
+) -> None:
+    """QI-3: realistic prose sharing stopwords must NOT cost O(n²) LLM calls.
+
+    The entries are genuinely-distinct prose (different feeling about a
+    different subject) that share only function words like ``the``/``a``/``i``/
+    ``to``. This is the workload the old all-token prefilter FAILED to gate:
+    every pair shared a stopword, so it deferred every pair to the model and
+    stayed quadratic. The QI-3 stopword-stripping gate keys on subject words,
+    so these pairs are gated out and the similarity-judgement call count is
+    sub-quadratic (<= c*n), FAR under the naive n·(n−1)/2.
+
+    Hard guard against the regression: we assert the count is well below what
+    the OLD raw-token gate would have produced on this very data — so this test
+    would FAIL against the pre-QI-3 prefilter (which gated nothing here).
+    """
+    n = len(_PROSE_BANK)  # 25
     bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
-    # Each entry shares no token with any other (distinct word per entry),
-    # and each is short so together they exceed the overflow limit and the
-    # merge pass actually runs.
-    entries = [_emo(1.0 + i * 0.1, f"alpha{i}word") for i in range(n)]
+    entries = [_emo(1.0 + i * 0.1, _PROSE_BANK[i]) for i in range(n)]
     bs.save_atomic("emotional", entries)
-    summ = ScriptedSummarizer()  # nothing scripted similar anyway
+    summ = ScriptedSummarizer()  # none scripted similar; gate decides call count
     meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
 
-    quadratic = n * (n - 1) // 2  # 190 — what the naive pairwise loop would do
+    quadratic = n * (n - 1) // 2  # 300 — the naive pairwise loop
+    old_gate_calls = _raw_token_overlap_calls(_PROSE_BANK)
     calls = _similarity_calls(summ)
-    # Sub-quadratic: bounded by c*n, not n². Here the prefilter gates ALL
-    # pairs (zero shared tokens) so it is 0 << 190.
-    assert calls <= 2 * n
+
+    # The OLD prefilter would have passed almost every pair on shared stopwords
+    # (proving the regression existed on this data) ...
+    assert old_gate_calls > quadratic // 2  # >150 of 300 — effectively quadratic
+    # ... while the QI-3 gate keeps it sub-quadratic and far below the old gate.
+    assert calls <= 2 * n  # <= 50: bounded by c*n, not n²
+    assert calls < old_gate_calls // 2  # decisively beats the pre-QI-3 gate
+
+
+def test_merge_prefilter_disjoint_tokens_gates_all(tmp_path: Path) -> None:
+    """Token-disjoint entries (no shared content word at all) cost ~0 LLM calls
+    — the prefilter's best case, preserved from QI-2."""
+    n = 20
+    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
+    entries = [_emo(1.0 + i * 0.1, f"alpha{i}word") for i in range(n)]
+    bs.save_atomic("emotional", entries)
+    summ = ScriptedSummarizer()
+    meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+
+    quadratic = n * (n - 1) // 2  # 190
+    calls = _similarity_calls(summ)
+    assert calls == 0  # all pairs gated (zero shared tokens)
     assert calls < quadratic
 
 
@@ -393,18 +476,57 @@ def test_merge_prefilter_lets_similar_pairs_merge(tmp_path: Path) -> None:
     assert len(survivors) == 1 and survivors[0].weight == 10.0
 
 
+def test_merge_similar_prose_sharing_stopwords_still_merges(
+    tmp_path: Path,
+) -> None:
+    """No over-gating (QI-3): two genuinely-similar prose entries that share
+    BOTH stopwords AND subject words must still pass the gate and merge.
+
+    This is the safety direction of the QI-3 fix: stripping stopwords must not
+    gate out a real near-duplicate. Both entries are about the same deploy
+    going green; they share the content words ``deploy``/``green`` (plus
+    stopwords), so the gate defers them to the LLM, which judges YES and merges.
+    """
+    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
+    a = _emo(8.0, "the deploy finally went green")
+    b = _emo(7.0, "so glad the deploy was green")
+    bs.save_atomic("emotional", [a, b])
+    summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
+    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    # Shared content words (deploy/green) passed the gate despite the entries
+    # also sharing stopwords; the scripted summarizer judged YES, so b merged.
+    assert b.id in log.merged and log.merged[b.id] == a.id
+    assert _similarity_calls(summ) >= 1  # the pair DID reach the LLM
+    survivors = bs.load("emotional")
+    assert len(survivors) == 1 and survivors[0].weight == 10.0
+
+
 def test_might_be_similar_gate_unit(tmp_path: Path) -> None:
-    """Unit-cover the gate: no shared token -> skip; shared token -> defer;
-    an entry with no content tokens -> defer (never silently gated out)."""
-    from tigerharness.tiger_memory.meditation import _might_be_similar
+    """Unit-cover the gate: no shared CONTENT token -> skip; shared content
+    token -> defer; shared only-stopwords -> skip (QI-3); an entry with no
+    content tokens (all stopwords / punctuation) -> defer (never silently
+    gated out)."""
+    from tigerharness.tiger_memory.meditation import (
+        _might_be_similar,
+        _norm_tokens,
+    )
 
     share = _emo(1.0, "loved the clean api")
     other = _emo(1.0, "loved that clean api too")
     disjoint = _emo(1.0, "hated verbose yaml configs")
+    stopword_only = _emo(1.0, "i was at the desk")  # only stopwords overlap
+    all_stop = _emo(1.0, "i was at the and to")  # no content tokens at all
     empty_tokens = _emo(1.0, "!!! ??? ...")  # punctuation-only -> no tokens
 
+    # Stopwords are stripped: "the" in `share` and `stopword_only` does NOT
+    # count as shared content.
+    assert _norm_tokens(stopword_only.text) == frozenset({"desk"})
+    assert _norm_tokens(all_stop.text) == frozenset()  # all stripped
+
     assert _might_be_similar(share, other) is True   # share "loved/clean/api"
-    assert _might_be_similar(share, disjoint) is False  # zero shared tokens
+    assert _might_be_similar(share, disjoint) is False  # zero shared content
+    assert _might_be_similar(share, stopword_only) is False  # only "the" shared
+    assert _might_be_similar(all_stop, share) is True  # no content -> defer
     assert _might_be_similar(empty_tokens, share) is True  # defer, don't gate
     assert _might_be_similar(share, empty_tokens) is True  # symmetric defer
 
