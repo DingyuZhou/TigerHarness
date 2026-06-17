@@ -1,14 +1,12 @@
-"""Additional store tests — atomic_swap_dir, lock, find_*, state IO, _pid_alive."""
+"""Additional store tests — atomic_swap_dir, lock, state IO, _pid_alive."""
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
-from tigerharness.tiger_memory.store import Store, _pid_alive, _refresh_lockfile_loop
+from tigerharness.tiger_memory.store import Store, _pid_alive
 
 
 class TestAtomicSwapDir:
@@ -40,47 +38,6 @@ class TestAtomicSwapDir:
         target = tmp_path / "memory" / "new_target"
         store.atomic_swap_dir(new_dir, target)
         assert (target / "x.txt").exists()
-
-
-class TestFindArchive:
-    def test_finds_existing(self, tmp_path: Path):
-        store = Store(tmp_path / "memory")
-        store.init_layout()
-        uid = str(uuid4())
-        archive = store.paths.archive / f"20260514-082136-{uid}.md"
-        archive.write_text("archive content")
-        result = store.find_archive(uid)
-        assert result == archive
-
-    def test_returns_none_when_missing(self, tmp_path: Path):
-        store = Store(tmp_path / "memory")
-        store.init_layout()
-        assert store.find_archive("nonexistent-uuid") is None
-
-    def test_raises_on_duplicates(self, tmp_path: Path):
-        store = Store(tmp_path / "memory")
-        store.init_layout()
-        uid = str(uuid4())
-        (store.paths.archive / f"20260514-082136-{uid}.md").write_text("a")
-        (store.paths.archive / f"20260515-093000-{uid}.md").write_text("b")
-        with pytest.raises(RuntimeError, match="multiple archives"):
-            store.find_archive(uid)
-
-
-class TestFindShort:
-    def test_finds_short(self, tmp_path: Path):
-        store = Store(tmp_path / "memory")
-        store.init_layout()
-        uid = str(uuid4())
-        short = store.paths.journal / f"20260514-082136-{uid}.md"
-        short.write_text("short content")
-        result = store.find_short(uid)
-        assert result == short
-
-    def test_returns_none_when_missing(self, tmp_path: Path):
-        store = Store(tmp_path / "memory")
-        store.init_layout()
-        assert store.find_short("nonexistent-uuid") is None
 
 
 class TestLock:
@@ -150,17 +107,3 @@ class TestPidAlive:
         assert _pid_alive(999999999) is False
 
 
-class TestWorkingDays:
-    def test_returns_sorted_desc(self, tmp_path: Path):
-        store = Store(tmp_path / "memory")
-        store.init_layout()
-        uid1, uid2 = str(uuid4()), str(uuid4())
-        (store.paths.journal / f"20260514-082136-{uid1}.md").write_text("a")
-        (store.paths.journal / f"20260515-093000-{uid2}.md").write_text("b")
-        days = store.working_days()
-        assert days == ["20260515", "20260514"]
-
-    def test_empty_store(self, tmp_path: Path):
-        store = Store(tmp_path / "memory")
-        store.init_layout()
-        assert store.working_days() == []

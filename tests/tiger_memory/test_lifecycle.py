@@ -426,6 +426,10 @@ def test_rebuild_drops_legacy_surface(tmp_path: Path) -> None:
     (journal / "20260101-daily-abc.md").write_text("a daily")
     (journal / "20260101-week-abc.md").write_text("a weekly")
     (journal / "202601-month-abc.md").write_text("a monthly")
+    # Simulate a pre-existing legacy archive dir from an old store. The live
+    # layout no longer creates archive/ (GAP-1), so a real migration would
+    # only see it when an old store carried one — recreate that here.
+    store.paths.archive.mkdir(parents=True, exist_ok=True)
     (store.paths.archive / "x.md").write_text("archive entry")
     # A new-store file must survive the fresh start.
     (journal / "skills.md").write_text("---\nid: x\nstore: skills\n---\nkeep me\n")

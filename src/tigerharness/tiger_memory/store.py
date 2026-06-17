@@ -1,20 +1,24 @@
 """Filesystem store for tiger-memory: folder layout, atomic writes, lock.
 
-Layout (design doc §4):
+Layout (design doc §4 — the shipped three-store model):
     <root>/
-        archive/    detailed summaries (one per conv)
-        journal/    shorts + rollups + must_memorize + longer_memory
+        journal/    the three bounded stores:
+                    ``skills.md`` / ``must_remember.md`` / ``emotional.md``
+                    plus ``.state.json`` (sweep bookkeeping)
         briefing/   session-load working set (rebuilt atomically)
+
+There is no ``archive/`` dir and no chronological rollups: §3/§9 retired the
+detailed-summary archive, the daily/weekly/monthly rollup ladder, and
+``longer_memory`` entirely. The migration is a fresh start
+(``lifecycle._drop_legacy_surface``) that *deletes* any pre-existing legacy
+surface from an old store; ``init_layout`` never (re)creates it.
 
 All writes are write-tmp-then-rename so a crash mid-write never leaves
 a partial file. The briefing rebuild is full-folder swap.
 
-Filename conventions (§4.1):
-    Short:   YYYYMMDD-HHmmss-<UUID>.md
-    Daily:   YYYYMMDD-daily-<UUID>.md
-    Weekly:  YYYYMMDD-week-<UUID>.md   (Monday's date)
-    Monthly: YYYYMM-month-<UUID>.md
-    Archive: same filename as short, in archive/
+The ``*_RE`` filename patterns below describe the *retired* chronological
+shapes; they survive only so ``lifecycle._drop_legacy_surface`` can recognise
+and delete leftover rollup ``.md`` files on a fresh-start migration.
 """
 from __future__ import annotations
 
@@ -28,19 +32,15 @@ import shutil
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
 log = logging.getLogger("tigerharness.tiger_memory.store")
 
 
-# Glob/regex patterns per §4.1
-SHORT_GLOB = "[0-9]" * 8 + "-[0-9]" * 6 + "-*.md"
-DAILY_GLOB_TEMPLATE = "{date}-daily-*.md"
-WEEKLY_GLOB_TEMPLATE = "{monday}-week-*.md"
-MONTHLY_GLOB_TEMPLATE = "{year_month}-month-*.md"
-
+# Regex patterns for the retired chronological filename shapes. KEPT (not the
+# generators/globs, which are gone) because ``lifecycle._drop_legacy_surface``
+# still uses these to identify+delete legacy rollup ``.md`` files on migration.
 SHORT_RE = re.compile(r"^(\d{8})-(\d{6})-(.+)\.md$")
 DAILY_RE = re.compile(r"^(\d{8})-daily-(.+)\.md$")
 WEEKLY_RE = re.compile(r"^(\d{8})-week-(.+)\.md$")
@@ -50,17 +50,21 @@ MONTHLY_RE = re.compile(r"^(\d{6})-month-(.+)\.md$")
 @dataclass(frozen=True)
 class Paths:
     root: Path
-    archive: Path
     journal: Path
     briefing: Path
+    # The retired detailed-summary archive dir. NOT part of the live layout —
+    # ``init_layout`` never creates it. Resolved only so the fresh-start
+    # migration (``lifecycle._drop_legacy_surface``) can delete a pre-existing
+    # one left behind by an old store.
+    archive: Path
 
     @classmethod
     def from_root(cls, root: Path) -> "Paths":
         return cls(
             root=root,
-            archive=root / "archive",
             journal=root / "journal",
             briefing=root / "briefing",
+            archive=root / "archive",
         )
 
 
@@ -74,21 +78,22 @@ class Store:
     # ----- layout -------------------------------------------------------
 
     def init_layout(self) -> None:
-        """Create the folder layout if missing.
+        """Create the live folder layout if missing.
 
-        Drops ``.gitkeep`` in ``archive/`` and ``journal/`` so the
-        empty directories are trackable by git from the first commit
-        (briefing/ is gitignored and doesn't need one).
+        The live layout is just ``journal/`` + ``briefing/``; the retired
+        ``archive/`` dir is NOT (re)created here (see ``Paths.archive``).
+        Drops a ``.gitkeep`` in ``journal/`` so the empty directory is
+        trackable by git from the first commit (briefing/ is gitignored and
+        doesn't need one).
         """
-        for d in (self.paths.archive, self.paths.journal, self.paths.briefing):
+        for d in (self.paths.journal, self.paths.briefing):
             d.mkdir(parents=True, exist_ok=True)
-        for d in (self.paths.archive, self.paths.journal):
-            gitkeep = d / ".gitkeep"
-            if not gitkeep.exists():
-                gitkeep.write_text("")
+        gitkeep = self.paths.journal / ".gitkeep"
+        if not gitkeep.exists():
+            gitkeep.write_text("")
 
     def exists(self) -> bool:
-        return self.paths.archive.exists() and self.paths.journal.exists()
+        return self.paths.journal.exists()
 
     # ----- atomic write -------------------------------------------------
 
@@ -121,64 +126,6 @@ class Store:
             raise
         if backup.exists():
             shutil.rmtree(backup)
-
-    # ----- session/file resolution (§7.9) -------------------------------
-
-    def find_archive(self, conversation_uuid: str) -> Path | None:
-        """Glob ``archive/*-<UUID>.md`` — at most one match."""
-        matches = list(self.paths.archive.glob(f"*-{conversation_uuid}.md"))
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise RuntimeError(
-                f"multiple archives for uuid {conversation_uuid}: {matches}"
-            )
-        return matches[0]
-
-    def find_short(self, conversation_uuid: str) -> Path | None:
-        """Locate the short summary for *conversation_uuid*.
-
-        Excludes rollups by enforcing the time-bearing filename pattern.
-        """
-        for f in self.paths.journal.glob(f"*-{conversation_uuid}.md"):
-            if SHORT_RE.match(f.name):
-                return f
-        return None
-
-    # ----- filename derivation ------------------------------------------
-
-    @staticmethod
-    def short_filename(first_event_at: datetime, conversation_uuid: str) -> str:
-        return (
-            f"{first_event_at.strftime('%Y%m%d-%H%M%S')}-"
-            f"{conversation_uuid}.md"
-        )
-
-    @staticmethod
-    def daily_filename(date_str_yyyymmdd: str, rollup_uuid: str) -> str:
-        return f"{date_str_yyyymmdd}-daily-{rollup_uuid}.md"
-
-    @staticmethod
-    def weekly_filename(monday_str_yyyymmdd: str, rollup_uuid: str) -> str:
-        return f"{monday_str_yyyymmdd}-week-{rollup_uuid}.md"
-
-    @staticmethod
-    def monthly_filename(year_month_str_yyyymm: str, rollup_uuid: str) -> str:
-        return f"{year_month_str_yyyymm}-month-{rollup_uuid}.md"
-
-    # ----- enumerators --------------------------------------------------
-
-    def working_days(self) -> list[str]:
-        """All distinct YYYYMMDD prefixes that have ≥ 1 short summary.
-
-        Returned newest-first (sorted desc).
-        """
-        dates: set[str] = set()
-        for f in self.paths.journal.glob("*.md"):
-            m = SHORT_RE.match(f.name)
-            if m:
-                dates.add(m.group(1))
-        return sorted(dates, reverse=True)
 
     # ----- lock (§7.2) --------------------------------------------------
 
