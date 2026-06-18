@@ -31,16 +31,6 @@ slack = [
 memory = [
     "pyyaml>=6.0",
 ]
-memory-rag = [
-    "pyyaml>=6.0",
-    "fastembed>=0.4",
-    "sqlite-vec>=0.1",
-]
-memory-rag-openai = [
-    "pyyaml>=6.0",
-    "openai>=1.0",
-    "sqlite-vec>=0.1",
-]
 # Pulls in Anthropic's official Claude Agent SDK for the anthropic_sdk
 # backend. Without this extra, only the `claude_p` (subprocess) backend
 # is functional; `get_backend("anthropic_sdk")` raises a clear error
@@ -53,9 +43,6 @@ all = [
     "aiohttp>=3.9",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
-    "fastembed>=0.4",
-    "sqlite-vec>=0.1",
-    "openai>=1.0",
     "claude-agent-sdk>=0.1.0",
 ]
 

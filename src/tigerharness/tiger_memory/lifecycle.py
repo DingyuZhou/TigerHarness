@@ -1,27 +1,54 @@
-"""Lazy rebuild engine — bootstrap, rebuild, resummarize.
+"""Session → memory extraction (bounded-store revamp; design §2, §4; plan §2 dev-3).
 
-Implements §7 (algorithm) and §11 (bootstrap) of the design doc.
+This module turns a *finished* session — discovered via the unchanged
+``sources/`` adapters — into candidate entries for the three bounded stores
+(``skills`` / ``must_remember`` / ``emotional``), in-persona, then ingests
+them through Mitsui's :class:`BoundedStore`. It replaces the old
+rollup / archive / ``longer_memory`` chronological lifecycle entirely
+(design §3 — fully retired, no safety net).
+
+The only model touch point is the extraction *judgement*, which goes through
+the pluggable summarizer registry (mock in CI, plan §5b). Discovery, the
+idle/clean decision, parsing, merging, and the fresh-start ``rebuild`` are
+pure Python.
+
+Two write paths share the same parse + ingest core:
+
+- **in-process** (``extract_and_ingest``): a Python summarizer runs the
+  extraction call directly — used by tests under the mock and by any caller
+  that already has a :class:`Summarizer`.
+- **in-session sub-agent** (``plan_extraction`` → ``executor.ingest_extraction``):
+  ``plan_extraction`` stages one prompt per flagged transcript under
+  ``.sweep-staging/``; an in-persona Task sub-agent reads the staged prompt,
+  emits the bundle, and writes it back via the CLI (so the bulky transcript
+  never transits the driver's context). This is the subscription-rail path
+  (design §2 — never an inline ``claude -p``).
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
-import subprocess
-import sys
 import time
-from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from typing import Iterable
 
-from . import frontmatter, must_memorize as mm
-from .collapse import CollapseParseError, parse_collapsed
+from .bounded_store import BoundedStore
 from .config import Config
-from .metrics import RebuildMetrics
+from .entries import (
+    KIND_OWNER_EXPLICIT,
+    STORE_EMOTIONAL,
+    STORE_MUST_REMEMBER,
+    STORE_SKILLS,
+    VALID_KINDS,
+    BaseEntry,
+    EmotionalEntry,
+    MustRememberEntry,
+    SkillEntry,
+)
 from .prefilter import filter_transcript
+from .skills import refresh_importance
 from .sources import (
     ClaudeTranscriptAdapter,
     DocsAdapter,
@@ -30,15 +57,8 @@ from .sources import (
     SourceRecord,
 )
 from .state import iso_now
-from .store import (
-    DAILY_RE,
-    MONTHLY_RE,
-    SHORT_RE,
-    WEEKLY_RE,
-    Store,
-)
+from .store import Store
 from .summarizers import (
-    AnthropicSummarizer,
     MockSummarizer,
     Summarizer,
     get_summarizer,
@@ -50,433 +70,289 @@ log = logging.getLogger("tigerharness.tiger_memory.lifecycle")
 
 # ----- session-decision constants ------------------------------------------
 
-SKIP_ACTIVE = "skip_active"
-SUMMARIZE_NEW = "summarize_new"
-SKIP_CLEAN = "skip_clean"
-RE_SUMMARIZE = "re_summarize"
-ADDENDUM = "addendum"
+SKIP_ACTIVE = "skip_active"        # still-active session — not idle yet
+EXTRACT = "extract"                # idle session not yet processed
 
 
 @dataclass
 class Decision:
     record: SourceRecord
     action: str
-    existing_archive: Path | None = None
-    existing_short: Path | None = None
 
 
-# ----- entry points: bootstrap / rebuild / resummarize --------------------
+# ----- extraction candidate parsing -----------------------------------------
+
+# The extraction prompt's strict output contract (see
+# ``summarizers/prompts/default/v1/extract_memory.md``): three whole-line
+# section markers, in this order.
+MARK_SKILLS = "@@SKILLS@@"
+MARK_MUST_REMEMBER = "@@MUST_REMEMBER@@"
+MARK_EMOTIONAL = "@@EMOTIONAL@@"
+_MARKERS = (MARK_SKILLS, MARK_MUST_REMEMBER, MARK_EMOTIONAL)
 
 
-def bootstrap(
-    cfg: Config,
-    store: Store,
-    *,
-    dry_run: bool = False,
-    limit: int | None = None,
-    summarizer_override: Summarizer | None = None,
-) -> int:
-    """One-shot backfill (§11). Resumable: already-written archives skip."""
-    store.init_layout()
-    with store.lock(cfg.rebuild.lock_path, cfg.rebuild.rebuild_timeout_minutes) as got:
-        if not got:
-            print("another tiger-memory run is in progress.")
-            return 1
-
-        # Bootstrap is a one-shot backfill: ignore the 7-day rebuild cap.
-        # ``--limit`` is the user-visible safety; the discovery cutoff is
-        # only there to gate the lazy rebuild path.
-        adapters = _build_adapters(cfg, max_age_days=None)
-        summarizer = summarizer_override or _build_summarizer(cfg, mock=dry_run)
-        if dry_run:
-            print(f"DRY-RUN: using {summarizer.tag} (no model spend)")
-
-        records = []
-        for adapter in adapters:
-            for rec in adapter.discover():
-                records.append(rec)
-                if limit and len(records) >= limit:
-                    break
-            if limit and len(records) >= limit:
-                break
-
-        # In bootstrap, also process auto-memory directory → synthetic conv.
-        am = _auto_memory_record(cfg, store)
-        if am is not None and (not limit or len(records) < limit):
-            records.append(am)
-
-        print(f"discovered {len(records)} source records")
-
-        # Treat bootstrap same as rebuild — respect 2h idle rule.
-        decisions = _decide(records, store, cfg, now=time.time())
-        new_or_resum = [
-            d for d in decisions
-            if d.action in (SUMMARIZE_NEW, RE_SUMMARIZE, ADDENDUM)
-        ]
-        print(
-            f"to process: {len(new_or_resum)} (new/resummarize/addendum); "
-            f"{sum(1 for d in decisions if d.action == SKIP_CLEAN)} clean; "
-            f"{sum(1 for d in decisions if d.action == SKIP_ACTIVE)} active"
-        )
-
-        if dry_run:
-            sample = new_or_resum[:5]
-            print(f"DRY-RUN: would process {len(sample)} of {len(new_or_resum)}")
-            _process_decisions(sample, store, cfg, summarizer)
-            est = _estimate_total_cost(cfg, len(new_or_resum), records)
-            print(f"DRY-RUN: estimated total cost: ${est:.2f}")
-            return 0
-
-        metrics = RebuildMetrics()
-        cost = _process_decisions(new_or_resum, store, cfg, summarizer, metrics)
-        _finalize_rebuild(
-            store, cfg, summarizer,
-            decisions=decisions, cost=cost, metrics=metrics,
-            last_op="bootstrap",
-        )
-        print(f"bootstrap done. cost: ${cost:.2f}")
-    return 0
+class ExtractionParseError(ValueError):
+    """The extraction output didn't satisfy the marker contract."""
 
 
-def rebuild(
-    cfg: Config,
-    store: Store,
-    *,
-    background: bool = False,
-    summarizer_override: Summarizer | None = None,
-) -> int:
-    """Lazy rebuild (§7.3)."""
-    if background and "TIGER_MEMORY_BACKGROUND_SPAWNED" not in os.environ:
-        return _spawn_background()
-    store.init_layout()
-    with store.lock(cfg.rebuild.lock_path, cfg.rebuild.rebuild_timeout_minutes) as got:
-        if not got:
-            print("another tiger-memory rebuild is in progress; skipping.")
-            return 0  # graceful no-op
-        start = time.time()
-        adapters = _build_adapters(cfg)
-        summarizer = summarizer_override or _build_summarizer(cfg)
+@dataclass
+class Candidates:
+    """Parsed extraction candidates for the three stores (typed, unscored)."""
 
-        records = []
-        for adapter in adapters:
-            # Skip docs in rebuild (one-shot during bootstrap only).
-            if isinstance(adapter, DocsAdapter):
-                continue
-            records.extend(adapter.discover())
+    skills: list[SkillEntry]
+    must_remember: list[MustRememberEntry]
+    emotional: list[EmotionalEntry]
 
-        decisions = _decide(records, store, cfg, now=time.time())
-        new_or_resum = [
-            d for d in decisions
-            if d.action in (SUMMARIZE_NEW, RE_SUMMARIZE, ADDENDUM)
-        ]
+    def is_empty(self) -> bool:
+        return not (self.skills or self.must_remember or self.emotional)
 
-        metrics = RebuildMetrics()
-        cost = _process_decisions(
-            new_or_resum, store, cfg, summarizer, metrics,
-            max_sessions=cfg.cap.max_sessions_per_rebuild,
-            max_usd=cfg.cap.max_usd_per_rebuild,
-        )
-        duration = time.time() - start
-        _finalize_rebuild(
-            store, cfg, summarizer,
-            decisions=decisions, cost=cost, metrics=metrics,
-            last_op="rebuild", duration_sec=duration,
-        )
-    return 0
+    def total(self) -> int:
+        return len(self.skills) + len(self.must_remember) + len(self.emotional)
 
 
-def resummarize(
-    cfg: Config,
-    store: Store,
-    *,
-    since: str,
-    summarizer: str | None = None,
-) -> int:
-    """Re-summarize shorts whose first_event_at is on/after *since* (YYYY-MM-DD)."""
-    store.init_layout()
-    try:
-        since_date = date.fromisoformat(since)
-    except ValueError:
-        print(f"--since must be YYYY-MM-DD; got {since!r}")
-        return 2
-    with store.lock(cfg.rebuild.lock_path, cfg.rebuild.rebuild_timeout_minutes) as got:
-        if not got:
-            print("another run is in progress.")
-            return 1
+def _split_sections(text: str) -> dict[str, str]:
+    """Split a bundle on its whole-line section markers (inverse of the prompt).
 
-        # ``--since`` is the user's explicit date range; the discovery
-        # cutoff would silently override anything older than 7 days.
-        # Disable it here so resummarize honors the requested window.
-        adapters = _build_adapters(cfg, max_age_days=None)
-        summarizer_obj = _build_summarizer(cfg)
+    Markers are matched as whole lines (``line.strip() == marker``) taking the
+    first standalone occurrence of each — so a marker token echoed inline in a
+    section body (e.g. quoted from an untrusted transcript) does not mis-split
+    the bundle. Raises :class:`ExtractionParseError` if any marker is missing
+    or the markers are out of order.
+    """
+    if not text or not text.strip():
+        raise ExtractionParseError("empty extraction output")
+    lines = text.split("\n")
+    pos: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped in _MARKERS and stripped not in pos:
+            pos[stripped] = i
+    if any(m not in pos for m in _MARKERS):
+        raise ExtractionParseError("missing one or more section markers")
+    i_s, i_m, i_e = pos[MARK_SKILLS], pos[MARK_MUST_REMEMBER], pos[MARK_EMOTIONAL]
+    if not (i_s < i_m < i_e):
+        raise ExtractionParseError("section markers out of order")
+    return {
+        STORE_SKILLS: "\n".join(lines[i_s + 1:i_m]).strip(),
+        STORE_MUST_REMEMBER: "\n".join(lines[i_m + 1:i_e]).strip(),
+        STORE_EMOTIONAL: "\n".join(lines[i_e + 1:]).strip(),
+    }
 
-        # Find all sessions whose first_event_at >= since
-        records = []
-        for adapter in adapters:
-            if isinstance(adapter, DocsAdapter):
-                continue
-            for rec in adapter.discover():
-                if rec.first_event_at.date() >= since_date:
-                    records.append(rec)
 
-        forced: list[Decision] = []
-        for rec in records:
-            archive = store.find_archive(rec.conversation_uuid)
-            short = store.find_short(rec.conversation_uuid)
-            forced.append(
-                Decision(
-                    record=rec,
-                    action=RE_SUMMARIZE if archive else SUMMARIZE_NEW,
-                    existing_archive=archive,
-                    existing_short=short,
-                )
+def _section_blocks(section: str) -> list[dict[str, str]]:
+    """Parse one store section into a list of ``FIELD: value`` block dicts.
+
+    ``NONE`` (case-insensitive, possibly with trailing prose) ⇒ zero blocks.
+    Blocks are separated by blank lines; within a block, each ``KEY: value``
+    line contributes a field (keys upper-cased). A value may continue onto
+    following unkeyed lines (appended with a space). Lines before the first
+    key in a block are ignored. Tolerant of extra whitespace.
+    """
+    if not section or section.strip().upper().startswith("NONE"):
+        return []
+    blocks: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    last_key: str | None = None
+    for raw in section.split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            if current:
+                blocks.append(current)
+                current, last_key = {}, None
+            continue
+        key, sep, value = line.partition(":")
+        key_norm = key.strip().upper()
+        if sep and key_norm.isalpha() and " " not in key.strip():
+            current[key_norm] = value.strip()
+            last_key = key_norm
+        elif last_key is not None:
+            current[last_key] = (current[last_key] + " " + line.strip()).strip()
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
+    """Parse an extraction bundle into typed (unscored) store candidates.
+
+    The body markers are validated (:class:`ExtractionParseError` on a
+    malformed bundle, raised BEFORE any candidate is built); within a section,
+    individual malformed blocks are skipped (a missing required field drops
+    just that block, never the whole bundle). ``now`` seeds ``created_at`` /
+    ``last_used``; ``source`` is the provenance tag.
+    """
+    sections = _split_sections(text)
+    skills: list[SkillEntry] = []
+    for b in _section_blocks(sections[STORE_SKILLS]):
+        name, trigger, proc = b.get("NAME"), b.get("TRIGGER"), b.get("PROCEDURE")
+        if not (name and trigger and proc):
+            continue
+        skills.append(
+            SkillEntry(
+                text=proc, created_at=now, last_used=now, source=source,
+                name=name, trigger=trigger, procedure=proc,
+                usage_count=0, importance=0.0,
             )
-        print(f"resummarize: {len(forced)} sessions since {since}")
-
-        metrics = RebuildMetrics()
-        cost = _process_decisions(forced, store, cfg, summarizer_obj, metrics)
-        _finalize_rebuild(
-            store, cfg, summarizer_obj,
-            decisions=forced, cost=cost, metrics=metrics,
-            last_op="resummarize",
         )
-        print(f"resummarize done. cost: ${cost:.2f}")
-    return 0
+    must: list[MustRememberEntry] = []
+    for b in _section_blocks(sections[STORE_MUST_REMEMBER]):
+        kind = (b.get("KIND") or "").lower()
+        memo = b.get("MEMO")
+        if kind not in VALID_KINDS or not memo:
+            continue
+        must.append(
+            MustRememberEntry(
+                text=memo, created_at=now, last_used=now, source=source,
+                kind=kind, importance=1.0,
+            )
+        )
+    emo: list[EmotionalEntry] = []
+    for b in _section_blocks(sections[STORE_EMOTIONAL]):
+        reaction = b.get("REACTION")
+        body = b.get("TEXT") or reaction
+        weight = _parse_weight(b.get("WEIGHT"))
+        if weight is None or not reaction or not body:
+            continue
+        emo.append(
+            EmotionalEntry(
+                text=body, created_at=now, last_used=now, source=source,
+                weight=weight, reaction=reaction,
+            )
+        )
+    return Candidates(skills=skills, must_remember=must, emotional=emo)
 
 
-# ----- finalize stage (shared non-AI tail) ---------------------------------
+def _parse_weight(raw: str | None) -> float | None:
+    """Parse a signed emotional weight; ``None`` if missing/unparseable."""
+    if raw is None:
+        return None
+    try:
+        return float(raw.strip().split()[0]) if raw.strip() else None
+    except (ValueError, IndexError):
+        return None
 
 
-def _finalize_rebuild(
-    store: Store,
+# ----- extraction (the model touch point) -----------------------------------
+
+
+def extract_candidates(
     cfg: Config,
     summarizer: Summarizer,
+    rec: SourceRecord,
     *,
-    decisions: list[Decision],
-    cost: float,
-    metrics: RebuildMetrics,
-    last_op: str,
-    duration_sec: float | None = None,
-) -> None:
-    """The non-AI tail shared by every rebuild entry point
-    (bootstrap / rebuild / resummarize): cascade rollups, fold
-    longer-memory, decay must-memorize, write state, rebuild the briefing.
+    now: str | None = None,
+) -> Candidates:
+    """Run the extraction prompt over *rec* and parse the typed candidates.
 
-    This is the ``finalize`` stage of the P2 plan -> execute -> finalize
-    split (see ``docs/history/tiger-memory-rework.md``, "B1/B8 — implementation
-    design"): the in-session summarization path will call this same tail
-    once its sub-agents have written the per-session artifacts.
+    The single LLM call (mock in CI). A backend error or a malformed bundle is
+    logged-and-swallowed into empty candidates so one bad session never aborts
+    a sweep. The transcript is pre-filtered (if enabled) and clipped to the
+    staged ceiling before the call.
     """
-    _cascade_all_rollups(store, cfg, summarizer)
-    _refresh_longer_memory(store, cfg, summarizer)
-    _apply_decay(store, cfg)
-    # Write state BEFORE building the briefing so the manifest's
-    # last_rebuild_at reflects THIS run, not the previous one.
-    _write_state(
-        store, cfg, decisions=decisions, cost_usd=cost,
-        duration_sec=duration_sec, last_op=last_op, metrics=metrics,
+    now = now or iso_now()
+    content = rec.content
+    if cfg.prefilter.enabled:
+        content = filter_transcript(
+            content,
+            drop_tool_results=cfg.prefilter.drop_tool_results,
+            drop_system_reminders=cfg.prefilter.drop_system_reminders,
+        )
+    content = _clip(content, cfg.budgets.max_prompt_content_chars)
+    prompt = _fill_prompt(
+        _prompts_root(cfg) / "extract_memory.md",
+        agent_name=cfg.agent.name,
+        source=rec.source,
+        source_id=rec.source_id,
+        first_event_at=rec.first_event_at.isoformat(),
+        last_event_at=rec.last_event_at.isoformat(),
+        procedure_max_words=cfg.memory_extract.skill_procedure_words,
+        memo_max_words=cfg.memory_extract.memo_words,
+        reaction_max_words=cfg.memory_extract.reaction_words,
+        weight_cap=int(cfg.memory.emotional_log.weight_cap),
+        content=content,
     )
-    from .briefing import rebuild_briefing
-    rebuild_briefing(cfg, store)
+    try:
+        raw = summarizer.summarize(
+            prompt=prompt, max_words=cfg.memory_extract.max_output_words
+        )
+        return parse_extraction(raw, now=now, source=rec.source)
+    except ExtractionParseError as exc:
+        log.warning("extraction parse failed for %s: %s", rec.conversation_uuid, exc)
+    except Exception:  # noqa: BLE001 — one bad session must not abort the sweep
+        log.exception("extraction call failed for %s", rec.conversation_uuid)
+    return Candidates(skills=[], must_remember=[], emotional=[])
 
 
-# ----- B1 stage-2: plan side (in-session sub-agent executor) ----------------
+# ----- ingest (candidates → bounded stores) ---------------------------------
 
 
-def _sweep_staging_dir(store: Store) -> Path:
-    return store.root / ".sweep-staging"
-
-
-# A summarize sub-agent drops its collapsed bundle here as a "card"; the
-# deferred glue step (``tiger-memory ingest-staged``) reads every card in a
-# single process, so the per-persona must-memorize merge is serialized by
-# construction -- no agent-side coordination, no lost-update race.
-SUMMARY_CARD_SUFFIX = ".summary.md"
-
-
-def _sweep_card_path(store: Store, conversation_uuid: str) -> Path:
-    return _sweep_staging_dir(store) / f"{conversation_uuid}{SUMMARY_CARD_SUFFIX}"
-
-
-def _pack_stacks(
-    weighted: list[tuple[str, int]],
+def ingest_candidates(
+    bstore: BoundedStore,
+    cfg: Config,
+    candidates: Candidates,
     *,
-    char_budget: int,
-    max_items: int,
-) -> list[list[str]]:
-    """Greedily group ``(uuid, weight)`` pairs -- in plan order -- into
-    "stacks", one per summarize sub-agent.
+    now: str | None = None,
+) -> dict[str, int]:
+    """Merge *candidates* into the three bounded stores (per-store, atomic).
 
-    A stack closes when adding the next transcript would push the summed
-    weight over *char_budget*, or once it already holds *max_items*. A
-    transcript heavier than the budget on its own still lands as a solo
-    stack: it opens a fresh stack, and the over-budget check only fires on a
-    non-empty stack, so a single item is never split. Order is preserved and
-    the result is deterministic, so a re-plan reproduces the same grouping.
-
-    This is the load-bearing cost fix: a backlog fans out across many small
-    stacks (each a fresh sub-agent context) instead of one agent looping over
-    every transcript and re-reading all prior ones each turn.
+    Returns a per-store count of entries added. Each store is loaded, the new
+    candidates appended (skills get their ``importance`` refreshed from
+    ``usage_count`` + ``last_used``), and the whole store re-saved atomically.
+    Meditation/compaction is NOT run here — the sweep runs it post-ingest only
+    when a store is over its overflow limit (the hysteresis trigger).
     """
-    stacks: list[list[str]] = []
-    current: list[str] = []
-    running = 0
-    for conversation_uuid, weight in weighted:
-        if current and (
-            running + weight > char_budget or len(current) >= max_items
-        ):
-            stacks.append(current)
-            current = []
-            running = 0
-        current.append(conversation_uuid)
-        running += weight
-    if current:
-        stacks.append(current)
-    return stacks
+    now = now or iso_now()
+    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_EMOTIONAL: 0}
+    if candidates.is_empty():
+        return added
+    per_store: dict[str, list[BaseEntry]] = {
+        STORE_SKILLS: list(candidates.skills),
+        STORE_MUST_REMEMBER: list(candidates.must_remember),
+        STORE_EMOTIONAL: list(candidates.emotional),
+    }
+    for store_name, new_entries in per_store.items():
+        if not new_entries:
+            continue
+        existing = bstore.load(store_name)
+        for entry in new_entries:
+            if isinstance(entry, SkillEntry):
+                refresh_importance(entry, now, cfg)
+        merged = existing + new_entries
+        bstore.save_atomic(store_name, merged)
+        added[store_name] = len(new_entries)
+    log.info(
+        "ingest: +%d skills, +%d must_remember, +%d emotional",
+        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_EMOTIONAL],
+    )
+    return added
 
 
-def plan_rebuild(
+def extract_and_ingest(
     cfg: Config,
     store: Store,
+    summarizer: Summarizer,
+    rec: SourceRecord,
     *,
-    max_sessions: int | None = None,
-) -> list[dict]:
-    """B1 stage-2 PLAN (non-AI): stage one collapsed prompt per flagged
-    transcript for the in-session sub-agent executor, and return the work
-    manifest.
-
-    For each ``SUMMARIZE_NEW`` / ``RE_SUMMARIZE`` decision (capped at
-    *max_sessions*), apply the P1.1 pre-filter, fill ``combined_summary.md``
-    with the clipped content, and write it to
-    ``<store>/.sweep-staging/<uuid>.prompt.md``. The sub-agent later reads
-    *that* file (so the bulky transcript never transits the driver's
-    context — B8), emits the bundle, and writes it back via
-    ``executor.ingest_collapsed_summary``. ADDENDUM is deferred (the
-    collapsed pass targets the 3-call new-session cost).
-
-    Returns the manifest items and persists ``.sweep-staging/manifest.json``.
-    """
-    store.init_layout()
-    adapters = _build_adapters(cfg)
-    records: list[SourceRecord] = []
-    for adapter in adapters:
-        if isinstance(adapter, DocsAdapter):
-            continue
-        records.extend(adapter.discover())
-    decisions = _decide(records, store, cfg, now=time.time())
-
-    staging = _sweep_staging_dir(store)
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-
-    prompts_root = _prompts_root(cfg)
-    items: list[dict] = []
-    # (uuid, weight) per staged transcript -- the weight is the clipped
-    # content length, which the stack packer below uses to bound how much a
-    # single summarize sub-agent ingests.
-    weighted: list[tuple[str, int]] = []
-    processed = 0
-    for d in decisions:
-        if d.action not in (SUMMARIZE_NEW, RE_SUMMARIZE):
-            continue
-        if max_sessions is not None and processed >= max_sessions:
-            break
-        rec = d.record
-        content = rec.content
-        if cfg.prefilter.enabled:
-            content = filter_transcript(
-                content,
-                drop_tool_results=cfg.prefilter.drop_tool_results,
-                drop_system_reminders=cfg.prefilter.drop_system_reminders,
-            )
-        # The sub-agent (not an in-process summarizer) owns the reduce here
-        # and has a large context window, so stage the FULL transcript up to
-        # the sub-agent ceiling — no lossy middle elision in the common case.
-        # Only a transcript beyond the (configurable) staged ceiling is
-        # clipped, as a last resort. The clipped length is the stack weight.
-        clipped = _clip(content, max_chars=cfg.budgets.max_staged_content_chars)
-        prompt = _fill_prompt(
-            prompts_root / "combined_summary.md",
-            agent_name=cfg.agent.name,
-            short_max_words=cfg.budgets.short_summary_words,
-            detailed_max_words=cfg.budgets.detailed_summary_words,
-            memo_max_words=cfg.budgets.must_memorize_memo_words,
-            source=rec.source,
-            source_id=rec.source_id,
-            first_event_at=rec.first_event_at.isoformat(),
-            last_event_at=rec.last_event_at.isoformat(),
-            content=clipped,
-        )
-        prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
-        prompt_path.write_text(prompt, encoding="utf-8")
-        items.append({
-            "conversation_uuid": rec.conversation_uuid,
-            "source": rec.source,
-            "source_id": rec.source_id,
-            "first_event_at": rec.first_event_at.isoformat(),
-            "last_event_at": rec.last_event_at.isoformat(),
-            "raw_path": str(rec.raw_path),
-            "prompt_path": str(prompt_path),
-            "action": d.action,
-        })
-        weighted.append((rec.conversation_uuid, len(clipped)))
-        processed += 1
-
-    # Group the staged transcripts into stacks (one summarize sub-agent per
-    # stack). The driver fans these out -- a fresh context per stack -- so a
-    # big backlog stays roughly linear instead of one looping agent paying a
-    # worse-than-linear re-read cost. See ``docs/tiger-memory-sweep-protocol.md``.
-    stacks = _pack_stacks(
-        weighted,
-        char_budget=cfg.budgets.sweep_stack_content_chars,
-        max_items=cfg.budgets.sweep_stack_max_items,
-    )
-    (staging / "manifest.json").write_text(
-        json.dumps({"items": items, "stacks": stacks}, indent=2),
-        encoding="utf-8",
-    )
-    return items
+    now: str | None = None,
+) -> dict[str, int]:
+    """In-process extract → ingest for one finished session (mock-backed in CI)."""
+    now = now or iso_now()
+    candidates = extract_candidates(cfg, summarizer, rec, now=now)
+    return ingest_candidates(BoundedStore(cfg, store), cfg, candidates, now=now)
 
 
-# ----- adapter / summarizer factories --------------------------------------
+# ----- discovery + idle decision --------------------------------------------
 
 
-def _resolve_journal_root(field_root: str, repo_root: Path) -> Path:
-    """Resolve a ``journal_worklog`` source's ``journal_root`` field.
-
-    A relative root is anchored to the config's directory (``repo_root``,
-    like ``store.root`` and the docs ``repo_root``) so a per-persona
-    config can say ``../../journal/`` and a headless sweep still finds it
-    regardless of the working directory. Shared by the adapter
-    construction and the drive-sessions registry-path derivation so the
-    two never diverge."""
-    jr = Path(field_root).expanduser()
-    if not jr.is_absolute():
-        jr = (repo_root / jr).resolve()
-    return jr
-
-
-def _build_adapters(
-    cfg: Config, *, max_age_days: int | None = 7,
-) -> list[SourceAdapter]:
-    """Build source adapters from config.
+def _build_adapters(cfg: Config, *, max_age_days: int | None = 7) -> list[SourceAdapter]:
+    """Build source adapters from config (the unchanged input feed, design §3).
 
     ``max_age_days`` is forwarded to ``ClaudeTranscriptAdapter`` as the
-    discovery cutoff (skip JSONLs older than N days by mtime).
-    The default ``7`` is the loop-prevention cap used by ``rebuild``.
-    Pass ``None`` from ``bootstrap`` and ``resummarize`` -- both commands
-    have their own scoping (``--limit`` and ``--since`` respectively) and
-    must see the full corpus to honor it. Duplicates the constructor
-    default in ``ClaudeTranscriptAdapter``; keep them in sync.
+    discovery cutoff (skip JSONLs older than N days by mtime). ``docs`` sources
+    are dropped — the rollup/bootstrap docs path is retired.
     """
     adapters: list[SourceAdapter] = []
-    repo_root = (
-        cfg.source_path.parent if cfg.source_path else Path.cwd()
-    )
-    # Pre-scan for cross-source wiring the claude_code adapter needs:
-    #   - threads.json (slack_thread)        -> persona attribution
-    #   - .drive-sessions.json (journal_worklog) -> drive suppression
+    repo_root = cfg.source_path.parent if cfg.source_path else Path.cwd()
     threads_json: Path | None = None
     drive_sessions_json: Path | None = None
     for s in cfg.sources:
@@ -490,14 +366,8 @@ def _build_adapters(
             )
     for s in cfg.sources:
         if s.kind == "claude_code":
-            # Per-persona filtering (added after multi-bridge introduced
-            # N-persona routing): when `persona:` is set on this source,
-            # only sessions owned by that persona in threads.json are
-            # ingested. `include_unattributed: true` brings in local
-            # claude-p sessions (no bridge attribution) as well.
             persona = s.fields.get("persona")
             persona = persona.strip() if isinstance(persona, str) and persona.strip() else None
-            # B4 — optional team qualifier; defaults None (name-only match).
             team = s.fields.get("team")
             team = team.strip() if isinstance(team, str) and team.strip() else None
             include_unattributed = bool(s.fields.get("include_unattributed", False))
@@ -512,29 +382,8 @@ def _build_adapters(
                     drive_sessions_json=drive_sessions_json,
                 )
             )
-        elif s.kind == "slack_thread":
-            # Note: there's no separate Slack adapter. Slack threads
-            # share the Claude transcript JSONL location with regular
-            # Claude Code sessions; the slack_thread config kind just
-            # supplies threads.json so the claude_code adapter can
-            # classify some sessions as `source: slack` via reverse
-            # lookup. See HANDOFF.md for the rationale.
-            pass
-        elif s.kind == "docs":
-            adapters.append(
-                DocsAdapter(
-                    glob_pattern=s.fields["glob"],
-                    repo_root=repo_root,
-                )
-            )
-        elif s.kind == "journal_worklog":  # pragma: no branch  # remaining kind (auto_memory) is handled at bootstrap, not here
-            # Per-persona journal memory. ``team`` qualifies the
-            # conversation_uuid namespace; default it from the journal
-            # root's grandparent (``<team>/journal/`` -> ``<team>``) so a
-            # config that omits it still namespaces correctly.
-            journal_root = _resolve_journal_root(
-                s.fields["journal_root"], repo_root
-            )
+        elif s.kind == "journal_worklog":
+            journal_root = _resolve_journal_root(s.fields["journal_root"], repo_root)
             team = s.fields.get("team")
             team = (
                 team.strip()
@@ -548,834 +397,295 @@ def _build_adapters(
                     team=team,
                 )
             )
+        # slack_thread / docs / auto_memory carry no live adapter on this path.
     return adapters
 
 
-def _build_summarizer(cfg: Config, mock: bool = False) -> Summarizer:
+def _resolve_journal_root(field_root: str, repo_root: Path) -> Path:
+    """Resolve a ``journal_worklog`` source's ``journal_root`` field.
+
+    A relative root is anchored to the config's directory (``repo_root``) so a
+    per-persona config can say ``../../journal/`` and a headless sweep still
+    finds it regardless of the working directory.
+    """
+    jr = Path(field_root).expanduser()
+    if not jr.is_absolute():
+        jr = (repo_root / jr).resolve()
+    return jr
+
+
+def _build_summarizer(cfg: Config, *, mock: bool = False) -> Summarizer:
     if mock:
         return MockSummarizer()
-    # Look up the backend by name in the summarizer registry. Anthropic
-    # is pre-registered; external code can plug in new vendors via
-    # ``register_summarizer()`` -- see the summarizers package docstring.
     return get_summarizer(cfg.summarizer.backend, cfg.summarizer)
 
 
-# ----- decision tree per §7.3 step 1 ---------------------------------------
+def _discover(cfg: Config, *, max_age_days: int | None = 7) -> list[SourceRecord]:
+    records: list[SourceRecord] = []
+    for adapter in _build_adapters(cfg, max_age_days=max_age_days):
+        records.extend(adapter.discover())
+    return records
 
 
 def _decide(
-    records: Iterable[SourceRecord], store: Store, cfg: Config, *, now: float
+    records: Iterable[SourceRecord], cfg: Config, *, now: float
 ) -> list[Decision]:
+    """Classify each record: still-active (skip) vs idle (extract).
+
+    The summary trigger is unchanged (design §3): a session is processed only
+    once it has gone idle for ``idle_threshold_hours``. There is no
+    archive/clean/resummarize ladder any more — extraction is idempotent at the
+    sweep level (a re-extracted session re-merges near-duplicate entries, which
+    meditation later folds), so this only gates the still-active case.
+    """
     out: list[Decision] = []
     idle_threshold_sec = cfg.rebuild.idle_threshold_hours * 3600
-    resummarize_window_sec = cfg.rebuild.resummarize_window_days * 86400
     for rec in records:
-        archive = store.find_archive(rec.conversation_uuid)
-        short = store.find_short(rec.conversation_uuid)
-        activity_age = now - rec.activity_mtime
-
-        if activity_age < idle_threshold_sec:
-            out.append(Decision(rec, SKIP_ACTIVE, archive, short))
-            continue
-        if archive is None:
-            out.append(Decision(rec, SUMMARIZE_NEW, archive, short))
-            continue
-        archive_mtime = archive.stat().st_mtime
-        if rec.activity_mtime <= archive_mtime:
-            out.append(Decision(rec, SKIP_CLEAN, archive, short))
-            continue
-        summary_age = now - archive_mtime
-        if summary_age <= resummarize_window_sec:
-            out.append(Decision(rec, RE_SUMMARIZE, archive, short))
+        if (now - rec.activity_mtime) < idle_threshold_sec:
+            out.append(Decision(rec, SKIP_ACTIVE))
         else:
-            out.append(Decision(rec, ADDENDUM, archive, short))
+            out.append(Decision(rec, EXTRACT))
     return out
 
 
-# ----- per-session processing ----------------------------------------------
+# ----- in-session sub-agent staging (subscription rail) ----------------------
 
 
-def _cap_reason(
-    processed: int,
-    spent_usd: float,
-    max_sessions: int | None,
-    max_usd: float | None,
-) -> str | None:
-    """Return why a rebuild should stop processing, or ``None`` to continue.
+def _sweep_staging_dir(store: Store) -> Path:
+    return store.root / ".sweep-staging"
 
-    The cost/scope cap (P1.2 / Lever 1.4): a rebuild processes at most
-    ``max_sessions`` sessions, or stops once ``spent_usd`` reaches
-    ``max_usd`` — whichever trips first. ``None`` for either bound
-    disables it (the default for user-scoped bootstrap / resummarize).
+
+EXTRACTION_CARD_SUFFIX = ".extract.md"
+
+
+def _sweep_card_path(store: Store, conversation_uuid: str) -> Path:
+    """Where a sub-agent drops its extraction bundle for one conversation."""
+    return _sweep_staging_dir(store) / f"{conversation_uuid}{EXTRACTION_CARD_SUFFIX}"
+
+
+def _pack_stacks(
+    weighted: list[tuple[str, int]], *, char_budget: int, max_items: int
+) -> list[list[str]]:
+    """Greedily group ``(uuid, weight)`` pairs — in plan order — into stacks,
+    one per extraction sub-agent.
+
+    A stack closes when adding the next transcript would push the summed weight
+    over *char_budget*, or once it already holds *max_items*. A transcript
+    heavier than the budget lands as a solo stack (never split). Deterministic,
+    so a re-plan reproduces the same grouping.
     """
-    if max_sessions is not None and processed >= max_sessions:
-        return "session_cap"
-    if max_usd is not None and spent_usd >= max_usd:
-        return "usd_cap"
-    return None
+    stacks: list[list[str]] = []
+    current: list[str] = []
+    running = 0
+    for uuid, weight in weighted:
+        if current and (running + weight > char_budget or len(current) >= max_items):
+            stacks.append(current)
+            current, running = [], 0
+        current.append(uuid)
+        running += weight
+    if current:
+        stacks.append(current)
+    return stacks
 
 
-def _process_decisions(
-    decisions: list[Decision],
-    store: Store,
-    cfg: Config,
-    summarizer: Summarizer,
-    metrics: RebuildMetrics | None = None,
-    *,
-    max_sessions: int | None = None,
-    max_usd: float | None = None,
-) -> float:
-    """Run the summarizer for each decision and write archive/short.
+def plan_extraction(
+    cfg: Config, store: Store, *, max_sessions: int | None = None
+) -> list[dict]:
+    """Stage one extraction prompt per idle, unprocessed transcript.
 
-    Returns total cost in USD — from ``summarizer.cost_so_far`` when
-    the backend reports real numbers (Anthropic does), or a rough
-    char-count heuristic for backends that don't (MockSummarizer reports 0).
-
-    The transcript pre-filter (P1.1) runs once per record here, *before*
-    any summarize call, so all of short/detailed/addendum/extractor reuse
-    the same de-noised content. When *metrics* is supplied, the raw vs.
-    filtered char counts and the per-session call count are accumulated
-    into it for the rebuild's ``state.json`` snapshot.
-
-    ``max_sessions`` / ``max_usd`` are the P1.2 cost/scope cap: once
-    either trips we stop *before* starting the next session, leaving the
-    remainder unprocessed. Those records simply keep no archive, so the
-    next rebuild's ``_decide`` re-emits them — resumability with no extra
-    state. Both default ``None`` (uncapped) for the user-scoped paths.
+    For each ``EXTRACT`` decision (capped at *max_sessions*), pre-filter +
+    clip the transcript, fill the extraction prompt, and write it to
+    ``<store>/.sweep-staging/<uuid>.prompt.md``. The in-persona sub-agent later
+    reads *that* file (so the bulky transcript never transits the driver's
+    context), emits the bundle, and writes it back via
+    ``executor.ingest_extraction``. Returns the manifest items and persists
+    ``.sweep-staging/manifest.json`` (carrying ``items`` + ``stacks``).
     """
-    cost_at_start = summarizer.cost_so_far
-    heuristic_fallback = 0.0
-    rows = mm.load(store)
-    today = datetime.now(timezone.utc).date().isoformat()
+    store.init_layout()
+    decisions = _decide(_discover(cfg), cfg, now=time.time())
+
+    staging = _sweep_staging_dir(store)
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    prompts_root = _prompts_root(cfg)
+    items: list[dict] = []
+    weighted: list[tuple[str, int]] = []
     processed = 0
     for d in decisions:
-        if d.action == SKIP_ACTIVE or d.action == SKIP_CLEAN:
+        if d.action != EXTRACT:
             continue
-        reason = _cap_reason(
-            processed,
-            summarizer.cost_so_far - cost_at_start,
-            max_sessions,
-            max_usd,
-        )
-        if reason is not None:
-            if metrics is not None:
-                metrics.note_capped(reason)
-            log.info(
-                "tiger-memory rebuild cap hit (%s) after %d session(s); "
-                "deferring the rest to the next rebuild",
-                reason, processed,
-            )
+        if max_sessions is not None and processed >= max_sessions:
             break
         rec = d.record
-        raw_chars = len(rec.content)
+        content = rec.content
         if cfg.prefilter.enabled:
-            rec = replace(
-                rec,
-                content=filter_transcript(
-                    rec.content,
-                    drop_tool_results=cfg.prefilter.drop_tool_results,
-                    drop_system_reminders=cfg.prefilter.drop_system_reminders,
-                ),
+            content = filter_transcript(
+                content,
+                drop_tool_results=cfg.prefilter.drop_tool_results,
+                drop_system_reminders=cfg.prefilter.drop_system_reminders,
             )
-        filtered_chars = len(rec.content)
-        try:
-            # Fit the (pre-filtered) transcript into the budget ONCE per
-            # record via chunk-and-reduce, so an oversized transcript loses
-            # no middle content (vs. the old lossy head/tail clip). This sits
-            # INSIDE the try on purpose: the fit makes summarizer calls, and a
-            # backend error on one giant session must be logged-and-skipped
-            # like any other failure here — never crash the whole rebuild.
-            #
-            # The addendum path's only two consumers both want half-budget
-            # content, so fit straight to half there and skip a wasted
-            # full-budget reduce they would each re-reduce. A normal-sized
-            # transcript fits already → no-op (same object, no model calls),
-            # so we skip the replace and downstream sites add no cost.
-            fit_budget = (
-                cfg.budgets.max_prompt_content_chars // 2
-                if d.action == ADDENDUM
-                else cfg.budgets.max_prompt_content_chars
-            )
-            fitted = _fit_content(
-                rec.content, summarizer=summarizer, cfg=cfg,
-                max_chars=fit_budget,
-            )
-            if fitted is not rec.content:
-                rec = replace(rec, content=fitted)
-            if d.action == ADDENDUM:
-                _write_addendum(store, cfg, summarizer, rec)
-                heuristic_fallback += _approx_cost(cfg, rec.content,
-                                                   n_short=1, n_detailed=0)
-                candidates = _extract_must_memorize(cfg, summarizer, rec)
-                calls = 2  # short + extractor
-            elif cfg.collapse.enabled:  # SUMMARIZE_NEW / RE_SUMMARIZE, collapsed
-                candidates, calls = _write_session_collapsed(
-                    store, cfg, summarizer, rec
-                )
-                heuristic_fallback += _approx_cost(cfg, rec.content,
-                                                   n_short=1, n_detailed=1)
-            else:  # SUMMARIZE_NEW / RE_SUMMARIZE, legacy 3-call
-                _write_short_and_archive(store, cfg, summarizer, rec)
-                heuristic_fallback += _approx_cost(cfg, rec.content,
-                                                   n_short=1, n_detailed=1)
-                candidates = _extract_must_memorize(cfg, summarizer, rec)
-                calls = 3  # short + detailed + extractor
+        clipped = _clip(content, cfg.budgets.max_staged_content_chars)
+        prompt = _fill_prompt(
+            prompts_root / "extract_memory.md",
+            agent_name=cfg.agent.name,
+            source=rec.source,
+            source_id=rec.source_id,
+            first_event_at=rec.first_event_at.isoformat(),
+            last_event_at=rec.last_event_at.isoformat(),
+            procedure_max_words=cfg.memory_extract.skill_procedure_words,
+            memo_max_words=cfg.memory_extract.memo_words,
+            reaction_max_words=cfg.memory_extract.reaction_words,
+            weight_cap=int(cfg.memory.emotional_log.weight_cap),
+            content=clipped,
+        )
+        prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        items.append({
+            "conversation_uuid": rec.conversation_uuid,
+            "source": rec.source,
+            "source_id": rec.source_id,
+            "first_event_at": rec.first_event_at.isoformat(),
+            "last_event_at": rec.last_event_at.isoformat(),
+            "raw_path": str(rec.raw_path),
+            "prompt_path": str(prompt_path),
+        })
+        weighted.append((rec.conversation_uuid, len(clipped)))
+        processed += 1
 
-            rows, demoted = mm.merge_candidates(
-                rows,
-                candidates,
-                today=today,
-                similarity_threshold=cfg.budgets.repeat_detection_similarity,
-                max_rows=cfg.budgets.must_memorize_rows,
-            )
-            if demoted:
-                mm.append_dropped(store, demoted)
-            processed += 1
-            if metrics is not None:
-                metrics.record_session(
-                    chars_raw=raw_chars,
-                    chars_filtered=filtered_chars,
-                    calls=calls,
-                )
-        except Exception:
-            log.exception(
-                "failed to process %s (%s)", rec.conversation_uuid, d.action
-            )
-            continue
-    mm.save(store, rows)
-
-    real_cost = summarizer.cost_so_far - cost_at_start
-    # If the backend reported real cost (>0), trust it. Otherwise fall
-    # back to the heuristic — useful in dry-runs with MockSummarizer.
-    return real_cost if real_cost > 0 else heuristic_fallback
-
-
-def _write_short_and_archive(
-    store: Store,
-    cfg: Config,
-    summarizer: Summarizer,
-    rec: SourceRecord,
-) -> int:
-    prompts_root = _prompts_root(cfg)
-
-    # Short summary
-    short_prompt = _fill_prompt(
-        prompts_root / "short_summary.md",
-        agent_name=cfg.agent.name,
-        max_words=cfg.budgets.short_summary_words,
-        source=rec.source,
-        source_id=rec.source_id,
-        first_event_at=rec.first_event_at.isoformat(),
-        last_event_at=rec.last_event_at.isoformat(),
-        content=_fit_content(
-            rec.content, summarizer=summarizer, cfg=cfg,
-            max_chars=cfg.budgets.max_prompt_content_chars,
-        ),
+    stacks = _pack_stacks(
+        weighted,
+        char_budget=cfg.budgets.sweep_stack_content_chars,
+        max_items=cfg.budgets.sweep_stack_max_items,
     )
-    short_body = summarizer.summarize(
-        prompt=short_prompt, max_words=cfg.budgets.short_summary_words
+    (staging / "manifest.json").write_text(
+        json.dumps({"items": items, "stacks": stacks}, indent=2),
+        encoding="utf-8",
     )
-
-    # Detailed summary
-    detailed_prompt = _fill_prompt(
-        prompts_root / "detailed_summary.md",
-        agent_name=cfg.agent.name,
-        max_words=cfg.budgets.detailed_summary_words,
-        source=rec.source,
-        source_id=rec.source_id,
-        first_event_at=rec.first_event_at.isoformat(),
-        last_event_at=rec.last_event_at.isoformat(),
-        content=_fit_content(
-            rec.content, summarizer=summarizer, cfg=cfg,
-            max_chars=cfg.budgets.max_prompt_content_chars,
-        ),
-    )
-    detailed_body = summarizer.summarize(
-        prompt=detailed_prompt, max_words=cfg.budgets.detailed_summary_words
-    )
-
-    return _write_short_archive_bodies(
-        store, cfg, summarizer.tag, rec, short_body, detailed_body
-    )
+    log.info("plan_extraction: staged %d transcript(s) in %d stack(s)",
+             len(items), len(stacks))
+    return items
 
 
-def _write_short_archive_bodies(
-    store: Store,
-    cfg: Config,
-    summarizer_tag: str,
-    rec: SourceRecord,
-    short_body: str,
-    detailed_body: str,
-) -> int:
-    """Write the short + detailed-archive files for *rec*. Shared by the
-    legacy 3-call path, the collapsed single-call path, and the in-session
-    sub-agent ingest (B1 stage-2) so all emit identical on-disk artifacts.
-    Takes a *summarizer_tag* string (not a Summarizer) so the sub-agent
-    path — which has no Python summarizer object — can reuse it."""
-    filename = Store.short_filename(rec.first_event_at, rec.conversation_uuid)
-    short_path = store.paths.journal / filename
-    archive_path = store.paths.archive / filename
-
-    _op, _ = store.ensure_operator_id()
-    short_fm = {
-        "type": "short_summary",
-        "operator": _op,
-        "conversation_uuid": rec.conversation_uuid,
-        "source": rec.source,
-        "source_id": rec.source_id,
-        "first_event_at": rec.first_event_at.isoformat(),
-        "last_event_at": rec.last_event_at.isoformat(),
-        "summarizer": summarizer_tag,
-    }
-    archive_fm = {**short_fm, "type": "detailed_summary"}
-
-    store.atomic_write(short_path, frontmatter.render(short_fm, short_body))
-    store.atomic_write(archive_path, frontmatter.render(archive_fm, detailed_body))
-    return 2
+# ----- fresh-start rebuild (design §10.6 migration = fresh start) ------------
 
 
-def _write_session_collapsed(
-    store: Store,
-    cfg: Config,
-    summarizer: Summarizer,
-    rec: SourceRecord,
-) -> tuple[list[mm.Row], int]:
-    """Collapsed single-pass summarize (P1.3): one call emits short +
-    detailed + must-memorize. Falls back to the legacy 3-call path on a
-    ``CollapseParseError`` so a malformed response never corrupts the
-    store. Returns ``(must_memorize_candidates, n_calls)`` — ``n_calls``
-    is 1 on success, 4 on fallback (the spent collapse call plus 3).
+# The legacy on-disk surface the fresh-start rebuild drops: the retired
+# rollup/archive store dir + the old journal markdown files. The three new
+# stores (skills.md / must_remember.md / emotional.md) live in journal/ and
+# are NOT in this set, so a rebuild that runs after extraction keeps them.
+_LEGACY_JOURNAL_FILES = (
+    "must_memorize.md",
+    "longer_memory.md",
+    ".dropped_memorize.md",
+)
+
+
+def rebuild(cfg: Config, store: Store) -> int:
+    """Fresh-start rebuild (design §10.6): drop the retired surface, then
+    regenerate the session-start briefing (skill index + must_remember +
+    emotional view + unprocessed notice).
+
+    Migration is a fresh start — there is no one-time converter. The first
+    rebuild removes the old rollup ``archive/`` dir and legacy journal files
+    (chronological summaries, ``must_memorize.md``, ``longer_memory.md``); the
+    three bounded stores are then (re)built incrementally by extraction. The
+    briefing rebuild is what regenerates the skill index by Python.
     """
-    prompts_root = _prompts_root(cfg)
-    prompt = _fill_prompt(
-        prompts_root / "combined_summary.md",
-        agent_name=cfg.agent.name,
-        short_max_words=cfg.budgets.short_summary_words,
-        detailed_max_words=cfg.budgets.detailed_summary_words,
-        memo_max_words=cfg.budgets.must_memorize_memo_words,
-        source=rec.source,
-        source_id=rec.source_id,
-        first_event_at=rec.first_event_at.isoformat(),
-        last_event_at=rec.last_event_at.isoformat(),
-        content=_fit_content(
-            rec.content, summarizer=summarizer, cfg=cfg,
-            max_chars=cfg.budgets.max_prompt_content_chars,
-        ),
-    )
-    # One generous cap covering both bodies; per-section budgets are stated
-    # in the template itself.
-    max_words = (
-        cfg.budgets.short_summary_words + cfg.budgets.detailed_summary_words + 100
-    )
-    raw = summarizer.summarize(prompt=prompt, max_words=max_words)
-    try:
-        short_body, detailed_body, mm_section = parse_collapsed(raw)
-    except CollapseParseError:
-        log.warning(
-            "collapsed summary parse failed for %s; falling back to 3-call path",
-            rec.conversation_uuid,
-        )
-        _write_short_and_archive(store, cfg, summarizer, rec)
-        return _extract_must_memorize(cfg, summarizer, rec), 4
-    _write_short_archive_bodies(
-        store, cfg, summarizer.tag, rec, short_body, detailed_body
-    )
-    return mm.parse_extractor_output(mm_section), 1
+    store.init_layout()
+    _drop_legacy_surface(store)
+    from .briefing import rebuild_briefing
+    rebuild_briefing(cfg, store)
+    log.info("rebuild: dropped legacy surface; briefing regenerated")
+    return 0
 
 
-def _write_addendum(
-    store: Store,
-    cfg: Config,
-    summarizer: Summarizer,
-    rec: SourceRecord,
-) -> int:
-    """Write a fresh short summary with addendum_of pointing at original."""
-    addendum_uuid = str(uuid4())
-    today_dt = datetime.now(timezone.utc)
-    prompts_root = _prompts_root(cfg)
-    short_prompt = _fill_prompt(
-        prompts_root / "short_summary.md",
-        agent_name=cfg.agent.name,
-        max_words=cfg.budgets.short_summary_words,
-        source=rec.source,
-        source_id=rec.source_id,
-        first_event_at=today_dt.isoformat(),
-        last_event_at=rec.last_event_at.isoformat(),
-        content=(
-            f"(Addendum to frozen session {rec.conversation_uuid}.\n"
-            f"Only NEW activity since the original summary should be reflected.)\n\n"
-            + _fit_content(
-                rec.content, summarizer=summarizer, cfg=cfg,
-                max_chars=cfg.budgets.max_prompt_content_chars // 2,
-            )
-        ),
-    )
-    short_body = summarizer.summarize(
-        prompt=short_prompt, max_words=cfg.budgets.short_summary_words
-    )
-    filename = Store.short_filename(today_dt, addendum_uuid)
-    short_path = store.paths.journal / filename
-    _op2, _ = store.ensure_operator_id()
-    fm = {
-        "type": "short_summary",
-        "operator": _op2,
-        "conversation_uuid": addendum_uuid,
-        "source": rec.source,
-        "source_id": rec.source_id,
-        "first_event_at": today_dt.isoformat(),
-        "last_event_at": rec.last_event_at.isoformat(),
-        "summarizer": summarizer.tag,
-        "addendum_of": rec.conversation_uuid,
-    }
-    store.atomic_write(short_path, frontmatter.render(fm, short_body))
-    return 1
+def _drop_legacy_surface(store: Store) -> None:
+    """Remove the retired rollup/archive on-disk surface (idempotent)."""
+    journal = store.paths.journal
+    for name in _LEGACY_JOURNAL_FILES:
+        (journal / name).unlink(missing_ok=True)
+    # Retired chronological summaries (shorts + daily/weekly/monthly rollups).
+    from .store import DAILY_RE, MONTHLY_RE, SHORT_RE, WEEKLY_RE
+    for f in journal.glob("*.md"):
+        if any(rx.match(f.name) for rx in (SHORT_RE, DAILY_RE, WEEKLY_RE, MONTHLY_RE)):
+            f.unlink(missing_ok=True)
+    # The retired detailed-summary archive dir.
+    if store.paths.archive.exists():
+        shutil.rmtree(store.paths.archive, ignore_errors=True)
 
 
-def _extract_must_memorize(
-    cfg: Config, summarizer: Summarizer, rec: SourceRecord
-) -> list[mm.Row]:
-    prompts_root = _prompts_root(cfg)
-    prompt = _fill_prompt(
-        prompts_root / "must_memorize_extract.md",
-        agent_name=cfg.agent.name,
-        memo_max_words=cfg.budgets.must_memorize_memo_words,
-        content=_fit_content(
-            rec.content, summarizer=summarizer, cfg=cfg,
-            max_chars=cfg.budgets.max_prompt_content_chars // 2,
-        ),
-    )
-    try:
-        out = summarizer.summarize(
-            prompt=prompt, max_words=200  # extractor outputs short
-        )
-    except Exception:  # noqa: BLE001
-        log.exception("must_memorize extraction failed for %s", rec.conversation_uuid)
-        return []
-    return mm.parse_extractor_output(out)
+# ----- pin (reframed: write a must_remember entry) --------------------------
 
 
-# ----- cascade rollups (§7.3 step 3) ---------------------------------------
+def pin(cfg: Config, store: Store, *, memo: str, kind: str) -> int:
+    """``tiger-memory pin`` — write a must_remember entry directly (design §3).
 
-
-def _cascade_all_rollups(store: Store, cfg: Config, summarizer: Summarizer) -> None:
-    # Build a map: date_str → bool (dirty?)
-    _cascade_dailies(store, cfg, summarizer)
-    _cascade_weeklies(store, cfg, summarizer)
-    _cascade_monthlies(store, cfg, summarizer)
-
-
-def _operator_of(path) -> str | None:
-    """The ``operator`` frontmatter key of a summary file, or None for
-    legacy (pre-multi-op) files. Unreadable files count as legacy --
-    the fold filter then excludes them unless this store adopted the
-    legacy pyramid (conservative: never fold what you can't
-    attribute to yourself)."""
-    try:
-        fm, _ = frontmatter.parse(path.read_text(encoding="utf-8"))
-        op = fm.get("operator")
-        return str(op) if op else None
-    except Exception:  # noqa: BLE001 -- unreadable = unattributable
-        return None
-
-
-def _fold_inputs(files, operator_id: str, adopt_legacy: bool):
-    """Multi-operator fold locality (T12b, THE invariant): a cascade
-    folds ONLY files written by the local operator -- plus the
-    segment-less legacy files iff this store adopted the legacy
-    pyramid. Foreign operators' files are read-only inputs to the
-    briefing, never fold targets; folding them would re-create the
-    same-name collision one level up."""
-    out = []
-    for f in files:
-        op = _operator_of(f)
-        if op == operator_id or (op is None and adopt_legacy):
-            out.append(f)
-    return out
-
-
-def _local_rollup_target(
-    store: Store,
-    *,
-    kind: str,
-    period_key: str,
-    filename_fn,
-    operator_id: str,
-    adopt_legacy: bool,
-):
-    """The LOCAL pyramid's rollup path for a period (T12b re-roll
-    seam): the operator-seeded name -- except a pre-upgrade period
-    whose legacy file exists in an adopting store, which keeps the
-    legacy name (one file per period per writer, before and after
-    the upgrade)."""
-    seeded = store.paths.journal / filename_fn(
-        period_key, str(uuid5(NAMESPACE_URL, f"{kind}:{period_key}:{operator_id}"))
-    )
-    legacy = store.paths.journal / filename_fn(
-        period_key, str(uuid5(NAMESPACE_URL, f"{kind}:{period_key}"))
-    )
-    if not seeded.exists() and adopt_legacy and legacy.exists():
-        return legacy
-    return seeded
-
-
-def _cascade_dailies(store: Store, cfg: Config, summarizer: Summarizer) -> None:
-    """For each date with shorts, create/refresh daily if dirty."""
-    by_date: dict[str, list[Path]] = {}
-    for f in store.paths.journal.glob("*.md"):
-        m = SHORT_RE.match(f.name)
-        if m:
-            by_date.setdefault(m.group(1), []).append(f)
-    prompts_root = _prompts_root(cfg)
-    operator_id, adopt_legacy = store.ensure_operator_id()
-    for date_str, all_shorts in by_date.items():
-        shorts = _fold_inputs(all_shorts, operator_id, adopt_legacy)
-        if not shorts:
-            continue  # nothing of OURS this day; foreign-only periods stay foreign
-        target = _local_rollup_target(
-            store, kind="daily", period_key=date_str,
-            filename_fn=Store.daily_filename,
-            operator_id=operator_id, adopt_legacy=adopt_legacy,
-        )
-        if not _rollup_dirty(target, shorts):
-            continue
-        content_parts = []
-        for s in sorted(shorts):
-            content_parts.append(f"\n--- {s.name} ---\n")
-            content_parts.append(s.read_text(encoding="utf-8"))
-        prompt = _fill_prompt(
-            prompts_root / "daily_rollup.md",
-            agent_name=cfg.agent.name,
-            max_words=cfg.budgets.daily_words,
-            period=_format_period_date(date_str),
-            n_sources=len(shorts),
-            content="".join(content_parts),
-        )
-        try:
-            body = summarizer.summarize(
-                prompt=prompt, max_words=cfg.budgets.daily_words
-            )
-        except Exception:
-            log.exception("daily rollup failed for %s", date_str)
-            continue
-        # Operator-seeded deterministic uuid: re-roll keeps the same
-        # filename PER WRITER; cross-writer collisions impossible.
-        fm = {
-            "type": "daily_rollup",
-            "period": _format_period_date(date_str),
-            "summarizer": summarizer.tag,
-            "operator": operator_id,
-        }
-        store.atomic_write(target, frontmatter.render(fm, body))
-
-
-def _rollup_dirty(target, inputs) -> bool:
-    """Local-pyramid dirty check (T12b): compare the EXACT local
-    target's mtime against its fold inputs -- never resolve "the
-    period's rollup" by glob, which could pick a foreign writer's
-    file and mask (or force) re-rolls."""
-    if not target.exists():
-        return True
-    t = target.stat().st_mtime
-    return any(f.stat().st_mtime > t for f in inputs)
-
-
-def _cascade_weeklies(store: Store, cfg: Config, summarizer: Summarizer) -> None:
-    """For each Mon-week containing a dirty daily, refresh the weekly."""
-    by_monday: dict[str, list[Path]] = {}
-    for f in store.paths.journal.glob("*.md"):
-        m = DAILY_RE.match(f.name)
-        if not m:
-            continue
-        d = date.fromisoformat(_iso_from_yyyymmdd(m.group(1)))
-        monday = d - timedelta(days=d.weekday())
-        by_monday.setdefault(monday.strftime("%Y%m%d"), []).append(f)
-    prompts_root = _prompts_root(cfg)
-    operator_id, adopt_legacy = store.ensure_operator_id()
-    for monday_str, all_dailies in by_monday.items():
-        dailies = _fold_inputs(all_dailies, operator_id, adopt_legacy)
-        if not dailies:
-            continue
-        target = _local_rollup_target(
-            store, kind="weekly", period_key=monday_str,
-            filename_fn=Store.weekly_filename,
-            operator_id=operator_id, adopt_legacy=adopt_legacy,
-        )
-        if not _rollup_dirty(target, dailies):
-            continue
-        content_parts = []
-        for d in sorted(dailies):
-            content_parts.append(f"\n--- {d.name} ---\n")
-            content_parts.append(d.read_text(encoding="utf-8"))
-        prompt = _fill_prompt(
-            prompts_root / "weekly_rollup.md",
-            agent_name=cfg.agent.name,
-            max_words=cfg.budgets.weekly_words,
-            period=_format_period_date(monday_str),
-            n_sources=len(dailies),
-            content="".join(content_parts),
-        )
-        try:
-            body = summarizer.summarize(
-                prompt=prompt, max_words=cfg.budgets.weekly_words
-            )
-        except Exception:
-            log.exception("weekly rollup failed for %s", monday_str)
-            continue
-        fm = {
-            "type": "weekly_rollup",
-            "period": _format_period_date(monday_str),
-            "summarizer": summarizer.tag,
-            "operator": operator_id,
-        }
-        store.atomic_write(target, frontmatter.render(fm, body))
-
-
-def _cascade_monthlies(store: Store, cfg: Config, summarizer: Summarizer) -> None:
-    """For each month containing a dirty weekly, refresh the monthly."""
-    by_month: dict[str, list[Path]] = {}
-    for f in store.paths.journal.glob("*.md"):
-        m = WEEKLY_RE.match(f.name)
-        if not m:
-            continue
-        d = date.fromisoformat(_iso_from_yyyymmdd(m.group(1)))
-        key = d.strftime("%Y%m")
-        by_month.setdefault(key, []).append(f)
-    prompts_root = _prompts_root(cfg)
-    operator_id, adopt_legacy = store.ensure_operator_id()
-    for yyyymm, all_weeklies in by_month.items():
-        weeklies = _fold_inputs(all_weeklies, operator_id, adopt_legacy)
-        if not weeklies:
-            continue
-        target = _local_rollup_target(
-            store, kind="monthly", period_key=yyyymm,
-            filename_fn=Store.monthly_filename,
-            operator_id=operator_id, adopt_legacy=adopt_legacy,
-        )
-        if not _rollup_dirty(target, weeklies):
-            continue
-        content_parts = []
-        for w in sorted(weeklies):
-            content_parts.append(f"\n--- {w.name} ---\n")
-            content_parts.append(w.read_text(encoding="utf-8"))
-        prompt = _fill_prompt(
-            prompts_root / "monthly_rollup.md",
-            agent_name=cfg.agent.name,
-            max_words=cfg.budgets.monthly_words,
-            period=f"{yyyymm[:4]}-{yyyymm[4:]}",
-            n_sources=len(weeklies),
-            content="".join(content_parts),
-        )
-        try:
-            body = summarizer.summarize(
-                prompt=prompt, max_words=cfg.budgets.monthly_words
-            )
-        except Exception:
-            log.exception("monthly rollup failed for %s", yyyymm)
-            continue
-        fm = {
-            "type": "monthly_rollup",
-            "period": f"{yyyymm[:4]}-{yyyymm[4:]}",
-            "summarizer": summarizer.tag,
-            "operator": operator_id,
-        }
-        store.atomic_write(target, frontmatter.render(fm, body))
-
-
-def _refresh_longer_memory(
-    store: Store, cfg: Config, summarizer: Summarizer
-) -> None:
-    """Fold any monthly older than monthlies window that isn't yet folded."""
-    cutoff = date.today() - timedelta(
-        days=cfg.briefing.walking.monthlies_working_days
-    )
-    monthlies_to_fold: list[Path] = []
-    for f in sorted(store.paths.journal.glob("*.md")):
-        m = MONTHLY_RE.match(f.name)
-        if not m:
-            continue
-        yyyymm = m.group(1)
-        period_first = date(int(yyyymm[:4]), int(yyyymm[4:]), 1)
-        if period_first >= cutoff:
-            continue
-        fm = frontmatter.read_frontmatter(f)
-        if fm.get("folded_into_longer_memory"):
-            continue
-        monthlies_to_fold.append(f)
-    if not monthlies_to_fold:
-        return
-
-    prompts_root = _prompts_root(cfg)
-    longer_path = store.paths.journal / "longer_memory.md"
-    if longer_path.exists():
-        prev_fm, prev_body = frontmatter.parse(longer_path.read_text())
-        prev_covers = prev_fm.get("covers_until", "")
-    else:
-        prev_body = ""
-        prev_covers = ""
-
-    for monthly_path in monthlies_to_fold:
-        fm_existing = frontmatter.read_frontmatter(monthly_path)
-        period = fm_existing.get("period", "")
-        prompt = _fill_prompt(
-            prompts_root / "longer_memory.md",
-            agent_name=cfg.agent.name,
-            max_words=cfg.budgets.longer_memory_words,
-            previous_covers_until=prev_covers or "(empty)",
-            previous_longer_memory=prev_body or "(empty)",
-            new_month=period,
-            new_monthly=monthly_path.read_text(encoding="utf-8"),
-        )
-        try:
-            body = summarizer.summarize(
-                prompt=prompt, max_words=cfg.budgets.longer_memory_words
-            )
-        except Exception:
-            log.exception("longer_memory fold failed for %s", monthly_path.name)
-            continue
-        new_longer_fm = {
-            "type": "longer_memory",
-            "covers_until": period,
-            "last_refreshed_at": iso_now(),
-            "summarizer": summarizer.tag,
-        }
-        store.atomic_write(
-            longer_path, frontmatter.render(new_longer_fm, body)
-        )
-        # Mark monthly as folded (rewrite frontmatter).
-        m_text = monthly_path.read_text(encoding="utf-8")
-        m_fm, m_body = frontmatter.parse(m_text)
-        m_fm["folded_into_longer_memory"] = iso_now()
-        store.atomic_write(monthly_path, frontmatter.render(m_fm, m_body))
-
-        prev_body = body
-        prev_covers = period
-
-
-# ----- decay (§7.3 step 4) -------------------------------------------------
-
-
-def _apply_decay(store: Store, cfg: Config) -> None:
-    rows = mm.load(store)
-    if not rows:
-        return
-    today = datetime.now(timezone.utc).date().isoformat()
-    kept = mm.decay_all(
-        rows,
-        today=today,
-        days_per_point={
-            mm.KIND_PREFERENCE: cfg.decay.preference_days_per_point,
-            mm.KIND_DECISION: cfg.decay.decision_days_per_point,
-            mm.KIND_INCIDENT: cfg.decay.incident_days_per_point,
-        },
-    )
-    mm.save(store, kept)
-
-
-# ----- state writer --------------------------------------------------------
-
-
-def _write_state(
-    store: Store,
-    cfg: Config,
-    *,
-    decisions: list[Decision],
-    cost_usd: float,
-    duration_sec: float | None = None,
-    last_op: str = "rebuild",
-    metrics: RebuildMetrics | None = None,
-) -> None:
-    counts = {"active": 0, "clean": 0, "dirty": 0, "frozen": 0}
-    for d in decisions:
-        if d.action == SKIP_ACTIVE:
-            counts["active"] += 1
-        elif d.action == SKIP_CLEAN:
-            counts["clean"] += 1
-        elif d.action == ADDENDUM:
-            counts["frozen"] += 1
-        else:
-            counts["dirty"] += 1
-
-    # Preserve sticky fields from previous state — e.g., bootstrap cost
-    # should survive subsequent rebuilds. Running total accumulates.
-    prev = store.read_state() or {}
-    bootstrap_cost = (
-        cost_usd if last_op == "bootstrap"
-        else prev.get("last_bootstrap_cost_usd")
-    )
-    prev_total = prev.get("total_cost_usd") or 0.0
-
-    payload = {
-        "agent": cfg.agent.name,
-        "last_rebuild_at": iso_now(),
-        "last_op": last_op,
-        "last_rebuild_duration_sec": duration_sec,
-        "sessions": counts,
-        "last_rebuild_cost_usd": cost_usd,           # this op only
-        "total_cost_usd": prev_total + cost_usd,     # running total since bootstrap
-        "last_bootstrap_cost_usd": bootstrap_cost,
-    }
-    if metrics is not None:
-        payload["metrics"] = metrics.as_dict()
-    store.write_state(payload)
-
-
-# ----- auto-memory synthetic conv (§11 step 3) -----------------------------
-
-
-def _auto_memory_record(cfg: Config, store: Store) -> SourceRecord | None:
-    """Build a SourceRecord by concatenating the legacy auto-memory dir.
-
-    Only runs if a source of kind ``auto_memory`` is configured with a
-    ``path:`` field. Tests pointing at isolated configs naturally skip
-    this. Returns None if the directory is missing or empty.
+    Reframed from the old must-memorize table: a pin is now one
+    :class:`MustRememberEntry`. ``owner_explicit`` pins start elevated (the
+    forget-guard protects them until meditation's relevance-check). Pinning
+    does not run meditation; the next sweep compacts if the store overflows.
     """
-    mem_dir: Path | None = None
-    for s in cfg.sources:
-        if s.kind == "auto_memory":
-            mem_dir = Path(s.fields.get("path", "")).expanduser()
-            break
-    if mem_dir is None or not mem_dir.exists() or not mem_dir.is_dir():
-        return None
-    parts: list[str] = []
-    for f in sorted(mem_dir.glob("*.md")):
-        try:
-            parts.append(f"\n--- {f.name} ---\n{f.read_text(encoding='utf-8')}")
-        except OSError:
-            continue
-    if not parts:
-        return None
-    content = "".join(parts)
-    now = datetime.now(timezone.utc)
-    # Operator-segmented for uniformity with the rollup seeds (design
-    # Q2 recommendation adopted; Decision logged in the task record).
-    _op, _ = store.ensure_operator_id()
-    uid = str(uuid5(NAMESPACE_URL, f"auto_memory:{cfg.agent.name}:{_op}"))
-    return SourceRecord(
-        conversation_uuid=uid,
-        source="doc",
-        source_id=f"auto_memory:{cfg.agent.name}",
-        first_event_at=now,
-        last_event_at=now,
-        activity_mtime=time.time() - 86400 * 365,  # ancient → idle
-        content=content,
-        raw_path=mem_dir,
+    if kind not in VALID_KINDS:
+        print(f"unknown kind: {kind}")
+        return 2
+    store.init_layout()
+    now = iso_now()
+    bstore = BoundedStore(cfg, store)
+    entries = bstore.load(STORE_MUST_REMEMBER)
+    importance = 5.0 if kind == KIND_OWNER_EXPLICIT else 1.0
+    entries.append(
+        MustRememberEntry(
+            text=memo, created_at=now, last_used=now, source="pin",
+            kind=kind, importance=importance,
+        )
     )
+    bstore.save_atomic(STORE_MUST_REMEMBER, entries)
+    print(f"pinned ({kind}): {memo}")
+    return 0
 
 
-# ----- prompt loading + filling --------------------------------------------
+# ----- mission text sourcing (plan §1/§2.5 — Miyagi owns the sourcing) -------
+
+
+# The charter Mission is the live team goal the relevance-check reads (design
+# §5; resolved decision §10.5). Sourced relative to the team root, which is
+# the grandparent of a persona's store dir (``<team>/memories/<persona>/``).
+CHARTER_README_REL = ("charter", "README.md")
+
+
+def team_mission_text(cfg: Config) -> str:
+    """Read the live team mission from ``<team>/charter/README.md`` (design §5).
+
+    Resolves the team root from the persona store layout
+    (``<team>/memories/<persona>/`` → ``<team>``) and returns the charter
+    README text. Returns ``""`` if the charter is missing/unreadable — the
+    relevance-check then keeps every directive (a missing mission must never
+    cause a directive to be judged stale-and-dropped).
+    """
+    # store.root == <team>/memories/<persona>; team root is two parents up.
+    team_root = cfg.store.root.parent.parent
+    charter = team_root.joinpath(*CHARTER_README_REL)
+    try:
+        return charter.read_text(encoding="utf-8")
+    except OSError:
+        log.info("charter mission not found at %s; relevance-check keeps all", charter)
+        return ""
+
+
+# ----- prompt loading + filling ---------------------------------------------
 
 
 def _prompts_root(cfg: Config) -> Path:
     here = Path(__file__).parent / "summarizers" / "prompts" / cfg.summarizer.prompts
     if here.exists():
         return here
-    # Fallback: cwd-relative (allows future overrides).
-    return Path("summarizers/prompts") / cfg.summarizer.prompts
+    return Path("summarizers/prompts") / cfg.summarizer.prompts  # pragma: no cover
 
 
 def _fill_prompt(path: Path, **kwargs) -> str:
     template = path.read_text(encoding="utf-8")
-    # Use simple .format() with a SafeDict so missing keys don't crash.
     return template.format_map(_SafeFormatDict(kwargs))
 
 
@@ -1388,200 +698,15 @@ _CLIP_MARKER = "\n\n[...content elided...]\n\n"
 
 
 def _clip(text: str, max_chars: int) -> str:
+    """Bounded clip: keep head + tail within *max_chars* (lossy middle elision).
+
+    The extraction sub-agent owns the reduce of an oversized transcript; this
+    is only the last-resort ceiling so a pathological transcript never blows
+    the context window.
+    """
     if len(text) <= max_chars:
         return text
-    # Keep the result strictly within max_chars by reserving room for the
-    # elision marker, so callers that promise a hard ceiling can rely on it.
     if max_chars <= len(_CLIP_MARKER):
         return text[:max_chars]
     half = (max_chars - len(_CLIP_MARKER)) // 2
     return text[:half] + _CLIP_MARKER + text[-half:]
-
-
-# Max times ``_fit_content`` re-summarizes its own digests before giving
-# up and falling back to a bounded clip. Each pass shrinks the text by a
-# large factor, so 4 covers transcripts orders of magnitude over budget;
-# the cap only exists to guarantee termination on pathological input.
-_MAX_REDUCE_DEPTH = 4
-
-
-def _split_on_boundaries(text: str, max_chars: int) -> list[str]:
-    """Split *text* into consecutive chunks each ``<= max_chars``.
-
-    Prefers line boundaries so a chunk never cuts mid-line. A single line
-    longer than *max_chars* (pathological — e.g. a minified blob) is
-    hard-split on character count so the invariant always holds. The
-    concatenation of the returned chunks equals *text* (lossless split).
-    """
-    if len(text) <= max_chars:
-        return [text]
-    chunks: list[str] = []
-    buf: list[str] = []
-    size = 0
-    for line in text.splitlines(keepends=True):
-        if len(line) > max_chars:
-            # Flush the buffer, then hard-split the oversized line.
-            if buf:
-                chunks.append("".join(buf))
-                buf, size = [], 0
-            for i in range(0, len(line), max_chars):
-                chunks.append(line[i:i + max_chars])
-            continue
-        if size + len(line) > max_chars and buf:
-            chunks.append("".join(buf))
-            buf, size = [], 0
-        buf.append(line)
-        size += len(line)
-    if buf:
-        chunks.append("".join(buf))
-    return chunks
-
-
-def _fit_content(
-    text: str,
-    *,
-    summarizer: Summarizer,
-    cfg: Config,
-    max_chars: int,
-    _depth: int = 0,
-) -> str:
-    """Fit *text* into *max_chars* WITHOUT lossy middle-elision.
-
-    If the text already fits, return it unchanged — zero model calls, so
-    the common case costs exactly what it does today. Otherwise
-    chunk-and-reduce (map-reduce): split into ``<= max_chars`` chunks,
-    condense each through the summarizer (map), concatenate the digests,
-    and recurse if the concatenation is still over budget (reduce). A
-    depth cap plus a final bounded ``_clip`` guarantee termination and
-    that the result never exceeds the context window, even on
-    pathological input that refuses to shrink.
-    """
-    if len(text) <= max_chars:
-        return text
-    if max_chars <= len(_CLIP_MARKER):
-        # Budget too small to map-reduce into: even the per-part wrappers
-        # wouldn't fit, so condensing can never converge. Also guards
-        # _split_on_boundaries against a non-positive range() step (a
-        # max_chars of 0 is reachable via `max_prompt_content_chars: 1`,
-        # whose // 2 is 0). Clip directly — bounded, never overflows.
-        return _clip(text, max_chars)
-    if _depth >= _MAX_REDUCE_DEPTH:
-        # Condensation isn't shrinking the text fast enough; fall back to
-        # a bounded clip so we never overflow the context window.
-        log.warning(
-            "chunk-and-reduce hit depth cap (%d) at %d chars; "
-            "clipping as a last resort", _MAX_REDUCE_DEPTH, len(text),
-        )
-        return _clip(text, max_chars)
-    template = _prompts_root(cfg) / "chunk_condense.md"
-    chunks = _split_on_boundaries(text, max_chars)
-    # Aim each digest small enough that all of them concatenated land
-    # under budget. ~6 chars/word; reserve half the budget so the
-    # "[part i/n]" wrappers and prose overhead still fit.
-    per_chunk_words = max(120, (max_chars // (len(chunks) * 2)) // 6)
-    digests: list[str] = []
-    for i, chunk in enumerate(chunks):
-        prompt = _fill_prompt(
-            template,
-            agent_name=cfg.agent.name,
-            chunk_index=i + 1,
-            chunk_total=len(chunks),
-            max_words=per_chunk_words,
-            content=chunk,
-        )
-        digests.append(
-            summarizer.summarize(prompt=prompt, max_words=per_chunk_words)
-        )
-    combined = "\n\n".join(
-        f"[transcript part {i + 1}/{len(chunks)}]\n{d}"
-        for i, d in enumerate(digests)
-    )
-    if len(combined) <= max_chars:
-        return combined
-    return _fit_content(
-        combined, summarizer=summarizer, cfg=cfg,
-        max_chars=max_chars, _depth=_depth + 1,
-    )
-
-
-# ----- cost estimation -----------------------------------------------------
-
-
-def _approx_cost(
-    cfg: Config,
-    input_text: str,
-    *,
-    n_short: int = 1,
-    n_detailed: int = 1,
-) -> float:
-    """Heuristic char→token cost estimate for dry-runs.
-
-    Each summarizer call (short, detailed, extractor) consumes the full
-    input text as its prompt context. Output sizes differ by call type:
-        short    ≈ short_summary_words * 1.3 tokens
-        detailed ≈ detailed_summary_words * 1.3 tokens
-        extractor ≈ ~65 tokens (just the KIND/MEMO blocks)
-
-    For SUMMARIZE_NEW / RE_SUMMARIZE: short + detailed + extractor = 3 calls.
-    For ADDENDUM: short + extractor = 2 calls.
-    """
-    input_tokens_per_call = max(1, len(input_text) // 4)
-    n_extractor = 1  # always one extractor call per session
-    n_calls = n_short + n_detailed + n_extractor
-
-    output_tokens = int(
-        n_short * cfg.budgets.short_summary_words * 1.3
-        + n_detailed * cfg.budgets.detailed_summary_words * 1.3
-        + n_extractor * 65
-    )
-    summ = AnthropicSummarizer(model=cfg.summarizer.model)
-    return summ.cost_estimate_usd(
-        prompt_tokens=input_tokens_per_call * n_calls,
-        output_tokens=output_tokens,
-    )
-
-
-def _estimate_total_cost(
-    cfg: Config, n_to_process: int, sample_records: list[SourceRecord]
-) -> float:
-    if not sample_records:
-        return 0.0
-    sample = sample_records[: min(5, len(sample_records))]
-    per_session_cost = sum(
-        _approx_cost(cfg, r.content, n_short=1, n_detailed=1)
-        for r in sample
-    ) / len(sample)
-    return per_session_cost * n_to_process
-
-
-# ----- background spawn ----------------------------------------------------
-
-
-def _spawn_background() -> int:
-    """Spawn the current process detached and exit."""
-    env = os.environ.copy()
-    env["TIGER_MEMORY_BACKGROUND_SPAWNED"] = "1"
-    argv = [sys.executable, "-m", "tigerharness.tiger_memory.cli", "rebuild"]
-    if "--config" in sys.argv:
-        idx = sys.argv.index("--config")
-        argv = [sys.executable, "-m", "tigerharness.tiger_memory.cli", "--config",
-                sys.argv[idx + 1], "rebuild"]
-    log_path = Path("/tmp/tiger-memory.background.log")
-    with open(log_path, "ab") as out:
-        subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-            env=env, start_new_session=True,
-        )
-    return 0
-
-
-# ----- date helpers --------------------------------------------------------
-
-
-def _iso_from_yyyymmdd(s: str) -> str:
-    return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-
-
-def _format_period_date(yyyymmdd: str) -> str:
-    return _iso_from_yyyymmdd(yyyymmdd)

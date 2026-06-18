@@ -142,30 +142,7 @@ class TestConfigEmptySources:
             load_config(cfg_path)
 
 
-# ----- config.py:320 (full_shorts_working_days too small) ----------------
-
-class TestConfigFullShortsTooSmall:
-    """Line 320: full_shorts_working_days below minimum."""
-
-    def test_full_shorts_too_small(self, tmp_path: Path):
-        from tigerharness.tiger_memory.config import ConfigError, load_config
-        cfg_path = tmp_path / "cfg.yaml"
-        cfg_path.write_text(
-            f"agent: {{name: T, role: T}}\n"
-            f"store: {{root: {tmp_path}/memory}}\n"
-            f"sources:\n"
-            f"  - kind: claude_code\n"
-            f"    project_path: {tmp_path}/proj/\n"
-            f"summarizer: {{backend: anthropic, model: claude-sonnet-4-6, prompts: default/v1}}\n"
-            f"briefing:\n"
-            f"  walking:\n"
-            f"    full_shorts_working_days: 0\n"
-        )
-        with pytest.raises(ConfigError, match="full_shorts_working_days"):
-            load_config(cfg_path)
-
-
-# ----- tiger_memory/cli.py:133-134 (no matching subcommand) ---------------
+# ----- tiger_memory/cli.py (no matching subcommand) -----------------------
 
 class TestTigerMemoryCLINoSubcommand:
     """Lines 133-134: calling main() with no known subcommand → help."""

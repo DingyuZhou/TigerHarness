@@ -1,108 +1,68 @@
-"""B1 stage-2 executor write-back (the in-session sub-agent path).
+"""In-session sub-agent write-back: extraction bundle → bounded stores.
 
-The subscription-safe rebuild moves summarization into an isolated
-Task-tool sub-agent (B1/B8): it reads one flagged transcript, emits the
-collapsed ``@@SHORT@@/@@DETAILED@@/@@MUST_MEMORIZE@@`` bundle, and turns it
-into stored artifacts through THIS entry point — typically by invoking a
-``tiger-memory`` CLI that wraps it, so the bulky bundle never transits the
-driver's context.
+The subscription-safe sweep runs extraction inside an isolated, in-persona
+Task sub-agent (design §2): it reads one staged transcript prompt, emits the
+``@@SKILLS@@ / @@MUST_REMEMBER@@ / @@EMOTIONAL@@`` bundle, and turns it into
+stored entries through THIS entry point — typically via a ``tiger-memory``
+CLI that wraps it, so the bulky bundle never transits the driver's context.
 
-This is the bundle -> store half of the collapsed pass, factored so the
-in-session sub-agent and the legacy in-process collapsed path
-(``lifecycle._write_session_collapsed``) write identical artifacts.
-Parsing + validation stay in Python (robust); the sub-agent only produces
-the text and self-validates before calling in.
+Parsing + validation stay in Python (robust); the sub-agent only produces the
+text. A malformed bundle raises before any write, so the store is left intact.
 """
 from __future__ import annotations
 
 import logging
-
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 
-from . import must_memorize as mm
-from .collapse import parse_collapsed
+from .bounded_store import BoundedStore
 from .config import Config
-from .lifecycle import _write_short_archive_bodies
-from .sources.base import SourceRecord
+from .lifecycle import ingest_candidates, parse_extraction
+from .state import iso_now
 from .store import Store
 
 log = logging.getLogger("tigerharness.tiger_memory.executor")
-
-SUBAGENT_SUMMARIZER_TAG = "subagent@v1"
 
 
 @dataclass(frozen=True)
 class IngestResult:
     conversation_uuid: str
-    must_memorize_added: int
+    skills_added: int
+    must_remember_added: int
+    emotional_added: int
+
+    @property
+    def total_added(self) -> int:
+        return self.skills_added + self.must_remember_added + self.emotional_added
 
 
-def ingest_collapsed_summary(
+def ingest_extraction(
     store: Store,
     cfg: Config,
     *,
     conversation_uuid: str,
     source: str,
-    source_id: str,
-    first_event_at: datetime,
-    last_event_at: datetime,
     bundle_text: str,
-    raw_path: Path,
-    summarizer_tag: str = SUBAGENT_SUMMARIZER_TAG,
-    today: str | None = None,
+    now: str | None = None,
 ) -> IngestResult:
-    """Parse a collapsed summary bundle and write the short + detailed
-    archive, then merge its must-memorize candidates into the store.
+    """Parse an extraction bundle and merge its candidates into the stores.
 
-    Raises ``CollapseParseError`` (from ``parse_collapsed``) on a malformed
-    bundle — parsing happens *before* any write, so the store is left
-    untouched and the caller can fall back / re-ask the sub-agent.
+    Raises :class:`~tigerharness.tiger_memory.lifecycle.ExtractionParseError`
+    on a malformed bundle — parsing happens BEFORE any write, so the store is
+    left untouched and the caller can re-ask the sub-agent.
 
-    **Concurrency — serialize per persona.** short/archive are written
-    per-uuid (atomic, collision-free), but the must-memorize merge is a
-    read-modify-write on the persona's single ``must_memorize.md``. Calls
-    for the SAME persona's store must therefore be **serialized** — do not
-    pipe multiple sub-agent bundles to ``tiger-memory ingest-summary``
-    concurrently for one persona (a parallel run would lose must-memorize
-    updates). Different personas are independent (separate stores). The
-    live driver should ingest a persona's transcripts serially, or defer
-    the merge to a single finalize step. See
-    ``docs/tiger-memory-sweep-protocol.md``.
+    **Concurrency — serialize per persona.** The merge is a read-modify-write
+    on each per-persona store file; calls for the SAME persona must be
+    serialized (run a persona's transcripts serially, or defer to a single
+    finalize step). Different personas are independent (separate stores).
     """
-    log.info("ingest-summary: merging collapsed summary into store")
-    short_body, detailed_body, mm_section = parse_collapsed(bundle_text)
-
-    rec = SourceRecord(
-        conversation_uuid=conversation_uuid,
-        source=source,
-        source_id=source_id,
-        first_event_at=first_event_at,
-        last_event_at=last_event_at,
-        activity_mtime=0.0,
-        content="",
-        raw_path=raw_path,
-    )
-    _write_short_archive_bodies(
-        store, cfg, summarizer_tag, rec, short_body, detailed_body
-    )
-
-    candidates = mm.parse_extractor_output(mm_section)
-    if today is None:
-        today = datetime.now(timezone.utc).date().isoformat()
-    rows = mm.load(store)
-    rows, demoted = mm.merge_candidates(
-        rows,
-        candidates,
-        today=today,
-        similarity_threshold=cfg.budgets.repeat_detection_similarity,
-        max_rows=cfg.budgets.must_memorize_rows,
-    )
-    if demoted:
-        mm.append_dropped(store, demoted)
-    mm.save(store, rows)
+    log.info("ingest-extraction: merging bundle for %s", conversation_uuid)
+    now = now or iso_now()
+    candidates = parse_extraction(bundle_text, now=now, source=source)
+    added = ingest_candidates(BoundedStore(cfg, store), cfg, candidates, now=now)
+    from .entries import STORE_EMOTIONAL, STORE_MUST_REMEMBER, STORE_SKILLS
     return IngestResult(
         conversation_uuid=conversation_uuid,
-        must_memorize_added=len(candidates),
+        skills_added=added[STORE_SKILLS],
+        must_remember_added=added[STORE_MUST_REMEMBER],
+        emotional_added=added[STORE_EMOTIONAL],
     )

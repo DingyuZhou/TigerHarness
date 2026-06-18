@@ -118,6 +118,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0bc91d13201769b6327e762bc9763db3c8b97c7923d3830171effedad9e56691",
     },
     "tigerharness-basics": {
+        # 2026-06-17 (b5-doc-draft): anzai: tiger-memory CLI verb list -> live set
+        #   (init/rebuild/pin/state/plan/ingest-extraction/ingest-staged/sweep-*);
+        #   dropped search/drill/tree/raw/bootstrap/resummarize/ingest-summary.
+        "13e4192d65d15c6ba9bc475a01cb5a96870e53141a2baf0b1d30a395f5501b87",
         # 2026-06-12 (083f83f): anzai: add the scaffolded .gitignore to the basics sk...
         "203ba77acfbc23ba3608b856a65a6c06d2731b8cd01da5f3169b4fcc90252ea9",
         # 2026-06-12 (ceceef1): miyagi: fix walkthrough breakages in tigerharness-bas...
@@ -127,11 +131,15 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         # 2026-06-12 (4033e04): miyagi: add tigerharness-basics bundled skill + init ...
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
+    "sweep-memory": {
+        # 2026-06-17 (b5-doc-draft): anzai: rewrite to the 3-store contract
+        #   (@@SKILLS@@/@@MUST_REMEMBER@@/@@EMOTIONAL@@, .extract.md cards,
+        #   meditation) -- the prior bundle described the retired collapsed-
+        #   summary flow (@@SHORT@@/@@DETAILED@@/@@MUST_MEMORIZE@@, .summary.md).
+        "fe6455719d5c9bf688b9d9de5f1b9653e9a67d59f2438a920f6e27c2237d3323",
+    },
     # workflow-append-steps: only ever shipped once (current == sole history) --
     #   no prior version to register.
-    # sweep-memory: newly bundled (the stacks + deferred-glue rewrite) -- no
-    #   earlier *bundled* ship to register; teams that hand-authored a local
-    #   copy keep it (refresh leaves a non-matching skill alone).
 }
 
 # Last-shipped manifest: skill dir name -> sha256 of the CURRENT bundled
@@ -144,8 +152,8 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "drive-journal": "d0b1f3704b12a3642211408fd2d2f9ed9dc1b555c856ca1acd2ceb02b5201666",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "fe6455719d5c9bf688b9d9de5f1b9653e9a67d59f2438a920f6e27c2237d3323",
-    "tigerharness-basics": "13e4192d65d15c6ba9bc475a01cb5a96870e53141a2baf0b1d30a395f5501b87",
+    "sweep-memory": "f00bcf6f6420935269dce6006f475c98312fe72e6826abc86823c9edf3a7af33",
+    "tigerharness-basics": "d32ae9739696c3f199088396143922b663edbd0a75fc07a6163b85e378d6f604",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }
 

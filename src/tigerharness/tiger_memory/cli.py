@@ -1,22 +1,31 @@
-"""tiger-memory CLI entrypoint.
+"""tiger-memory CLI entrypoint (bounded-store revamp).
 
-Subcommands (see design doc §3.3):
+Subcommands:
 
-    Writers (acquire lock):
+    Writers:
         init          create empty store, validate config
-        bootstrap     one-shot backfill (§11)
-        rebuild       lazy rebuild (session-start hook)
-        pin           direct injection into must_memorize
-        resummarize   re-summarize within a date range
+        rebuild       fresh-start: drop the retired surface, regenerate the
+                      session-start briefing (skill index + must_remember +
+                      emotional view + unprocessed notice)
+        pin           write a must_remember entry directly
+        import-legacy one-off (idempotent) seed of the three stores from the
+                      old must_memorize.md pins + daily/weekly/monthly rollups.
+                      MUST run BEFORE the fresh-start `rebuild` (which deletes
+                      the legacy files): merge -> migrate configs ->
+                      import-legacy -> rebuild -> sweep.
 
     Readers (lockless):
-        drill         walk children of a path
-        tree          recursive hierarchy
-        raw           raw-transcript locator
-        search        grep (default) or rag mode
-        state         show JSON state snapshot
+        state         show JSON state snapshot for the three bounded stores
 
-    Team sweep (B3 gating, non-AI -- drive the in-session protocol):
+    In-session sub-agent executor (subscription rail, non-AI glue):
+        plan          stage one extraction prompt per idle, unprocessed
+                      transcript; print the work manifest
+        ingest-extraction   write back one sub-agent's extraction bundle
+                            (stdin) for a planned conversation uuid
+        ingest-staged       ingest every staged <uuid>.extract.md card in ONE
+                            process (per-persona merge serialized by construction)
+
+    Team-sweep gating (B3, non-AI -- drive the in-session protocol):
         sweep-plan      claim the team sweep; print targets for this wake
         sweep-done      mark one persona done in the in-flight run
         sweep-complete  advance the watermark + end the run
@@ -24,10 +33,9 @@ Subcommands (see design doc §3.3):
 """
 from __future__ import annotations
 
-import logging
-
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,97 +63,72 @@ def main(argv: list[str] | None = None) -> int:
     # ----- writers -----
     sub.add_parser("init", help="Create empty store + validate config.")
 
-    p_bs = sub.add_parser(
-        "bootstrap", help="One-shot backfill over all configured sources."
+    sub.add_parser(
+        "rebuild",
+        help="Fresh-start: drop the retired surface, regenerate the "
+             "session-start briefing (skill index + stores + notice).",
     )
-    p_bs.add_argument("--dry-run", action="store_true",
-                     help="Estimate cost on 5 representative transcripts, no model spend on the full set.")
-    p_bs.add_argument("--limit", type=int, default=None,
-                     help="Optional cap on number of sessions to process (for testing).")
 
-    p_rb = sub.add_parser("rebuild", help="Lazy rebuild (session-start hook).")
-    p_rb.add_argument("--background", action="store_true",
-                     help="Detach and run in background (used by hooks).")
-
-    p_pin = sub.add_parser("pin", help="Inject a must-memorize row directly.")
-    p_pin.add_argument("memo", help="Memo text (≤ 25 words by default).")
+    p_pin = sub.add_parser("pin", help="Write a must_remember entry directly.")
+    p_pin.add_argument("memo", help="Memo text.")
     p_pin.add_argument(
         "--kind",
         choices=["owner_explicit", "preference", "decision", "incident"],
         default="owner_explicit",
     )
 
-    p_re = sub.add_parser("resummarize", help="Re-summarize within a date range.")
-    p_re.add_argument("--since", required=True, help="ISO date (YYYY-MM-DD).")
-    p_re.add_argument("--summarizer", default=None,
-                     help="e.g. default@v2 (default: current config).")
-
-    # ----- readers -----
-    p_dr = sub.add_parser("drill", help="Open file + list immediate children.")
-    p_dr.add_argument("path", help="Path to a summary file.")
-
-    p_tr = sub.add_parser("tree", help="Recursive hierarchy from a path.")
-    p_tr.add_argument("path", help="Starting summary file.")
-    p_tr.add_argument("--depth", type=int, default=None,
-                     help="Max depth (default: unlimited).")
-
-    p_raw = sub.add_parser("raw", help="Raw-transcript locator for an archive entry.")
-    p_raw.add_argument("archive_path", help="Path to archive/<file>.md.")
-
-    p_sr = sub.add_parser("search", help="Search journal/ + archive/.")
-    p_sr.add_argument("topic", help="Query string.")
-    p_sr.add_argument(
-        "--mode",
-        choices=["auto", "grep", "rag", "hybrid"],
-        default="auto",
-        help="auto (default; hybrid if RAG available, else grep), "
-             "grep (ripgrep), rag (embedding semantic), "
-             "hybrid (grep + rag fused via RRF).",
+    p_imp = sub.add_parser(
+        "import-legacy",
+        help="One-off (idempotent) seed of the 3 stores from the old "
+             "must_memorize.md pins + daily/weekly/monthly rollups. Run BEFORE "
+             "`rebuild` (which deletes the legacy files).",
+    )
+    p_imp.add_argument(
+        "--mock", action="store_true",
+        help="Use the deterministic mock summarizer (no live model; CI/dry-run).",
+    )
+    p_imp.add_argument(
+        "--force", action="store_true",
+        help="Re-seed even if already imported (drops prior import-legacy "
+             "entries first).",
     )
 
-    sub.add_parser("state", help="Print JSON state snapshot.")
+    # ----- readers -----
+    sub.add_parser("state", help="Print JSON state snapshot for the 3 stores.")
 
-    # ----- B1 stage-2: in-session sub-agent executor (plan / ingest) -----
+    # ----- in-session sub-agent executor (plan / ingest) -----
     p_plan = sub.add_parser(
         "plan",
-        help="Stage collapsed prompts for the in-session sub-agent and "
-             "print the work manifest (non-AI).",
+        help="Stage one extraction prompt per idle, unprocessed transcript "
+             "and print the work manifest (non-AI).",
     )
     p_plan.add_argument("--max-sessions", type=int, default=None,
                         help="Cap on transcripts staged this plan.")
 
     p_ing = sub.add_parser(
-        "ingest-summary",
-        help="Write back one sub-agent's collapsed summary bundle (read "
-             "from stdin) for a planned conversation uuid.",
+        "ingest-extraction",
+        help="Write back one sub-agent's extraction bundle (stdin) for a "
+             "planned conversation uuid.",
     )
     p_ing.add_argument("--uuid", required=True,
                        help="conversation_uuid from the plan manifest.")
 
     sub.add_parser(
         "ingest-staged",
-        help="Glue: ingest every staged <uuid>.summary.md card in ONE process "
-             "(per-persona merge serialized by construction -- no race). Run "
-             "after the summarize sub-agents have written their cards.",
+        help="Glue: ingest every staged <uuid>.extract.md card in ONE process "
+             "(per-persona merge serialized by construction -- no race).",
     )
 
     # ----- B3 team-sweep gating convenience CLIs (non-AI) -----
-    # Thin wrappers over tiger_memory.sweep so an interactive persona
-    # session drives the gating (see docs/tiger-memory-sweep-protocol.md)
-    # without inline Python. team_memories_dir = cfg.store.root.parent.
     p_swp = sub.add_parser(
         "sweep-plan",
         help="Try to claim the team sweep at session bootstrap; print the "
              "decision + roster targets to process this wake (non-AI).",
     )
     p_swp.add_argument("--token", default=None,
-                       help="Stable claim token (default: random uuid). Pass "
-                            "the interactive session id so a crashed claim "
-                            "stays re-stealable across resumes.")
+                       help="Stable claim token (default: random uuid).")
     p_swp.add_argument("--max-personas", type=int, default=DEFAULT_MAX_PERSONAS,
-                       help="Per-wake cap on personas processed this trigger "
-                            f"(default {DEFAULT_MAX_PERSONAS}; pass a larger "
-                            "number to process more per wake).")
+                       help=f"Per-wake cap on personas (default {DEFAULT_MAX_PERSONAS}).")
     p_swp.add_argument("--floor-hours", type=float, default=None,
                        help="Staleness floor override (default 24h).")
     p_swp.add_argument("--lease-seconds", type=float, default=None,
@@ -154,25 +137,19 @@ def main(argv: list[str] | None = None) -> int:
                        help="ISO timestamp override (testing/determinism).")
 
     p_swd = sub.add_parser(
-        "sweep-done",
-        help="Mark one persona completed in the in-flight sweep run.",
-    )
+        "sweep-done", help="Mark one persona completed in the in-flight run.")
     p_swd.add_argument("--persona", required=True,
-                       help="Persona name that was just summarized.")
+                       help="Persona name that was just processed.")
 
     p_swc = sub.add_parser(
         "sweep-complete",
-        help="Advance the team watermark + end the run (all due personas "
-             "processed). Makes the next trigger a cheap no-op.",
-    )
+        help="Advance the team watermark + end the run (all due personas done).")
     p_swc.add_argument("--now", default=None,
                        help="ISO timestamp override (testing/determinism).")
 
     sub.add_parser(
         "sweep-release",
-        help="Drop the claim WITHOUT advancing the watermark (per-wake cap "
-             "hit; the next wake resumes the remaining personas).",
-    )
+        help="Drop the claim WITHOUT advancing the watermark (per-wake cap hit).")
 
     args = parser.parse_args(argv)
 
@@ -186,62 +163,40 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "init":
         return _cmd_init(cfg, store)
-    if args.cmd == "bootstrap":
-        from .lifecycle import bootstrap
-        return bootstrap(cfg, store, dry_run=args.dry_run, limit=args.limit)
     if args.cmd == "rebuild":
         from .lifecycle import rebuild
-        return rebuild(cfg, store, background=args.background)
+        return rebuild(cfg, store)
     if args.cmd == "pin":
-        from .must_memorize import pin as pin_cmd
+        from .lifecycle import pin as pin_cmd
         return pin_cmd(cfg, store, memo=args.memo, kind=args.kind)
-    if args.cmd == "resummarize":
-        from .lifecycle import resummarize
-        return resummarize(cfg, store, since=args.since, summarizer=args.summarizer)
-    if args.cmd == "drill":
-        from .drill import drill as drill_cmd
-        return drill_cmd(store, Path(args.path))
-    if args.cmd == "tree":
-        from .drill import tree as tree_cmd
-        return tree_cmd(store, Path(args.path), depth=args.depth)
-    if args.cmd == "raw":
-        from .drill import raw as raw_cmd
-        return raw_cmd(cfg, store, Path(args.archive_path))
-    if args.cmd == "search":
-        from .drill import search as search_cmd
-        return search_cmd(cfg, store, topic=args.topic, mode=args.mode)
+    if args.cmd == "import-legacy":
+        return _cmd_import_legacy(cfg, store, mock=args.mock, force=args.force)
     if args.cmd == "state":
         return _cmd_state(cfg, store)
     if args.cmd == "plan":
         return _cmd_plan(cfg, store, args.max_sessions)
-    if args.cmd == "ingest-summary":
-        return _cmd_ingest_summary(cfg, store, args.uuid)
+    if args.cmd == "ingest-extraction":
+        return _cmd_ingest_extraction(cfg, store, args.uuid)
     if args.cmd == "ingest-staged":
         return _cmd_ingest_staged(cfg, store)
     if args.cmd == "sweep-plan":
         return _cmd_sweep_plan(
-            cfg,
-            token=args.token,
-            max_personas=args.max_personas,
-            floor_hours=args.floor_hours,
-            lease_seconds=args.lease_seconds,
+            cfg, token=args.token, max_personas=args.max_personas,
+            floor_hours=args.floor_hours, lease_seconds=args.lease_seconds,
             now=args.now,
         )
     if args.cmd == "sweep-done":
         return _cmd_sweep_done(cfg, args.persona)
     if args.cmd == "sweep-complete":
         return _cmd_sweep_complete(cfg, now=args.now)
-    if args.cmd == "sweep-release":
+    if args.cmd == "sweep-release":  # pragma: no branch  # exhaustive dispatch
         return _cmd_sweep_release(cfg)
-
-    parser.print_help()
-    return 2
+    return 2  # pragma: no cover  # argparse rejects unknown subcommands first
 
 
 def _cmd_init(cfg: Config, store: Store) -> int:
     store.init_layout()
     print(f"tiger-memory store initialised at: {store.root}")
-    print(f"  archive/   {store.paths.archive}")
     print(f"  journal/   {store.paths.journal}")
     print(f"  briefing/  {store.paths.briefing}")
     print(f"Agent: {cfg.agent.name}")
@@ -253,25 +208,39 @@ def _cmd_init(cfg: Config, store: Store) -> int:
 
 def _cmd_state(cfg: Config, store: Store) -> int:
     from .state import compute_state
-    payload = compute_state(cfg, store)
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    print(json.dumps(compute_state(cfg, store), indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_import_legacy(cfg: Config, store: Store, *, mock: bool, force: bool) -> int:
+    """One-off legacy import — seed the three stores from the old pins + rollups.
+
+    Idempotent: a no-op once imported (unless ``--force``). ``--mock`` uses the
+    deterministic mock summarizer (no live model). NEVER runs ``rebuild`` — the
+    caller drops the legacy files AFTER (merge -> migrate configs ->
+    import-legacy -> rebuild -> sweep).
+    """
+    from .import_legacy import import_legacy_run
+    from .lifecycle import _build_summarizer
+    summarizer = _build_summarizer(cfg, mock=mock)
+    result = import_legacy_run(cfg, store, summarizer=summarizer, force=force)
+    if result.get("skipped") == "already":
+        print("import-legacy: already imported; nothing to do (use --force to re-seed)")
+        return 0
+    print(f"import-legacy seeded: {result['skills']} skills, "
+          f"{result['must_remember']} must_remember, {result['emotional']} emotional")
     return 0
 
 
 def _cmd_plan(cfg: Config, store: Store, max_sessions: int | None) -> int:
-    from .lifecycle import _sweep_staging_dir, plan_rebuild
-    plan_rebuild(cfg, store, max_sessions=max_sessions)
-    # Print the persisted manifest verbatim so the CLI output and the file
-    # the driver reads are the same single source of truth -- it carries both
-    # ``items`` (per-uuid metadata) and ``stacks`` (the sub-agent grouping).
+    from .lifecycle import _sweep_staging_dir, plan_extraction
+    plan_extraction(cfg, store, max_sessions=max_sessions)
     manifest_path = _sweep_staging_dir(store) / "manifest.json"
     print(manifest_path.read_text(encoding="utf-8").rstrip("\n"))
     return 0
 
 
 def _load_plan_manifest(store: Store) -> dict | None:
-    """Return the plan manifest dict, or ``None`` (after printing why) when it
-    is missing/unreadable. Shared by both ingest paths."""
     from .lifecycle import _sweep_staging_dir
     manifest_path = _sweep_staging_dir(store) / "manifest.json"
     try:
@@ -283,20 +252,15 @@ def _load_plan_manifest(store: Store) -> dict | None:
 
 
 def _ingest_item_bundle(cfg: Config, store: Store, item: dict, bundle_text: str):
-    """Parse + write back one collapsed bundle for a manifest *item*, then drop
-    the now-consumed staged prompt. Raises ``CollapseParseError`` on a
-    malformed bundle BEFORE any write, so the store + prompt are left intact
-    and the transcript can be re-summarized."""
-    from .executor import ingest_collapsed_summary
-    result = ingest_collapsed_summary(
+    """Parse + ingest one extraction bundle for a manifest *item*, then drop the
+    now-consumed staged prompt. Raises ``ExtractionParseError`` on a malformed
+    bundle BEFORE any write, so the store + prompt are left intact."""
+    from .executor import ingest_extraction
+    result = ingest_extraction(
         store, cfg,
         conversation_uuid=item["conversation_uuid"],
         source=item["source"],
-        source_id=item["source_id"],
-        first_event_at=datetime.fromisoformat(item["first_event_at"]),
-        last_event_at=datetime.fromisoformat(item["last_event_at"]),
         bundle_text=bundle_text,
-        raw_path=Path(item["raw_path"]),
     )
     # The staged prompt embeds the (prefiltered) transcript; once ingested it
     # is consumed, so drop it to avoid leaving transcript content at rest.
@@ -304,11 +268,8 @@ def _ingest_item_bundle(cfg: Config, store: Store, item: dict, bundle_text: str)
     return result
 
 
-def _cmd_ingest_summary(cfg: Config, store: Store, uuid: str) -> int:
-    """Write back one sub-agent's collapsed bundle (stdin) for a planned
-    conversation. The metadata comes from the plan manifest so the caller
-    only needs the uuid + the bundle."""
-    from .collapse import CollapseParseError
+def _cmd_ingest_extraction(cfg: Config, store: Store, uuid: str) -> int:
+    from .lifecycle import ExtractionParseError
     manifest = _load_plan_manifest(store)
     if manifest is None:
         return 2
@@ -320,39 +281,29 @@ def _cmd_ingest_summary(cfg: Config, store: Store, uuid: str) -> int:
     if item is None:
         print(f"uuid {uuid} not in plan manifest", file=sys.stderr)
         return 2
-
     bundle = sys.stdin.read()
     try:
         result = _ingest_item_bundle(cfg, store, item, bundle)
-    except CollapseParseError as exc:
-        print(f"malformed summary bundle for {uuid}: {exc}", file=sys.stderr)
+    except ExtractionParseError as exc:
+        print(f"malformed extraction bundle for {uuid}: {exc}", file=sys.stderr)
         return 1
-    print(f"ingested {result.conversation_uuid} "
-          f"(+{result.must_memorize_added} must-memorize)")
+    print(f"ingested {result.conversation_uuid} (+{result.total_added} entries: "
+          f"{result.skills_added} skills, {result.must_remember_added} "
+          f"must_remember, {result.emotional_added} emotional)")
     return 0
 
 
 def _cmd_ingest_staged(cfg: Config, store: Store) -> int:
-    """Deferred glue: ingest every staged ``<uuid>.summary.md`` card in ONE
-    process, so the per-persona must-memorize merge is serialized by
-    construction — no agent-side coordination, no lost-update race. The cards
-    are written by the summarize sub-agents; this consumes them.
+    """Ingest every staged ``<uuid>.extract.md`` card in ONE process, so the
+    per-persona merge is serialized by construction — no race. A malformed card
+    is left in place and reported. An item with no card yet is skipped.
 
-    Per manifest item that has a card: parse + write it back, then delete the
-    card (its prompt is dropped by ``_ingest_item_bundle``). A malformed card
-    is left in place and reported. An item with no card yet is skipped — it was
-    not summarized this wake and re-stages next wake (the store, not the card,
-    is the durable ledger; a re-``plan`` wipes the staging dir).
-
-    Exit: 0 = no malformed cards; 1 = at least one malformed card (re-summarize
-    those); 2 = no plan manifest.
+    Exit: 0 = no malformed cards; 1 = ≥1 malformed card; 2 = no plan manifest.
     """
-    from .collapse import CollapseParseError
-    from .lifecycle import _sweep_card_path
+    from .lifecycle import ExtractionParseError, _sweep_card_path
     manifest = _load_plan_manifest(store)
     if manifest is None:
         return 2
-
     ingested: list[str] = []
     malformed: list[str] = []
     skipped_no_card = 0
@@ -366,13 +317,12 @@ def _cmd_ingest_staged(cfg: Config, store: Store) -> int:
             continue
         try:
             result = _ingest_item_bundle(cfg, store, item, bundle)
-        except CollapseParseError as exc:
-            print(f"malformed summary card for {uuid}: {exc}", file=sys.stderr)
+        except ExtractionParseError as exc:
+            print(f"malformed extraction card for {uuid}: {exc}", file=sys.stderr)
             malformed.append(uuid)
             continue
         card_path.unlink(missing_ok=True)
         ingested.append(result.conversation_uuid)
-
     print(json.dumps({
         "ingested": len(ingested),
         "malformed": malformed,
@@ -385,27 +335,19 @@ def _cmd_ingest_staged(cfg: Config, store: Store) -> int:
 
 
 def _team_memories_dir(cfg: Config) -> Path:
-    """The team-scoped sweep-state dir = the parent of this persona's store
-    (``<team>/memories/``). It is the same path for every persona on the
-    team, which is what makes the sweep claim team-scoped."""
+    """The team-scoped sweep-state dir = the parent of this persona's store."""
     return cfg.store.root.parent
 
 
 def _parse_now(raw: str | None) -> datetime:
-    """UTC now, or an ISO override (tolerant of a trailing ``Z``)."""
     if not raw:
         return datetime.now(timezone.utc)
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
 def _cmd_sweep_plan(
-    cfg: Config,
-    *,
-    token: str | None,
-    max_personas: int | None,
-    floor_hours: float | None,
-    lease_seconds: float | None,
-    now: str | None,
+    cfg: Config, *, token: str | None, max_personas: int | None,
+    floor_hours: float | None, lease_seconds: float | None, now: str | None,
 ) -> int:
     import uuid
 
@@ -418,18 +360,13 @@ def _cmd_sweep_plan(
         kwargs["lease_seconds"] = lease_seconds
     claim_token = token or uuid.uuid4().hex
     decision = sweep.maybe_sweep_roster(
-        _team_memories_dir(cfg),
-        now=_parse_now(now),
-        token=claim_token,
-        max_personas=max_personas,
-        **kwargs,
+        _team_memories_dir(cfg), now=_parse_now(now), token=claim_token,
+        max_personas=max_personas, **kwargs,
     )
     plan = decision.plan
     payload = {
         "ran": decision.ran,
         "reason": decision.reason,
-        # Echo the token actually used so a session that let us mint a
-        # uuid can re-claim its own hold on a later wake within the run.
         "token": claim_token,
         "targets": [
             {"name": t.name, "config_path": str(t.config_path)}
@@ -444,7 +381,6 @@ def _cmd_sweep_plan(
 
 def _cmd_sweep_done(cfg: Config, persona: str) -> int:
     from . import sweep
-
     sweep.record_persona_done(_team_memories_dir(cfg), persona)
     print(f"recorded {persona} done")
     return 0
@@ -452,7 +388,6 @@ def _cmd_sweep_done(cfg: Config, persona: str) -> int:
 
 def _cmd_sweep_complete(cfg: Config, *, now: str | None) -> int:
     from . import sweep
-
     sweep.mark_sweep_complete(_team_memories_dir(cfg), _parse_now(now))
     print("sweep complete; watermark advanced")
     return 0
@@ -460,7 +395,6 @@ def _cmd_sweep_complete(cfg: Config, *, now: str | None) -> int:
 
 def _cmd_sweep_release(cfg: Config) -> int:
     from . import sweep
-
     sweep.release_sweep_claim(_team_memories_dir(cfg))
     print("claim released; watermark unchanged")
     return 0

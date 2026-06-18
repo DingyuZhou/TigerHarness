@@ -27,13 +27,6 @@ class ConfigError(ValueError):
     a minimum-value rule (e.g., dailies_working_days < 7)."""
 
 
-# ----- minimums per design doc §3.2 ----------------------------------------
-
-MIN_DAILIES_WORKING_DAYS = 7
-MIN_WEEKLIES_WORKING_DAYS = 28
-MIN_FULL_SHORTS_WORKING_DAYS = 1
-
-
 # ----- typed config sections -----------------------------------------------
 
 
@@ -66,21 +59,10 @@ class SummarizerConfig:
 
 @dataclass(frozen=True)
 class BudgetsConfig:
-    short_summary_words: int = 400
-    detailed_summary_words: int = 4000
-    daily_words: int = 600
-    weekly_words: int = 1000
-    monthly_words: int = 1500
-    longer_memory_words: int = 2500
-    must_memorize_rows: int = 60
-    must_memorize_memo_words: int = 25
-    repeat_detection_similarity: float = 0.7
     # Max characters of transcript content fed to a single in-process
-    # summarizer prompt. ~120 KB ≈ ~30 K tokens, well under Opus 4.7's
-    # context window with headroom for the prompt+output. A transcript
-    # larger than this is NOT lossily clipped — it is chunk-and-reduced
-    # (map each chunk through the summarizer, then summarize the digests)
-    # so no information in the middle is silently dropped.
+    # extraction summarizer prompt. ~120 KB ≈ ~30 K tokens, well under
+    # the context window with headroom for the prompt+output. A transcript
+    # larger than this is clipped (head+tail) before the in-process call.
     max_prompt_content_chars: int = 120_000
     # Max characters of transcript content staged into a sub-agent prompt
     # file (the subscription-billed in-session path, which has no
@@ -104,18 +86,24 @@ class BudgetsConfig:
 
 
 @dataclass(frozen=True)
-class DecayConfig:
-    preference_days_per_point: int = 7
-    decision_days_per_point: int = 14
-    incident_days_per_point: int = 28
-    # owner_explicit is always locked — not configurable.
+class MemoryExtractConfig:
+    """Word budgets for the extraction prompt's three store sections.
+
+    The extraction prompt (``summarizers/prompts/.../extract_memory.md``)
+    fills these as per-section length hints. ``max_output_words`` caps the
+    whole bundle the summarizer may return.
+    """
+
+    skill_procedure_words: int = 120
+    memo_words: int = 25
+    reaction_words: int = 40
+    max_output_words: int = 600
 
 
 @dataclass(frozen=True)
 class RebuildConfig:
     trigger: str = "lazy"
     idle_threshold_hours: float = 1.0
-    resummarize_window_days: int = 7
     lock_path: Path = Path("/tmp/tiger-memory.lock")
     # Maximum wall-clock minutes a rebuild may hold the lock before
     # the NEXT trigger reclaims it. Default 60 — generous for a real
@@ -126,27 +114,14 @@ class RebuildConfig:
 
 
 @dataclass(frozen=True)
-class WalkingConfig:
-    full_shorts_working_days: int = 2
-    dailies_working_days: int = 7
-    weeklies_working_days: int = 28
-    monthlies_working_days: int = 90
-
-
-VALID_RESIDENT_LAYERS = ("recent", "daily", "weekly", "monthly")
-
-
-@dataclass(frozen=True)
 class BriefingConfig:
-    walking: WalkingConfig = field(default_factory=WalkingConfig)
-    always_first: str = "must_memorize.md"
-    order: str = "oldest_to_newest"
-    # P3 / Lever 2 — which walking-window layers are COPIED into the
-    # always-resident briefing. Layers omitted here stay in the journal
-    # and are listed as drill-on-demand in MANIFEST.md (recall-safe).
-    # ``must_memorize.md`` + ``longer_memory.md`` are always resident.
-    # Default = all four (no diet; backward compatible).
-    resident_layers: tuple[str, ...] = VALID_RESIDENT_LAYERS
+    """Session-start briefing assembly (bounded-store revamp, design §6).
+
+    ``emotional_top`` caps how many emotional entries the session-start
+    view shows (top-by-|weight|); ``0`` shows all.
+    """
+
+    emotional_top: int = 20
 
 
 @dataclass(frozen=True)
@@ -164,14 +139,11 @@ class PrefilterConfig:
 
 @dataclass(frozen=True)
 class CapConfig:
-    """Hard cost/scope cap per automatic rebuild (P1.2 / Lever 1.4).
+    """Per-wake cap knobs (retained for forward-compat; tuning hints).
 
-    A backstop so a lazy ``rebuild`` can never run away: it processes at
-    most ``max_sessions_per_rebuild`` sessions, or stops once cumulative
-    spend reaches ``max_usd_per_rebuild`` — whichever trips first. The
-    remainder is deferred to the next rebuild (re-discovered, stateless).
-    ``bootstrap``/``resummarize`` are user-scoped (``--limit`` / ``--since``)
-    and exempt.
+    Sensible upper bounds a caller may consult when batching extraction work
+    across sweep wakes. Parsed for config stability; the per-wake transcript
+    cap itself is enforced by ``plan_extraction(max_sessions=...)``.
     """
 
     max_sessions_per_rebuild: int = 10
@@ -180,15 +152,78 @@ class CapConfig:
 
 @dataclass(frozen=True)
 class CollapseConfig:
-    """Collapse the 3 per-session summarize calls into 1 (P1.3 / Lever 1.1).
+    """Retained config stub (forward-compat).
 
-    Default **off**: the legacy 3-call path stays the default (and the
-    automatic fallback on any parse drift). The collapsed pass only helps
-    the legacy API-spawn path — P2's in-session read-once subsumes it for
-    free — so it ships opt-in. See ``collapse.py``.
+    The collapsed-summary pass is retired with the rollup lifecycle; this
+    stays parseable so an older config carrying ``collapse:`` still loads.
     """
 
     enabled: bool = False
+
+
+# ----- memory revamp config (design §7) ------------------------------------
+#
+# The three bounded stores (design §4). Each store carries a two-number
+# bound (``max`` + ``overflow_limit``) giving hysteresis: a store may drift
+# up to ``overflow_limit``, and only then does meditation fire and compact
+# it back below ``max`` (design §4 — prevents meditate-every-session thrash).
+# Length is measured in CHARACTERS, never tokens (vendor-neutral, design §8).
+
+# The only length unit we accept. Token units are vendor-specific and are
+# rejected at load time (design §7 / §8).
+VALID_LENGTH_UNIT = "characters"
+
+
+@dataclass(frozen=True)
+class SkillsStoreConfig:
+    """Bound for the skills store — count-based (design §4.1)."""
+
+    max_count: int = 40
+    overflow_limit: int = 50
+
+
+@dataclass(frozen=True)
+class MustRememberStoreConfig:
+    """Bound for the must-remember store — length-based (design §4.2)."""
+
+    max_length: int = 8000
+    overflow_limit: int = 10000
+
+
+@dataclass(frozen=True)
+class EmotionalDecayConfig:
+    """Signed-weight decay rate for the emotional log (design §4.3)."""
+
+    magnitude_per_day: float = 0.1
+
+
+@dataclass(frozen=True)
+class EmotionalStoreConfig:
+    """Bound + signed-weight cap + decay for the emotional log (design §4.3)."""
+
+    max_length: int = 12000
+    overflow_limit: int = 15000
+    weight_cap: float = 10.0
+    decay: EmotionalDecayConfig = field(default_factory=EmotionalDecayConfig)
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    """The ``memory:`` block (design §7).
+
+    ``length_unit`` is CONFIRMED final: ``characters``, never tokens.
+    The store bounds and decay rate are sensible defaults the Operator
+    approved tuning later (design §10.2).
+    """
+
+    length_unit: str = VALID_LENGTH_UNIT
+    skills: SkillsStoreConfig = field(default_factory=SkillsStoreConfig)
+    must_remember: MustRememberStoreConfig = field(
+        default_factory=MustRememberStoreConfig
+    )
+    emotional_log: EmotionalStoreConfig = field(
+        default_factory=EmotionalStoreConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -198,12 +233,15 @@ class Config:
     sources: list[SourceConfig]
     summarizer: SummarizerConfig
     budgets: BudgetsConfig
-    decay: DecayConfig
     rebuild: RebuildConfig
     briefing: BriefingConfig
     prefilter: PrefilterConfig = field(default_factory=PrefilterConfig)
     cap: CapConfig = field(default_factory=CapConfig)
     collapse: CollapseConfig = field(default_factory=CollapseConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    memory_extract: MemoryExtractConfig = field(
+        default_factory=MemoryExtractConfig
+    )
     env_var: str = "TIGER_MEMORY_CONFIG"
     # Resolved at load time so tests can introspect.
     source_path: Path | None = None
@@ -374,17 +412,6 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
 
     budgets_raw = raw.get("budgets") or {}
     budgets = BudgetsConfig(
-        short_summary_words=int(budgets_raw.get("short_summary_words", 400)),
-        detailed_summary_words=int(budgets_raw.get("detailed_summary_words", 4000)),
-        daily_words=int(budgets_raw.get("daily_words", 600)),
-        weekly_words=int(budgets_raw.get("weekly_words", 1000)),
-        monthly_words=int(budgets_raw.get("monthly_words", 1500)),
-        longer_memory_words=int(budgets_raw.get("longer_memory_words", 2500)),
-        must_memorize_rows=int(budgets_raw.get("must_memorize_rows", 60)),
-        must_memorize_memo_words=int(budgets_raw.get("must_memorize_memo_words", 25)),
-        repeat_detection_similarity=float(
-            budgets_raw.get("repeat_detection_similarity", 0.7)
-        ),
         max_prompt_content_chars=int(
             budgets_raw.get("max_prompt_content_chars", 120_000)
         ),
@@ -399,24 +426,18 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         ),
     )
 
-    decay_raw = raw.get("decay") or {}
-    decay = DecayConfig(
-        preference_days_per_point=int(
-            (decay_raw.get("preference") or {}).get("days_per_point", 7)
-        ),
-        decision_days_per_point=int(
-            (decay_raw.get("decision") or {}).get("days_per_point", 14)
-        ),
-        incident_days_per_point=int(
-            (decay_raw.get("incident") or {}).get("days_per_point", 28)
-        ),
+    extract_raw = raw.get("memory_extract") or {}
+    memory_extract = MemoryExtractConfig(
+        skill_procedure_words=int(extract_raw.get("skill_procedure_words", 120)),
+        memo_words=int(extract_raw.get("memo_words", 25)),
+        reaction_words=int(extract_raw.get("reaction_words", 40)),
+        max_output_words=int(extract_raw.get("max_output_words", 600)),
     )
 
     rebuild_raw = raw.get("rebuild") or {}
     rebuild = RebuildConfig(
         trigger=str(rebuild_raw.get("trigger", "lazy")),
         idle_threshold_hours=float(rebuild_raw.get("idle_threshold_hours", 1.0)),
-        resummarize_window_days=int(rebuild_raw.get("resummarize_window_days", 7)),
         lock_path=Path(
             rebuild_raw.get("lock_path", "/tmp/tiger-memory.lock")
         ).expanduser(),
@@ -426,23 +447,12 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
     )
 
     briefing_raw = raw.get("briefing") or {}
-    walking_raw = briefing_raw.get("walking") or {}
-    walking = WalkingConfig(
-        full_shorts_working_days=int(
-            walking_raw.get("full_shorts_working_days", 2)
-        ),
-        dailies_working_days=int(walking_raw.get("dailies_working_days", 7)),
-        weeklies_working_days=int(walking_raw.get("weeklies_working_days", 28)),
-        monthlies_working_days=int(walking_raw.get("monthlies_working_days", 90)),
-    )
-    _validate_walking(walking)
-    resident_layers = _parse_resident_layers(briefing_raw)
-    briefing = BriefingConfig(
-        walking=walking,
-        always_first=str(briefing_raw.get("always_first", "must_memorize.md")),
-        order=str(briefing_raw.get("order", "oldest_to_newest")),
-        resident_layers=resident_layers,
-    )
+    emotional_top = int(briefing_raw.get("emotional_top", 20))
+    if emotional_top < 0:
+        raise ConfigError(
+            f"briefing.emotional_top must be ≥ 0; got {emotional_top}."
+        )
+    briefing = BriefingConfig(emotional_top=emotional_top)
 
     prefilter_raw = raw.get("prefilter") or {}
     prefilter = PrefilterConfig(
@@ -466,21 +476,154 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         enabled=bool(collapse_raw.get("enabled", False)),
     )
 
+    memory = _parse_memory(raw.get("memory") or {})
+
     return Config(
         agent=agent,
         store=store,
         sources=sources,
         summarizer=summarizer,
         budgets=budgets,
-        decay=decay,
         rebuild=rebuild,
         briefing=briefing,
         prefilter=prefilter,
         cap=cap,
         collapse=collapse,
+        memory=memory,
+        memory_extract=memory_extract,
         env_var=str(raw.get("env_var", "TIGER_MEMORY_CONFIG")),
         source_path=source_path,
     )
+
+
+# ----- memory revamp parsing + validation (design §7) ---------------------
+
+
+def _cfg_int(value: Any, field: str) -> int:
+    """``int(value)`` but a non-numeric value raises the contracted ``ConfigError``.
+
+    The ``memory:`` block comes from a user-edited YAML file; a non-numeric
+    bound (``max_count: lots``) must fail fast with an actionable ConfigError,
+    not leak a raw ``ValueError`` (QI-4).
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{field} must be an integer; got {value!r}.") from None
+
+
+def _cfg_float(value: Any, field: str) -> float:
+    """``float(value)`` but a non-numeric value raises the contracted ``ConfigError``."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{field} must be a number; got {value!r}.") from None
+
+
+def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
+    """Parse + validate the ``memory:`` block (design §7).
+
+    All keys are optional (sensible defaults, design §10.2) EXCEPT the
+    vendor-neutrality invariants: ``length_unit`` must be ``characters``
+    (token units are rejected, design §8), bounds must be positive with
+    ``overflow_limit > max`` (the hysteresis band, design §4), and the
+    emotional ``weight_cap`` / decay rate must be positive.
+    """
+    length_unit = str(memory_raw.get("length_unit", VALID_LENGTH_UNIT))
+    if length_unit != VALID_LENGTH_UNIT:
+        raise ConfigError(
+            f"memory.length_unit must be {VALID_LENGTH_UNIT!r} "
+            f"(token units are vendor-specific and rejected); "
+            f"got {length_unit!r}."
+        )
+
+    skills_raw = memory_raw.get("skills") or {}
+    skills = SkillsStoreConfig(
+        max_count=_cfg_int(skills_raw.get("max_count", 40), "memory.skills.max_count"),
+        overflow_limit=_cfg_int(
+            skills_raw.get("overflow_limit", 50), "memory.skills.overflow_limit"
+        ),
+    )
+    _validate_bound(
+        "memory.skills", "max_count", skills.max_count, skills.overflow_limit
+    )
+
+    mr_raw = memory_raw.get("must_remember") or {}
+    must_remember = MustRememberStoreConfig(
+        max_length=_cfg_int(
+            mr_raw.get("max_length", 8000), "memory.must_remember.max_length"
+        ),
+        overflow_limit=_cfg_int(
+            mr_raw.get("overflow_limit", 10000), "memory.must_remember.overflow_limit"
+        ),
+    )
+    _validate_bound(
+        "memory.must_remember",
+        "max_length",
+        must_remember.max_length,
+        must_remember.overflow_limit,
+    )
+
+    el_raw = memory_raw.get("emotional_log") or {}
+    decay_raw = el_raw.get("decay") or {}
+    emotional_log = EmotionalStoreConfig(
+        max_length=_cfg_int(
+            el_raw.get("max_length", 12000), "memory.emotional_log.max_length"
+        ),
+        overflow_limit=_cfg_int(
+            el_raw.get("overflow_limit", 15000), "memory.emotional_log.overflow_limit"
+        ),
+        weight_cap=_cfg_float(
+            el_raw.get("weight_cap", 10.0), "memory.emotional_log.weight_cap"
+        ),
+        decay=EmotionalDecayConfig(
+            magnitude_per_day=_cfg_float(
+                decay_raw.get("magnitude_per_day", 0.1),
+                "memory.emotional_log.decay.magnitude_per_day",
+            ),
+        ),
+    )
+    _validate_bound(
+        "memory.emotional_log",
+        "max_length",
+        emotional_log.max_length,
+        emotional_log.overflow_limit,
+    )
+    if emotional_log.weight_cap <= 0:
+        raise ConfigError(
+            f"memory.emotional_log.weight_cap must be > 0; "
+            f"got {emotional_log.weight_cap}."
+        )
+    if emotional_log.decay.magnitude_per_day < 0:
+        raise ConfigError(
+            f"memory.emotional_log.decay.magnitude_per_day must be ≥ 0; "
+            f"got {emotional_log.decay.magnitude_per_day}."
+        )
+
+    return MemoryConfig(
+        length_unit=length_unit,
+        skills=skills,
+        must_remember=must_remember,
+        emotional_log=emotional_log,
+    )
+
+
+def _validate_bound(
+    label: str, max_key: str, max_value: int, overflow_limit: int
+) -> None:
+    """A store bound is valid iff ``0 < max < overflow_limit`` (design §4).
+
+    The two-number hysteresis band only exists when overflow sits strictly
+    above max; an inverted or collapsed band would make meditation thrash
+    (fire while still under max) or never compact.
+    """
+    if max_value <= 0:
+        raise ConfigError(f"{label}.{max_key} must be > 0; got {max_value}.")
+    if overflow_limit <= max_value:
+        raise ConfigError(
+            f"{label}.overflow_limit must be > {max_key} ({max_value}) "
+            f"to form a hysteresis band; got {overflow_limit}."
+        )
 
 
 # ----- helpers -------------------------------------------------------------
@@ -517,51 +660,3 @@ def _expand_path_if_pathy(value: Any) -> Any:
     if isinstance(value, str) and (value.startswith("~") or "/" in value):
         return str(Path(value).expanduser())
     return value
-
-
-def _parse_resident_layers(briefing_raw: dict[str, Any]) -> tuple[str, ...]:
-    """Parse + validate ``briefing.resident_layers`` (P3 lean core).
-
-    Absent -> all four layers resident (backward compatible). Present ->
-    a list whose entries must each be one of ``VALID_RESIDENT_LAYERS``;
-    an empty list is allowed (only ``must_memorize`` / ``longer_memory``
-    stay resident, everything else drill-on-demand).
-    """
-    raw = briefing_raw.get("resident_layers")
-    if raw is None:
-        return VALID_RESIDENT_LAYERS
-    if not isinstance(raw, list):
-        raise ConfigError(
-            "briefing.resident_layers must be a list of layer names "
-            f"(subset of {list(VALID_RESIDENT_LAYERS)})."
-        )
-    out: list[str] = []
-    for item in raw:
-        if item not in VALID_RESIDENT_LAYERS:
-            raise ConfigError(
-                f"briefing.resident_layers: unknown layer {item!r}; "
-                f"allowed: {list(VALID_RESIDENT_LAYERS)}."
-            )
-        out.append(item)
-    return tuple(out)
-
-
-def _validate_walking(w: WalkingConfig) -> None:
-    if w.full_shorts_working_days < MIN_FULL_SHORTS_WORKING_DAYS:
-        raise ConfigError(
-            f"briefing.walking.full_shorts_working_days must be ≥ "
-            f"{MIN_FULL_SHORTS_WORKING_DAYS}; got {w.full_shorts_working_days}."
-        )
-    if w.dailies_working_days < MIN_DAILIES_WORKING_DAYS:
-        raise ConfigError(
-            f"briefing.walking.dailies_working_days must be ≥ "
-            f"{MIN_DAILIES_WORKING_DAYS} (memory-gap guard); got "
-            f"{w.dailies_working_days}."
-        )
-    if w.weeklies_working_days < MIN_WEEKLIES_WORKING_DAYS:
-        raise ConfigError(
-            f"briefing.walking.weeklies_working_days must be ≥ "
-            f"{MIN_WEEKLIES_WORKING_DAYS} (memory-gap guard); got "
-            f"{w.weeklies_working_days}."
-        )
-    # No min on monthlies.

@@ -1,12 +1,15 @@
 # tiger-memory configuration
 # Full docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
+# Design (the three bounded stores + meditation):
+#   https://github.com/DingyuZhou/TigerHarness/blob/main/docs/DESIGN-memory.md
 
 agent:
   name: researcher
   role: "A research assistant specializing in technical topics."
 
 store:
-  # Where to persist the memory store (archive, journal, briefing).
+  # Where to persist the memory store (the three bounded stores +
+  # briefing live under journal/ here). Auto-appends the agent slug.
   root: ~/.local/share/tiger-memory/researcher
 
 sources:
@@ -17,34 +20,59 @@ sources:
     project_path: ~/.claude/projects/-home-user-myproject/
 
 summarizer:
-  # Choices: anthropic, mock (for testing without API spend)
+  # Choices: anthropic, mock (for testing without API spend).
+  # The summarizer is the ONLY model call: the extraction judgement and
+  # meditation's similarity/staleness/compaction judgements. Vendor-neutral.
   backend: anthropic
   model: claude-sonnet-4-6
   prompts: default/v1
 
-# Optional: RAG embedder for semantic search
-# embedder:
-#   backend: fastembed          # or "openai"
-#   model: BAAI/bge-small-en-v1.5
-#   # For OpenAI:
-#   # backend: openai
-#   # model: text-embedding-3-small
-
 rebuild:
   lock_path: /tmp/tiger-memory-researcher.lock
   idle_threshold_hours: 1
-  resummarize_window_days: 7
   rebuild_timeout_minutes: 60
 
 budgets:
-  must_memorize_rows: 150       # max rows in must_memorize.md
-  repeat_detection_similarity: 0.9
-  # Max transcript chars fed to a single in-process summarizer call. A
-  # transcript over this is chunk-and-reduced (map-reduce), NOT clipped,
-  # so no middle content is lost. ~120 KB is well under Opus's window.
+  # Max transcript chars fed to a single in-process extraction summarizer
+  # call. A transcript over this is clipped (head+tail); the staged
+  # sub-agent path owns the reduce of an oversized transcript.
   max_prompt_content_chars: 120000
   # Max transcript chars staged into a sub-agent prompt on the live
   # subscription path (no in-process summarizer there — the sub-agent
   # owns the reduce, so this is sized to its window). Only a transcript
   # beyond this is clipped, as a last resort.
   max_staged_content_chars: 300000
+
+# memory: the three bounded stores (design §4) + signed-weight decay.
+# Every key is optional — these are the package defaults (design §7); set
+# only the ones you want to tune. length_unit is CONFIRMED final
+# (characters, never tokens — tokenization is vendor-specific and rejected
+# at load time). Each store carries a two-number bound (max + overflow_limit)
+# giving hysteresis: a store may drift up to overflow_limit, and only THEN
+# does meditation fire and compact it back below max (prevents thrash).
+memory:
+  length_unit: characters
+  skills:                  # count-bounded (learned, reusable lessons)
+    max_count: 40
+    overflow_limit: 50
+  must_remember:           # length-bounded chars (external directives)
+    max_length: 8000
+    overflow_limit: 10000
+  emotional_log:           # length-bounded chars (signed-weight reactions)
+    max_length: 12000
+    overflow_limit: 15000
+    weight_cap: 10         # hard cap: |weight| <= 10
+    decay:
+      magnitude_per_day: 0.1   # how fast |weight| shrinks toward 0
+
+# memory_extract: per-section word budgets for the extraction prompt
+# (optional; defaults shown). max_output_words caps the whole bundle.
+memory_extract:
+  skill_procedure_words: 120
+  memo_words: 25
+  reaction_words: 40
+  max_output_words: 600
+
+# briefing: session-start assembly knobs (optional).
+briefing:
+  emotional_top: 20        # cap on emotional entries shown (top-by-|weight|); 0 = all

@@ -37,30 +37,3 @@ def minimal_config_yaml(tmp_path: Path) -> Path:
         )
     )
     return cfg
-
-
-@pytest.fixture
-def invalid_dailies_config_yaml(tmp_path: Path) -> Path:
-    cfg = tmp_path / "bad.yaml"
-    cfg.write_text(
-        dedent(
-            f"""\
-            agent:
-              name: TestTiger
-              role: "Test."
-            store:
-              root: {tmp_path}/memory
-            sources:
-              - kind: claude_code
-                project_path: {tmp_path}/projects/
-            summarizer:
-              backend: anthropic
-              model: claude-opus-4-7
-              prompts: default/v1
-            briefing:
-              walking:
-                dailies_working_days: 3
-            """
-        )
-    )
-    return cfg

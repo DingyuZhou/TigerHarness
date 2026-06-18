@@ -17,7 +17,6 @@ from uuid import uuid4
 import pytest
 
 from tigerharness.tiger_memory.config import load_config
-from tigerharness.tiger_memory.lifecycle import _approx_cost
 from tigerharness.tiger_memory.sources import ClaudeTranscriptAdapter
 from tigerharness.tiger_memory.store import Store
 from tigerharness.tiger_memory.summarizers import MockSummarizer
@@ -39,29 +38,6 @@ def test_anthropic_summarizer_has_cost_attribute() -> None:
     from tigerharness.tiger_memory.summarizers import AnthropicSummarizer
     s = AnthropicSummarizer(model="claude-opus-4-7")
     assert s.cost_so_far == 0.0
-
-
-def test_approx_cost_correct_for_addendum_vs_new(tmp_path: Path) -> None:
-    """ADDENDUM (1 short) should cost noticeably less than SUMMARIZE_NEW
-    (1 short + 1 detailed), not the same. The old formula was off by ~5x."""
-    cfg_path = tmp_path / "cfg.yaml"
-    cfg_path.write_text(dedent(f"""\
-        agent: {{name: T, role: T}}
-        store: {{root: {tmp_path}/memory}}
-        sources:
-          - kind: claude_code
-            project_path: {tmp_path}/p/
-        summarizer: {{backend: anthropic, model: claude-opus-4-7, prompts: default/v1}}
-    """))
-    cfg = load_config(cfg_path)
-    content = "x" * 10_000
-
-    cost_new = _approx_cost(cfg, content, n_short=1, n_detailed=1)
-    cost_addendum = _approx_cost(cfg, content, n_short=1, n_detailed=0)
-    assert cost_new > cost_addendum
-    # Detailed output is 10x larger than short; addendum should be
-    # noticeably cheaper. 2x is a conservative lower bound.
-    assert cost_addendum < cost_new / 2
 
 
 # ----- slack channel + raw URL --------------------------------------------

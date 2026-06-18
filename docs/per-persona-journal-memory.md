@@ -86,8 +86,10 @@ Three moving parts:
    proceed. The driver writes a thin entry at `claim`/`release`.
 2. **Ingestion path (memory code):** a new `JournalWorklogAdapter`
    source discovers worklog entries, attributes each by its `persona`
-   frontmatter, and feeds the **existing** sweep → plan → summarize →
-   ingest machinery unchanged.
+   frontmatter, and feeds the sweep → plan → extract → ingest machinery
+   (the source-adapter input feed is unchanged across the bounded-store
+   revamp — only the extraction contract + stores downstream changed; see
+   [`tiger-memory.md`](tiger-memory.md)).
 3. **Double-count suppression:** the drive transcript is marked so the
    `claude_transcript` adapter skips it — otherwise the driver would
    *also* get a fat summary of the whole drive, defeating the "thin"
@@ -187,9 +189,9 @@ style, trivial to write atomically per turn.
   (`tiger_memory/sources/journal_worklog.py`): discovers
   `*/worklog/*.md` under the journal root (both `active/` and `done/`),
   reads frontmatter, filters by `persona`, and emits `SourceRecord`s.
-- **Grouping:** the summary unit is **per (task, persona)** — "Rukawa's
+- **Grouping:** the extraction unit is **per (task, persona)** — "Rukawa's
   memory of task X" — not per-turn. Fewer sub-agent calls, a natural
-  recall unit. Individual turn files remain the drill-down detail.
+  recall unit. Individual turn files remain the underlying detail.
   `conversation_uuid = uuid5("journal:" + team + "/" + task_id + "/" +
   persona)` (precedent: `docs.py` derives uuid5 from a path). Stable as
   the task grows; the existing addendum/growth path handles

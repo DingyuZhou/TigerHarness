@@ -1,14 +1,9 @@
 """Tests for tiger_memory.store."""
 from __future__ import annotations
 
-import json
 import os
 import time
-from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
-
-import pytest
 
 from tigerharness.tiger_memory.store import (
     DAILY_RE,
@@ -24,13 +19,27 @@ def test_init_layout(tmp_path: Path) -> None:
     assert not store.exists()
     store.init_layout()
     assert store.exists()
-    assert store.paths.archive.is_dir()
     assert store.paths.journal.is_dir()
     assert store.paths.briefing.is_dir()
-    # .gitkeep in archive/ and journal/ (git-trackable), not in briefing/
-    assert (store.paths.archive / ".gitkeep").exists()
+    # .gitkeep in journal/ (git-trackable), not in briefing/
     assert (store.paths.journal / ".gitkeep").exists()
     assert not (store.paths.briefing / ".gitkeep").exists()
+
+
+def test_init_layout_does_not_recreate_retired_archive(tmp_path: Path) -> None:
+    """GAP-1 regression: the retired ``archive/`` dir must NOT be (re)created.
+
+    §3/§9 retired the detailed-summary archive entirely; the live layout is
+    only ``journal/`` + ``briefing/``. ``init_layout`` (called by every
+    init/rebuild/pin) must not resurrect ``archive/``, and ``exists()`` must
+    not gate on it. This pins the dir shut so it cannot silently return.
+    """
+    store = Store(tmp_path / "mem")
+    store.init_layout()
+    store.init_layout()  # idempotent second call must not create it either
+    assert not store.paths.archive.exists()
+    # store still reports as existing on the journal-only live layout.
+    assert store.exists()
 
 
 def test_init_layout_gitkeep_idempotent(tmp_path: Path) -> None:
@@ -38,7 +47,6 @@ def test_init_layout_gitkeep_idempotent(tmp_path: Path) -> None:
     store = Store(tmp_path / "mem")
     store.init_layout()
     store.init_layout()  # second call
-    assert (store.paths.archive / ".gitkeep").exists()
     assert (store.paths.journal / ".gitkeep").exists()
 
 
@@ -80,63 +88,6 @@ def test_filename_patterns_match_design() -> None:
     assert not SHORT_RE.match(daily)
     assert not WEEKLY_RE.match(monthly)
     assert not MONTHLY_RE.match(weekly)
-
-
-def test_find_archive_by_uuid(tmp_path: Path) -> None:
-    store = Store(tmp_path / "mem")
-    store.init_layout()
-    uid = "abcdef12-3456-7890-1234-567890abcdef"
-    f = store.paths.archive / f"20260514-082136-{uid}.md"
-    f.write_text("dummy")
-    assert store.find_archive(uid) == f
-    assert store.find_archive("nonexistent-uuid") is None
-
-
-def test_find_short_excludes_rollups(tmp_path: Path) -> None:
-    store = Store(tmp_path / "mem")
-    store.init_layout()
-    uid = "abcdef12-3456-7890-1234-567890abcdef"
-    short = store.paths.journal / f"20260514-082136-{uid}.md"
-    daily = store.paths.journal / f"20260514-daily-{uid}.md"
-    short.write_text("s")
-    daily.write_text("d")
-    assert store.find_short(uid) == short  # daily excluded
-
-
-def test_find_short_only_rollup_returns_none(tmp_path: Path) -> None:
-    """Only a rollup exists for the uuid -> None.
-
-    Also the deterministic pin for the loop's skip-and-continue arc
-    (store.py 146->145): the mixed-file test above only exercises it
-    when glob yields the rollup BEFORE the short, and glob order is
-    filesystem-dependent -- it did on the dev box (aarch64/NixOS) and
-    did not on ubuntu CI, which is exactly how the first CI run landed
-    at 99.99%. With ONLY a non-matching file present, the arc executes
-    on every platform regardless of directory order."""
-    store = Store(tmp_path / "mem")
-    store.init_layout()
-    uid = "abcdef12-3456-7890-1234-567890abcdef"
-    (store.paths.journal / f"20260514-daily-{uid}.md").write_text("d")
-    assert store.find_short(uid) is None
-
-
-def test_filename_derivation() -> None:
-    uid = "abcdef12-3456-7890-1234-567890abcdef"
-    dt = datetime(2026, 5, 14, 8, 21, 36)
-    assert Store.short_filename(dt, uid) == f"20260514-082136-{uid}.md"
-    assert Store.daily_filename("20260514", uid) == f"20260514-daily-{uid}.md"
-    assert Store.weekly_filename("20260511", uid) == f"20260511-week-{uid}.md"
-    assert Store.monthly_filename("202605", uid) == f"202605-month-{uid}.md"
-
-
-def test_working_days_sorted_desc(tmp_path: Path) -> None:
-    store = Store(tmp_path / "mem")
-    store.init_layout()
-    for date in ["20260514", "20260512", "20260513"]:
-        (store.paths.journal / f"{date}-082136-{uuid4()}.md").write_text("s")
-    # Add a daily — should not contribute a working day on its own.
-    (store.paths.journal / f"20260601-daily-{uuid4()}.md").write_text("d")
-    assert store.working_days() == ["20260514", "20260513", "20260512"]
 
 
 def test_lock_acquire_and_release(tmp_path: Path) -> None:

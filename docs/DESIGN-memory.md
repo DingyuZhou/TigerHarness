@@ -1,0 +1,359 @@
+# Memory system design — the three bounded stores
+
+Status: **SHIPPED** (2026-06-17). This is the canonical design for the
+tiger-memory bounded-store revamp, as built on
+`work/2026-06-17-memory-revamp` (2600 tests, 100% branch coverage).
+It supersedes the chronological-rollup memory model described in
+`docs/history/tiger-memory-rework.md` (kept for historical rationale).
+The shipped code under `src/tigerharness/tiger_memory/` is the ground
+truth; this doc explains *why* it is shaped the way it is. Section
+numbers are preserved from the original design draft so review notes that
+cite "§4.2" / "§5" still resolve.
+
+---
+
+## 1. Why we did this
+
+The old tiger-memory had three weaknesses:
+
+1. **Unbounded growth.** Archived memory files grew forever; eventually a
+   liability.
+2. **Memorizing ≠ growing.** The agent recorded facts but did not get
+   measurably better at future tasks because of them.
+3. **Weak chemistry with the persona system.** Memory was the same
+   generic store for everyone — it did not make a Sakuragi more Sakuragi.
+
+The revamp answers all three: memory is **bounded and self-pruning**
+(forgetting is first-class), **skill-forming** (learned lessons become
+invokable skills that make future work easier), and **persona-coloured**
+(emotional logs carry each persona's reactions, decayed over time).
+
+## 2. Principles (the non-negotiables)
+
+- **Forgetting is a feature, not a failure.** Every store is bounded.
+  Crossing the bound triggers meditation, which compacts and forgets so the
+  store stays focused on what helps the team now.
+- **Memory must improve future task handling**, not just record the past.
+- **Vendor-neutral mechanics.** All bookkeeping (weights, decay, forgetting,
+  meditation orchestration, skill index) is pure Python with vendor-neutral
+  data formats. The only LLM call sits behind the existing pluggable
+  summarizer registry. No token-based units; no dependency on Claude's
+  skill system.
+- **The persona processes its own memory.** Both extraction (turning a
+  finished session into memory) and meditation (compaction) run **as that
+  persona, in character, with full context**, on the subscription rail (the
+  sweep-memory pattern: constrained Task sub-agents) — never an inline
+  `claude -p`, never a raw vendor API call. This is what makes the emotional
+  layer genuinely persona-oriented.
+
+## 3. What we retired (no safety net)
+
+Ripped out entirely — raw sources stay on disk but are no longer maintained
+as memory:
+
+- Chronological rollups: daily / weekly / monthly summaries.
+- `longer_memory.md` (the compressed pre-window history).
+- `archive/` detailed summaries.
+- Summary-RAG and drill-down: `rag.py`, the memory embedders, `drill.py`,
+  the search-over-summaries path, and the `tiger-memory-search` /
+  `tiger-memory-drill-down` skills.
+- The lazy rollup lifecycle that produced the above.
+- The old extraction contract: the `@@SHORT@@` / `@@DETAILED@@` /
+  `@@MUST_MEMORIZE@@` bundle, `.summary.md` cards, the `ingest-summary`
+  CLI verb, and the `must_memorize.md` table with `must_memorize_rows` +
+  kind-decay.
+
+The fresh-start migration is `tiger-memory rebuild`
+(`lifecycle._drop_legacy_surface`): on its first run it removes the old
+rollup `archive/` dir and the legacy journal files (chronological
+summaries, `must_memorize.md`, `longer_memory.md`). The three new store
+files survive; there is no one-time converter (resolved decision §10.6).
+
+There is, however, a **one-off seeding import** (`tiger-memory
+import-legacy`, `import_legacy.py`) that carries the old memory forward
+*before* the fresh-start drop. It reads (never deletes) each persona's old
+`must_memorize.md` pins + the daily/weekly/monthly rollups, re-authors them
+in character into the new shapes, backdates them to their source dates, and
+appends them tagged `source: import-legacy`. It is idempotent (a `.state.json`
+`legacy_import` marker + a detect-existing-seed fallback) and must run
+**before** `rebuild`. The full migration order is **merge → migrate configs
+→ import-legacy → rebuild → sweep** — running `rebuild` before
+`import-legacy` is irrecoverable, as it deletes the legacy files (§12).
+
+Kept and adapted:
+
+- **Source adapters** (`claude_code`, `slack_thread`, `journal_worklog`,
+  `auto_memory`) as the input feed, plus multi-persona attribution and the
+  drive-session double-count suppression.
+- **The idle/summary trigger** (lazy / idle-threshold) — unchanged as the
+  signal that a finished session is ready to be turned into memory.
+- **The pin command**, reframed to write a must-remember entry.
+
+## 4. The three bounded stores
+
+Memory is now exactly three stores per persona (`tiger_memory/entries.py`,
+`bounded_store.py`). Each has a scalar, an ordering rule, and a two-number
+bound (`max` + `overflow_limit`). The two numbers give hysteresis: a store
+may drift up to `overflow_limit`, and only *then* does meditation fire and
+compact it back below `max`. This prevents thrash (meditate every session).
+
+On-disk layout: one markdown file per store under the persona's `journal/`
+dir — `skills.md`, `must_remember.md`, `emotional.md`. Each file is a
+sequence of entries; every entry is a YAML-frontmatter block (the structured
+fields) + a body, blocks separated by a sentinel line. `save_atomic`
+rewrites the whole file (meditation operates store-wide). Length is measured
+in **characters**, never tokens (§8).
+
+### 4.1 Skills — learned, invokable, vendor-neutral
+
+- A skill (`SkillEntry`) is a markdown entry capturing "something I learned
+  to do better": a `name`, a *when-to-use* `trigger`, the `procedure`/lesson,
+  provenance (`source`/`created_at`), a `usage_count`, and an `importance`
+  scalar.
+- **Importance grows with use** — `importance = log1p(usage_count)`
+  (`skills.skill_importance`), monotonic non-decreasing in usage and
+  **independent of elapsed time** (no continuous time-decay). The keep-rank
+  factors in recency of use as a tie-break: an old, unused skill ranks lower
+  and is forgotten first. Importance is re-derived at meditation time, not
+  ticked down daily.
+- **Session start:** Python rebuilds a **skill index** (name + trigger +
+  one-line summary per skill, `briefing._render_skill_index`) and that index
+  — *only the index* — is loaded into the persona's context. When a skill is
+  relevant, the persona loads the full entry (its procedure) on demand from
+  `skills.md`. This is our own progressive-disclosure mechanism, **not**
+  Claude's `.claude/skills/`, and persona-private (not shared).
+- **Bound:** count-based (`max_count` + `overflow_limit`). On overflow,
+  meditation merges duplicate/near-duplicate skills and forgets the oldest,
+  least-used ones.
+
+### 4.2 Must-remember — external directives
+
+- Reflects requirements from outside that make the work land better.
+  `MustRememberEntry`: text, `kind` (`owner_explicit` / `preference` /
+  `decision` / `incident`), an `importance` scalar, source + date.
+- **Length-based** bound (replacing the old ~60-row cap): `max_length` +
+  `overflow_limit`, measured in characters (§7).
+- **Owner directives start elevated but are not immortal.** `pin --kind
+  owner_explicit` writes importance 5.0; extracted directives start at 1.0.
+  Meditation runs a **relevance check against the live team goal / project
+  focus**: a directive that was tied to an old feature and no longer serves
+  the current mission is **downgraded to a normal kind** (`decision`), after
+  which it becomes forgettable like any other entry. Nothing is permanently
+  locked; relevance to the live mission is the gate.
+  **No time-decay here:** unlike the emotional store, must_remember
+  `importance` does not tick down over time — the keep-rank is simply
+  `importance` + recency (`meditation.keep_rank`). Downgrading an
+  `owner_explicit` directive to `decision` does not start a decay clock; it
+  only drops the forget-guard, so the entry can be forgotten on the next
+  overflow if its `importance` + recency rank low enough.
+- On overflow, meditation: dedupe (merging bumps importance by 1.0),
+  relevance-check and downgrade stale directives, compact verbose survivors,
+  then guarded-forget old low-importance items until length < `max_length`.
+
+### 4.3 Emotional-weighted persona logs — the "more Sakuragi" layer
+
+- `EmotionalEntry`: "what I did this session / anything to remember for
+  future tasks / my reaction to it," plus a signed emotional `weight`, a
+  short `reaction` string, and a date.
+- **Signed scalar with a hard cap of [-10, +10]:** positive = *for* /
+  liked; negative = *against* / disliked; `0` = neutral. One scalar only.
+  The cap (`emotional.clamp_weight`) means repeated merges can never inflate
+  a single memory past ±10.
+- **Decay toward 0 from either side** (`emotional.decay_weight`). Each day
+  `|weight|` shrinks toward 0 by `magnitude_per_day * days`; the sign is
+  preserved until the magnitude reaches exactly 0 (never overshoots into the
+  opposite sign, never yields `-0.0`). Forgetting ranks by **magnitude
+  `|weight|`** plus recency, so strong feelings — positive *or* negative —
+  survive, while near-neutral / decayed items are compacted or forgotten
+  first.
+- **When decay is materialized:** decay is applied to the stored `weight`
+  **only at meditation time** (`emotional.decay_entry`, which fires on
+  overflow). It is **not** computed live on every read. In particular the
+  session-start emotional VIEW (`briefing._render_emotional`) sorts on the
+  raw **stored** `|weight|`, not a freshly decayed value — between
+  meditations, an entry's briefing rank reflects the weight as last written.
+- **Length-based** bound: `max_length` + `overflow_limit`. On overflow,
+  meditation merges similar items (merging bumps magnitude toward the
+  stronger feeling, clamped), then compacts/forgets the lowest-magnitude /
+  oldest items until length < `max_length`.
+
+## 5. Meditation — the compaction engine
+
+One engine (`meditation.meditate`), run per store, that turns "over the
+overflow limit" back into "under max."
+
+- **Trigger:** at session start (post-ingest), if any store is over its
+  `overflow_limit` (`bounded_store.is_over_overflow` — the hysteresis
+  trigger; `sweep.meditate_all_stores` gates on it). Meditation itself is a
+  no-op under `max`.
+- **Where it runs:** in-persona, on the subscription rail (sweep-memory's
+  constrained Task sub-agent pattern), with the persona's full context **and
+  the current team goal / project focus, read from the charter Mission**
+  (`charter/README.md`, via `lifecycle.team_mission_text`). Never inline
+  `claude -p`; never a raw vendor API call.
+- **Per-store recipe** (`meditate` runs these strictly in order under the
+  per-store lock):
+  1. **merge** duplicate / near-duplicate entries; merging **raises** the
+     surviving entry's scalar (importance, or emotional magnitude), clamped.
+  2. *(must-remember only)* **relevance-check** each `owner_explicit`
+     directive against the team goal; **downgrade** stale ones to `decision`.
+  3. **compact** verbose survivors (skipped for the count-bounded skills
+     store; the summarizer rewrites a body shorter, accepted only if
+     strictly shorter).
+  4. **forget** the lowest-keep-ranked entries until the store is below
+     `max`, via the guarded `bounded_store.forget`.
+- **Invariants:** steps run in order — never forget a still-relevant owner
+  directive before the relevance-check has had its say (see §5.1). Meditation
+  takes the per-store lock (concurrent sessions must not meditate the same
+  store at once; a live foreign lock raises `StoreLockHeld` and the caller
+  backs off — retried next sweep, it is not urgent). It is idempotent and
+  **logged**: forgetting is irreversible with no safety net, so a changed
+  pass emits an INFO record naming exactly what merged / downgraded /
+  compacted / forgotten.
+- **Vendor-neutral:** orchestration and ranking are Python; only the
+  judgement (which items are "similar," "stale," "low value") goes through
+  the pluggable summarizer/LLM backend. An unparseable verdict defaults to
+  the **safe** answer (not-similar / still-relevant / keep-original), so a
+  garbled backend never destroys data. CI runs the whole engine under a
+  scripted mock — zero live-model calls.
+
+### 5.1 Forget-guard semantics — RATIFIED (do not "fix" this)
+
+The forget pass must never drop a still-relevant `owner_explicit` directive.
+The mechanism is `bounded_store.forget(..., relevance_checked_ids=...)`: it
+raises `ForgetGuardError` when asked to drop an `owner_explicit`
+must_remember entry whose id is **not** in `relevance_checked_ids`.
+
+The interface note that introduced the guard phrased it as "collect the set
+of owner directives examined this cycle and pass them as
+`relevance_checked_ids`." Taken **literally**, that would mark a
+*still-relevant* directive as licensed-to-drop and reopen the data-loss hole
+the guard exists to close.
+
+**Decision (ratified, do not revert):** meditation's relevance pass
+(`_relevance_pass`) adds to `relevance_checked` **only the directives it
+judged stale and downgraded** (which are no longer `owner_explicit` anyway).
+A still-relevant directive stays `owner_explicit` and is deliberately **not**
+added, so the guard refuses to drop it. `_forget_pass` then **skips** a
+guarded candidate (it does not force-drop) and, if the store still cannot get
+under `max`, sets the terminal `over_max` warning and **leaves the store
+intact**. This satisfies both the guard's letter and the design's intent: the
+data-loss invariant wins over the interface-note phrasing.
+
+A later editor must **not** "fix" `_relevance_pass` back to the literal
+all-examined reading — that would silently reopen the data-loss hole. The
+behavior is regression-locked by
+`tests/tiger_memory/test_meditation.py::test_relevance_keeps_relevant_owner_then_terminal_overmax`
+(seeds only still-relevant owner directives over `max`, asserts both survive
+and `over_max is True`, `forgotten == []`).
+
+## 6. Session-start protocol
+
+The session-start working set (`briefing.rebuild_briefing`) is exactly:
+
+- **the full must_remember store** (bounded, so cheap), highest-importance
+  first;
+- **an emotional view** — the top entries by **stored** `|weight|` (capped by
+  `briefing.emotional_top`; strong feelings, for or against, survive). The
+  view ranks on the raw weight as last written, not a live-decayed value —
+  decay is materialized only at meditation time (§4.3);
+- **the skill index** — name + trigger + one-line summary per skill,
+  Python-rebuilt; only the index loads, the persona pulls a full skill on
+  demand;
+- **the unprocessed/active-session notice** (`UNPROCESSED.md`): the idle
+  trigger only fires once a session goes idle, so a *still-active* recent
+  session may not be in memory yet. The rule for the agent: **if the Operator
+  references something it does not recognise, check memory first, then check
+  for unprocessed/active sessions before claiming ignorance.**
+
+The briefing is assembled atomically (temp-dir folder swap) with a
+fingerprint no-op shortcut. Meditation runs (per store) if any store is over
+its overflow limit (§5).
+
+## 7. Config schema (the `memory:` block)
+
+`tiger_memory/config.py` parses and validates this block; every key is
+optional (these are the defaults). See `examples/tiger-memory.config.yaml`
+for an annotated copy.
+
+```yaml
+memory:
+  length_unit: characters        # CONFIRMED: characters, never tokens
+  skills:
+    max_count: 40                # count bound
+    overflow_limit: 50
+  must_remember:
+    max_length: 8000             # chars
+    overflow_limit: 10000
+  emotional_log:
+    max_length: 12000            # chars
+    overflow_limit: 15000
+    weight_cap: 10               # hard cap: |weight| <= 10
+    decay:
+      magnitude_per_day: 0.1     # how fast |weight| -> 0
+
+memory_extract:                  # per-section word budgets for extraction
+  skill_procedure_words: 120
+  memo_words: 25
+  reaction_words: 40
+  max_output_words: 600
+
+briefing:
+  emotional_top: 20              # cap on emotional entries shown; 0 = all
+```
+
+Validation is fail-fast at load time: `length_unit` must be `characters`
+(token units are rejected); each store bound must satisfy
+`0 < max < overflow_limit` (the hysteresis band); `weight_cap > 0`;
+`magnitude_per_day >= 0`. The numbers are sensible defaults approved for
+tuning later; `length_unit` and `weight_cap` are confirmed final.
+
+## 8. Vendor decoupling (explicit)
+
+- Length measured in **characters**, never tokens (tokenization is
+  vendor-specific and rejected at config load).
+- Weights, decay, forgetting, the skill index, and meditation orchestration
+  are pure Python over vendor-neutral markdown/frontmatter.
+- The only model call is the judgement step inside extraction/meditation,
+  which goes through the **existing pluggable summarizer registry** — swap
+  Anthropic for any vendor without touching the memory mechanics.
+- The skill system is **ours**, not Claude's `.claude/skills/`.
+
+## 9. Code map
+
+| Module | Role |
+|---|---|
+| `config.py` | the `memory:` / `memory_extract:` blocks + fail-fast validation |
+| `entries.py` | the three entry schemas (`SkillEntry` / `MustRememberEntry` / `EmotionalEntry`) + validation + frontmatter bridge |
+| `bounded_store.py` | crash-safe store I/O, character-length / count, `is_over_overflow`, per-store lock, the guarded `forget` + `ForgetGuardError` / `StoreLockHeld` |
+| `emotional.py` | signed-weight clamp + decay + emotional keep-rank |
+| `skills.py` | `log1p(usage)` importance + skills keep-rank |
+| `ranking.py` | shared recency / date-math helpers |
+| `meditation.py` | the compaction engine: `keep_rank`, `MeditationLog`, `meditate` (merge → relevance/downgrade → compact → guarded-forget) |
+| `lifecycle.py` | extraction (`parse_extraction` / `extract_candidates` / `ingest_candidates`), the in-session staging (`plan_extraction`), fresh-start `rebuild`, `pin`, `team_mission_text` |
+| `import_legacy.py` | the one-off legacy import (§12): reader (`read_legacy`), persona-driven re-author (`reauthor`), backdated seeding scorer (`score_seed_candidates`), seed-writer + idempotency guards (`seed_entries` / `already_imported` / `mark_imported`), orchestrator (`import_legacy_run`) |
+| `sweep.py` | team-sweep gating + `meditate_all_stores` (post-ingest, over-overflow only) |
+| `briefing.py` | session-start assembly: must_remember + emotional view + skill index + unprocessed notice |
+| `state.py` | the `tiger-memory state` JSON snapshot (`compute_state`): per-store count / chars / `max` / `over_overflow` — the programmatic hook to check a store's size vs its bound |
+| `store.py` | on-disk store layout (`Paths`) + crash-safe serialization helpers (`atomic_write`, `atomic_swap_dir`, `write_state` / `read_state`) used by the bounded stores and the briefing swap |
+| `cli.py` | `init` / `rebuild` / `pin` / `import-legacy` / `state` / `plan` / `ingest-extraction` / `ingest-staged` / `sweep-*` |
+
+## 10. Resolved decisions (Operator, 2026-06-17)
+
+1. **Length unit:** characters. (Confirmed.)
+2. **Default bounds & decay rate:** sensible defaults (§7), tuned later.
+   (Confirmed.)
+3. **Skill importance:** no continuous time-decay, but old/unused skills are
+   less important — recency of use feeds the keep-ranking and is recomputed
+   at meditation. (Confirmed.)
+4. **Emotional magnitude cap:** hard cap, range **[-10, +10]**. (Confirmed.)
+5. **Team-goal reference for the relevance check:** read from the charter
+   Mission. (Confirmed.)
+6. **Migration:** fresh start — drop the existing stores and let the new
+   system build from sources; no one-time converter. A one-off
+   `import-legacy` seed (§12) carries the old `must_memorize.md` pins +
+   rollups forward *before* the drop; order is merge → migrate configs →
+   import-legacy → rebuild → sweep. (Confirmed.)
+7. **Forget-guard semantics:** `relevance_checked_ids` carries only the
+   downgraded directives, so a still-relevant owner directive is never
+   licensed to drop (§5.1). (Ratified, do not revert.)
