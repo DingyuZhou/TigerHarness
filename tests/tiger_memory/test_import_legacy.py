@@ -14,6 +14,11 @@ import pytest
 
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
+from tigerharness.tiger_memory.emotional import (
+    clamp_weight,
+    decay_entry,
+    emotional_keep_rank,
+)
 from tigerharness.tiger_memory.entries import (
     EmotionalEntry,
     MustRememberEntry,
@@ -277,27 +282,42 @@ def test_score_tags_every_entry_import_source(tmp_path: Path) -> None:
     assert every and all(e.source == IMPORT_SOURCE for e in every)
 
 
-def test_score_emotional_backdated_decay_preserves_sign(tmp_path: Path) -> None:
+def test_score_emotional_stores_raw_clamped_weight_backdated(tmp_path: Path) -> None:
+    # GAP-5 (final convergence): a seed stores the CLAMPED RAW weight — NOT a
+    # pre-decayed one — backdated to its source date. The "partly decayed" effect
+    # happens ONCE at rank time (via last_used), so a seed is never double-decayed.
     cfg = _load_cfg(tmp_path)
-    # An OLD high-magnitude experience (source ~530d back) enters PARTLY decayed:
-    # 530 * 0.1 = 53 of shrink fully erases an 8.0 magnitude -> pinned to 0.
     out = score_seed_candidates(_raw(emo=[_raw_emo(weight=8.0)]), cfg=cfg, now=NOW)
     e = out.emotional[0]
     assert e.created_at == SRC and e.last_used == SRC  # backdated, not now()
-    assert e.weight == 0.0
-    # A recent positive experience (~1 day back) is only slightly decayed and
-    # keeps its sign + most of its magnitude.
-    recent = "2026-06-16T00:00:00Z"
-    out2 = score_seed_candidates(
-        _raw(emo=[_raw_emo(src=recent, weight=8.0)]), cfg=cfg, now=NOW
+    assert e.weight == 8.0  # raw clamped, NOT decayed (was wrongly 0.0 pre-fix)
+    # sign preserved; a beyond-cap raw still clamps (no pre-decay involved).
+    neg = score_seed_candidates(
+        _raw(emo=[_raw_emo(weight=-8.0)]), cfg=cfg, now=NOW
+    ).emotional[0]
+    assert neg.weight == -8.0
+
+
+def test_seed_emotional_not_double_decayed_matches_organic(tmp_path: Path) -> None:
+    # GAP-5 regression (Kogure r1): a seeded emotional entry and an ORGANIC entry
+    # of the SAME age + raw weight must rank IDENTICALLY — the seed is decayed
+    # exactly once, at rank time, like any organic entry. (Pre-fix the seed was
+    # double-decayed: a 30-day +8 ranked 2.0 instead of the intended 5.0.)
+    cfg = _load_cfg(tmp_path)
+    old = "2026-05-18T00:00:00Z"  # 30 days before NOW (2026-06-17)
+    seeded = score_seed_candidates(
+        _raw(emo=[_raw_emo(src=old, weight=8.0)]), cfg=cfg, now=NOW
+    ).emotional[0]
+    assert seeded.weight == clamp_weight(8.0, cfg)  # stored raw, not pre-decayed
+    organic = EmotionalEntry(
+        text="x", created_at=old, last_used=old, source="extract",
+        weight=8.0, reaction="r",
     )
-    w = out2.emotional[0].weight
-    assert 0 < w < 8.0 and abs(w - 7.9) < 1e-9
-    # A negative experience keeps its (negative) sign while decaying toward 0.
-    out3 = score_seed_candidates(
-        _raw(emo=[_raw_emo(src=recent, weight=-8.0)]), cfg=cfg, now=NOW
+    # single rank-time decay is identical for both -> intended 5.0, not 2.0.
+    assert decay_entry(seeded, NOW, cfg) == decay_entry(organic, NOW, cfg) == 5.0
+    assert emotional_keep_rank(seeded, NOW, cfg) == emotional_keep_rank(
+        organic, NOW, cfg
     )
-    assert out3.emotional[0].weight < 0
 
 
 def test_score_emotional_clamps_beyond_cap(tmp_path: Path) -> None:

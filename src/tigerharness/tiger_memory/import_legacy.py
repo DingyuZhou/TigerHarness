@@ -66,7 +66,6 @@ from .lifecycle import (
     _prompts_root,
     parse_extraction,
 )
-from .ranking import days_between
 from .state import iso_now
 from .store import DAILY_RE, MONTHLY_RE, SHORT_RE, WEEKLY_RE, Store
 from .summarizers import Summarizer
@@ -309,13 +308,15 @@ def seeds_perform_no_deletion(paths_before: Iterable, paths_after: Iterable) -> 
 #   ``created_at = last_used = source_date`` — NEVER ``now()``. An old memory
 #   enters the store already aged, so the live keep-rank treats it exactly as it
 #   would have treated it had it been written on its source date.
-# - **emotional** seeds enter *already partly decayed*: the re-authored raw
-#   signed weight is shrunk by :func:`emotional.decay_weight` over the days from
-#   the source date to ``now`` (sign preserved), then clamped to
-#   ``[-weight_cap, +weight_cap]`` via :func:`emotional.clamp_weight` (defense in
-#   depth — decay already returns within cap). A months-old high-magnitude
-#   experience therefore lands with a strictly smaller ``|weight|`` than it was
-#   re-authored with; a same-day one is ~unchanged.
+# - **emotional** seeds store the clamped RAW signed weight (clamped to
+#   ``[-weight_cap, +weight_cap]`` via :func:`emotional.clamp_weight`); they are
+#   NOT pre-decayed. The "already partly decayed" effect is produced at RANK
+#   time: because ``last_used = source_date``, the live keep-rank's single
+#   decay (:func:`emotional.decay_entry`) ages the seed over exactly the
+#   source→now span — identical to an organic entry written on the source date.
+#   Pre-decaying here as well would double-decay the seed (GAP-5, final
+#   convergence pass), under-weighting and prematurely forgetting curated
+#   emotional memory the import exists to preserve.
 # - **skills** seed a LOW ``usage_count`` (0 or 1 — a freshly re-derived skill
 #   has no live invocations yet) and ``last_used = source_date`` so an old/unused
 #   skill ranks low immediately. ``importance`` is left at ``0.0``;
@@ -375,10 +376,11 @@ def score_seed_candidates(
 
     Per store (design §12 three bullets / plan §2.1):
 
-    - **emotional:** ``weight = clamp_weight(decay_weight(raw_weight,
-      days_between(source_date, now), cfg), cfg)`` — older experiences enter
-      already partly decayed, the sign is preserved, and the result is clamped
-      to ``[-weight_cap, +weight_cap]``.
+    - **emotional:** ``weight = clamp_weight(raw_weight, cfg)`` — the clamped
+      RAW weight, NOT pre-decayed. ``last_used = source_date`` lets the live
+      keep-rank decay it ONCE at rank time over the source→now span, so an
+      imported experience ages exactly like an organic one of the same age
+      (pre-decaying here too would double-decay it — GAP-5).
     - **skills:** ``usage_count`` clamped to ``[0, SEED_SKILL_USAGE_CAP]``,
       ``importance = 0.0`` (NOT refreshed — derived at meditation), ``last_used``
       = source date.
@@ -426,9 +428,13 @@ def score_seed_candidates(
     emo: list[EmotionalEntry] = []
     for e in raw.emotional:
         src = _source_date_for(e, source_dates, now)
-        days = days_between(src, now)
-        decayed = emotional_mod.decay_weight(e.weight, days, cfg)
-        weight = emotional_mod.clamp_weight(decayed, cfg)
+        # GAP-5 fix (final convergence): store the clamped RAW weight, NOT a
+        # pre-decayed one. Emotional weight is decayed exactly ONCE, at rank
+        # time, from last_used (= the backdated source date) via
+        # decay_entry/keep_rank — identical to an organic entry of the same age.
+        # Pre-decaying here AND backdating last_used double-decayed the seed
+        # (~2x aging), prematurely forgetting the curated memory §12 preserves.
+        weight = emotional_mod.clamp_weight(e.weight, cfg)
         emo.append(
             EmotionalEntry(
                 text=e.text,
