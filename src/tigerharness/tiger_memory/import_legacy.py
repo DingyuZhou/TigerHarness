@@ -515,8 +515,33 @@ def _normalise_source_date(raw: str | None, *, fallback: str) -> str:
     if _MONTH_RE.match(s):
         return f"{s}-01T00:00:00Z"
     if s:
+        # A full ISO timestamp passes through, but a non-ISO string (e.g.
+        # "yesterday") must NOT poison the entry's date — days_between would
+        # read it as 0 days and recency_score as -inf, silently defeating the
+        # backdating. An unparseable value falls back to the mtime sentinel,
+        # exactly like a blank value (D2, b2 QA finding).
+        try:
+            datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return fallback
         return s
     return fallback
+
+
+def _read_text_lenient(path: Path) -> str:
+    """Read a legacy file tolerantly — a stray non-UTF8 byte must NOT crash the
+    whole persona import (it would lose every otherwise-valid pin/rollup). The
+    bad byte degrades to the Unicode replacement char and the affected content
+    simply parses to nothing, rather than raising ``UnicodeDecodeError`` out of
+    ``import_legacy_run`` (D1, b2 QA finding). Mirrors ``bounded_store.load``."""
+    text = path.read_bytes().decode("utf-8", errors="replace")
+    if "�" in text:
+        log.warning(
+            "import-legacy: %s had non-UTF8 byte(s) replaced; affected content "
+            "is skipped, the rest of the persona still imports.",
+            path,
+        )
+    return text
 
 
 def _mtime_iso(path: Path) -> str:
@@ -613,14 +638,14 @@ def read_legacy(store: Store) -> LegacySource:
     mm_path = journal / MUST_MEMORIZE_FILENAME
     if mm_path.exists():
         src.pins = _parse_must_memorize(
-            mm_path.read_text(encoding="utf-8"), mtime_iso=_mtime_iso(mm_path)
+            _read_text_lenient(mm_path), mtime_iso=_mtime_iso(mm_path)
         )
 
     for f in sorted(journal.glob("*.md")):
         kind = _rollup_kind(f.name)
         if kind is None:
             continue
-        fm, body = frontmatter.parse(f.read_text(encoding="utf-8"))
+        fm, body = frontmatter.parse(_read_text_lenient(f))
         period = fm.get("period")
         period = str(period) if period is not None else ""
         body = body.strip()

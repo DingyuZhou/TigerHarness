@@ -962,19 +962,10 @@ def test_qa_persona_with_nothing_at_all(tmp_path: Path) -> None:
     assert already_imported(store, bstore) is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT (b2-qa-sakuragi): read_legacy reads every legacy file with "
-        "read_text(encoding='utf-8') and NO error handling. A single non-UTF8 "
-        "byte in must_memorize.md (or any rollup) raises UnicodeDecodeError that "
-        "propagates out of import_legacy_run, aborting the ENTIRE persona import "
-        "and losing all otherwise-valid pins/rollups. read_legacy should decode "
-        "tolerantly (errors='replace') or skip+log the undecodable file and "
-        "continue, like every other malformed-input path here degrades."
-    ),
-)
 def test_qa_non_utf8_byte_in_must_memorize_degrades_gracefully(tmp_path: Path) -> None:
+    # FIXED (D1, b2 REVISE): read_legacy now decodes tolerantly (errors='replace'
+    # via _read_text_lenient), so a stray non-UTF8 byte no longer crashes the
+    # whole persona import — the bad byte is replaced and the rest still seeds.
     cfg = _load_cfg(tmp_path)
     store, bstore = _make_store(tmp_path)
     # a stray 0xFF byte in the pin file; a perfectly good rollup also present.
@@ -994,20 +985,18 @@ def test_qa_non_utf8_byte_in_must_memorize_degrades_gracefully(tmp_path: Path) -
     assert already_imported(store, bstore) is True
 
 
-def test_qa_non_utf8_crash_leaves_no_partial_state(tmp_path: Path) -> None:
-    # SILVER LINING (holds): the UnicodeDecodeError fires inside read_legacy —
-    # BEFORE any seed or mark — so even though the import aborts, NO entries are
-    # seeded and NO marker is written. A clean retry (once the file is fixed) is
-    # therefore still possible; idempotency is not corrupted by the crash.
+def test_qa_non_utf8_only_file_does_not_crash_and_completes(tmp_path: Path) -> None:
+    # FIXED (D1, b2 REVISE): a non-UTF8 byte in the ONLY legacy file no longer
+    # raises out of import_legacy_run — the byte is replaced and the run reaches
+    # mark_imported normally (no crash, no abort, no lost import).
     cfg = _load_cfg(tmp_path)
     store, bstore = _make_store(tmp_path)
     (store.paths.journal / "20260611-daily-aaaaaaaa-0000-0000-0000-000000000000.md").write_bytes(
         b"---\ntype: daily_rollup\nperiod: '2026-06-11'\n---\nlatin1 \xff byte\n"
     )
-    with pytest.raises(UnicodeDecodeError):
-        import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
-    assert STATE_KEY not in (store.read_state() or {})
-    assert has_seeded_entries(bstore) is False
+    result = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    assert result["skipped"] is None
+    assert already_imported(store, bstore) is True
 
 
 # ----- 2. source-date fallback ----------------------------------------------
@@ -1051,21 +1040,10 @@ def test_qa_dated_row_does_not_silently_use_now(tmp_path: Path) -> None:
     assert read_legacy(store).pins[0].source_date == "2025-03-04T00:00:00Z"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT (b2-qa-sakuragi): _normalise_source_date passes ANY non-empty "
-        "string through verbatim (the `if s: return s` branch). A garbage / "
-        "non-ISO `Last bump` like 'yesterday' becomes the entry's created_at = "
-        "last_used. It survives validate (non-empty string) but days_between "
-        "silently returns 0.0 for an unparseable date, so the seed is NOT aged "
-        "(an old memory enters as if same-day) and recency_score reads it as "
-        "infinitely old at keep-rank — an inconsistent, un-ageable timestamp. "
-        "Unrecognised date strings should fall back to the mtime sentinel like a "
-        "blank value does, not pass through as a poisoned timestamp."
-    ),
-)
-def test_qa_garbage_nonISO_date_should_fall_back_not_passthrough(tmp_path: Path) -> None:
+def test_qa_garbage_nonISO_date_falls_back_not_passthrough(tmp_path: Path) -> None:
+    # FIXED (D2, b2 REVISE): _normalise_source_date now validates a non-empty
+    # value parses as ISO before passing it through; a garbage 'Last bump' like
+    # 'yesterday' falls back to the mtime sentinel instead of poisoning the date.
     store, _bstore = _make_store(tmp_path)
     mm = store.paths.journal / "must_memorize.md"
     mm.write_text(
