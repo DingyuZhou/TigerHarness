@@ -25,6 +25,7 @@ from tigerharness.tiger_memory.import_legacy import (
     STATE_KEY,
     DoubleSeedError,
     LegacyRollup,
+    _mtime_iso,
     already_imported,
     assert_seed_inputs_snapshotted,
     has_seeded_entries,
@@ -789,4 +790,437 @@ def test_reauthor_one_swallows_backend_error(tmp_path: Path) -> None:
     src = read_legacy(store)
     src.rollups.append(rollup)
     out = _ra(cfg, _Boom(), src)
+    assert out.is_empty()
+
+
+# ===== b2-qa-sakuragi — adversarial QA defense ==============================
+#
+# ATTACK what the build assumed away: malformed/edge legacy input, source-date
+# fallbacks, idempotency under stress, read-before-drop on the error paths, and
+# re-author parse failures. A real break is captured as an xfail(strict) test +
+# precise repro (the dev fixes it on rewind); everything that HOLDS stays as
+# hardening. MOCK/scripted summarizer only — no live model.
+
+
+class _JunkSummarizer(Summarizer):
+    """Returns text with NO section markers → ``ExtractionParseError``."""
+
+    name = "junk"
+    version = "v1"
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        return "total garbage prose with no @@markers@@ at all"
+
+
+class _PartialBundleSummarizer(Summarizer):
+    """Returns ONLY the ``@@SKILLS@@`` marker → missing-markers parse error."""
+
+    name = "partial"
+    version = "v1"
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        return "@@SKILLS@@\nNAME: x\nTRIGGER: y\nPROCEDURE: z\n"
+
+
+class _EmptyBundleSummarizer(Summarizer):
+    """Returns the empty string → ``empty extraction output`` parse error."""
+
+    name = "empty"
+    version = "v1"
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        return ""
+
+
+# ----- 1. malformed / edge legacy input to read_legacy ----------------------
+
+
+def test_qa_corrupt_empty_must_memorize_no_table(tmp_path: Path) -> None:
+    # HOLDS: a header-only must_memorize.md with no markdown table degrades to
+    # zero pins (not a crash); the import completes + writes the marker.
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _make_store(tmp_path)
+    (store.paths.journal / "must_memorize.md").write_text(
+        "---\ntype: must_memorize\n---\n# Must memorize\n\nNo table here at all.\n",
+        encoding="utf-8",
+    )
+    assert read_legacy(store).pins == []
+    result = import_legacy_run(cfg, store, summarizer=MockSummarizer(), now=NOW)
+    assert result == {"skipped": None, "skills": 0, "must_remember": 0, "emotional": 0}
+    assert already_imported(store, bstore) is True
+
+
+def test_qa_totally_empty_must_memorize_file(tmp_path: Path) -> None:
+    # HOLDS: a zero-byte must_memorize.md → no frontmatter, no body, zero pins.
+    store, _bstore = _make_store(tmp_path)
+    (store.paths.journal / "must_memorize.md").write_text("", encoding="utf-8")
+    assert read_legacy(store).pins == []
+
+
+def test_qa_ragged_and_extra_column_rows_skipped(tmp_path: Path) -> None:
+    # HOLDS: short (< 5 cell) rows are skipped; an extra-column row keeps only
+    # its first 5 cells (cells[:5]) so a 6-column row still parses its memo.
+    store, _bstore = _make_store(tmp_path)
+    (store.paths.journal / "must_memorize.md").write_text(
+        dedent(
+            """\
+            | Score | Kind | Last bump | Source | Memo |
+            |------:|------|-----------|--------|------|
+            | 3 | decision | 2026-06-11 |
+            | 4 | incident | 2026-06-10 | extract | Good row. | extra | columns |
+            """
+        ),
+        encoding="utf-8",
+    )
+    pins = read_legacy(store).pins
+    # the 3-cell ragged row drops; the 7-cell extra-column row keeps first 5.
+    assert len(pins) == 1
+    assert pins[0].kind == "incident"
+    assert pins[0].memo == "Good row."
+
+
+def test_qa_whitespace_only_memo_dropped_not_crashing(tmp_path: Path) -> None:
+    # HOLDS: a valid-kind row whose Memo cell is whitespace-only is DROPPED at
+    # parse (cell.strip() → "" → falsy `not memo`), so a blank-text entry never
+    # reaches MustRememberEntry.validate (which would EntryError-abort the whole
+    # atomic seed). The good row alongside it still seeds.
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _make_store(tmp_path)
+    (store.paths.journal / "must_memorize.md").write_text(
+        dedent(
+            """\
+            | Score | Kind | Last bump | Source | Memo |
+            |------:|------|-----------|--------|------|
+            | 5 | owner_explicit | 2026-06-16 | extract |    |
+            | 1 | decision | 2026-06-11 | extract | Good memo survives. |
+            """
+        ),
+        encoding="utf-8",
+    )
+    assert len(read_legacy(store).pins) == 1
+    result = import_legacy_run(cfg, store, summarizer=MockSummarizer(), now=NOW)
+    assert result["must_remember"] == 1
+    assert bstore.load("must_remember")[0].text == "Good memo survives."
+
+
+def test_qa_kind_not_in_valid_kinds_dropped(tmp_path: Path) -> None:
+    # HOLDS: a row whose Kind is not in VALID_KINDS is dropped at parse (it would
+    # else fail MustRememberEntry.validate and abort the seed).
+    store, _bstore = _make_store(tmp_path)
+    (store.paths.journal / "must_memorize.md").write_text(
+        dedent(
+            """\
+            | Score | Kind | Last bump | Source | Memo |
+            |------:|------|-----------|--------|------|
+            | 2 | not_a_real_kind | 2026-06-11 | extract | Dropped. |
+            | 1 | decision | 2026-06-11 | extract | Kept. |
+            """
+        ),
+        encoding="utf-8",
+    )
+    pins = read_legacy(store).pins
+    assert [p.kind for p in pins] == ["decision"]
+
+
+def test_qa_rollup_missing_or_malformed_frontmatter(tmp_path: Path) -> None:
+    # HOLDS: a rollup with NO frontmatter (or frontmatter lacking `period`) does
+    # not crash — the source date falls back to the file mtime (a full ISO ts).
+    store, _bstore = _make_store(tmp_path)
+    j = store.paths.journal
+    (j / "20260611-daily-aaaaaaaa-0000-0000-0000-000000000000.md").write_text(
+        "no frontmatter at all, just prose about shipping\n", encoding="utf-8"
+    )
+    (j / "20260612-daily-bbbbbbbb-0000-0000-0000-000000000000.md").write_text(
+        "---\ntype: daily_rollup\n---\nperiod key missing, prose here\n",
+        encoding="utf-8",
+    )
+    rollups = read_legacy(store).rollups
+    assert len(rollups) == 2
+    for r in rollups:
+        assert r.source_date.endswith("Z") and r.source_date  # mtime fallback
+
+
+def test_qa_persona_with_only_rollups_no_pins(tmp_path: Path) -> None:
+    # HOLDS: a persona with rollups but no must_memorize.md still imports; the
+    # mechanical-pin half is simply empty.
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _make_store(tmp_path)
+    _write_rollups(store)
+    assert read_legacy(store).pins == []
+    result = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    assert result["must_remember"] == 3  # only the 3 rollup-mined mr, no pins
+    assert already_imported(store, bstore) is True
+
+
+def test_qa_persona_with_nothing_at_all(tmp_path: Path) -> None:
+    # HOLDS: an empty store (no pins, no rollups) imports as an all-zero seed and
+    # still writes the marker (the "we imported, there was nothing" record).
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _make_store(tmp_path)
+    result = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    assert result == {"skipped": None, "skills": 0, "must_remember": 0, "emotional": 0}
+    assert already_imported(store, bstore) is True
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "DEFECT (b2-qa-sakuragi): read_legacy reads every legacy file with "
+        "read_text(encoding='utf-8') and NO error handling. A single non-UTF8 "
+        "byte in must_memorize.md (or any rollup) raises UnicodeDecodeError that "
+        "propagates out of import_legacy_run, aborting the ENTIRE persona import "
+        "and losing all otherwise-valid pins/rollups. read_legacy should decode "
+        "tolerantly (errors='replace') or skip+log the undecodable file and "
+        "continue, like every other malformed-input path here degrades."
+    ),
+)
+def test_qa_non_utf8_byte_in_must_memorize_degrades_gracefully(tmp_path: Path) -> None:
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _make_store(tmp_path)
+    # a stray 0xFF byte in the pin file; a perfectly good rollup also present.
+    (store.paths.journal / "must_memorize.md").write_bytes(
+        b"---\ntype: must_memorize\n---\n"
+        b"| 5 | decision | 2026-06-16 | x | bad byte \xff here |\n"
+    )
+    (store.paths.journal / "20260611-daily-aaaaaaaa-0000-0000-0000-000000000000.md").write_text(
+        "---\ntype: daily_rollup\nperiod: '2026-06-11'\n---\ngood prose to mine\n",
+        encoding="utf-8",
+    )
+    # EXPECTED (post-fix): the import does NOT crash; the undecodable file is
+    # skipped/replaced and the valid rollup still seeds. Currently raises
+    # UnicodeDecodeError → this assertion is never reached (strict xfail).
+    result = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    assert result["skipped"] is None
+    assert already_imported(store, bstore) is True
+
+
+def test_qa_non_utf8_crash_leaves_no_partial_state(tmp_path: Path) -> None:
+    # SILVER LINING (holds): the UnicodeDecodeError fires inside read_legacy —
+    # BEFORE any seed or mark — so even though the import aborts, NO entries are
+    # seeded and NO marker is written. A clean retry (once the file is fixed) is
+    # therefore still possible; idempotency is not corrupted by the crash.
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _make_store(tmp_path)
+    (store.paths.journal / "20260611-daily-aaaaaaaa-0000-0000-0000-000000000000.md").write_bytes(
+        b"---\ntype: daily_rollup\nperiod: '2026-06-11'\n---\nlatin1 \xff byte\n"
+    )
+    with pytest.raises(UnicodeDecodeError):
+        import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    assert STATE_KEY not in (store.read_state() or {})
+    assert has_seeded_entries(bstore) is False
+
+
+# ----- 2. source-date fallback ----------------------------------------------
+
+
+def test_qa_dateless_must_memorize_row_falls_back_to_mtime(tmp_path: Path) -> None:
+    # HOLDS: a row with a blank `Last bump` backdates to the file mtime — a real,
+    # non-empty ISO timestamp — not now() and not an empty (invalid) timestamp.
+    store, _bstore = _make_store(tmp_path)
+    mm = store.paths.journal / "must_memorize.md"
+    mm.write_text(
+        dedent(
+            """\
+            | Score | Kind | Last bump | Source | Memo |
+            |------:|------|-----------|--------|------|
+            | 3 | preference | | extract | No date → mtime fallback. |
+            """
+        ),
+        encoding="utf-8",
+    )
+    pin = read_legacy(store).pins[0]
+    assert pin.source_date.endswith("Z") and pin.source_date  # mtime, real ts
+    # and it backdates to roughly the file mtime, not the literal string "now".
+    assert pin.source_date == _mtime_iso(mm)
+
+
+def test_qa_dated_row_does_not_silently_use_now(tmp_path: Path) -> None:
+    # HOLDS: when a real date IS present, the fallback does NOT override it with
+    # now() — the explicit Last bump is honored.
+    store, _bstore = _make_store(tmp_path)
+    (store.paths.journal / "must_memorize.md").write_text(
+        dedent(
+            """\
+            | Score | Kind | Last bump | Source | Memo |
+            |------:|------|-----------|--------|------|
+            | 5 | owner_explicit | 2025-03-04 | extract | Real date honored. |
+            """
+        ),
+        encoding="utf-8",
+    )
+    assert read_legacy(store).pins[0].source_date == "2025-03-04T00:00:00Z"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "DEFECT (b2-qa-sakuragi): _normalise_source_date passes ANY non-empty "
+        "string through verbatim (the `if s: return s` branch). A garbage / "
+        "non-ISO `Last bump` like 'yesterday' becomes the entry's created_at = "
+        "last_used. It survives validate (non-empty string) but days_between "
+        "silently returns 0.0 for an unparseable date, so the seed is NOT aged "
+        "(an old memory enters as if same-day) and recency_score reads it as "
+        "infinitely old at keep-rank — an inconsistent, un-ageable timestamp. "
+        "Unrecognised date strings should fall back to the mtime sentinel like a "
+        "blank value does, not pass through as a poisoned timestamp."
+    ),
+)
+def test_qa_garbage_nonISO_date_should_fall_back_not_passthrough(tmp_path: Path) -> None:
+    store, _bstore = _make_store(tmp_path)
+    mm = store.paths.journal / "must_memorize.md"
+    mm.write_text(
+        dedent(
+            """\
+            | Score | Kind | Last bump | Source | Memo |
+            |------:|------|-----------|--------|------|
+            | 5 | owner_explicit | yesterday | extract | Garbage date. |
+            """
+        ),
+        encoding="utf-8",
+    )
+    pin = read_legacy(store).pins[0]
+    # EXPECTED (post-fix): an unparseable date falls back to the mtime sentinel
+    # (a real ISO ts), never the literal garbage string. Currently 'yesterday'
+    # passes straight through → this assertion fails (strict xfail).
+    assert pin.source_date != "yesterday"
+    assert pin.source_date == _mtime_iso(mm)
+
+
+# ----- 3. idempotency under stress ------------------------------------------
+
+
+def test_qa_partial_import_marker_unwritten_still_blocks(tmp_path: Path) -> None:
+    # HOLDS: simulate a crash AFTER seed_entries but BEFORE mark_imported — the
+    # store holds import-legacy entries but no marker. The detect-existing-seed
+    # fallback still reports "imported" and a re-run no-ops (no double-seed).
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _make_store(tmp_path)
+    seeded = score_seed_candidates(
+        _raw(must=[_raw_mr(kind="decision", importance=1.0)]), cfg=cfg, now=NOW
+    )
+    seed_entries(bstore, seeded)
+    assert STATE_KEY not in (store.read_state() or {})  # marker never written
+    assert already_imported(store, bstore) is True  # fallback guard catches it
+    result = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    assert result == {"skipped": "already"}
+    assert len(bstore.load("must_remember")) == 1  # no double-seed
+
+
+def test_qa_double_invocation_back_to_back(tmp_path: Path) -> None:
+    # HOLDS: two import_legacy_run calls in a row (sequential double-invoke) →
+    # the first seeds, the second is gated; counts are stable.
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _full_legacy_store(tmp_path)
+    first = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    second = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    assert first["skipped"] is None
+    assert second == {"skipped": "already"}
+    counts = {n: len(bstore.load(n)) for n in ("skills", "must_remember", "emotional")}
+    assert counts == {"skills": 3, "must_remember": 7, "emotional": 3}
+
+
+def test_qa_force_purges_only_import_legacy_entries(tmp_path: Path) -> None:
+    # HOLDS: --force purges ONLY import-legacy entries across ALL three stores,
+    # leaving live extract/pin memory of every store untouched, then re-seeds.
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _full_legacy_store(tmp_path)
+    import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    # seed a live (non-import) entry into EACH store.
+    bstore.save_atomic("skills", bstore.load("skills") + [_skill(src="extract", name="live skill")])
+    bstore.save_atomic(
+        "must_remember",
+        bstore.load("must_remember")
+        + [MustRememberEntry(text="live directive", created_at=NOW, last_used=NOW,
+                             source="pin", kind="owner_explicit", importance=5.0)],
+    )
+    bstore.save_atomic("emotional", bstore.load("emotional") + [_emo(src="extract")])
+    import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW, force=True)
+    # the live entry in every store survived; import-legacy entries were replaced.
+    assert "live skill" in {e.name for e in bstore.load("skills")}
+    assert "live directive" in {m.text for m in bstore.load("must_remember")}
+    assert any(e.source == "extract" for e in bstore.load("emotional"))
+    # and the import-legacy entries are present exactly once (replace, not double).
+    assert sum(1 for e in bstore.load("skills") if e.source == IMPORT_SOURCE) == 3
+
+
+def test_qa_force_on_never_imported_store_is_clean_seed(tmp_path: Path) -> None:
+    # HOLDS: --force on a store that was NEVER imported (purge is a no-op) still
+    # seeds correctly and writes the marker.
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _full_legacy_store(tmp_path)
+    result = import_legacy_run(
+        cfg, store, summarizer=_BundleSummarizer(), now=NOW, force=True
+    )
+    assert result == {"skipped": None, "skills": 3, "must_remember": 7, "emotional": 3}
+    assert already_imported(store, bstore) is True
+
+
+# ----- 4. read-before-drop on the error paths -------------------------------
+
+
+def test_qa_import_unlinks_nothing_even_with_bad_rollup(tmp_path: Path) -> None:
+    # HOLDS: even when a rollup re-author FAILS (parse error swallowed), the
+    # import unlinks no legacy file and never calls rebuild — read-before-drop
+    # holds on the error path too.
+    cfg = _load_cfg(tmp_path)
+    store, _bstore = _full_legacy_store(tmp_path)
+    before = {p.name for p in store.paths.journal.glob("*.md")}
+    # _JunkSummarizer makes every rollup re-author fail (swallowed to empty).
+    import_legacy_run(cfg, store, summarizer=_JunkSummarizer(), now=NOW)
+    after = {p.name for p in store.paths.journal.glob("*.md")}
+    assert before <= after  # nothing dropped
+    assert "must_memorize.md" in after
+
+
+def test_qa_import_never_imports_rebuild(tmp_path: Path, monkeypatch) -> None:
+    # HOLDS: the orchestrator never invokes rebuild (the only legacy-dropping
+    # step). Poison the symbol so any accidental call would raise.
+    import tigerharness.tiger_memory.import_legacy as il
+
+    def _boom(*a, **k):  # pragma: no cover - asserted never called
+        raise AssertionError("import_legacy_run must NEVER call rebuild")
+
+    # rebuild is not imported into import_legacy's namespace, so guard the source
+    # module too: confirm the name simply isn't referenced in the run path.
+    monkeypatch.setattr("tigerharness.tiger_memory.lifecycle.rebuild", _boom, raising=False)
+    cfg = _load_cfg(tmp_path)
+    store, _bstore = _full_legacy_store(tmp_path)
+    result = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
+    assert result["skipped"] is None  # completed without touching rebuild
+
+
+# ----- 5. re-author parse failures degrade safely ---------------------------
+
+
+def test_qa_reauthor_junk_bundle_seeds_nothing(tmp_path: Path) -> None:
+    # HOLDS: a summarizer returning marker-less junk → ExtractionParseError,
+    # swallowed per rollup → empty candidates. The rollup half mines nothing; the
+    # mechanical pins still seed (so a junk model never loses the pins).
+    cfg = _load_cfg(tmp_path)
+    store, bstore = _full_legacy_store(tmp_path)
+    result = import_legacy_run(cfg, store, summarizer=_JunkSummarizer(), now=NOW)
+    assert result["skills"] == 0 and result["emotional"] == 0
+    assert result["must_remember"] == 4  # only the 4 mechanical pins
+    assert already_imported(store, bstore) is True
+
+
+def test_qa_reauthor_partial_bundle_seeds_nothing(tmp_path: Path) -> None:
+    # HOLDS: a bundle with only one of the three required markers →
+    # missing-markers ExtractionParseError → swallowed to empty (no garbage seed).
+    cfg = _load_cfg(tmp_path)
+    store, _bstore = _make_store(tmp_path)
+    _write_rollups(store)
+    src = read_legacy(store)
+    out = reauthor(cfg, _PartialBundleSummarizer(), src)
+    assert out.is_empty()
+
+
+def test_qa_reauthor_empty_bundle_seeds_nothing(tmp_path: Path) -> None:
+    # HOLDS: an empty-string summarizer output → "empty extraction output" parse
+    # error → swallowed to empty candidates (no crash, no garbage).
+    cfg = _load_cfg(tmp_path)
+    store, _bstore = _make_store(tmp_path)
+    _write_rollups(store)
+    src = read_legacy(store)
+    out = reauthor(cfg, _EmptyBundleSummarizer(), src)
     assert out.is_empty()
