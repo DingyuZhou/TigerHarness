@@ -37,17 +37,23 @@ write/guard surface.
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from typing import Iterable, Mapping
 
+from . import emotional as emotional_mod
 from .bounded_store import BoundedStore
+from .config import Config
 from .entries import (
     STORE_EMOTIONAL,
     STORE_MUST_REMEMBER,
     STORE_NAMES,
     STORE_SKILLS,
     BaseEntry,
+    EmotionalEntry,
+    MustRememberEntry,
+    SkillEntry,
 )
 from .lifecycle import Candidates
+from .ranking import days_between
 from .state import iso_now
 from .store import Store
 
@@ -259,3 +265,148 @@ def seeds_perform_no_deletion(paths_before: Iterable, paths_after: Iterable) -> 
     before = set(paths_before)
     after = set(paths_after)
     return before <= after
+
+
+# ===== seeding scoring (b1-dev-2, Rukawa) ===================================
+#
+# Turn the re-authored *raw* candidates (Miyagi/dev-3's reader + re-author pass)
+# into FINAL typed entries that are correctly BACKDATED to each item's source
+# date, then handed to Mitsui's :func:`seed_entries` to write AS-IS. The single
+# scoring twist of the whole import (design §12; plan §2, seat b1-dev-2):
+#
+# - **every** seeded entry carries ``source = "import-legacy"`` and is stamped
+#   ``created_at = last_used = source_date`` — NEVER ``now()``. An old memory
+#   enters the store already aged, so the live keep-rank treats it exactly as it
+#   would have treated it had it been written on its source date.
+# - **emotional** seeds enter *already partly decayed*: the re-authored raw
+#   signed weight is shrunk by :func:`emotional.decay_weight` over the days from
+#   the source date to ``now`` (sign preserved), then clamped to
+#   ``[-weight_cap, +weight_cap]`` via :func:`emotional.clamp_weight` (defense in
+#   depth — decay already returns within cap). A months-old high-magnitude
+#   experience therefore lands with a strictly smaller ``|weight|`` than it was
+#   re-authored with; a same-day one is ~unchanged.
+# - **skills** seed a LOW ``usage_count`` (0 or 1 — a freshly re-derived skill
+#   has no live invocations yet) and ``last_used = source_date`` so an old/unused
+#   skill ranks low immediately. ``importance`` is left at ``0.0``;
+#   :func:`skills.refresh_importance` is deliberately NOT called (it would reset
+#   the semantics against *now*) — importance is re-derived from usage + recency
+#   at the next meditation, exactly as Mitsui's seed-write contract expects.
+# - **must_remember** preserves the legacy ``kind`` straight from the table and
+#   maps the legacy importance/score onto the new ``importance`` (an owner
+#   directive starts elevated).
+#
+# The per-item SOURCE DATE seam (Akagi, round-1): each unscored input entry
+# already carries its source date in ``created_at`` (Miyagi's reader attaches
+# it — a rollup's frontmatter ``period`` date, or the must_memorize row's
+# ``Last bump`` / a file-mtime fallback). An optional ``source_dates`` map keyed
+# by entry ``id`` overrides that per-entry (e.g. a must_memorize row whose date
+# the reader resolves separately). ``now`` is injected for deterministic tests.
+
+# A freshly re-derived skill has no live invocations yet, so its seeded
+# ``usage_count`` is capped at this low ceiling regardless of the raw input
+# (plan §2.1 "0 or 1"). It still ranks above a never-derived skill if the
+# re-author judged the skill as actually exercised (raw ≥ 1 → 1).
+SEED_SKILL_USAGE_CAP = 1
+
+
+def _source_date_for(
+    entry: BaseEntry, source_dates: Mapping[str, str] | None, now: str
+) -> str:
+    """The backdated source date for one unscored *entry*.
+
+    Resolution order (plan §2.1 + Akagi's source-date seam): an explicit
+    ``source_dates[entry.id]`` override wins; otherwise the entry's own
+    ``created_at`` (which Miyagi's reader stamped with the per-item source date)
+    is used. If neither yields a non-empty value, fall back to *now* so the
+    entry is never left with an empty timestamp (which would fail validation) —
+    a same-day seed, the most conservative backdating.
+    """
+    if source_dates is not None:
+        override = source_dates.get(entry.id)
+        if override:
+            return override
+    return entry.created_at or now
+
+
+def score_seed_candidates(
+    raw: Candidates,
+    *,
+    cfg: Config,
+    now: str | None = None,
+    source_dates: Mapping[str, str] | None = None,
+) -> Candidates:
+    """Score the re-authored *raw* candidates into FINAL backdated seed entries.
+
+    Returns a NEW :class:`Candidates` of freshly-constructed entries (the input
+    is never mutated) ready for Mitsui's :func:`seed_entries` to write AS-IS.
+    Every output entry carries ``source = "import-legacy"`` and is backdated to
+    its per-item source date (``created_at = last_used = source_date``).
+
+    Per store (design §12 three bullets / plan §2.1):
+
+    - **emotional:** ``weight = clamp_weight(decay_weight(raw_weight,
+      days_between(source_date, now), cfg), cfg)`` — older experiences enter
+      already partly decayed, the sign is preserved, and the result is clamped
+      to ``[-weight_cap, +weight_cap]``.
+    - **skills:** ``usage_count`` clamped to ``[0, SEED_SKILL_USAGE_CAP]``,
+      ``importance = 0.0`` (NOT refreshed — derived at meditation), ``last_used``
+      = source date.
+    - **must_remember:** ``kind`` + ``importance`` preserved straight from the
+      re-authored row (an ``owner_explicit`` directive stays elevated).
+
+    *now* defaults to :func:`state.iso_now`. *source_dates* (optional) is a map
+    from entry ``id`` to an ISO source date overriding the entry's own
+    ``created_at`` (the per-item source-date seam, Akagi round-1).
+    """
+    now = now or iso_now()
+
+    skills: list[SkillEntry] = []
+    for s in raw.skills:
+        src = _source_date_for(s, source_dates, now)
+        usage = max(0, min(int(s.usage_count), SEED_SKILL_USAGE_CAP))
+        skills.append(
+            SkillEntry(
+                text=s.text,
+                created_at=src,
+                last_used=src,
+                source=IMPORT_SOURCE,
+                name=s.name,
+                trigger=s.trigger,
+                procedure=s.procedure,
+                usage_count=usage,
+                importance=0.0,
+            )
+        )
+
+    must: list[MustRememberEntry] = []
+    for m in raw.must_remember:
+        src = _source_date_for(m, source_dates, now)
+        must.append(
+            MustRememberEntry(
+                text=m.text,
+                created_at=src,
+                last_used=src,
+                source=IMPORT_SOURCE,
+                kind=m.kind,
+                importance=m.importance,
+            )
+        )
+
+    emo: list[EmotionalEntry] = []
+    for e in raw.emotional:
+        src = _source_date_for(e, source_dates, now)
+        days = days_between(src, now)
+        decayed = emotional_mod.decay_weight(e.weight, days, cfg)
+        weight = emotional_mod.clamp_weight(decayed, cfg)
+        emo.append(
+            EmotionalEntry(
+                text=e.text,
+                created_at=src,
+                last_used=src,
+                source=IMPORT_SOURCE,
+                weight=weight,
+                reaction=e.reaction,
+            )
+        )
+
+    return Candidates(skills=skills, must_remember=must, emotional=emo)
