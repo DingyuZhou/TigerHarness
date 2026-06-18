@@ -77,7 +77,8 @@ pruning, and forgetting has no safety net.
 
 | Module | Purpose |
 |---|---|
-| `cli.py` | CLI. Writers: `init`, `rebuild`, `pin`. Reader: `state`. In-session executor (subscription rail): `plan` (stage extraction prompts + pack stacks), `ingest-extraction` (one bundle via stdin), `ingest-staged` (single-process glue of all `.extract.md` cards). Team-sweep gating: `sweep-plan`, `sweep-done`, `sweep-complete`, `sweep-release` |
+| `cli.py` | CLI. Writers: `init`, `rebuild`, `pin`, `import-legacy` (one-off legacy seed). Reader: `state`. In-session executor (subscription rail): `plan` (stage extraction prompts + pack stacks), `ingest-extraction` (one bundle via stdin), `ingest-staged` (single-process glue of all `.extract.md` cards). Team-sweep gating: `sweep-plan`, `sweep-done`, `sweep-complete`, `sweep-release` |
+| `import_legacy.py` | the one-off legacy import: reader (`read_legacy`), persona-driven re-author (`reauthor`), backdated seeding scorer (`score_seed_candidates`), seed-writer + idempotency guards (`seed_entries` / `already_imported` / `mark_imported`), orchestrator (`import_legacy_run`) |
 | `config.py` | YAML config loading + validation (the `memory:` block) |
 | `entries.py` | the three entry schemas + validation + frontmatter bridge |
 | `bounded_store.py` | crash-safe store I/O, length/count, overflow detection, per-store lock, the guarded `forget` |
@@ -182,6 +183,7 @@ verbs (`plan` / `ingest-extraction` / `ingest-staged`) are driven by the
 | `init` | create the empty store + validate the config |
 | `rebuild` | fresh-start: drop the retired legacy surface (first run), regenerate the briefing |
 | `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `owner_explicit`** (importance 5.0, the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
+| `import-legacy [--mock] [--force]` | **one-off, idempotent** seed of the three stores from the old `must_memorize.md` pins + the daily/weekly/monthly rollups (reads/snapshots only — never deletes). MUST run **before** `rebuild` (which drops the legacy files). `--mock` uses the deterministic mock summarizer (no live model); `--force` re-seeds (drops prior `import-legacy` entries first) |
 | `state` | JSON snapshot of the three stores |
 | `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks) |
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
@@ -295,19 +297,38 @@ memory:
 Optionally also add `memory_extract:` (per-section word budgets) and
 `briefing.emotional_top` (see the example config).
 
-**3. Fresh-start the store.** Migration is a **fresh start** (no converter,
+**3. Seed from the old memory (one-off).** Before the fresh start drops the
+legacy files, run the one-off import to carry the old memory forward:
+`tiger-memory --config <persona-config> import-legacy`. It reads (and only
+reads — no deletion) each persona's old `must_memorize.md` pins + the
+daily/weekly/monthly rollups, re-authors them **in character** into the new
+`skills` / `must_remember` / `emotional` shapes, backdates them to their
+source dates (an old emotional reaction enters already-decayed; a skill's
+`last_used` = its source date), and appends them to the three stores tagged
+`source: import-legacy`. It is **idempotent** (a durable `.state.json`
+`legacy_import` marker plus a detect-existing-seed fallback make a re-run a
+no-op); pass `--force` to deliberately re-seed and `--mock` to run without a
+live model. The verbose per-session `archive/` and `journal/` shorts are NOT
+imported — only the pins + rollups.
+
+**4. Fresh-start the store.** Migration is a **fresh start** (no converter,
 design §10.6): run `tiger-memory --config <persona-config> rebuild` once.
 The first rebuild drops the legacy on-disk surface (old rollup summaries,
 `must_memorize.md`, `longer_memory.md`, the `archive/` dir) and regenerates
 the briefing; the three new stores then (re)build incrementally as the team
 sweep extracts new sessions.
 
-> **Timing.** On a team that tracks live persona configs in git, do the
-> roster-YAML migration **with the branch merge**, not before — editing a
-> live config to the new schema while `main` still runs the old code would
-> desync the config from the deployed code. The new code ignores the
-> retired keys, and the old code ignores the `memory:` block, so the safe
-> order is: merge the code, then migrate the configs, then `rebuild`.
+> **Ordering (critical).** `import-legacy` must run **before** `rebuild` —
+> `rebuild` deletes the legacy files, so running it first is irrecoverable
+> (the old memory is gone before it can be seeded). On a team that tracks
+> live persona configs in git, also do the roster-YAML migration **with the
+> branch merge**, not before — editing a live config to the new schema while
+> `main` still runs the old code would desync the config from the deployed
+> code. The new code ignores the retired keys, and the old code ignores the
+> `memory:` block. The full safe order is:
+>
+> **merge the code → migrate the configs → `import-legacy` (seed) →
+> `rebuild` (fresh start) → ongoing sweep.**
 
 `tigerharness init` already scaffolds new personas with the new model (no
 retired keys), so this migration only applies to configs created before the

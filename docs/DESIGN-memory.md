@@ -69,6 +69,17 @@ rollup `archive/` dir and the legacy journal files (chronological
 summaries, `must_memorize.md`, `longer_memory.md`). The three new store
 files survive; there is no one-time converter (resolved decision §10.6).
 
+There is, however, a **one-off seeding import** (`tiger-memory
+import-legacy`, `import_legacy.py`) that carries the old memory forward
+*before* the fresh-start drop. It reads (never deletes) each persona's old
+`must_memorize.md` pins + the daily/weekly/monthly rollups, re-authors them
+in character into the new shapes, backdates them to their source dates, and
+appends them tagged `source: import-legacy`. It is idempotent (a `.state.json`
+`legacy_import` marker + a detect-existing-seed fallback) and must run
+**before** `rebuild`. The full migration order is **merge → migrate configs
+→ import-legacy → rebuild → sweep** — running `rebuild` before
+`import-legacy` is irrecoverable, as it deletes the legacy files (§12).
+
 Kept and adapted:
 
 - **Source adapters** (`claude_code`, `slack_thread`, `journal_worklog`,
@@ -320,11 +331,12 @@ tuning later; `length_unit` and `weight_cap` are confirmed final.
 | `ranking.py` | shared recency / date-math helpers |
 | `meditation.py` | the compaction engine: `keep_rank`, `MeditationLog`, `meditate` (merge → relevance/downgrade → compact → guarded-forget) |
 | `lifecycle.py` | extraction (`parse_extraction` / `extract_candidates` / `ingest_candidates`), the in-session staging (`plan_extraction`), fresh-start `rebuild`, `pin`, `team_mission_text` |
+| `import_legacy.py` | the one-off legacy import (§12): reader (`read_legacy`), persona-driven re-author (`reauthor`), backdated seeding scorer (`score_seed_candidates`), seed-writer + idempotency guards (`seed_entries` / `already_imported` / `mark_imported`), orchestrator (`import_legacy_run`) |
 | `sweep.py` | team-sweep gating + `meditate_all_stores` (post-ingest, over-overflow only) |
 | `briefing.py` | session-start assembly: must_remember + emotional view + skill index + unprocessed notice |
 | `state.py` | the `tiger-memory state` JSON snapshot (`compute_state`): per-store count / chars / `max` / `over_overflow` — the programmatic hook to check a store's size vs its bound |
 | `store.py` | on-disk store layout (`Paths`) + crash-safe serialization helpers (`atomic_write`, `atomic_swap_dir`, `write_state` / `read_state`) used by the bounded stores and the briefing swap |
-| `cli.py` | `init` / `rebuild` / `pin` / `state` / `plan` / `ingest-extraction` / `ingest-staged` / `sweep-*` |
+| `cli.py` | `init` / `rebuild` / `pin` / `import-legacy` / `state` / `plan` / `ingest-extraction` / `ingest-staged` / `sweep-*` |
 
 ## 10. Resolved decisions (Operator, 2026-06-17)
 
@@ -338,7 +350,10 @@ tuning later; `length_unit` and `weight_cap` are confirmed final.
 5. **Team-goal reference for the relevance check:** read from the charter
    Mission. (Confirmed.)
 6. **Migration:** fresh start — drop the existing stores and let the new
-   system build from sources; no one-time converter. (Confirmed.)
+   system build from sources; no one-time converter. A one-off
+   `import-legacy` seed (§12) carries the old `must_memorize.md` pins +
+   rollups forward *before* the drop; order is merge → migrate configs →
+   import-legacy → rebuild → sweep. (Confirmed.)
 7. **Forget-guard semantics:** `relevance_checked_ids` carries only the
    downgraded directives, so a still-relevant owner directive is never
    licensed to drop (§5.1). (Ratified, do not revert.)

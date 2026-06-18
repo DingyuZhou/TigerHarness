@@ -8,6 +8,11 @@ Subcommands:
                       session-start briefing (skill index + must_remember +
                       emotional view + unprocessed notice)
         pin           write a must_remember entry directly
+        import-legacy one-off (idempotent) seed of the three stores from the
+                      old must_memorize.md pins + daily/weekly/monthly rollups.
+                      MUST run BEFORE the fresh-start `rebuild` (which deletes
+                      the legacy files): merge -> migrate configs ->
+                      import-legacy -> rebuild -> sweep.
 
     Readers (lockless):
         state         show JSON state snapshot for the three bounded stores
@@ -70,6 +75,22 @@ def main(argv: list[str] | None = None) -> int:
         "--kind",
         choices=["owner_explicit", "preference", "decision", "incident"],
         default="owner_explicit",
+    )
+
+    p_imp = sub.add_parser(
+        "import-legacy",
+        help="One-off (idempotent) seed of the 3 stores from the old "
+             "must_memorize.md pins + daily/weekly/monthly rollups. Run BEFORE "
+             "`rebuild` (which deletes the legacy files).",
+    )
+    p_imp.add_argument(
+        "--mock", action="store_true",
+        help="Use the deterministic mock summarizer (no live model; CI/dry-run).",
+    )
+    p_imp.add_argument(
+        "--force", action="store_true",
+        help="Re-seed even if already imported (drops prior import-legacy "
+             "entries first).",
     )
 
     # ----- readers -----
@@ -148,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "pin":
         from .lifecycle import pin as pin_cmd
         return pin_cmd(cfg, store, memo=args.memo, kind=args.kind)
+    if args.cmd == "import-legacy":
+        return _cmd_import_legacy(cfg, store, mock=args.mock, force=args.force)
     if args.cmd == "state":
         return _cmd_state(cfg, store)
     if args.cmd == "plan":
@@ -186,6 +209,26 @@ def _cmd_init(cfg: Config, store: Store) -> int:
 def _cmd_state(cfg: Config, store: Store) -> int:
     from .state import compute_state
     print(json.dumps(compute_state(cfg, store), indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_import_legacy(cfg: Config, store: Store, *, mock: bool, force: bool) -> int:
+    """One-off legacy import — seed the three stores from the old pins + rollups.
+
+    Idempotent: a no-op once imported (unless ``--force``). ``--mock`` uses the
+    deterministic mock summarizer (no live model). NEVER runs ``rebuild`` — the
+    caller drops the legacy files AFTER (merge -> migrate configs ->
+    import-legacy -> rebuild -> sweep).
+    """
+    from .import_legacy import import_legacy_run
+    from .lifecycle import _build_summarizer
+    summarizer = _build_summarizer(cfg, mock=mock)
+    result = import_legacy_run(cfg, store, summarizer=summarizer, force=force)
+    if result.get("skipped") == "already":
+        print("import-legacy: already imported; nothing to do (use --force to re-seed)")
+        return 0
+    print(f"import-legacy seeded: {result['skills']} skills, "
+          f"{result['must_remember']} must_remember, {result['emotional']} emotional")
     return 0
 
 

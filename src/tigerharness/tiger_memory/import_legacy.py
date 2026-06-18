@@ -37,9 +37,14 @@ write/guard surface.
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable, Mapping
 
 from . import emotional as emotional_mod
+from . import frontmatter
 from .bounded_store import BoundedStore
 from .config import Config
 from .entries import (
@@ -47,15 +52,24 @@ from .entries import (
     STORE_MUST_REMEMBER,
     STORE_NAMES,
     STORE_SKILLS,
+    VALID_KINDS,
     BaseEntry,
     EmotionalEntry,
     MustRememberEntry,
     SkillEntry,
 )
-from .lifecycle import Candidates
+from .lifecycle import (
+    Candidates,
+    _build_summarizer,
+    _clip,
+    _fill_prompt,
+    _prompts_root,
+    parse_extraction,
+)
 from .ranking import days_between
 from .state import iso_now
-from .store import Store
+from .store import DAILY_RE, MONTHLY_RE, SHORT_RE, WEEKLY_RE, Store
+from .summarizers import Summarizer
 
 log = logging.getLogger("tigerharness.tiger_memory.import_legacy")
 
@@ -101,6 +115,23 @@ def has_seeded_entries(bstore: BoundedStore) -> bool:
             if entry.source == IMPORT_SOURCE:
                 return True
     return False
+
+
+def _purge_seeded_entries(bstore: BoundedStore) -> None:
+    """Drop every ``import-legacy`` entry from the three stores (the ``--force``
+    re-seed path only).
+
+    Loads each store, keeps only the non-import entries, and re-saves it
+    atomically when (and only when) a prior import entry was present — so a
+    forced re-run REPLACES the prior seed rather than duplicating it, and the
+    no-double-seed guard in :func:`seed_entries` does not refuse the re-run.
+    Live ``extract``/``pin`` memory is never touched.
+    """
+    for store_name in STORE_NAMES:
+        existing = bstore.load(store_name)
+        kept = [e for e in existing if e.source != IMPORT_SOURCE]
+        if len(kept) != len(existing):
+            bstore.save_atomic(store_name, kept)
 
 
 # ----- the durable marker (§1.2) --------------------------------------------
@@ -410,3 +441,350 @@ def score_seed_candidates(
         )
 
     return Candidates(skills=skills, must_remember=must, emotional=emo)
+
+
+# ===== legacy reader + re-author + orchestration (b1-dev-3, Miyagi) ==========
+#
+# The READER turns each persona's old on-disk memory into an in-memory snapshot,
+# the RE-AUTHOR pass (the single model touch point) re-derives the new bundle
+# shapes from the aged-out rollup prose, and the ORCHESTRATOR sequences
+# read → reauthor → score → seed → mark in the strict read-before-drop order
+# (design §12; plan §3). Nothing here deletes anything — the actual fresh-start
+# drop is ``rebuild``, which the orchestrator NEVER invokes.
+
+# The literal legacy pin file (a YAML-frontmatter doc whose body is a markdown
+# ``| Score | Kind | Last bump | Source | Memo |`` table; design §12).
+MUST_MEMORIZE_FILENAME = "must_memorize.md"
+
+# A bare ``YYYY-MM-DD`` (must_memorize ``Last bump`` / a daily|weekly rollup
+# ``period``) and a bare ``YYYY-MM`` (a monthly rollup ``period``). Normalised to
+# a full ISO-8601 UTC timestamp so the seeded entries validate and ``days_between``
+# can measure the backdated age (plan §3.1 + Akagi's source-date seam).
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+
+
+@dataclass
+class LegacyPin:
+    """One parsed ``must_memorize.md`` table row (a structured directive)."""
+
+    score: float
+    kind: str
+    source_date: str  # normalised ISO timestamp (row ``Last bump`` or mtime)
+    memo: str
+
+
+@dataclass
+class LegacyRollup:
+    """One parsed daily/weekly/monthly rollup (frontmatter date + prose body)."""
+
+    kind: str  # "daily" | "weekly" | "monthly"
+    source_date: str  # normalised ISO timestamp from the frontmatter ``period``
+    body: str
+
+
+@dataclass
+class LegacySource:
+    """The in-memory snapshot of one persona's old memory the import consumes.
+
+    ``pins`` are the already-structured ``must_memorize.md`` rows (mechanical —
+    the table IS the directive, so they do not need the model). ``rollups`` are
+    the aged-out experience the re-author pass mines for skill + emotional seeds.
+    Both carry a per-item source date for backdating (Akagi's source-date seam).
+    """
+
+    pins: list[LegacyPin] = field(default_factory=list)
+    rollups: list[LegacyRollup] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not (self.pins or self.rollups)
+
+
+def _normalise_source_date(raw: str | None, *, fallback: str) -> str:
+    """Normalise a legacy date string to a full ISO-8601 UTC timestamp.
+
+    A bare ``YYYY-MM-DD`` becomes ``...T00:00:00Z``; a bare ``YYYY-MM`` (a
+    monthly ``period``) becomes the first of that month. Anything already
+    carrying a time component is passed through. An empty/unrecognised value
+    falls back to *fallback* (a documented sentinel — the file mtime) so an
+    entry is never left with an un-backdatable date (plan §3.1).
+    """
+    s = (raw or "").strip()
+    if _DATE_RE.match(s):
+        return f"{s}T00:00:00Z"
+    if _MONTH_RE.match(s):
+        return f"{s}-01T00:00:00Z"
+    if s:
+        return s
+    return fallback
+
+
+def _mtime_iso(path: Path) -> str:
+    """The file's modification time as an ISO-8601 UTC timestamp (the documented
+    fallback source date when a row/file carries no usable date)."""
+    try:
+        ts = path.stat().st_mtime
+    except OSError:  # pragma: no cover  # path was just globbed/exists
+        return iso_now()
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_must_memorize(text: str, *, mtime_iso: str) -> list[LegacyPin]:
+    """Parse the ``must_memorize.md`` markdown table into structured pins.
+
+    The body is a ``| Score | Kind | Last bump | Source | Memo |`` table. The
+    header + separator rows and any malformed/short row are skipped; an unknown
+    ``Kind`` is dropped (it would fail ``MustRememberEntry`` validation later).
+    The per-row source date is the ``Last bump`` column (normalised); a row with
+    no usable date falls back to the file mtime (plan §3.1).
+    """
+    _fm, body = frontmatter.parse(text)
+    pins: list[LegacyPin] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) < 5:
+            continue
+        score_raw, kind_raw, bump_raw, _source_raw, memo = cells[:5]
+        kind = kind_raw.lower()
+        # Skip the header (``Score``) + the ``---|---`` separator + any row whose
+        # kind is not a real directive kind.
+        if kind not in VALID_KINDS or not memo:
+            continue
+        try:
+            score = float(score_raw)
+        except ValueError:
+            continue
+        pins.append(
+            LegacyPin(
+                score=score,
+                kind=kind,
+                source_date=_normalise_source_date(bump_raw, fallback=mtime_iso),
+                memo=memo,
+            )
+        )
+    return pins
+
+
+def _rollup_kind(name: str) -> str | None:
+    """Classify a journal ``*.md`` filename by the retired rollup regexes.
+
+    Returns ``"daily"`` / ``"weekly"`` / ``"monthly"`` for a rollup, or ``None``
+    for a per-session SHORT transcript (skipped — §12 "skip the verbose detailed
+    archive") or any non-rollup file. SHORT_RE is checked FIRST so a short whose
+    timestamp prefix could otherwise look daily-ish is never mis-read.
+    """
+    if SHORT_RE.match(name):
+        return None
+    if DAILY_RE.match(name):
+        return "daily"
+    if WEEKLY_RE.match(name):
+        return "weekly"
+    if MONTHLY_RE.match(name):
+        return "monthly"
+    return None
+
+
+def read_legacy(store: Store) -> LegacySource:
+    """Read one persona's old on-disk memory into an in-memory snapshot.
+
+    Pure Python, NO model (plan §3.1). Reads:
+
+    - ``journal/must_memorize.md`` — the pin table → structured :class:`LegacyPin`
+      rows (skipped if the file is absent).
+    - ``journal/*.md`` rollups matching ``DAILY_RE`` / ``WEEKLY_RE`` /
+      ``MONTHLY_RE`` → :class:`LegacyRollup` prose blocks, each stamped with its
+      frontmatter ``period`` (normalised) as the source date.
+
+    **Skips** the per-session ``SHORT_RE`` transcripts in ``journal/`` AND the
+    verbose ``archive/`` dir entirely (§12 "skip the verbose detailed
+    ``archive/``") — only the pins + the three rollup shapes are imported.
+
+    This is the read-before-drop SNAPSHOT: every legacy byte the import needs is
+    materialised here, BEFORE any deletable step. ``read_legacy`` never unlinks.
+    """
+    journal = store.paths.journal
+    src = LegacySource()
+    if not journal.exists():
+        return src
+
+    mm_path = journal / MUST_MEMORIZE_FILENAME
+    if mm_path.exists():
+        src.pins = _parse_must_memorize(
+            mm_path.read_text(encoding="utf-8"), mtime_iso=_mtime_iso(mm_path)
+        )
+
+    for f in sorted(journal.glob("*.md")):
+        kind = _rollup_kind(f.name)
+        if kind is None:
+            continue
+        fm, body = frontmatter.parse(f.read_text(encoding="utf-8"))
+        period = fm.get("period")
+        period = str(period) if period is not None else ""
+        body = body.strip()
+        if not body:
+            continue
+        src.rollups.append(
+            LegacyRollup(
+                kind=kind,
+                source_date=_normalise_source_date(period, fallback=_mtime_iso(f)),
+                body=body,
+            )
+        )
+    return src
+
+
+def _pins_to_candidates(pins: Iterable[LegacyPin]) -> Candidates:
+    """The mechanical must-remember half of the import (NO model, plan §3.1).
+
+    Each ``must_memorize.md`` row is already a structured directive, so it maps
+    straight to an unscored :class:`MustRememberEntry` carrying its legacy
+    ``Score`` as the importance and its ``Last bump`` as the source date. Rukawa's
+    :func:`score_seed_candidates` preserves both and backdates the timestamps.
+    """
+    must: list[MustRememberEntry] = []
+    for p in pins:
+        must.append(
+            MustRememberEntry(
+                text=p.memo,
+                created_at=p.source_date,
+                last_used=p.source_date,
+                source=IMPORT_SOURCE,
+                kind=p.kind,
+                importance=p.score,
+            )
+        )
+    return Candidates(skills=[], must_remember=must, emotional=list())
+
+
+def _reauthor_one(
+    cfg: Config,
+    summarizer: Summarizer,
+    rollup: LegacyRollup,
+) -> Candidates:
+    """Run the re-author prompt over ONE rollup and parse the typed candidates.
+
+    The single LLM call per rollup (mock in CI), mirroring
+    ``lifecycle.extract_candidates``: fill the ``import_legacy.md`` template with
+    the rollup prose, call the summarizer, and parse the strict
+    ``@@SKILLS@@/@@MUST_REMEMBER@@/@@EMOTIONAL@@`` bundle via the SHARED
+    :func:`lifecycle.parse_extraction`. Every parsed entry is stamped with the
+    rollup's source date (``created_at``) so the scorer can backdate it; the
+    provenance ``source`` is set at scoring time, not here. A backend error or a
+    malformed bundle is logged-and-swallowed into empty candidates so one bad
+    rollup never aborts the import.
+    """
+    content = _clip(rollup.body, cfg.budgets.max_prompt_content_chars)
+    prompt = _fill_prompt(
+        _prompts_root(cfg) / "import_legacy.md",
+        agent_name=cfg.agent.name,
+        period=rollup.source_date,
+        rollup_kind=rollup.kind,
+        procedure_max_words=cfg.memory_extract.skill_procedure_words,
+        memo_max_words=cfg.memory_extract.memo_words,
+        reaction_max_words=cfg.memory_extract.reaction_words,
+        weight_cap=int(cfg.memory.emotional_log.weight_cap),
+        content=content,
+    )
+    try:
+        raw = summarizer.summarize(
+            prompt=prompt, max_words=cfg.memory_extract.max_output_words
+        )
+        # ``now`` = the rollup's source date so the unscored entries carry the
+        # backdated ``created_at`` the scorer reads; ``source`` is re-tagged to
+        # IMPORT_SOURCE by ``score_seed_candidates``.
+        return parse_extraction(raw, now=rollup.source_date, source=IMPORT_SOURCE)
+    except Exception:  # noqa: BLE001 — one bad rollup must not abort the import
+        log.exception("re-author failed for %s rollup %s", rollup.kind, rollup.source_date)
+        return Candidates(skills=[], must_remember=[], emotional=[])
+
+
+def reauthor(
+    cfg: Config,
+    summarizer: Summarizer,
+    source: LegacySource,
+) -> Candidates:
+    """Re-author one persona's legacy memory into unscored new-shape candidates.
+
+    The persona-driven pass (plan §3.2): the mechanical ``must_memorize.md`` pins
+    pass straight through (the table IS the directive), while EACH rollup's aged-
+    out prose goes through the single model touch point (:func:`_reauthor_one`)
+    to mine skill + emotional + any fresh must-remember seeds. The per-rollup
+    bundles are concatenated, then merged with the mechanical pins. Every entry
+    carries its source date in ``created_at`` for the scorer to backdate.
+    """
+    skills: list[SkillEntry] = []
+    must: list[MustRememberEntry] = []
+    emo: list[EmotionalEntry] = []
+
+    mechanical = _pins_to_candidates(source.pins)
+    must.extend(mechanical.must_remember)
+
+    for rollup in source.rollups:
+        cands = _reauthor_one(cfg, summarizer, rollup)
+        skills.extend(cands.skills)
+        must.extend(cands.must_remember)
+        emo.extend(cands.emotional)
+
+    return Candidates(skills=skills, must_remember=must, emotional=emo)
+
+
+# ----- the orchestrator (§3.3 / §12 read-before-drop spine) -----------------
+
+
+def import_legacy_run(
+    cfg: Config,
+    store: Store,
+    *,
+    summarizer: Summarizer | None = None,
+    force: bool = False,
+    now: str | None = None,
+) -> dict:
+    """Orchestrate the one-off legacy import for one persona (plan §3.3).
+
+    The dependency spine, in this EXACT order (read-before-drop, design §12):
+
+    1. gate on :func:`already_imported` — skip (no-op) if the persona is already
+       imported, UNLESS *force* is set;
+    2. :func:`read_legacy` — snapshot ALL old bytes into memory FIRST;
+    3. :func:`reauthor` — re-author the rollup prose (the single model touch
+       point; mock in CI) + pass the mechanical pins through;
+    4. :func:`assert_seed_inputs_snapshotted` — confirm the snapshot is fully
+       materialised before any seed (the ordering anchor);
+    5. :func:`score_seed_candidates` (Rukawa) — backdate + score;
+    6. :func:`seed_entries` (Mitsui) — durable append into the three stores;
+    7. :func:`mark_imported` (Mitsui) — write the one-off ``.state.json`` marker.
+
+    Returns ``{"skipped": "already"}`` when gated, else the per-store seeded
+    counts plus ``{"skipped": None}``. **NEVER calls ``rebuild``** — the caller
+    runs the fresh-start drop AFTER the import (the migration order is
+    merge → migrate configs → import-legacy → rebuild → sweep).
+    """
+    store.init_layout()
+    bstore = BoundedStore(cfg, store)
+    if already_imported(store, bstore) and not force:
+        log.info("import-legacy: already imported; skipping (use force to re-seed)")
+        return {"skipped": "already"}
+    if force:
+        # Re-seed intentionally: drop any prior import-legacy entries first so
+        # the no-double-seed guard in seed_entries does not refuse the re-run
+        # (and so the re-seed REPLACES rather than duplicates). Only entries
+        # carrying the import provenance are removed — live extract/pin memory
+        # is untouched.
+        _purge_seeded_entries(bstore)
+
+    now = now or iso_now()
+    source = read_legacy(store)  # snapshot ALL legacy bytes FIRST.
+    summarizer = summarizer or _build_summarizer(cfg)
+    raw = reauthor(cfg, summarizer, source)
+    assert_seed_inputs_snapshotted(raw)
+    scored = score_seed_candidates(raw, cfg=cfg, now=now)
+    counts = seed_entries(bstore, scored, now=now)
+    mark_imported(store, counts=counts)
+    log.info(
+        "import-legacy complete: +%d skills, +%d must_remember, +%d emotional",
+        counts[STORE_SKILLS], counts[STORE_MUST_REMEMBER], counts[STORE_EMOTIONAL],
+    )
+    return {"skipped": None, **counts}
