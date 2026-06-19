@@ -39,12 +39,14 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from .bounded_store import BoundedStore, ForgetGuardError
+from . import fuzz_select, fuzzy_recompact, fuzzy_store
+from .bounded_store import BoundedStore, ForgetGuardError, StoreLockHeld
 from .config import Config
 from .diary import clamp_weight, diary_keep_rank
 from .entries import (
     KIND_DECISION,
     KIND_OWNER_EXPLICIT,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
     BaseEntry,
@@ -561,3 +563,98 @@ def _forget_pass(
             len(entries),
         )
     return entries
+
+
+# ----- 4-store persona meditation (brief §meditation pipeline) --------------
+
+
+@dataclass
+class PersonaMeditationLog:
+    """Outcome of one 4-store persona meditation cycle (audit record)."""
+
+    diary: MeditationLog
+    must_remember: MeditationLog
+    # The TEXT of each item routed into fuzzy this cycle. Text (not id) because
+    # the compact diary format does not persist ids — text is the stable,
+    # auditable key, and it is what the no-hard-drop invariant checks against.
+    fuzzed_diary: list[str] = field(default_factory=list)
+    fuzzed_mr: list[str] = field(default_factory=list)
+    fuzzy_dropped: int = 0                                   # chars trimmed on save
+    skipped_locked: bool = False
+
+
+def meditate_persona(
+    persona_ctx: str,
+    mission_text: str,
+    summarizer: Summarizer,
+    cfg: Config,
+    store: BoundedStore,
+) -> PersonaMeditationLog:
+    """Run the 4-store meditation for one persona (brief §meditation pipeline).
+
+    Ordered: merge -> relevance-downgrade (must_remember) -> compact -> select
+    fuzz candidates (diary + must_remember) -> re-compact aged items + the
+    existing fuzzy.md into fuzzy.md -> persist the kept sharp stores + fuzzy.
+
+    THE CRUX (plan §7, no silent loss): nothing is hard-dropped. The only items
+    that leave a sharp store are the ones routed into fuzzy.md (re-compacted,
+    recoverable). Diary fresh-window items are always kept. Skills are unchanged
+    here (count-bounded; they keep their own :func:`meditate` and do not fuzz).
+
+    Holds the diary + must_remember store locks for the whole cycle (fuzzy.md is
+    written under them; only meditation writes it). If a live session holds
+    either, backs off (``skipped_locked=True``) rather than racing a meditation.
+    """
+    del persona_ctx  # carried by the summarizer backend wiring.
+    now = iso_now()
+    diary_log = MeditationLog(store_name=STORE_DIARY)
+    mr_log = MeditationLog(store_name=STORE_MUST_REMEMBER)
+    result = PersonaMeditationLog(diary=diary_log, must_remember=mr_log)
+
+    try:
+        with store.store_lock(STORE_DIARY), store.store_lock(STORE_MUST_REMEMBER):
+            diary = list(store.load(STORE_DIARY))
+            mr = list(store.load(STORE_MUST_REMEMBER))
+            existing_fuzzy = fuzzy_store.load_fuzzy(store.store)
+
+            # 1-3 (diary): merge near-dups, then compact verbose survivors.
+            diary = _merge_pass(diary, summarizer, cfg, diary_log)
+            diary = _compact_pass(diary, store, STORE_DIARY, summarizer, diary_log)
+
+            # 1-3 (must_remember): merge, relevance-downgrade stale owner
+            # directives, then compact.
+            mr = _merge_pass(mr, summarizer, cfg, mr_log)
+            downgraded: set[str] = set()
+            mr = _relevance_pass(mr, summarizer, mission_text, mr_log, downgraded)
+            mr = _compact_pass(mr, store, STORE_MUST_REMEMBER, summarizer, mr_log)
+
+            # 4: select fuzz candidates (diary fresh-window protected; mr
+            # downgraded always fuzz).
+            kept_diary, fuzzed_diary = fuzz_select.select_diary_fuzz(diary, now, cfg)
+            kept_mr, fuzzed_mr = fuzz_select.select_mr_fuzz(mr, downgraded, now, cfg)
+
+            # 5: re-compact aged items + existing fuzzy into fuzzy.md.
+            new_fuzzy = fuzzy_recompact.recompact_fuzzy(
+                summarizer, fuzzed_diary, fuzzed_mr, existing_fuzzy, cfg
+            )
+
+            # 6: persist. The ONLY items leaving a sharp store are the fuzzed
+            # ones (now captured in fuzzy) -> NO hard drop (plan §7 invariant).
+            store.save_atomic(STORE_DIARY, kept_diary)
+            store.save_atomic(STORE_MUST_REMEMBER, kept_mr)
+            result.fuzzy_dropped = fuzzy_store.save_fuzzy(cfg, store.store, new_fuzzy)
+            result.fuzzed_diary = [e.text for e in fuzzed_diary]
+            result.fuzzed_mr = [e.text for e in fuzzed_mr]
+            log.info(
+                "meditate_persona(%s): diary kept=%d fuzzed=%d | mr kept=%d "
+                "fuzzed=%d | fuzzy trimmed=%d",
+                cfg.agent.name, len(kept_diary), len(fuzzed_diary),
+                len(kept_mr), len(fuzzed_mr), result.fuzzy_dropped,
+            )
+    except StoreLockHeld:
+        result.skipped_locked = True
+        log.warning(
+            "meditate_persona(%s): a sharp store is locked by a live session; "
+            "backing off (retry next cycle).", cfg.agent.name,
+        )
+    return result
