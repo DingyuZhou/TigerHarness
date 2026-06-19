@@ -292,8 +292,8 @@ memory:
   skills:        { max_count: 40, overflow_limit: 50 }
   must_remember: { max_length: 8000, overflow_limit: 10000 }
   diary:
-    max_length: 12000
-    overflow_limit: 15000
+    max_length: 4000
+    overflow_limit: 6000
     weight_cap: 10
     decay: { magnitude_per_day: 0.1 }
 ```

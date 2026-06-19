@@ -566,10 +566,10 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     decay_raw = el_raw.get("decay") or {}
     diary = DiaryStoreConfig(
         max_length=_cfg_int(
-            el_raw.get("max_length", 12000), "memory.diary.max_length"
+            el_raw.get("max_length", 4000), "memory.diary.max_length"
         ),
         overflow_limit=_cfg_int(
-            el_raw.get("overflow_limit", 15000), "memory.diary.overflow_limit"
+            el_raw.get("overflow_limit", 6000), "memory.diary.overflow_limit"
         ),
         weight_cap=_cfg_float(
             el_raw.get("weight_cap", 10.0), "memory.diary.weight_cap"

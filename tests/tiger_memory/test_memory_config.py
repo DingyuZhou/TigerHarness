@@ -47,8 +47,8 @@ def test_memory_defaults_when_block_absent(minimal_config_yaml: Path) -> None:
     assert m.skills.overflow_limit == 50
     assert m.must_remember.max_length == 8000
     assert m.must_remember.overflow_limit == 10000
-    assert m.diary.max_length == 12000
-    assert m.diary.overflow_limit == 15000
+    assert m.diary.max_length == 4000
+    assert m.diary.overflow_limit == 6000
     assert m.diary.weight_cap == 10.0
     assert m.diary.decay.magnitude_per_day == 0.1
 
