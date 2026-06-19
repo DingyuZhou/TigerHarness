@@ -33,7 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import diary_format, frontmatter
-from .bounded_store import _split_blocks
+from .bounded_store import BoundedStore, StoreLockHeld, _split_blocks
+from .entries import STORE_DIARY
 from .config import Config
 from .diary import clamp_weight
 from .store import Store
@@ -136,17 +137,28 @@ def migrate_store(cfg: Config, store: Store, *, apply: bool = False) -> Migratio
         raise ValueError(f"migration produced an invalid diary: {errs[0]}")
 
     if apply:
-        store.paths.journal.mkdir(parents=True, exist_ok=True)
-        emo_path.rename(emo_path.with_suffix(".md.bak"))
-        store.atomic_write(store.paths.journal / "diary.md", serialized)
-        state = store.read_state() or {}
-        state[STATE_KEY] = {"converted": res.converted, "kept": res.kept,
-                            "forgotten": res.forgotten}
-        store.write_state(state)
-        res.applied = True
-        log.warning(
-            "migrate(%s): APPLIED — %d source -> %d kept (%d forgotten over max); "
-            "emotional.md backed up to emotional.md.bak",
-            res.persona, res.source_blocks, res.kept, res.forgotten,
-        )
+        # plan §6: never migrate a store a live sweep is meditating — take the
+        # per-store lock and REFUSE (no-op) if a live session holds it, so the
+        # destructive write can't race a concurrent meditation.
+        try:
+            with BoundedStore(cfg, store).store_lock(STORE_DIARY):
+                store.paths.journal.mkdir(parents=True, exist_ok=True)
+                emo_path.rename(emo_path.with_suffix(".md.bak"))
+                store.atomic_write(store.paths.journal / "diary.md", serialized)
+                state = store.read_state() or {}
+                state[STATE_KEY] = {"converted": res.converted, "kept": res.kept,
+                                    "forgotten": res.forgotten}
+                store.write_state(state)
+                res.applied = True
+                log.warning(
+                    "migrate(%s): APPLIED — %d source -> %d kept (%d forgotten "
+                    "over max); emotional.md backed up to emotional.md.bak",
+                    res.persona, res.source_blocks, res.kept, res.forgotten,
+                )
+        except StoreLockHeld:
+            res.skipped_reason = "diary store locked by a live session"
+            log.warning(
+                "migrate(%s): SKIPPED — diary store locked (sweep in progress); "
+                "re-run when idle", res.persona,
+            )
     return res

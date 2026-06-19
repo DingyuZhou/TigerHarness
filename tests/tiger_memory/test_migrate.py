@@ -189,3 +189,18 @@ def test_cli_exit_one_on_unbalanced(tmp_path: Path):
 def test_cli_noop_skip_exit_zero(tmp_path: Path):
     cfg, store = _store(tmp_path)
     assert _cli(tmp_path, "--apply") == 0  # no emotional.md -> skip -> 0
+
+
+def test_migrate_refuses_when_diary_store_locked(tmp_path: Path):
+    """plan §6: --apply REFUSES (no-op) if a live session holds the diary store
+    lock, so the destructive write can't race a concurrent meditation."""
+    from tigerharness.tiger_memory.bounded_store import BoundedStore
+    cfg, store = _store(tmp_path)
+    _write_emotional(store, [_legacy_block("a", 3.0, "ok", "note")])
+    bstore = BoundedStore(cfg, store)
+    with bstore.store_lock("diary"):              # a live session holds the lock
+        res = mig.migrate_store(cfg, store, apply=True)
+    assert res.skipped_reason == "diary store locked by a live session"
+    assert not res.applied
+    assert (store.paths.journal / "emotional.md").exists()      # untouched
+    assert not (store.paths.journal / "diary.md").exists()
