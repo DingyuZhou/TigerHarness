@@ -57,7 +57,7 @@ def test_ingest_extraction_writes_stores(tmp_path: Path) -> None:
     assert result.conversation_uuid == "c1"
     assert result.skills_added == 1
     assert result.must_remember_added == 1
-    assert result.emotional_added == 1
+    assert result.diary_added == 1
     assert result.total_added == 3
     bstore = BoundedStore(cfg, store)
     assert len(bstore.load(STORE_SKILLS)) == 1

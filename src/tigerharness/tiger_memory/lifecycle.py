@@ -572,7 +572,7 @@ def plan_extraction(
 
 # The legacy on-disk surface the fresh-start rebuild drops: the retired
 # rollup/archive store dir + the old journal markdown files. The three new
-# stores (skills.md / must_remember.md / emotional.md) live in journal/ and
+# stores (skills.md / must_remember.md / diary.md) live in journal/ and
 # are NOT in this set, so a rebuild that runs after extraction keeps them.
 _LEGACY_JOURNAL_FILES = (
     "must_memorize.md",

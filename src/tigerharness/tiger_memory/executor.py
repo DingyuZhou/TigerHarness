@@ -28,11 +28,11 @@ class IngestResult:
     conversation_uuid: str
     skills_added: int
     must_remember_added: int
-    emotional_added: int
+    diary_added: int
 
     @property
     def total_added(self) -> int:
-        return self.skills_added + self.must_remember_added + self.emotional_added
+        return self.skills_added + self.must_remember_added + self.diary_added
 
 
 def ingest_extraction(
@@ -64,5 +64,5 @@ def ingest_extraction(
         conversation_uuid=conversation_uuid,
         skills_added=added[STORE_SKILLS],
         must_remember_added=added[STORE_MUST_REMEMBER],
-        emotional_added=added[STORE_DIARY],
+        diary_added=added[STORE_DIARY],
     )

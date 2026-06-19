@@ -260,7 +260,7 @@ def _compact_text(
 def keep_rank(entry: BaseEntry, now: str, cfg: Config) -> tuple[float, float]:
     """Sortable keep-rank for *entry* (higher = keep; ascending = forget order).
 
-    Dispatches by store: must_remember by ``importance`` + recency, emotional
+    Dispatches by store: must_remember by ``importance`` + recency, diary
     by decayed ``|weight|`` + recency, skills by ``importance``(usage) +
     recency. The single entry point meditation sorts by to choose drop order.
     """

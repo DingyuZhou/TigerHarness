@@ -15,7 +15,7 @@ on. It owns, for the three bounded stores (``skills`` / ``must_remember`` /
   (design §5 invariant; the no-safety-net correctness anchor, plan §2.4).
 
 On-disk layout: one markdown file per store under the store's journal dir
-(``skills.md`` / ``must_remember.md`` / ``emotional.md``). Each file is a
+(``skills.md`` / ``must_remember.md`` / ``diary.md``). Each file is a
 sequence of entries, every entry a YAML-frontmatter block (structured
 fields) followed by its body text, blocks separated by a sentinel line. The
 whole file is rewritten atomically on every ``save_atomic`` — meditation
@@ -24,7 +24,7 @@ and the simplest thing that is crash-safe.
 
 The bound is read per store from the ``memory:`` config block: skills are
 **count-based** (``max_count`` / ``overflow_limit``); must_remember and
-emotional are **length-based** in characters (``max_length`` /
+diary are **length-based** in characters (``max_length`` /
 ``overflow_limit``). ``is_over_overflow`` returns True only at/above
 ``overflow_limit`` — never inside the ``max <= n < overflow_limit``
 hysteresis band (design §4 no-thrash; plan §4 Kogure R1#2).
@@ -237,7 +237,7 @@ class BoundedStore:
         self.store.atomic_write(path, _serialize(entries))
 
     def _validate_entry(self, entry: BaseEntry) -> None:
-        # The emotional store's cap is config-driven; everything else
+        # The diary store's cap is config-driven; everything else
         # validates with no argument.
         if entry.store_name == STORE_DIARY:
             entry.validate(weight_cap=self.memory.diary.weight_cap)
@@ -276,7 +276,7 @@ class BoundedStore:
             return self.count(entries) >= self.memory.skills.overflow_limit
         if store_name == "must_remember":
             limit = self.memory.must_remember.overflow_limit
-        else:  # emotional
+        else:  # diary
             limit = self.memory.diary.overflow_limit
         return self.length_chars(entries) >= limit
 

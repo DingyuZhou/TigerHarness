@@ -1,6 +1,6 @@
 """Signed-weight scoring for the emotional log (design §4.3; plan §2 dev-2).
 
-The emotional store carries a single signed scalar per entry — a ``weight``
+The diary store carries a single signed scalar per entry — a ``weight``
 in ``[-weight_cap, +weight_cap]`` (default ±10, design §4.3): positive =
 *for* / liked, negative = *against* / disliked, ``0`` = neutral.
 

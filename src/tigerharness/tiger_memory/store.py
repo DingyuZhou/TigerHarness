@@ -3,7 +3,7 @@
 Layout (design doc §4 — the shipped three-store model):
     <root>/
         journal/    the three bounded stores:
-                    ``skills.md`` / ``must_remember.md`` / ``emotional.md``
+                    ``skills.md`` / ``must_remember.md`` / ``diary.md``
                     plus ``.state.json`` (sweep bookkeeping)
         briefing/   session-load working set (rebuilt atomically)
 

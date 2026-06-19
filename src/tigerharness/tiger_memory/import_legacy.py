@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from . import diary as emotional_mod
+from . import diary as diary_scoring
 from . import frontmatter
 from .bounded_store import BoundedStore
 from .config import Config
@@ -319,7 +319,7 @@ def seeds_perform_no_deletion(paths_before: Iterable, paths_after: Iterable) -> 
 #   ``created_at = last_used = source_date`` — NEVER ``now()``. An old memory
 #   enters the store already aged, so the live keep-rank treats it exactly as it
 #   would have treated it had it been written on its source date.
-# - **emotional** seeds store the clamped RAW signed weight (clamped to
+# - **diary** seeds store the clamped RAW signed weight (clamped to
 #   ``[-weight_cap, +weight_cap]`` via :func:`emotional.clamp_weight`); they are
 #   NOT pre-decayed. The "already partly decayed" effect is produced at RANK
 #   time: because ``last_used = source_date``, the live keep-rank's single
@@ -445,7 +445,7 @@ def score_seed_candidates(
         # decay_entry/keep_rank — identical to an organic entry of the same age.
         # Pre-decaying here AND backdating last_used double-decayed the seed
         # (~2x aging), prematurely forgetting the curated memory §12 preserves.
-        weight = emotional_mod.clamp_weight(e.weight, cfg)
+        weight = diary_scoring.clamp_weight(e.weight, cfg)
         emo.append(
             DiaryEntry(
                 text=e.text,
