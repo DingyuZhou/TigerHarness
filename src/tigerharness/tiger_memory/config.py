@@ -117,11 +117,9 @@ class RebuildConfig:
 class BriefingConfig:
     """Session-start briefing assembly (bounded-store revamp, design §6).
 
-    ``emotional_top`` caps how many emotional entries the session-start
-    view shows (top-by-|weight|); ``0`` shows all.
+    The diary is loaded WHOLE at session start (forgetting, not a display cap,
+    keeps it bounded), so there is no top-N knob.
     """
-
-    emotional_top: int = 20
 
 
 @dataclass(frozen=True)
@@ -191,20 +189,26 @@ class MustRememberStoreConfig:
 
 
 @dataclass(frozen=True)
-class EmotionalDecayConfig:
+class DiaryDecayConfig:
     """Signed-weight decay rate for the emotional log (design §4.3)."""
 
     magnitude_per_day: float = 0.1
 
 
 @dataclass(frozen=True)
-class EmotionalStoreConfig:
-    """Bound + signed-weight cap + decay for the emotional log (design §4.3)."""
+class DiaryStoreConfig:
+    """Bound + signed-weight cap + decay for the diary store (design §4.3).
 
-    max_length: int = 12000
-    overflow_limit: int = 15000
+    The diary is loaded WHOLE each session, so it is bounded tighter than the
+    other length-based stores and kept small by forgetting (not a display cap):
+    ``max_length`` 4000 (the target forgetting compacts back below),
+    ``overflow_limit`` 6000 (the hysteresis trigger). The Operator's numbers.
+    """
+
+    max_length: int = 4000
+    overflow_limit: int = 6000
     weight_cap: float = 10.0
-    decay: EmotionalDecayConfig = field(default_factory=EmotionalDecayConfig)
+    decay: DiaryDecayConfig = field(default_factory=DiaryDecayConfig)
 
 
 @dataclass(frozen=True)
@@ -221,8 +225,8 @@ class MemoryConfig:
     must_remember: MustRememberStoreConfig = field(
         default_factory=MustRememberStoreConfig
     )
-    emotional_log: EmotionalStoreConfig = field(
-        default_factory=EmotionalStoreConfig
+    diary: DiaryStoreConfig = field(
+        default_factory=DiaryStoreConfig
     )
 
 
@@ -446,13 +450,7 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         ),
     )
 
-    briefing_raw = raw.get("briefing") or {}
-    emotional_top = int(briefing_raw.get("emotional_top", 20))
-    if emotional_top < 0:
-        raise ConfigError(
-            f"briefing.emotional_top must be ≥ 0; got {emotional_top}."
-        )
-    briefing = BriefingConfig(emotional_top=emotional_top)
+    briefing = BriefingConfig()
 
     prefilter_raw = raw.get("prefilter") or {}
     prefilter = PrefilterConfig(
@@ -564,47 +562,47 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
         must_remember.overflow_limit,
     )
 
-    el_raw = memory_raw.get("emotional_log") or {}
+    el_raw = memory_raw.get("diary") or {}
     decay_raw = el_raw.get("decay") or {}
-    emotional_log = EmotionalStoreConfig(
+    diary = DiaryStoreConfig(
         max_length=_cfg_int(
-            el_raw.get("max_length", 12000), "memory.emotional_log.max_length"
+            el_raw.get("max_length", 4000), "memory.diary.max_length"
         ),
         overflow_limit=_cfg_int(
-            el_raw.get("overflow_limit", 15000), "memory.emotional_log.overflow_limit"
+            el_raw.get("overflow_limit", 6000), "memory.diary.overflow_limit"
         ),
         weight_cap=_cfg_float(
-            el_raw.get("weight_cap", 10.0), "memory.emotional_log.weight_cap"
+            el_raw.get("weight_cap", 10.0), "memory.diary.weight_cap"
         ),
-        decay=EmotionalDecayConfig(
+        decay=DiaryDecayConfig(
             magnitude_per_day=_cfg_float(
                 decay_raw.get("magnitude_per_day", 0.1),
-                "memory.emotional_log.decay.magnitude_per_day",
+                "memory.diary.decay.magnitude_per_day",
             ),
         ),
     )
     _validate_bound(
-        "memory.emotional_log",
+        "memory.diary",
         "max_length",
-        emotional_log.max_length,
-        emotional_log.overflow_limit,
+        diary.max_length,
+        diary.overflow_limit,
     )
-    if emotional_log.weight_cap <= 0:
+    if diary.weight_cap <= 0:
         raise ConfigError(
-            f"memory.emotional_log.weight_cap must be > 0; "
-            f"got {emotional_log.weight_cap}."
+            f"memory.diary.weight_cap must be > 0; "
+            f"got {diary.weight_cap}."
         )
-    if emotional_log.decay.magnitude_per_day < 0:
+    if diary.decay.magnitude_per_day < 0:
         raise ConfigError(
-            f"memory.emotional_log.decay.magnitude_per_day must be ≥ 0; "
-            f"got {emotional_log.decay.magnitude_per_day}."
+            f"memory.diary.decay.magnitude_per_day must be ≥ 0; "
+            f"got {diary.decay.magnitude_per_day}."
         )
 
     return MemoryConfig(
         length_unit=length_unit,
         skills=skills,
         must_remember=must_remember,
-        emotional_log=emotional_log,
+        diary=diary,
     )
 
 

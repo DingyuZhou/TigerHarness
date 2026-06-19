@@ -43,18 +43,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from . import emotional as emotional_mod
+from . import diary as diary_scoring
 from . import frontmatter
 from .bounded_store import BoundedStore
 from .config import Config
 from .entries import (
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_NAMES,
     STORE_SKILLS,
     VALID_KINDS,
     BaseEntry,
-    EmotionalEntry,
+    DiaryEntry,
     MustRememberEntry,
     SkillEntry,
 )
@@ -109,7 +109,10 @@ def has_seeded_entries(bstore: BoundedStore) -> bool:
     actual store contents, so a hand-deleted marker over already-seeded stores
     still reports "imported" and blocks a re-seed.
     """
-    for store_name in STORE_NAMES:
+    # The diary store is source-less on disk (compact dated bullets), so its
+    # import-seeds can't be content-detected by ``source``; it is covered by the
+    # .state.json marker instead. Scan only the frontmatter stores here.
+    for store_name in (STORE_SKILLS, STORE_MUST_REMEMBER):
         for entry in bstore.load(store_name):
             if entry.source == IMPORT_SOURCE:
                 return True
@@ -128,6 +131,14 @@ def _purge_seeded_entries(bstore: BoundedStore) -> None:
     """
     for store_name in STORE_NAMES:
         existing = bstore.load(store_name)
+        if store_name == STORE_DIARY:
+            # Source-less compact format: import-seeds can't be told apart from
+            # live entries, so a force-reimport RESETS the diary (rebuildable;
+            # the legacy seed is re-authored). b1-dev-3/Mitsui may refine this to
+            # preserve live diary entries via a marker-tracked seed set.
+            if existing:
+                bstore.save_atomic(store_name, [])
+            continue
         kept = [e for e in existing if e.source != IMPORT_SOURCE]
         if len(kept) != len(existing):
             bstore.save_atomic(store_name, kept)
@@ -173,7 +184,7 @@ def mark_imported(store: Store, *, counts: dict[str, int]) -> None:
         "seeded": {
             STORE_SKILLS: int(counts.get(STORE_SKILLS, 0)),
             STORE_MUST_REMEMBER: int(counts.get(STORE_MUST_REMEMBER, 0)),
-            STORE_EMOTIONAL: int(counts.get(STORE_EMOTIONAL, 0)),
+            STORE_DIARY: int(counts.get(STORE_DIARY, 0)),
         },
     }
     store.write_state(state)
@@ -215,13 +226,13 @@ def seed_entries(
     intentionally unused: seeded entries are backdated, never stamped to now.
     """
     del now  # intentionally unused — seeds are backdated, never re-stamped.
-    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_EMOTIONAL: 0}
+    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_DIARY: 0}
     if candidates.is_empty():
         return added
     per_store: dict[str, list[BaseEntry]] = {
         STORE_SKILLS: list(candidates.skills),
         STORE_MUST_REMEMBER: list(candidates.must_remember),
-        STORE_EMOTIONAL: list(candidates.emotional),
+        STORE_DIARY: list(candidates.diary),
     }
     for store_name, new_entries in per_store.items():
         if not new_entries:
@@ -245,7 +256,7 @@ def seed_entries(
         added[store_name] = len(new_entries)
     log.info(
         "import-legacy seed: +%d skills, +%d must_remember, +%d emotional",
-        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_EMOTIONAL],
+        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_DIARY],
     )
     return added
 
@@ -274,7 +285,7 @@ def assert_seed_inputs_snapshotted(candidates: Candidates) -> None:
     for bucket in (
         candidates.skills,
         candidates.must_remember,
-        candidates.emotional,
+        candidates.diary,
     ):
         if not isinstance(bucket, list):
             raise TypeError(
@@ -308,7 +319,7 @@ def seeds_perform_no_deletion(paths_before: Iterable, paths_after: Iterable) -> 
 #   ``created_at = last_used = source_date`` — NEVER ``now()``. An old memory
 #   enters the store already aged, so the live keep-rank treats it exactly as it
 #   would have treated it had it been written on its source date.
-# - **emotional** seeds store the clamped RAW signed weight (clamped to
+# - **diary** seeds store the clamped RAW signed weight (clamped to
 #   ``[-weight_cap, +weight_cap]`` via :func:`emotional.clamp_weight`); they are
 #   NOT pre-decayed. The "already partly decayed" effect is produced at RANK
 #   time: because ``last_used = source_date``, the live keep-rank's single
@@ -425,8 +436,8 @@ def score_seed_candidates(
             )
         )
 
-    emo: list[EmotionalEntry] = []
-    for e in raw.emotional:
+    emo: list[DiaryEntry] = []
+    for e in raw.diary:
         src = _source_date_for(e, source_dates, now)
         # GAP-5 fix (final convergence): store the clamped RAW weight, NOT a
         # pre-decayed one. Emotional weight is decayed exactly ONCE, at rank
@@ -434,19 +445,18 @@ def score_seed_candidates(
         # decay_entry/keep_rank — identical to an organic entry of the same age.
         # Pre-decaying here AND backdating last_used double-decayed the seed
         # (~2x aging), prematurely forgetting the curated memory §12 preserves.
-        weight = emotional_mod.clamp_weight(e.weight, cfg)
+        weight = diary_scoring.clamp_weight(e.weight, cfg)
         emo.append(
-            EmotionalEntry(
+            DiaryEntry(
                 text=e.text,
                 created_at=src,
                 last_used=src,
                 source=IMPORT_SOURCE,
                 weight=weight,
-                reaction=e.reaction,
             )
         )
 
-    return Candidates(skills=skills, must_remember=must, emotional=emo)
+    return Candidates(skills=skills, must_remember=must, diary=emo)
 
 
 # ===== legacy reader + re-author + orchestration (b1-dev-3, Miyagi) ==========
@@ -687,7 +697,7 @@ def _pins_to_candidates(pins: Iterable[LegacyPin]) -> Candidates:
                 importance=p.score,
             )
         )
-    return Candidates(skills=[], must_remember=must, emotional=list())
+    return Candidates(skills=[], must_remember=must, diary=list())
 
 
 def _reauthor_one(
@@ -700,7 +710,7 @@ def _reauthor_one(
     The single LLM call per rollup (mock in CI), mirroring
     ``lifecycle.extract_candidates``: fill the ``import_legacy.md`` template with
     the rollup prose, call the summarizer, and parse the strict
-    ``@@SKILLS@@/@@MUST_REMEMBER@@/@@EMOTIONAL@@`` bundle via the SHARED
+    ``@@SKILLS@@/@@MUST_REMEMBER@@/@@DIARY@@`` bundle via the SHARED
     :func:`lifecycle.parse_extraction`. Every parsed entry is stamped with the
     rollup's source date (``created_at``) so the scorer can backdate it; the
     provenance ``source`` is set at scoring time, not here. A backend error or a
@@ -716,7 +726,7 @@ def _reauthor_one(
         procedure_max_words=cfg.memory_extract.skill_procedure_words,
         memo_max_words=cfg.memory_extract.memo_words,
         reaction_max_words=cfg.memory_extract.reaction_words,
-        weight_cap=int(cfg.memory.emotional_log.weight_cap),
+        weight_cap=int(cfg.memory.diary.weight_cap),
         content=content,
     )
     try:
@@ -729,7 +739,7 @@ def _reauthor_one(
         return parse_extraction(raw, now=rollup.source_date, source=IMPORT_SOURCE)
     except Exception:  # noqa: BLE001 — one bad rollup must not abort the import
         log.exception("re-author failed for %s rollup %s", rollup.kind, rollup.source_date)
-        return Candidates(skills=[], must_remember=[], emotional=[])
+        return Candidates(skills=[], must_remember=[], diary=[])
 
 
 def reauthor(
@@ -748,7 +758,7 @@ def reauthor(
     """
     skills: list[SkillEntry] = []
     must: list[MustRememberEntry] = []
-    emo: list[EmotionalEntry] = []
+    emo: list[DiaryEntry] = []
 
     mechanical = _pins_to_candidates(source.pins)
     must.extend(mechanical.must_remember)
@@ -757,9 +767,9 @@ def reauthor(
         cands = _reauthor_one(cfg, summarizer, rollup)
         skills.extend(cands.skills)
         must.extend(cands.must_remember)
-        emo.extend(cands.emotional)
+        emo.extend(cands.diary)
 
-    return Candidates(skills=skills, must_remember=must, emotional=emo)
+    return Candidates(skills=skills, must_remember=must, diary=emo)
 
 
 # ----- the orchestrator (§3.3 / §12 read-before-drop spine) -----------------
@@ -816,6 +826,6 @@ def import_legacy_run(
     mark_imported(store, counts=counts)
     log.info(
         "import-legacy complete: +%d skills, +%d must_remember, +%d emotional",
-        counts[STORE_SKILLS], counts[STORE_MUST_REMEMBER], counts[STORE_EMOTIONAL],
+        counts[STORE_SKILLS], counts[STORE_MUST_REMEMBER], counts[STORE_DIARY],
     )
     return {"skipped": None, **counts}

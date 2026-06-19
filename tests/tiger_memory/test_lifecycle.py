@@ -19,7 +19,7 @@ from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
     KIND_OWNER_EXPLICIT,
     KIND_PREFERENCE,
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
 )
@@ -93,9 +93,8 @@ _FULL_BUNDLE = dedent("""\
     KIND: preference
     MEMO: targeted git add, never -A
 
-    @@EMOTIONAL@@
+    @@DIARY@@
     WEIGHT: 7
-    REACTION: proud
     TEXT: landed the bounded-store substrate clean and green
 """)
 
@@ -109,16 +108,16 @@ def test_parse_full_bundle() -> None:
     assert c.skills[0].name == "Bound a markdown store"
     assert c.skills[0].procedure.startswith("write one entry")
     assert [e.kind for e in c.must_remember] == [KIND_OWNER_EXPLICIT, KIND_PREFERENCE]
-    assert len(c.emotional) == 1
-    assert c.emotional[0].weight == 7.0
-    assert c.emotional[0].reaction == "proud"
+    assert len(c.diary) == 1
+    assert c.diary[0].weight == 7.0
+    assert c.diary[0].text == "landed the bounded-store substrate clean and green"
     assert not c.is_empty()
     assert c.total() == 4
 
 
 def test_parse_all_none() -> None:
     c = lc.parse_extraction(
-        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@EMOTIONAL@@\nNONE\n",
+        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@DIARY@@\nNONE\n",
         now=NOW, source="x",
     )
     assert c.is_empty()
@@ -126,7 +125,7 @@ def test_parse_all_none() -> None:
 
 def test_parse_missing_marker_raises() -> None:
     with pytest.raises(lc.ExtractionParseError, match="missing"):
-        lc.parse_extraction("@@SKILLS@@\nNONE\n@@EMOTIONAL@@\nNONE\n", now=NOW, source="x")
+        lc.parse_extraction("@@SKILLS@@\nNONE\n@@DIARY@@\nNONE\n", now=NOW, source="x")
 
 
 def test_parse_empty_raises() -> None:
@@ -135,7 +134,7 @@ def test_parse_empty_raises() -> None:
 
 
 def test_parse_out_of_order_raises() -> None:
-    bundle = "@@EMOTIONAL@@\nNONE\n@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
+    bundle = "@@DIARY@@\nNONE\n@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
     with pytest.raises(lc.ExtractionParseError, match="out of order"):
         lc.parse_extraction(bundle, now=NOW, source="x")
 
@@ -152,29 +151,16 @@ def test_parse_skips_malformed_blocks() -> None:
         KIND: decision
         MEMO:
 
-        @@EMOTIONAL@@
+        @@DIARY@@
         WEIGHT: not-a-number
-        REACTION: x
         TEXT: y
 
         WEIGHT: 3
-        REACTION:
-        TEXT: missing reaction
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.skills == []           # missing trigger/procedure
     assert c.must_remember == []    # bad kind + empty memo
-    assert c.emotional == []        # bad weight + missing reaction
-
-
-def test_parse_emotional_text_falls_back_to_reaction() -> None:
-    bundle = (
-        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
-        "@@EMOTIONAL@@\nWEIGHT: -4\nREACTION: frustrated\n"
-    )
-    c = lc.parse_extraction(bundle, now=NOW, source="x")
-    assert len(c.emotional) == 1
-    assert c.emotional[0].text == "frustrated"  # TEXT absent → reaction
+    assert c.diary == []        # bad weight + missing TEXT
 
 
 def test_parse_multiline_value_continuation() -> None:
@@ -187,7 +173,7 @@ def test_parse_multiline_value_continuation() -> None:
 
         @@MUST_REMEMBER@@
         NONE
-        @@EMOTIONAL@@
+        @@DIARY@@
         NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
@@ -272,11 +258,11 @@ def test_ingest_writes_three_stores(tmp_path: Path) -> None:
     store.init_layout()
     c = lc.parse_extraction(_FULL_BUNDLE, now=NOW, source="x")
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert added == {STORE_SKILLS: 1, STORE_MUST_REMEMBER: 2, STORE_EMOTIONAL: 1}
+    assert added == {STORE_SKILLS: 1, STORE_MUST_REMEMBER: 2, STORE_DIARY: 1}
     bstore = BoundedStore(cfg, store)
     assert len(bstore.load(STORE_SKILLS)) == 1
     assert len(bstore.load(STORE_MUST_REMEMBER)) == 2
-    assert len(bstore.load(STORE_EMOTIONAL)) == 1
+    assert len(bstore.load(STORE_DIARY)) == 1
     # Skill importance refreshed (>=0; log1p(0)=0 for usage_count 0).
     assert bstore.load(STORE_SKILLS)[0].importance >= 0.0
 
@@ -286,11 +272,11 @@ def test_ingest_empty_is_noop(tmp_path: Path) -> None:
     store = Store(cfg.store.root)
     store.init_layout()
     empty = lc.parse_extraction(
-        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@EMOTIONAL@@\nNONE\n",
+        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@DIARY@@\nNONE\n",
         now=NOW, source="x",
     )
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, empty)
-    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_EMOTIONAL: 0}
+    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_DIARY: 0}
 
 
 def test_ingest_appends_to_existing(tmp_path: Path) -> None:
@@ -300,7 +286,7 @@ def test_ingest_appends_to_existing(tmp_path: Path) -> None:
     c = lc.parse_extraction(_FULL_BUNDLE, now=NOW, source="x")
     lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
     lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert len(BoundedStore(cfg, store).load(STORE_EMOTIONAL)) == 2
+    assert len(BoundedStore(cfg, store).load(STORE_DIARY)) == 2
 
 
 def test_extract_and_ingest(tmp_path: Path) -> None:
@@ -594,3 +580,19 @@ def test_discover_runs_adapters(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     # No real transcripts on disk → discover yields nothing, but exercises the loop.
     assert lc._discover(cfg) == []
+
+
+def test_rebuild_runs_format_gate(tmp_path: Path) -> None:
+    """The per-persona rebuild runs `check --fix`: a non-canonical diary store
+    is mechanically repaired before the briefing is assembled from it."""
+    from tigerharness.tiger_memory.check import check_all
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    # days descending = parseable but non-canonical (the gate canonicalizes).
+    (store.paths.journal / "diary.md").write_text(
+        "## 2026-06-18\n- (+1) b\n\n## 2026-06-17\n- (+1) a\n"
+    )
+    assert lc.rebuild(cfg, store) == 0
+    assert check_all(cfg, store).ok
+    assert (store.paths.journal / "diary.md").read_text().startswith("## 2026-06-17")

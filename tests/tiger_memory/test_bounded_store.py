@@ -20,7 +20,7 @@ from tigerharness.tiger_memory.bounded_store import (
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory import entries as E
 from tigerharness.tiger_memory.entries import (
-    EmotionalEntry,
+    DiaryEntry,
     EntryError,
     MustRememberEntry,
     SkillEntry,
@@ -55,7 +55,7 @@ def bounded(tmp_path: Path) -> BoundedStore:
               must_remember:
                 max_length: 40
                 overflow_limit: 60
-              emotional_log:
+              diary:
                 max_length: 40
                 overflow_limit: 60
                 weight_cap: 10
@@ -81,10 +81,10 @@ def _mr(kind: str = "preference", text: str = "memo") -> MustRememberEntry:
     )
 
 
-def _emo(weight: float = 1.0, reaction: str = "ok") -> EmotionalEntry:
-    return EmotionalEntry(
-        text="did x", created_at=NOW, last_used=NOW, source="extract",
-        weight=weight, reaction=reaction,
+def _emo(weight: float = 1.0, text: str = "did x") -> DiaryEntry:
+    return DiaryEntry(
+        text=text, created_at=NOW, last_used=NOW, source="extract",
+        weight=weight,
     )
 
 
@@ -108,9 +108,9 @@ def test_save_load_roundtrip_all_stores(bounded: BoundedStore) -> None:
     assert [e.id for e in gm] == [m1.id, m2.id]
 
     e1 = _emo(-4.0, "annoyed")
-    bounded.save_atomic("emotional", [e1])
-    ge = bounded.load("emotional")
-    assert ge[0].weight == -4.0 and ge[0].reaction == "annoyed"
+    bounded.save_atomic("diary", [e1])
+    ge = bounded.load("diary")
+    assert ge[0].weight == -4.0
 
 
 def test_save_empty_then_load(bounded: BoundedStore) -> None:
@@ -132,9 +132,9 @@ def test_save_validates_emotional_against_config_cap(
     bounded: BoundedStore,
 ) -> None:
     # cfg weight_cap is 10; this entry is fine at 10 but a >10 must fail.
-    bounded.save_atomic("emotional", [_emo(10.0)])
+    bounded.save_atomic("diary", [_emo(10.0)])
     with pytest.raises(EntryError, match="weight_cap"):
-        bounded.save_atomic("emotional", [_emo(10.5)])
+        bounded.save_atomic("diary", [_emo(10.5)])
 
 
 def test_save_rejects_cross_store_entry(bounded: BoundedStore) -> None:
@@ -182,8 +182,10 @@ def test_save_overwrites_atomically(bounded: BoundedStore) -> None:
 
 
 def test_length_chars_counts_characters(bounded: BoundedStore) -> None:
-    e = _emo(1.0, "reaction")  # text "did x" (5) + reaction "reaction" (8)
-    assert bounded.length_chars([e]) == len("did x") + len("reaction")
+    e = _emo(1.0)  # text "did x"; diary length is the serialized file (header + bullet)
+    assert bounded.length_chars([e]) == len(
+        f"## {e.last_used[:10]}\n- (+1) {e.text}\n"
+    )
 
 
 def test_length_chars_skill_counts_prose_fields(bounded: BoundedStore) -> None:
@@ -217,7 +219,7 @@ def test_is_over_overflow_length_based(bounded: BoundedStore) -> None:
 def test_is_over_overflow_emotional(bounded: BoundedStore) -> None:
     # emotional overflow_limit = 60; weight is config-capped at 10.
     big = [_emo(1.0, "y" * 60)]
-    assert bounded.is_over_overflow("emotional", big) is True
+    assert bounded.is_over_overflow("diary", big) is True
 
 
 def test_hysteresis_band_does_not_overflow(bounded: BoundedStore) -> None:
@@ -231,7 +233,7 @@ def test_hysteresis_band_does_not_overflow(bounded: BoundedStore) -> None:
 def test_max_bound(bounded: BoundedStore) -> None:
     assert bounded.max_bound("skills") == 3
     assert bounded.max_bound("must_remember") == 40
-    assert bounded.max_bound("emotional") == 40
+    assert bounded.max_bound("diary") == 40
 
 
 # ----- store_lock ----------------------------------------------------------
@@ -362,3 +364,43 @@ def test_forget_preserves_owner_when_other_dropped(
 def test_split_blocks_empty() -> None:
     assert _split_blocks("") == []
     assert _split_blocks("   \n  ") == []
+
+
+def test_save_diary_refuses_unroundtrippable(bounded: BoundedStore) -> None:
+    """validate-on-write: an entry that passes the schema gate but serialises
+    to a malformed diary file (here, a ``last_used`` that is not a valid date)
+    is REFUSED — the diary store can never persist a non-round-tripping file."""
+    bad = DiaryEntry(
+        text="note", created_at=NOW, last_used="not-a-date",
+        source="extract", weight=1.0,
+    )
+    with pytest.raises(EntryError, match="round-trip"):
+        bounded.save_atomic("diary", [bad])
+
+
+def test_diary_decay_anchored_on_bullet_date(bounded: BoundedStore) -> None:
+    """The diary's decay anchor is the bullet's DATE (plan §6, Rukawa b1-dev-2):
+    the compact format persists only the day, so a save->load round-trip sets
+    last_used to that day header, and decay then ages from the bullet's date —
+    not from when it was last touched."""
+    from tigerharness.tiger_memory.diary import decay_entry
+    old = DiaryEntry(
+        text="shipped the substrate", created_at="2026-06-01T12:00:00Z",
+        last_used="2026-06-01T12:00:00Z", source="extract", weight=8.0,
+    )
+    bounded.save_atomic("diary", [old])
+    loaded = bounded.load("diary")[0]
+    # only the DATE survives; last_used is anchored to the bullet's day header.
+    assert loaded.last_used == "2026-06-01T00:00:00Z"
+    # decay ages from that date: 16 days * 0.1/day -> 8.0 - 1.6 = 6.4 (cap 10).
+    assert decay_entry(loaded, "2026-06-17T00:00:00Z", bounded.cfg) == pytest.approx(6.4)
+
+
+def test_diary_higher_weight_harder_to_forget(bounded: BoundedStore) -> None:
+    """The retention guarantee: among same-dated notes, the higher |weight|
+    ranks higher (kept) and the near-neutral one ranks lowest (forgotten first)."""
+    from tigerharness.tiger_memory.diary import diary_keep_rank
+    strong = DiaryEntry(text="a", created_at=NOW, last_used=NOW, source="x", weight=9.0)
+    weak = DiaryEntry(text="b", created_at=NOW, last_used=NOW, source="x", weight=0.5)
+    # keep-rank sorts ascending -> the weak (lowest |weight|) sorts first (forgotten first).
+    assert diary_keep_rank(weak, NOW, bounded.cfg) < diary_keep_rank(strong, NOW, bounded.cfg)

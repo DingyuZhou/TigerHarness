@@ -2,7 +2,7 @@
 
 The subscription-safe sweep runs extraction inside an isolated, in-persona
 Task sub-agent (design §2): it reads one staged transcript prompt, emits the
-``@@SKILLS@@ / @@MUST_REMEMBER@@ / @@EMOTIONAL@@`` bundle, and turns it into
+``@@SKILLS@@ / @@MUST_REMEMBER@@ / @@DIARY@@`` bundle, and turns it into
 stored entries through THIS entry point — typically via a ``tiger-memory``
 CLI that wraps it, so the bulky bundle never transits the driver's context.
 
@@ -28,11 +28,11 @@ class IngestResult:
     conversation_uuid: str
     skills_added: int
     must_remember_added: int
-    emotional_added: int
+    diary_added: int
 
     @property
     def total_added(self) -> int:
-        return self.skills_added + self.must_remember_added + self.emotional_added
+        return self.skills_added + self.must_remember_added + self.diary_added
 
 
 def ingest_extraction(
@@ -59,10 +59,10 @@ def ingest_extraction(
     now = now or iso_now()
     candidates = parse_extraction(bundle_text, now=now, source=source)
     added = ingest_candidates(BoundedStore(cfg, store), cfg, candidates, now=now)
-    from .entries import STORE_EMOTIONAL, STORE_MUST_REMEMBER, STORE_SKILLS
+    from .entries import STORE_DIARY, STORE_MUST_REMEMBER, STORE_SKILLS
     return IngestResult(
         conversation_uuid=conversation_uuid,
         skills_added=added[STORE_SKILLS],
         must_remember_added=added[STORE_MUST_REMEMBER],
-        emotional_added=added[STORE_EMOTIONAL],
+        diary_added=added[STORE_DIARY],
     )

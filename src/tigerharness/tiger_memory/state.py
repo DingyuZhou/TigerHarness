@@ -1,7 +1,7 @@
 """``tiger-memory state`` payload computation (bounded-store revamp).
 
 Reads the on-disk store and returns a JSON-serialisable snapshot of the three
-bounded stores (``skills`` / ``must_remember`` / ``emotional``): per-store
+bounded stores (``skills`` / ``must_remember`` / ``diary``): per-store
 entry counts, character length, and whether each is at/over its overflow
 limit (the meditation trigger). The retired rollup/archive/``longer_memory``
 counters are gone (design §3).

@@ -1,6 +1,6 @@
-"""Signed-weight scoring for the emotional log (design §4.3; plan §2 dev-2).
+"""Signed-weight scoring for the diary store (design §4.3; plan §2 dev-2).
 
-The emotional store carries a single signed scalar per entry — a ``weight``
+The diary store carries a single signed scalar per entry — a ``weight``
 in ``[-weight_cap, +weight_cap]`` (default ±10, design §4.3): positive =
 *for* / liked, negative = *against* / disliked, ``0`` = neutral.
 
@@ -17,16 +17,17 @@ Two pure functions live here, with NO I/O and NO summarizer dependency
 
 Forgetting ranks by **magnitude** ``|weight|`` plus recency, so strong
 feelings (positive *or* negative) survive while near-neutral / decayed items
-are compacted or forgotten first. :func:`emotional_keep_rank` produces that
-sort key; see :mod:`tigerharness.tiger_memory.meditation` for how it is used
-to drop the lowest-ranked entries.
+are compacted or forgotten first. :func:`diary_keep_rank` produces that
+sort key (anchored on each entry's dated-bullet day via ``last_used``); see
+:mod:`tigerharness.tiger_memory.meditation` for how it drops the lowest-ranked
+entries to keep the whole-loaded diary under its bound.
 """
 from __future__ import annotations
 
 import math
 
 from .config import Config
-from .entries import EmotionalEntry, EntryError
+from .entries import DiaryEntry, EntryError
 from .ranking import days_between, recency_score
 
 
@@ -38,7 +39,7 @@ def clamp_weight(weight: float, cfg: Config) -> float:
     Returns a plain ``float`` (never ``-0.0`` — see :func:`_zero_safe`).
 
     **Non-finite defense (GAP-3, defense in depth).** Mitsui's
-    :meth:`EmotionalEntry.validate` already rejects a non-finite weight at the
+    :meth:`DiaryEntry.validate` already rejects a non-finite weight at the
     schema/load gate, so a ``NaN``/``±inf`` should never reach here. But the
     scoring math must not *silently* propagate one if it ever does (a ``NaN``
     poisons the keep-rank ``sorted()`` into a non-deterministic order — the
@@ -55,9 +56,9 @@ def clamp_weight(weight: float, cfg: Config) -> float:
     """
     if math.isnan(weight):
         raise EntryError(
-            "emotional.weight must be finite (no NaN); cannot clamp NaN."
+            "diary.weight must be finite (no NaN); cannot clamp NaN."
         )
-    cap = cfg.memory.emotional_log.weight_cap
+    cap = cfg.memory.diary.weight_cap
     if weight > cap:
         return cap
     if weight < -cap:
@@ -75,7 +76,7 @@ def decay_weight(weight: float, days: float, cfg: Config) -> float:
     leaves the magnitude alone. The result is always within the cap.
     """
     clamped = clamp_weight(weight, cfg)
-    rate = cfg.memory.emotional_log.decay.magnitude_per_day
+    rate = cfg.memory.diary.decay.magnitude_per_day
     if days <= 0 or rate <= 0 or clamped == 0:
         return clamped
     shrink = rate * days
@@ -87,7 +88,7 @@ def decay_weight(weight: float, days: float, cfg: Config) -> float:
     return _zero_safe(sign * magnitude)
 
 
-def decay_entry(entry: EmotionalEntry, now: str, cfg: Config) -> float:
+def decay_entry(entry: DiaryEntry, now: str, cfg: Config) -> float:
     """Decayed weight for *entry* as of *now* (its ``last_used`` is the anchor).
 
     A convenience over :func:`decay_weight` that derives ``days`` from the
@@ -98,8 +99,8 @@ def decay_entry(entry: EmotionalEntry, now: str, cfg: Config) -> float:
     return decay_weight(entry.weight, days, cfg)
 
 
-def emotional_keep_rank(
-    entry: EmotionalEntry, now: str, cfg: Config
+def diary_keep_rank(
+    entry: DiaryEntry, now: str, cfg: Config
 ) -> tuple[float, float]:
     """Keep-rank for one emotional entry: higher = more worth keeping.
 

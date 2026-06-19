@@ -47,10 +47,10 @@ def test_memory_defaults_when_block_absent(minimal_config_yaml: Path) -> None:
     assert m.skills.overflow_limit == 50
     assert m.must_remember.max_length == 8000
     assert m.must_remember.overflow_limit == 10000
-    assert m.emotional_log.max_length == 12000
-    assert m.emotional_log.overflow_limit == 15000
-    assert m.emotional_log.weight_cap == 10.0
-    assert m.emotional_log.decay.magnitude_per_day == 0.1
+    assert m.diary.max_length == 4000
+    assert m.diary.overflow_limit == 6000
+    assert m.diary.weight_cap == 10.0
+    assert m.diary.decay.magnitude_per_day == 0.1
 
 
 def test_memory_full_override(tmp_path: Path) -> None:
@@ -66,7 +66,7 @@ def test_memory_full_override(tmp_path: Path) -> None:
               must_remember:
                 max_length: 500
                 overflow_limit: 700
-              emotional_log:
+              diary:
                 max_length: 600
                 overflow_limit: 900
                 weight_cap: 8
@@ -79,8 +79,8 @@ def test_memory_full_override(tmp_path: Path) -> None:
     assert m.skills.max_count == 10 and m.skills.overflow_limit == 15
     assert m.must_remember.max_length == 500
     assert m.must_remember.overflow_limit == 700
-    assert m.emotional_log.weight_cap == 8.0
-    assert m.emotional_log.decay.magnitude_per_day == 0.25
+    assert m.diary.weight_cap == 8.0
+    assert m.diary.decay.magnitude_per_day == 0.25
 
 
 def test_memory_partial_override_keeps_defaults(tmp_path: Path) -> None:
@@ -100,7 +100,7 @@ def test_memory_partial_override_keeps_defaults(tmp_path: Path) -> None:
     # Untouched -> default.
     assert m.skills.overflow_limit == 50
     assert m.must_remember.max_length == 8000
-    assert m.emotional_log.decay.magnitude_per_day == 0.1
+    assert m.diary.decay.magnitude_per_day == 0.1
 
 
 def test_rejects_token_length_unit(tmp_path: Path) -> None:
@@ -150,7 +150,7 @@ def test_rejects_emotional_overflow_not_above_max(tmp_path: Path) -> None:
         dedent(
             """\
             memory:
-              emotional_log:
+              diary:
                 max_length: 900
                 overflow_limit: 800
             """
@@ -166,7 +166,7 @@ def test_rejects_nonpositive_weight_cap(tmp_path: Path) -> None:
         dedent(
             """\
             memory:
-              emotional_log:
+              diary:
                 weight_cap: 0
             """
         ),
@@ -181,7 +181,7 @@ def test_rejects_negative_decay_rate(tmp_path: Path) -> None:
         dedent(
             """\
             memory:
-              emotional_log:
+              diary:
                 decay:
                   magnitude_per_day: -0.1
             """
@@ -198,14 +198,14 @@ def test_zero_decay_rate_allowed(tmp_path: Path) -> None:
         dedent(
             """\
             memory:
-              emotional_log:
+              diary:
                 decay:
                   magnitude_per_day: 0
             """
         ),
     )
     m = load_config(cfg).memory
-    assert m.emotional_log.decay.magnitude_per_day == 0.0
+    assert m.diary.decay.magnitude_per_day == 0.0
 
 
 @pytest.mark.parametrize(
@@ -220,12 +220,12 @@ def test_zero_decay_rate_allowed(tmp_path: Path) -> None:
             "memory.must_remember.max_length",
         ),
         (
-            "memory:\n  emotional_log:\n    weight_cap: heavy\n",
-            "memory.emotional_log.weight_cap",
+            "memory:\n  diary:\n    weight_cap: heavy\n",
+            "memory.diary.weight_cap",
         ),
         (
-            "memory:\n  emotional_log:\n    decay:\n      magnitude_per_day: fast\n",
-            "memory.emotional_log.decay.magnitude_per_day",
+            "memory:\n  diary:\n    decay:\n      magnitude_per_day: fast\n",
+            "memory.diary.decay.magnitude_per_day",
         ),
     ],
 )

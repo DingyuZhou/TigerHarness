@@ -58,9 +58,9 @@ memory:
   must_remember:           # length-bounded chars (external directives)
     max_length: 8000
     overflow_limit: 10000
-  emotional_log:           # length-bounded chars (signed-weight reactions)
-    max_length: 12000
-    overflow_limit: 15000
+  diary:                   # length-bounded chars; loaded whole, dated bullets
+    max_length: 4000
+    overflow_limit: 6000
     weight_cap: 10         # hard cap: |weight| <= 10
     decay:
       magnitude_per_day: 0.1   # how fast |weight| shrinks toward 0
@@ -70,9 +70,8 @@ memory:
 memory_extract:
   skill_procedure_words: 120
   memo_words: 25
-  reaction_words: 40
+  reaction_words: 40          # diary-note length hint
   max_output_words: 600
 
 # briefing: session-start assembly knobs (optional).
 briefing:
-  emotional_top: 20        # cap on emotional entries shown (top-by-|weight|); 0 = all

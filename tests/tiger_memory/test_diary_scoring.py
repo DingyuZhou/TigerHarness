@@ -14,13 +14,13 @@ from textwrap import dedent
 import pytest
 
 from tigerharness.tiger_memory.config import load_config
-from tigerharness.tiger_memory.emotional import (
+from tigerharness.tiger_memory.diary import (
     clamp_weight,
     decay_entry,
     decay_weight,
-    emotional_keep_rank,
+    diary_keep_rank,
 )
-from tigerharness.tiger_memory.entries import EmotionalEntry, EntryError
+from tigerharness.tiger_memory.entries import DiaryEntry, EntryError
 
 NOW = "2026-06-17T00:00:00Z"
 
@@ -43,7 +43,7 @@ def _cfg(tmp_path: Path, *, cap: float = 10.0, rate: float = 0.1):
               model: m
               prompts: default/v1
             memory:
-              emotional_log:
+              diary:
                 max_length: 40
                 overflow_limit: 60
                 weight_cap: {cap}
@@ -55,10 +55,10 @@ def _cfg(tmp_path: Path, *, cap: float = 10.0, rate: float = 0.1):
     return load_config(p)
 
 
-def _emo(weight: float, last_used: str = NOW) -> EmotionalEntry:
-    return EmotionalEntry(
+def _emo(weight: float, last_used: str = NOW) -> DiaryEntry:
+    return DiaryEntry(
         text="did x", created_at=NOW, last_used=last_used, source="extract",
-        weight=weight, reaction="ok",
+        weight=weight,
     )
 
 
@@ -194,7 +194,7 @@ def test_keep_rank_orders_by_magnitude_then_recency(tmp_path: Path) -> None:
     weak = _emo(1.0)
     ranked = sorted(
         [strong_pos, weak, strong_neg],
-        key=lambda e: emotional_keep_rank(e, NOW, cfg),
+        key=lambda e: diary_keep_rank(e, NOW, cfg),
     )
     # Ascending = forget order: weakest first, strong (either sign) last.
     assert ranked[0] is weak
@@ -206,7 +206,7 @@ def test_keep_rank_recency_tiebreak(tmp_path: Path) -> None:
     old = _emo(5.0, last_used="2026-01-01T00:00:00Z")
     fresh = _emo(5.0, last_used=NOW)
     # Equal magnitude: the older one ranks lower (sorts first = forget first).
-    ranked = sorted([fresh, old], key=lambda e: emotional_keep_rank(e, NOW, cfg))
+    ranked = sorted([fresh, old], key=lambda e: diary_keep_rank(e, NOW, cfg))
     assert ranked[0] is old and ranked[1] is fresh
 
 
@@ -251,7 +251,7 @@ def test_keep_rank_forget_order_is_stable_across_shuffles(tmp_path: Path) -> Non
     def forget_order(items):
         return [
             e.id
-            for e in sorted(items, key=lambda x: emotional_keep_rank(x, NOW, cfg))
+            for e in sorted(items, key=lambda x: diary_keep_rank(x, NOW, cfg))
         ]
 
     baseline = forget_order(entries)
@@ -277,6 +277,6 @@ def test_keep_rank_total_order_no_unhashable_or_nonfinite(tmp_path: Path) -> Non
     no NaN can sneak into the key and break the sort's total order."""
     cfg = _cfg(tmp_path, rate=0.1)
     for w in (-10.0, -0.0, 0.0, 0.5, 9.999, 10.0):
-        key = emotional_keep_rank(_emo(w), NOW, cfg)
+        key = diary_keep_rank(_emo(w), NOW, cfg)
         assert isinstance(key, tuple) and len(key) == 2
         assert all(math.isfinite(part) for part in key)

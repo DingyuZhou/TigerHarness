@@ -17,7 +17,7 @@ from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.cli import main
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
 )
@@ -49,7 +49,7 @@ _BUNDLE = dedent("""\
     @@MUST_REMEMBER@@
     KIND: decision
     MEMO: d
-    @@EMOTIONAL@@
+    @@DIARY@@
     NONE
 """)
 

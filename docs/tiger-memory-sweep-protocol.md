@@ -76,7 +76,7 @@ remains for the one-bundle-over-stdin path (a single uuid).
         else. It does **not** ingest and runs no `tiger-memory` command.
       - **Instruction**: for each uuid in the stack, act **as that persona,
         in character**; read the prompt; emit ONLY the
-        `@@SKILLS@@/@@MUST_REMEMBER@@/@@EMOTIONAL@@` bundle per the prompt's
+        `@@SKILLS@@/@@MUST_REMEMBER@@/@@DIARY@@` bundle per the prompt's
         output contract; **self-validate** (all three markers present, each
         on its own line, in that order; each section is well-formed blocks
         or the literal `NONE`); write it to the card; then **return only a

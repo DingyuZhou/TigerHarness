@@ -9,7 +9,7 @@ import pytest
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
 )
@@ -25,7 +25,7 @@ _BUNDLE = dedent("""\
     @@MUST_REMEMBER@@
     KIND: decision
     MEMO: store lives in-repo
-    @@EMOTIONAL@@
+    @@DIARY@@
     WEIGHT: 2
     REACTION: ok
     TEXT: shipped a thing
@@ -57,12 +57,12 @@ def test_ingest_extraction_writes_stores(tmp_path: Path) -> None:
     assert result.conversation_uuid == "c1"
     assert result.skills_added == 1
     assert result.must_remember_added == 1
-    assert result.emotional_added == 1
+    assert result.diary_added == 1
     assert result.total_added == 3
     bstore = BoundedStore(cfg, store)
     assert len(bstore.load(STORE_SKILLS)) == 1
     assert len(bstore.load(STORE_MUST_REMEMBER)) == 1
-    assert len(bstore.load(STORE_EMOTIONAL)) == 1
+    assert len(bstore.load(STORE_DIARY)) == 1
 
 
 def test_ingest_extraction_malformed_raises_before_write(tmp_path: Path) -> None:
