@@ -409,8 +409,11 @@ def _absorb(target: BaseEntry, dropped: BaseEntry, cfg: Config) -> None:
     elif isinstance(target, SkillEntry):
         _absorb_skill(target, dropped, cfg)
     else:  # MustRememberEntry
-        # A repeated directive matters more: bump importance by 1.0.
-        target.importance = float(target.importance) + 1.0
+        # A repeated directive matters more: accumulate the reinforcement count
+        # (the recurrence signal) and derive importance from it, so a fact seen
+        # N times ranks above a one-off (brief §store roster).
+        target.repeat_count += dropped.repeat_count
+        target.importance = float(target.repeat_count)
 
 
 def _absorb_diary(

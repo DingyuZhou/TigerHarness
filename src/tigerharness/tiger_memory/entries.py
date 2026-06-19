@@ -195,6 +195,11 @@ class MustRememberEntry(BaseEntry):
 
     kind: str = KIND_PREFERENCE
     importance: float = 0.0
+    #: Reinforcement count — how many times this fact has recurred across
+    #: sessions (the 4-store importance signal, brief §store roster). Starts at
+    #: 1; the meditation merge increments it (and derives ``importance`` from it)
+    #: so a repeated directive ranks higher, not lower.
+    repeat_count: int = 1
 
     def __post_init__(self) -> None:
         self.store_name = STORE_MUST_REMEMBER
@@ -210,10 +215,18 @@ class MustRememberEntry(BaseEntry):
             self.importance, (int, float)
         ):
             raise EntryError("must_remember.importance must be a number.")
+        if isinstance(self.repeat_count, bool) or not isinstance(
+            self.repeat_count, int
+        ) or self.repeat_count < 1:
+            raise EntryError("must_remember.repeat_count must be an int >= 1.")
 
     def frontmatter(self) -> dict[str, Any]:
         fm = super().frontmatter()
-        fm.update({"kind": self.kind, "importance": float(self.importance)})
+        fm.update({
+            "kind": self.kind,
+            "importance": float(self.importance),
+            "repeat_count": self.repeat_count,
+        })
         return fm
 
 
@@ -336,6 +349,9 @@ def entry_from_frontmatter(
             kind=str(fm.get("kind", KIND_PREFERENCE)),
             importance=_coerce_float(
                 fm.get("importance", 0.0), "must_remember.importance"
+            ),
+            repeat_count=_coerce_int(
+                fm.get("repeat_count", 1), "must_remember.repeat_count"
             ),
             **base_kwargs,
         )

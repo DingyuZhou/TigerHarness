@@ -102,6 +102,20 @@ def test_must_remember_rejects_bool_importance() -> None:
         m.validate()
 
 
+def test_must_remember_repeat_count_default_and_frontmatter() -> None:
+    m = MustRememberEntry(kind="preference", **_base())
+    m.validate()  # default repeat_count=1 is valid
+    assert m.repeat_count == 1
+    assert m.frontmatter()["repeat_count"] == 1
+
+
+def test_must_remember_rejects_bad_repeat_count() -> None:
+    for bad in (0, -1, True, 1.5):
+        m = MustRememberEntry(kind="preference", repeat_count=bad, **_base())
+        with pytest.raises(EntryError, match="repeat_count"):
+            m.validate()
+
+
 # ----- emotional -----------------------------------------------------------
 
 
@@ -201,10 +215,11 @@ def test_from_frontmatter_skill_roundtrip() -> None:
 
 
 def test_from_frontmatter_must_remember_roundtrip() -> None:
-    m = MustRememberEntry(kind="incident", importance=1, **_base())
+    m = MustRememberEntry(kind="incident", importance=1, repeat_count=3, **_base())
     rebuilt = entry_from_frontmatter("must_remember", m.frontmatter(), m.text)
     assert isinstance(rebuilt, MustRememberEntry)
     assert rebuilt.kind == "incident"
+    assert rebuilt.repeat_count == 3  # the reinforcement count round-trips
 
 
 def test_from_frontmatter_emotional_roundtrip() -> None:

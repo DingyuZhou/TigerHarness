@@ -258,7 +258,9 @@ def test_merge_into_owner_then_terminal_over_max_protects_survivor(
     survivors = bs.load("must_remember")
     assert len(survivors) == 1
     assert survivors[0].kind == KIND_OWNER_EXPLICIT
-    assert survivors[0].importance == 1.0  # merge bump
+    # reinforcement: two count-1 facts merge -> repeat_count 2, importance 2.0.
+    assert survivors[0].repeat_count == 2
+    assert survivors[0].importance == 2.0
 
 
 # ====================================================================

@@ -231,7 +231,9 @@ def test_merge_must_remember_bumps_importance(tmp_path: Path) -> None:
     assert log.forgotten == []
     survivors = bs.load("must_remember")
     assert len(survivors) == 1
-    assert survivors[0].importance == 2.0  # 1.0 + 1.0 bump
+    # reinforcement: two count-1 facts merge -> repeat_count 2, importance = 2.0.
+    assert survivors[0].repeat_count == 2
+    assert survivors[0].importance == 2.0
 
 
 # ----- relevance-check + downgrade BEFORE forget ----------------------------
