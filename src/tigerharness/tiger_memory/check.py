@@ -29,12 +29,13 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import diary_format, frontmatter
+from . import diary_format, frontmatter, fuzzy_store
 from .bounded_store import BoundedStore, _serialize, _split_blocks
 from .config import Config
 from .entries import (
+    ALL_STORE_NAMES,
     STORE_DIARY,
-    STORE_NAMES,
+    STORE_FUZZY,
     BaseEntry,
     EntryError,
     entry_from_frontmatter,
@@ -139,8 +140,32 @@ def _check_frontmatter(
     return res
 
 
+def _check_fuzzy(bstore: BoundedStore, *, fix: bool) -> StoreCheck:
+    """Validate (and optionally repair) the free-text fuzzy store.
+
+    Fuzzy is free text (no per-entry schema), so the only mechanical drift is
+    being over its hard bound: at/above ``overflow_limit`` is a problem, and
+    ``--fix`` re-bounds it to ``max_length`` (the convergence guarantee). An
+    empty / under-bound store is valid.
+    """
+    res = StoreCheck(STORE_FUZZY)
+    text = fuzzy_store.load_fuzzy(bstore.store)
+    res.valid = 1 if text.strip() else 0
+    overflow = bstore.memory.fuzzy.overflow_limit
+    if len(text) >= overflow:
+        res.problems = [
+            f"fuzzy store over overflow_limit ({len(text)} >= {overflow})"
+        ]
+        if fix:
+            fuzzy_store.save_fuzzy(bstore.cfg, bstore.store, text)
+            res.repaired = True
+    return res
+
+
 def check_store(bstore: BoundedStore, store_name: str, *, fix: bool) -> StoreCheck:
     """Validate (and optionally repair) one store."""
+    if store_name == STORE_FUZZY:
+        return _check_fuzzy(bstore, fix=fix)
     path = bstore._store_path(store_name)
     if not path.exists():
         return StoreCheck(store_name)
@@ -151,9 +176,9 @@ def check_store(bstore: BoundedStore, store_name: str, *, fix: bool) -> StoreChe
 
 
 def check_all(cfg: Config, store: Store, *, fix: bool = False) -> CheckReport:
-    """Check (and optionally ``--fix``) all three stores for one persona."""
+    """Check (and optionally ``--fix``) all four stores for one persona."""
     bstore = BoundedStore(cfg, store)
     report = CheckReport()
-    for name in STORE_NAMES:
+    for name in ALL_STORE_NAMES:
         report.stores.append(check_store(bstore, name, fix=fix))
     return report
