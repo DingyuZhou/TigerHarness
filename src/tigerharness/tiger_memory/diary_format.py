@@ -83,6 +83,16 @@ def _is_leap(year: int) -> bool:
     return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
 
+def _flatten(text: str) -> str:
+    """Collapse a note's internal whitespace (newlines / runs) to single spaces.
+
+    A bullet is ONE line, so a note containing newlines must flatten — otherwise
+    serialize would emit a malformed multi-line bullet that validate-on-write
+    refuses and the migration crashes on (b2 Sakuragi finding).
+    """
+    return " ".join(text.split())
+
+
 def serialize(entries: list[DiaryEntry]) -> str:
     """Render *entries* to the canonical dated-bullet text.
 
@@ -100,7 +110,7 @@ def serialize(entries: list[DiaryEntry]) -> str:
     for day in sorted(by_day):
         lines = [f"## {day}"]
         for e in by_day[day]:
-            lines.append(f"- ({_format_weight(e.weight)}) {e.text}")
+            lines.append(f"- ({_format_weight(e.weight)}) {_flatten(e.text)}")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) + "\n"
 
