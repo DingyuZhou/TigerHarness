@@ -67,6 +67,35 @@ def test_forget_over_bound_keeps_strongest():
     assert any(b.text == "strong feeling survives" for b in kept)
 
 
+# ----- boundary precision (plan §7a, Rukawa b1-dev-2) -----------------------
+
+def test_forget_exactly_at_bound_keeps_all():
+    bullets = _bullets()
+    exact = len(diary_format.serialize(bullets))
+    kept, dropped = df.forget_to_max(bullets, max_length=exact)  # == is <= : keep
+    assert dropped == 0 and kept == bullets
+
+
+def test_forget_one_char_under_bound_drops_lowest():
+    bullets = _bullets()
+    exact = len(diary_format.serialize(bullets))
+    kept, dropped = df.forget_to_max(bullets, max_length=exact - 1)
+    assert dropped >= 1
+    assert len(diary_format.serialize(kept)) <= exact - 1
+    # the weakest (|weight|=1.0) is the first to go; the strongest (9.0) stays.
+    assert any(b.weight == 9.0 for b in kept)
+    assert all(b.weight != 1.0 for b in kept)
+
+
+def test_forget_tiebreak_prefers_newer_date():
+    # equal |weight|; only one bullet fits -> the newer date wins the tie.
+    older = diary_format.DiaryEntry("2026-06-17", 5.0, "padded note alpha bravo charlie")
+    newer = diary_format.DiaryEntry("2026-06-18", 5.0, "padded note alpha bravo charlie")
+    one = len(diary_format.serialize([newer]))
+    kept, dropped = df.forget_to_max([older, newer], max_length=one)
+    assert dropped == 1 and len(kept) == 1 and kept[0].date == "2026-06-18"
+
+
 # ----- finalize_diary -------------------------------------------------------
 
 def test_finalize_with_emotional_present_snapshots_and_writes(tmp_path: Path):
