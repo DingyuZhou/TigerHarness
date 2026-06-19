@@ -38,12 +38,12 @@ from .bounded_store import BoundedStore
 from .config import Config
 from .entries import (
     KIND_OWNER_EXPLICIT,
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
     VALID_KINDS,
     BaseEntry,
-    EmotionalEntry,
+    DiaryEntry,
     MustRememberEntry,
     SkillEntry,
 )
@@ -101,13 +101,13 @@ class Candidates:
 
     skills: list[SkillEntry]
     must_remember: list[MustRememberEntry]
-    emotional: list[EmotionalEntry]
+    diary: list[DiaryEntry]
 
     def is_empty(self) -> bool:
-        return not (self.skills or self.must_remember or self.emotional)
+        return not (self.skills or self.must_remember or self.diary)
 
     def total(self) -> int:
-        return len(self.skills) + len(self.must_remember) + len(self.emotional)
+        return len(self.skills) + len(self.must_remember) + len(self.diary)
 
 
 def _split_sections(text: str) -> dict[str, str]:
@@ -135,7 +135,7 @@ def _split_sections(text: str) -> dict[str, str]:
     return {
         STORE_SKILLS: "\n".join(lines[i_s + 1:i_m]).strip(),
         STORE_MUST_REMEMBER: "\n".join(lines[i_m + 1:i_e]).strip(),
-        STORE_EMOTIONAL: "\n".join(lines[i_e + 1:]).strip(),
+        STORE_DIARY: "\n".join(lines[i_e + 1:]).strip(),
     }
 
 
@@ -206,20 +206,20 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
                 kind=kind, importance=1.0,
             )
         )
-    emo: list[EmotionalEntry] = []
-    for b in _section_blocks(sections[STORE_EMOTIONAL]):
+    emo: list[DiaryEntry] = []
+    for b in _section_blocks(sections[STORE_DIARY]):
         reaction = b.get("REACTION")
         body = b.get("TEXT") or reaction
         weight = _parse_weight(b.get("WEIGHT"))
         if weight is None or not reaction or not body:
             continue
         emo.append(
-            EmotionalEntry(
+            DiaryEntry(
                 text=body, created_at=now, last_used=now, source=source,
                 weight=weight, reaction=reaction,
             )
         )
-    return Candidates(skills=skills, must_remember=must, emotional=emo)
+    return Candidates(skills=skills, must_remember=must, diary=emo)
 
 
 def _parse_weight(raw: str | None) -> float | None:
@@ -268,7 +268,7 @@ def extract_candidates(
         procedure_max_words=cfg.memory_extract.skill_procedure_words,
         memo_max_words=cfg.memory_extract.memo_words,
         reaction_max_words=cfg.memory_extract.reaction_words,
-        weight_cap=int(cfg.memory.emotional_log.weight_cap),
+        weight_cap=int(cfg.memory.diary.weight_cap),
         content=content,
     )
     try:
@@ -280,7 +280,7 @@ def extract_candidates(
         log.warning("extraction parse failed for %s: %s", rec.conversation_uuid, exc)
     except Exception:  # noqa: BLE001 — one bad session must not abort the sweep
         log.exception("extraction call failed for %s", rec.conversation_uuid)
-    return Candidates(skills=[], must_remember=[], emotional=[])
+    return Candidates(skills=[], must_remember=[], diary=[])
 
 
 # ----- ingest (candidates → bounded stores) ---------------------------------
@@ -302,13 +302,13 @@ def ingest_candidates(
     when a store is over its overflow limit (the hysteresis trigger).
     """
     now = now or iso_now()
-    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_EMOTIONAL: 0}
+    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_DIARY: 0}
     if candidates.is_empty():
         return added
     per_store: dict[str, list[BaseEntry]] = {
         STORE_SKILLS: list(candidates.skills),
         STORE_MUST_REMEMBER: list(candidates.must_remember),
-        STORE_EMOTIONAL: list(candidates.emotional),
+        STORE_DIARY: list(candidates.diary),
     }
     for store_name, new_entries in per_store.items():
         if not new_entries:
@@ -322,7 +322,7 @@ def ingest_candidates(
         added[store_name] = len(new_entries)
     log.info(
         "ingest: +%d skills, +%d must_remember, +%d emotional",
-        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_EMOTIONAL],
+        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_DIARY],
     )
     return added
 
@@ -537,7 +537,7 @@ def plan_extraction(
             procedure_max_words=cfg.memory_extract.skill_procedure_words,
             memo_max_words=cfg.memory_extract.memo_words,
             reaction_max_words=cfg.memory_extract.reaction_words,
-            weight_cap=int(cfg.memory.emotional_log.weight_cap),
+            weight_cap=int(cfg.memory.diary.weight_cap),
             content=clipped,
         )
         prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"

@@ -14,13 +14,13 @@ import pytest
 
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
-from tigerharness.tiger_memory.emotional import (
+from tigerharness.tiger_memory.diary import (
     clamp_weight,
     decay_entry,
     emotional_keep_rank,
 )
 from tigerharness.tiger_memory.entries import (
-    EmotionalEntry,
+    DiaryEntry,
     MustRememberEntry,
     SkillEntry,
 )
@@ -73,7 +73,7 @@ def _load_cfg(tmp_path: Path):
               must_remember:
                 max_length: 8000
                 overflow_limit: 10000
-              emotional_log:
+              diary:
                 max_length: 12000
                 overflow_limit: 15000
                 weight_cap: 10
@@ -108,7 +108,7 @@ def _mr(src=IMPORT_SOURCE):
 
 
 def _emo(src=IMPORT_SOURCE, weight=3.0):
-    return EmotionalEntry(
+    return DiaryEntry(
         text="shipping the revamp felt great", created_at=SRC, last_used=SRC,
         source=src, weight=weight, reaction="proud",
     )
@@ -116,7 +116,7 @@ def _emo(src=IMPORT_SOURCE, weight=3.0):
 
 def _cands(skills=(), must=(), emo=()):
     return Candidates(
-        skills=list(skills), must_remember=list(must), emotional=list(emo)
+        skills=list(skills), must_remember=list(must), diary=list(emo)
     )
 
 
@@ -126,7 +126,7 @@ def _cands(skills=(), must=(), emo=()):
 def test_seed_entries_empty_is_noop(tmp_path: Path) -> None:
     _store, bstore = _make_store(tmp_path)
     added = seed_entries(bstore, _cands(), now="2026-06-18T00:00:00Z")
-    assert added == {"skills": 0, "must_remember": 0, "emotional": 0}
+    assert added == {"skills": 0, "must_remember": 0, "diary": 0}
 
 
 def test_seed_entries_appends_and_preserves_backdating(tmp_path: Path) -> None:
@@ -136,20 +136,20 @@ def test_seed_entries_appends_and_preserves_backdating(tmp_path: Path) -> None:
     added = seed_entries(
         bstore, _cands(skills=[_skill()], must=[_mr()], emo=[_emo()])
     )
-    assert added == {"skills": 1, "must_remember": 1, "emotional": 1}
+    assert added == {"skills": 1, "must_remember": 1, "diary": 1}
     skills = bstore.load("skills")
     assert {e.name for e in skills} == {"old skill", "run the suite"}
     # backdating survives byte-for-byte: no re-stamp.
     seeded = [e for e in skills if e.source == IMPORT_SOURCE][0]
     assert seeded.last_used == SRC and seeded.created_at == SRC
-    emo = bstore.load("emotional")[0]
+    emo = bstore.load("diary")[0]
     assert emo.weight == 3.0  # not re-derived
 
 
 def test_seed_entries_skips_empty_bucket(tmp_path: Path) -> None:
     _store, bstore = _make_store(tmp_path)
     added = seed_entries(bstore, _cands(skills=[_skill()]))  # must/emo empty
-    assert added == {"skills": 1, "must_remember": 0, "emotional": 0}
+    assert added == {"skills": 1, "must_remember": 0, "diary": 0}
 
 
 def test_seed_entries_rejects_wrong_source(tmp_path: Path) -> None:
@@ -203,10 +203,10 @@ def test_mark_imported_preserves_existing_state(tmp_path: Path) -> None:
     state = store.read_state() or {}
     state["sentinel"] = "keep me"
     store.write_state(state)
-    mark_imported(store, counts={"emotional": 2})
+    mark_imported(store, counts={"diary": 2})
     after = store.read_state()
     assert after["sentinel"] == "keep me"
-    assert after[STATE_KEY]["seeded"]["emotional"] == 2
+    assert after[STATE_KEY]["seeded"]["diary"] == 2
 
 
 # ----- read-before-drop -----------------------------------------------------
@@ -217,7 +217,7 @@ def test_assert_seed_inputs_snapshotted_ok(tmp_path: Path) -> None:
 
 
 def test_assert_seed_inputs_snapshotted_rejects_lazy(tmp_path: Path) -> None:
-    lazy = Candidates(skills=(e for e in []), must_remember=[], emotional=[])
+    lazy = Candidates(skills=(e for e in []), must_remember=[], diary=[])
     with pytest.raises(TypeError, match="read-before-drop"):
         assert_seed_inputs_snapshotted(lazy)
 
@@ -254,7 +254,7 @@ def _raw_mr(src=SRC, kind="owner_explicit", importance=5.0):
 
 
 def _raw_emo(src=SRC, weight=8.0):
-    return EmotionalEntry(
+    return DiaryEntry(
         text="shipping the revamp felt great", created_at=src, last_used=src,
         source="reauthor", weight=weight, reaction="proud",
     )
@@ -262,7 +262,7 @@ def _raw_emo(src=SRC, weight=8.0):
 
 def _raw(skills=(), must=(), emo=()):
     return Candidates(
-        skills=list(skills), must_remember=list(must), emotional=list(emo)
+        skills=list(skills), must_remember=list(must), diary=list(emo)
     )
 
 
@@ -278,7 +278,7 @@ def test_score_tags_every_entry_import_source(tmp_path: Path) -> None:
         _raw(skills=[_raw_skill()], must=[_raw_mr()], emo=[_raw_emo()]),
         cfg=cfg, now=NOW,
     )
-    every = out.skills + out.must_remember + out.emotional
+    every = out.skills + out.must_remember + out.diary
     assert every and all(e.source == IMPORT_SOURCE for e in every)
 
 
@@ -288,13 +288,13 @@ def test_score_emotional_stores_raw_clamped_weight_backdated(tmp_path: Path) -> 
     # happens ONCE at rank time (via last_used), so a seed is never double-decayed.
     cfg = _load_cfg(tmp_path)
     out = score_seed_candidates(_raw(emo=[_raw_emo(weight=8.0)]), cfg=cfg, now=NOW)
-    e = out.emotional[0]
+    e = out.diary[0]
     assert e.created_at == SRC and e.last_used == SRC  # backdated, not now()
     assert e.weight == 8.0  # raw clamped, NOT decayed (was wrongly 0.0 pre-fix)
     # sign preserved; a beyond-cap raw still clamps (no pre-decay involved).
     neg = score_seed_candidates(
         _raw(emo=[_raw_emo(weight=-8.0)]), cfg=cfg, now=NOW
-    ).emotional[0]
+    ).diary[0]
     assert neg.weight == -8.0
 
 
@@ -307,9 +307,9 @@ def test_seed_emotional_not_double_decayed_matches_organic(tmp_path: Path) -> No
     old = "2026-05-18T00:00:00Z"  # 30 days before NOW (2026-06-17)
     seeded = score_seed_candidates(
         _raw(emo=[_raw_emo(src=old, weight=8.0)]), cfg=cfg, now=NOW
-    ).emotional[0]
+    ).diary[0]
     assert seeded.weight == clamp_weight(8.0, cfg)  # stored raw, not pre-decayed
-    organic = EmotionalEntry(
+    organic = DiaryEntry(
         text="x", created_at=old, last_used=old, source="extract",
         weight=8.0, reaction="r",
     )
@@ -327,11 +327,11 @@ def test_score_emotional_clamps_beyond_cap(tmp_path: Path) -> None:
     out = score_seed_candidates(
         _raw(emo=[_raw_emo(src=NOW, weight=999.0)]), cfg=cfg, now=NOW
     )
-    assert out.emotional[0].weight == 10.0
+    assert out.diary[0].weight == 10.0
     out_neg = score_seed_candidates(
         _raw(emo=[_raw_emo(src=NOW, weight=-999.0)]), cfg=cfg, now=NOW
     )
-    assert out_neg.emotional[0].weight == -10.0
+    assert out_neg.diary[0].weight == -10.0
 
 
 def test_score_skill_backdated_lastused_and_low_usage(tmp_path: Path) -> None:
@@ -393,12 +393,12 @@ def test_score_falls_back_to_now_when_no_source_date(tmp_path: Path) -> None:
     cfg = _load_cfg(tmp_path)
     # No created_at, no override -> conservative same-day seed at now (never
     # an empty timestamp, which would fail validation).
-    raw_emo = EmotionalEntry(
+    raw_emo = DiaryEntry(
         text="neutral note", created_at="", last_used="", source="reauthor",
         weight=2.0, reaction="meh",
     )
     out = score_seed_candidates(_raw(emo=[raw_emo]), cfg=cfg, now=NOW)
-    e = out.emotional[0]
+    e = out.diary[0]
     assert e.created_at == NOW and e.last_used == NOW
     assert e.weight == 2.0  # 0 days elapsed -> no decay
 
@@ -408,8 +408,8 @@ def test_score_now_defaults_to_iso_now(tmp_path: Path) -> None:
     # now omitted -> defaults to iso_now(); the entry is still produced and the
     # old source weight decays toward 0 over the elapsed span.
     out = score_seed_candidates(_raw(emo=[_raw_emo(weight=8.0)]), cfg=cfg)
-    assert len(out.emotional) == 1
-    assert out.emotional[0].created_at == SRC
+    assert len(out.diary) == 1
+    assert out.diary[0].created_at == SRC
 
 
 def test_score_output_writes_through_seed_entries(tmp_path: Path) -> None:
@@ -421,7 +421,7 @@ def test_score_output_writes_through_seed_entries(tmp_path: Path) -> None:
         cfg=cfg, now=NOW,
     )
     added = seed_entries(bstore, scored, now=NOW)
-    assert added == {"skills": 1, "must_remember": 1, "emotional": 1}
+    assert added == {"skills": 1, "must_remember": 1, "diary": 1}
 
 
 # ===== legacy reader + re-author + orchestrator + CLI (b1-dev-3, Miyagi) =====
@@ -597,7 +597,7 @@ def test_reauthor_mock_yields_no_rollup_seeds(tmp_path: Path) -> None:
     src = read_legacy(store)
     out = reauthor(cfg, MockSummarizer(), src)
     # the mock bundle fails the marker contract -> swallowed to empty per rollup.
-    assert not out.skills and not out.emotional and not out.must_remember
+    assert not out.skills and not out.diary and not out.must_remember
 
 
 def test_reauthor_scripted_bundle_mines_all_stores(tmp_path: Path) -> None:
@@ -608,7 +608,7 @@ def test_reauthor_scripted_bundle_mines_all_stores(tmp_path: Path) -> None:
     out = reauthor(cfg, _BundleSummarizer(), src)
     # one bundle per non-empty rollup (3) -> 3 skills, 3 emotional, 3 mr.
     assert len(out.skills) == 3
-    assert len(out.emotional) == 3
+    assert len(out.diary) == 3
     assert len(out.must_remember) == 3
     # each re-authored entry carries its rollup's source date in created_at.
     assert {s.created_at for s in out.skills} == {
@@ -635,18 +635,18 @@ def test_import_legacy_run_end_to_end_seeds_all_stores(tmp_path: Path) -> None:
     assert result["skipped"] is None
     # 3 rollups * 1 skill each = 3 skills; 3 rollup-mr + 4 pins = 7 mr; 3 emo.
     assert result == {
-        "skipped": None, "skills": 3, "must_remember": 7, "emotional": 3
+        "skipped": None, "skills": 3, "must_remember": 7, "diary": 3
     }
     # the durable marker is written.
     assert already_imported(store, bstore) is True
     assert store.read_state()[STATE_KEY]["seeded"]["skills"] == 3
     # every seeded entry carries the import provenance + is backdated (not NOW
     # for the rollup/pin items).
-    for name in ("skills", "must_remember", "emotional"):
+    for name in ("skills", "must_remember", "diary"):
         seeded = bstore.load(name)
         assert seeded and all(e.source == IMPORT_SOURCE for e in seeded)
     # old emotional seeds entered already-decayed (source < now).
-    emo = bstore.load("emotional")[0]
+    emo = bstore.load("diary")[0]
     assert emo.created_at != NOW
 
 
@@ -654,12 +654,12 @@ def test_import_legacy_run_idempotent_no_double_seed(tmp_path: Path) -> None:
     cfg = _load_cfg(tmp_path)
     store, bstore = _full_legacy_store(tmp_path)
     first = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
-    counts_before = {n: len(bstore.load(n)) for n in ("skills", "must_remember", "emotional")}
+    counts_before = {n: len(bstore.load(n)) for n in ("skills", "must_remember", "diary")}
     # second run gates on the marker -> a no-op; stores unchanged.
     second = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
     assert first["skipped"] is None
     assert second == {"skipped": "already"}
-    counts_after = {n: len(bstore.load(n)) for n in ("skills", "must_remember", "emotional")}
+    counts_after = {n: len(bstore.load(n)) for n in ("skills", "must_remember", "diary")}
     assert counts_before == counts_after
 
 
@@ -708,7 +708,7 @@ def test_import_legacy_run_empty_store_seeds_nothing(tmp_path: Path) -> None:
     cfg = _load_cfg(tmp_path)
     store, bstore = _make_store(tmp_path)  # no legacy files at all
     result = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
-    assert result == {"skipped": None, "skills": 0, "must_remember": 0, "emotional": 0}
+    assert result == {"skipped": None, "skills": 0, "must_remember": 0, "diary": 0}
     # marker still written (a one-off "we imported, there was nothing").
     assert already_imported(store, bstore) is True
 
@@ -722,7 +722,7 @@ def test_import_legacy_run_does_not_unlink_legacy_files(tmp_path: Path) -> None:
     import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
     after = {p.name for p in store.paths.journal.glob("*.md")}
     # every legacy file present before the import is still present (plus the new
-    # store files skills.md/must_remember.md/emotional.md).
+    # store files skills.md/must_remember.md/diary.md).
     assert before <= after
     assert "must_memorize.md" in after
     assert "20260610-080144-dddddddd-0000-0000-0000-000000000000.md" in after  # short kept
@@ -866,7 +866,7 @@ def test_qa_corrupt_empty_must_memorize_no_table(tmp_path: Path) -> None:
     )
     assert read_legacy(store).pins == []
     result = import_legacy_run(cfg, store, summarizer=MockSummarizer(), now=NOW)
-    assert result == {"skipped": None, "skills": 0, "must_remember": 0, "emotional": 0}
+    assert result == {"skipped": None, "skills": 0, "must_remember": 0, "diary": 0}
     assert already_imported(store, bstore) is True
 
 
@@ -978,7 +978,7 @@ def test_qa_persona_with_nothing_at_all(tmp_path: Path) -> None:
     cfg = _load_cfg(tmp_path)
     store, bstore = _make_store(tmp_path)
     result = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
-    assert result == {"skipped": None, "skills": 0, "must_remember": 0, "emotional": 0}
+    assert result == {"skipped": None, "skills": 0, "must_remember": 0, "diary": 0}
     assert already_imported(store, bstore) is True
 
 
@@ -1113,8 +1113,8 @@ def test_qa_double_invocation_back_to_back(tmp_path: Path) -> None:
     second = import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW)
     assert first["skipped"] is None
     assert second == {"skipped": "already"}
-    counts = {n: len(bstore.load(n)) for n in ("skills", "must_remember", "emotional")}
-    assert counts == {"skills": 3, "must_remember": 7, "emotional": 3}
+    counts = {n: len(bstore.load(n)) for n in ("skills", "must_remember", "diary")}
+    assert counts == {"skills": 3, "must_remember": 7, "diary": 3}
 
 
 def test_qa_force_purges_only_import_legacy_entries(tmp_path: Path) -> None:
@@ -1131,12 +1131,12 @@ def test_qa_force_purges_only_import_legacy_entries(tmp_path: Path) -> None:
         + [MustRememberEntry(text="live directive", created_at=NOW, last_used=NOW,
                              source="pin", kind="owner_explicit", importance=5.0)],
     )
-    bstore.save_atomic("emotional", bstore.load("emotional") + [_emo(src="extract")])
+    bstore.save_atomic("diary", bstore.load("diary") + [_emo(src="extract")])
     import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW, force=True)
     # the live entry in every store survived; import-legacy entries were replaced.
     assert "live skill" in {e.name for e in bstore.load("skills")}
     assert "live directive" in {m.text for m in bstore.load("must_remember")}
-    assert any(e.source == "extract" for e in bstore.load("emotional"))
+    assert any(e.source == "extract" for e in bstore.load("diary"))
     # and the import-legacy entries are present exactly once (replace, not double).
     assert sum(1 for e in bstore.load("skills") if e.source == IMPORT_SOURCE) == 3
 
@@ -1149,7 +1149,7 @@ def test_qa_force_on_never_imported_store_is_clean_seed(tmp_path: Path) -> None:
     result = import_legacy_run(
         cfg, store, summarizer=_BundleSummarizer(), now=NOW, force=True
     )
-    assert result == {"skipped": None, "skills": 3, "must_remember": 7, "emotional": 3}
+    assert result == {"skipped": None, "skills": 3, "must_remember": 7, "diary": 3}
     assert already_imported(store, bstore) is True
 
 
@@ -1197,7 +1197,7 @@ def test_qa_reauthor_junk_bundle_seeds_nothing(tmp_path: Path) -> None:
     cfg = _load_cfg(tmp_path)
     store, bstore = _full_legacy_store(tmp_path)
     result = import_legacy_run(cfg, store, summarizer=_JunkSummarizer(), now=NOW)
-    assert result["skills"] == 0 and result["emotional"] == 0
+    assert result["skills"] == 0 and result["diary"] == 0
     assert result["must_remember"] == 4  # only the 4 mechanical pins
     assert already_imported(store, bstore) is True
 

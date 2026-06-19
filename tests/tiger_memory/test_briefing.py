@@ -8,10 +8,10 @@ from tigerharness.tiger_memory import briefing as bf
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
-    EmotionalEntry,
+    DiaryEntry,
     MustRememberEntry,
     SkillEntry,
 )
@@ -47,7 +47,7 @@ def _seed(cfg, store, *, skills=(), must=(), emo=()) -> None:
     if must:
         bstore.save_atomic(STORE_MUST_REMEMBER, list(must))
     if emo:
-        bstore.save_atomic(STORE_EMOTIONAL, list(emo))
+        bstore.save_atomic(STORE_DIARY, list(emo))
 
 
 def _skill(name, imp=1.0, usage=0) -> SkillEntry:
@@ -63,8 +63,8 @@ def _must(text, kind="preference", imp=1.0) -> MustRememberEntry:
                              source="x", kind=kind, importance=imp)
 
 
-def _emo(text, weight, reaction="felt") -> EmotionalEntry:
-    return EmotionalEntry(text=text, created_at=NOW, last_used=NOW, source="x",
+def _emo(text, weight, reaction="felt") -> DiaryEntry:
+    return DiaryEntry(text=text, created_at=NOW, last_used=NOW, source="x",
                           weight=weight, reaction=reaction)
 
 
@@ -83,7 +83,7 @@ def test_rebuild_assembles_all_files(tmp_path: Path) -> None:
     bf.rebuild_briefing(cfg, store)
     b = store.paths.briefing
     for name in (bf.README_NAME, bf.NOTICE_NAME, bf.MUST_REMEMBER_NAME,
-                 bf.EMOTIONAL_NAME, bf.SKILL_INDEX_NAME, bf.MANIFEST_NAME,
+                 bf.DIARY_NAME, bf.SKILL_INDEX_NAME, bf.MANIFEST_NAME,
                  bf.FINGERPRINT_NAME):
         assert (b / name).exists(), name
     # README is persona-substituted.
@@ -92,7 +92,7 @@ def test_rebuild_assembles_all_files(tmp_path: Path) -> None:
     idx = (b / bf.SKILL_INDEX_NAME).read_text()
     assert idx.index("## B") < idx.index("## A")
     # Emotional ordered by |weight| (the -8 before the +3).
-    emo = (b / bf.EMOTIONAL_NAME).read_text()
+    emo = (b / bf.DIARY_NAME).read_text()
     assert emo.index("bad") < emo.index("good")
     # must_remember shows kind + importance.
     mr = (b / bf.MUST_REMEMBER_NAME).read_text()
@@ -105,7 +105,7 @@ def test_rebuild_empty_stores(tmp_path: Path) -> None:
     store.init_layout()
     bf.rebuild_briefing(cfg, store)
     assert "_(empty)_" in (store.paths.briefing / bf.MUST_REMEMBER_NAME).read_text()
-    assert "_(empty)_" in (store.paths.briefing / bf.EMOTIONAL_NAME).read_text()
+    assert "_(empty)_" in (store.paths.briefing / bf.DIARY_NAME).read_text()
     assert "no skills" in (store.paths.briefing / bf.SKILL_INDEX_NAME).read_text()
 
 
@@ -152,7 +152,7 @@ def test_emotional_top_caps(tmp_path: Path) -> None:
     store = Store(cfg.store.root)
     _seed(cfg, store, emo=[_emo("a", 1.0), _emo("b", 9.0), _emo("c", -5.0)])
     bf.rebuild_briefing(cfg, store)
-    out = (store.paths.briefing / bf.EMOTIONAL_NAME).read_text()
+    out = (store.paths.briefing / bf.DIARY_NAME).read_text()
     # Only the two strongest (9.0, -5.0) shown; the 1.0 dropped.
     assert "b" in out and "c" in out
     assert out.count("- ") == 2
@@ -160,12 +160,12 @@ def test_emotional_top_caps(tmp_path: Path) -> None:
 
 def test_emotional_top_zero_shows_all(tmp_path: Path) -> None:
     entries = [_emo("a", 1.0), _emo("b", 2.0)]
-    out = bf._render_emotional(entries, 0)
+    out = bf._render_diary(entries, 0)
     assert out.count("- ") == 2
 
 
 def test_emotional_positive_sign_marker() -> None:
-    out = bf._render_emotional([_emo("up", 4.0)], 0)
+    out = bf._render_diary([_emo("up", 4.0)], 0)
     assert "(+4.0)" in out
 
 
@@ -246,5 +246,5 @@ def test_manifest_counts(tmp_path: Path) -> None:
     bf.rebuild_briefing(cfg, store)
     m = (store.paths.briefing / bf.MANIFEST_NAME).read_text()
     assert "must_remember: 2 entries" in m
-    assert "emotional: 1 entries" in m
+    assert "diary: 1 entries" in m
     assert "skills: 1 indexed" in m

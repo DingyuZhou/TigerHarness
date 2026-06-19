@@ -9,7 +9,7 @@ import pytest
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
 )
@@ -62,7 +62,7 @@ def test_ingest_extraction_writes_stores(tmp_path: Path) -> None:
     bstore = BoundedStore(cfg, store)
     assert len(bstore.load(STORE_SKILLS)) == 1
     assert len(bstore.load(STORE_MUST_REMEMBER)) == 1
-    assert len(bstore.load(STORE_EMOTIONAL)) == 1
+    assert len(bstore.load(STORE_DIARY)) == 1
 
 
 def test_ingest_extraction_malformed_raises_before_write(tmp_path: Path) -> None:

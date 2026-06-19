@@ -43,18 +43,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from . import emotional as emotional_mod
+from . import diary as emotional_mod
 from . import frontmatter
 from .bounded_store import BoundedStore
 from .config import Config
 from .entries import (
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_NAMES,
     STORE_SKILLS,
     VALID_KINDS,
     BaseEntry,
-    EmotionalEntry,
+    DiaryEntry,
     MustRememberEntry,
     SkillEntry,
 )
@@ -173,7 +173,7 @@ def mark_imported(store: Store, *, counts: dict[str, int]) -> None:
         "seeded": {
             STORE_SKILLS: int(counts.get(STORE_SKILLS, 0)),
             STORE_MUST_REMEMBER: int(counts.get(STORE_MUST_REMEMBER, 0)),
-            STORE_EMOTIONAL: int(counts.get(STORE_EMOTIONAL, 0)),
+            STORE_DIARY: int(counts.get(STORE_DIARY, 0)),
         },
     }
     store.write_state(state)
@@ -215,13 +215,13 @@ def seed_entries(
     intentionally unused: seeded entries are backdated, never stamped to now.
     """
     del now  # intentionally unused — seeds are backdated, never re-stamped.
-    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_EMOTIONAL: 0}
+    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_DIARY: 0}
     if candidates.is_empty():
         return added
     per_store: dict[str, list[BaseEntry]] = {
         STORE_SKILLS: list(candidates.skills),
         STORE_MUST_REMEMBER: list(candidates.must_remember),
-        STORE_EMOTIONAL: list(candidates.emotional),
+        STORE_DIARY: list(candidates.diary),
     }
     for store_name, new_entries in per_store.items():
         if not new_entries:
@@ -245,7 +245,7 @@ def seed_entries(
         added[store_name] = len(new_entries)
     log.info(
         "import-legacy seed: +%d skills, +%d must_remember, +%d emotional",
-        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_EMOTIONAL],
+        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_DIARY],
     )
     return added
 
@@ -274,7 +274,7 @@ def assert_seed_inputs_snapshotted(candidates: Candidates) -> None:
     for bucket in (
         candidates.skills,
         candidates.must_remember,
-        candidates.emotional,
+        candidates.diary,
     ):
         if not isinstance(bucket, list):
             raise TypeError(
@@ -425,8 +425,8 @@ def score_seed_candidates(
             )
         )
 
-    emo: list[EmotionalEntry] = []
-    for e in raw.emotional:
+    emo: list[DiaryEntry] = []
+    for e in raw.diary:
         src = _source_date_for(e, source_dates, now)
         # GAP-5 fix (final convergence): store the clamped RAW weight, NOT a
         # pre-decayed one. Emotional weight is decayed exactly ONCE, at rank
@@ -436,7 +436,7 @@ def score_seed_candidates(
         # (~2x aging), prematurely forgetting the curated memory §12 preserves.
         weight = emotional_mod.clamp_weight(e.weight, cfg)
         emo.append(
-            EmotionalEntry(
+            DiaryEntry(
                 text=e.text,
                 created_at=src,
                 last_used=src,
@@ -446,7 +446,7 @@ def score_seed_candidates(
             )
         )
 
-    return Candidates(skills=skills, must_remember=must, emotional=emo)
+    return Candidates(skills=skills, must_remember=must, diary=emo)
 
 
 # ===== legacy reader + re-author + orchestration (b1-dev-3, Miyagi) ==========
@@ -687,7 +687,7 @@ def _pins_to_candidates(pins: Iterable[LegacyPin]) -> Candidates:
                 importance=p.score,
             )
         )
-    return Candidates(skills=[], must_remember=must, emotional=list())
+    return Candidates(skills=[], must_remember=must, diary=list())
 
 
 def _reauthor_one(
@@ -716,7 +716,7 @@ def _reauthor_one(
         procedure_max_words=cfg.memory_extract.skill_procedure_words,
         memo_max_words=cfg.memory_extract.memo_words,
         reaction_max_words=cfg.memory_extract.reaction_words,
-        weight_cap=int(cfg.memory.emotional_log.weight_cap),
+        weight_cap=int(cfg.memory.diary.weight_cap),
         content=content,
     )
     try:
@@ -729,7 +729,7 @@ def _reauthor_one(
         return parse_extraction(raw, now=rollup.source_date, source=IMPORT_SOURCE)
     except Exception:  # noqa: BLE001 — one bad rollup must not abort the import
         log.exception("re-author failed for %s rollup %s", rollup.kind, rollup.source_date)
-        return Candidates(skills=[], must_remember=[], emotional=[])
+        return Candidates(skills=[], must_remember=[], diary=[])
 
 
 def reauthor(
@@ -748,7 +748,7 @@ def reauthor(
     """
     skills: list[SkillEntry] = []
     must: list[MustRememberEntry] = []
-    emo: list[EmotionalEntry] = []
+    emo: list[DiaryEntry] = []
 
     mechanical = _pins_to_candidates(source.pins)
     must.extend(mechanical.must_remember)
@@ -757,9 +757,9 @@ def reauthor(
         cands = _reauthor_one(cfg, summarizer, rollup)
         skills.extend(cands.skills)
         must.extend(cands.must_remember)
-        emo.extend(cands.emotional)
+        emo.extend(cands.diary)
 
-    return Candidates(skills=skills, must_remember=must, emotional=emo)
+    return Candidates(skills=skills, must_remember=must, diary=emo)
 
 
 # ----- the orchestrator (§3.3 / §12 read-before-drop spine) -----------------
@@ -816,6 +816,6 @@ def import_legacy_run(
     mark_imported(store, counts=counts)
     log.info(
         "import-legacy complete: +%d skills, +%d must_remember, +%d emotional",
-        counts[STORE_SKILLS], counts[STORE_MUST_REMEMBER], counts[STORE_EMOTIONAL],
+        counts[STORE_SKILLS], counts[STORE_MUST_REMEMBER], counts[STORE_DIARY],
     )
     return {"skipped": None, **counts}

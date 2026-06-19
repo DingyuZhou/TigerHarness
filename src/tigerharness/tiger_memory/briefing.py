@@ -26,10 +26,10 @@ from pathlib import Path
 from .bounded_store import BoundedStore
 from .config import Config
 from .entries import (
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
-    EmotionalEntry,
+    DiaryEntry,
     MustRememberEntry,
     SkillEntry,
 )
@@ -41,7 +41,7 @@ log = logging.getLogger("tigerharness.tiger_memory.briefing")
 # Files written into the assembled briefing/ working set.
 README_NAME = "README.md"
 MUST_REMEMBER_NAME = "must_remember.md"
-EMOTIONAL_NAME = "emotional.md"
+DIARY_NAME = "diary.md"
 SKILL_INDEX_NAME = "skill_index.md"
 MANIFEST_NAME = "MANIFEST.md"
 NOTICE_NAME = "UNPROCESSED.md"
@@ -49,7 +49,7 @@ FINGERPRINT_NAME = ".fingerprint"
 
 # The store files whose content drives the briefing — a fingerprint over them
 # powers the no-op shortcut (skip the rebuild when nothing changed).
-_SOURCE_STORE_FILES = ("skills.md", "must_remember.md", "emotional.md")
+_SOURCE_STORE_FILES = ("skills.md", "must_remember.md", "diary.md")
 
 
 def rebuild_briefing(cfg: Config, store: Store) -> None:
@@ -77,9 +77,9 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
             _render_must_remember(must), encoding="utf-8"
         )
 
-        emotional = bstore.load(STORE_EMOTIONAL)
-        (tmp / EMOTIONAL_NAME).write_text(
-            _render_emotional(emotional, cfg.briefing.emotional_top),
+        diary = bstore.load(STORE_DIARY)
+        (tmp / DIARY_NAME).write_text(
+            _render_diary(diary, cfg.briefing.emotional_top),
             encoding="utf-8",
         )
 
@@ -89,7 +89,7 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
         )
 
         (tmp / MANIFEST_NAME).write_text(
-            _render_manifest(cfg, store, must, emotional, skills),
+            _render_manifest(cfg, store, must, diary, skills),
             encoding="utf-8",
         )
         (tmp / FINGERPRINT_NAME).write_text(
@@ -187,7 +187,7 @@ def _render_must_remember(entries: list[MustRememberEntry]) -> str:
 # ----- emotional view (top-by-|weight|) -------------------------------------
 
 
-def _render_emotional(entries: list[EmotionalEntry], top: int) -> str:
+def _render_diary(entries: list[DiaryEntry], top: int) -> str:
     """Emotional log, strongest feelings first (top-N by ``|weight|``).
 
     ``top == 0`` shows all. A signed weight: positive = liked/for, negative =
@@ -257,7 +257,7 @@ def _render_manifest(
     cfg: Config,
     store: Store,
     must: list[MustRememberEntry],
-    emotional: list[EmotionalEntry],
+    diary: list[DiaryEntry],
     skills: list[SkillEntry],
 ) -> str:
     saved = store.read_state() or {}
@@ -268,14 +268,14 @@ def _render_manifest(
         f"- Agent: {cfg.agent.name}",
         f"- Last rebuild: {last_rebuild}",
         f"- must_remember: {len(must)} entries",
-        f"- emotional: {len(emotional)} entries",
+        f"- diary: {len(diary)} entries",
         f"- skills: {len(skills)} indexed",
         "",
         "## Read order",
         f"1. `{NOTICE_NAME}` — the unprocessed-session rule.",
         f"2. `{MUST_REMEMBER_NAME}` — external directives (load-bearing).",
         f"3. `{SKILL_INDEX_NAME}` — reusable lessons (load full skill on demand).",
-        f"4. `{EMOTIONAL_NAME}` — your reactions, strongest first.",
+        f"4. `{DIARY_NAME}` — your reactions, strongest first.",
         "",
     ]
     return "\n".join(parts) + "\n"

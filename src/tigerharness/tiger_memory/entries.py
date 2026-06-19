@@ -43,8 +43,8 @@ class EntryError(ValueError):
 
 STORE_SKILLS = "skills"
 STORE_MUST_REMEMBER = "must_remember"
-STORE_EMOTIONAL = "emotional"
-STORE_NAMES = (STORE_SKILLS, STORE_MUST_REMEMBER, STORE_EMOTIONAL)
+STORE_DIARY = "diary"
+STORE_NAMES = (STORE_SKILLS, STORE_MUST_REMEMBER, STORE_DIARY)
 
 # must_remember kinds (design §4.2). ``owner_explicit`` is the elevated
 # directive the forget-guard protects until the relevance-check runs (§5).
@@ -211,7 +211,7 @@ class MustRememberEntry(BaseEntry):
 
 
 @dataclass
-class EmotionalEntry(BaseEntry):
+class DiaryEntry(BaseEntry):
     """A persona reaction with a signed emotional weight (design §4.3).
 
     ``weight`` is a signed float in ``[-weight_cap, +weight_cap]``: positive
@@ -225,14 +225,14 @@ class EmotionalEntry(BaseEntry):
     reaction: str = ""
 
     def __post_init__(self) -> None:
-        self.store_name = STORE_EMOTIONAL
+        self.store_name = STORE_DIARY
 
     def validate(self, weight_cap: float = 10.0) -> None:
         super().validate()
         if isinstance(self.weight, bool) or not isinstance(
             self.weight, (int, float)
         ):
-            raise EntryError("emotional.weight must be a signed number.")
+            raise EntryError("diary.weight must be a signed number.")
         # A non-finite weight (NaN / ±inf) is a non-value: ``abs(nan) > cap``
         # is False, so it would slip past the cap check below and poison the
         # keep-rank ordering that decides irreversible forgetting (design
@@ -240,16 +240,16 @@ class EmotionalEntry(BaseEntry):
         # explicitly here — the schema gate — so it can never be persisted.
         if not math.isfinite(self.weight):
             raise EntryError(
-                f"emotional.weight must be finite (no NaN/inf); "
+                f"diary.weight must be finite (no NaN/inf); "
                 f"got {self.weight}."
             )
         if abs(self.weight) > weight_cap:
             raise EntryError(
-                f"emotional.weight magnitude must be ≤ weight_cap "
+                f"diary.weight magnitude must be ≤ weight_cap "
                 f"({weight_cap}); got {self.weight}."
             )
         if not isinstance(self.reaction, str) or not self.reaction.strip():
-            raise EntryError("emotional.reaction must be a non-empty string.")
+            raise EntryError("diary.reaction must be a non-empty string.")
 
     def frontmatter(self) -> dict[str, Any]:
         fm = super().frontmatter()
@@ -263,7 +263,7 @@ class EmotionalEntry(BaseEntry):
 _ENTRY_CLASSES: dict[str, type[BaseEntry]] = {
     STORE_SKILLS: SkillEntry,
     STORE_MUST_REMEMBER: MustRememberEntry,
-    STORE_EMOTIONAL: EmotionalEntry,
+    STORE_DIARY: DiaryEntry,
 }
 
 
@@ -330,9 +330,9 @@ def entry_from_frontmatter(
             ),
             **base_kwargs,
         )
-    # Only EmotionalEntry remains.
-    return EmotionalEntry(
-        weight=_coerce_float(fm.get("weight", 0.0), "emotional.weight"),
+    # Only DiaryEntry remains.
+    return DiaryEntry(
+        weight=_coerce_float(fm.get("weight", 0.0), "diary.weight"),
         reaction=str(fm.get("reaction", "")),
         **base_kwargs,
     )

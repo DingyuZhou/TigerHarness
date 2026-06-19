@@ -59,10 +59,10 @@ def ingest_extraction(
     now = now or iso_now()
     candidates = parse_extraction(bundle_text, now=now, source=source)
     added = ingest_candidates(BoundedStore(cfg, store), cfg, candidates, now=now)
-    from .entries import STORE_EMOTIONAL, STORE_MUST_REMEMBER, STORE_SKILLS
+    from .entries import STORE_DIARY, STORE_MUST_REMEMBER, STORE_SKILLS
     return IngestResult(
         conversation_uuid=conversation_uuid,
         skills_added=added[STORE_SKILLS],
         must_remember_added=added[STORE_MUST_REMEMBER],
-        emotional_added=added[STORE_EMOTIONAL],
+        emotional_added=added[STORE_DIARY],
     )

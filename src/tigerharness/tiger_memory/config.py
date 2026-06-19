@@ -191,20 +191,20 @@ class MustRememberStoreConfig:
 
 
 @dataclass(frozen=True)
-class EmotionalDecayConfig:
+class DiaryDecayConfig:
     """Signed-weight decay rate for the emotional log (design §4.3)."""
 
     magnitude_per_day: float = 0.1
 
 
 @dataclass(frozen=True)
-class EmotionalStoreConfig:
+class DiaryStoreConfig:
     """Bound + signed-weight cap + decay for the emotional log (design §4.3)."""
 
     max_length: int = 12000
     overflow_limit: int = 15000
     weight_cap: float = 10.0
-    decay: EmotionalDecayConfig = field(default_factory=EmotionalDecayConfig)
+    decay: DiaryDecayConfig = field(default_factory=DiaryDecayConfig)
 
 
 @dataclass(frozen=True)
@@ -221,8 +221,8 @@ class MemoryConfig:
     must_remember: MustRememberStoreConfig = field(
         default_factory=MustRememberStoreConfig
     )
-    emotional_log: EmotionalStoreConfig = field(
-        default_factory=EmotionalStoreConfig
+    diary: DiaryStoreConfig = field(
+        default_factory=DiaryStoreConfig
     )
 
 
@@ -564,47 +564,47 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
         must_remember.overflow_limit,
     )
 
-    el_raw = memory_raw.get("emotional_log") or {}
+    el_raw = memory_raw.get("diary") or {}
     decay_raw = el_raw.get("decay") or {}
-    emotional_log = EmotionalStoreConfig(
+    diary = DiaryStoreConfig(
         max_length=_cfg_int(
-            el_raw.get("max_length", 12000), "memory.emotional_log.max_length"
+            el_raw.get("max_length", 12000), "memory.diary.max_length"
         ),
         overflow_limit=_cfg_int(
-            el_raw.get("overflow_limit", 15000), "memory.emotional_log.overflow_limit"
+            el_raw.get("overflow_limit", 15000), "memory.diary.overflow_limit"
         ),
         weight_cap=_cfg_float(
-            el_raw.get("weight_cap", 10.0), "memory.emotional_log.weight_cap"
+            el_raw.get("weight_cap", 10.0), "memory.diary.weight_cap"
         ),
-        decay=EmotionalDecayConfig(
+        decay=DiaryDecayConfig(
             magnitude_per_day=_cfg_float(
                 decay_raw.get("magnitude_per_day", 0.1),
-                "memory.emotional_log.decay.magnitude_per_day",
+                "memory.diary.decay.magnitude_per_day",
             ),
         ),
     )
     _validate_bound(
-        "memory.emotional_log",
+        "memory.diary",
         "max_length",
-        emotional_log.max_length,
-        emotional_log.overflow_limit,
+        diary.max_length,
+        diary.overflow_limit,
     )
-    if emotional_log.weight_cap <= 0:
+    if diary.weight_cap <= 0:
         raise ConfigError(
-            f"memory.emotional_log.weight_cap must be > 0; "
-            f"got {emotional_log.weight_cap}."
+            f"memory.diary.weight_cap must be > 0; "
+            f"got {diary.weight_cap}."
         )
-    if emotional_log.decay.magnitude_per_day < 0:
+    if diary.decay.magnitude_per_day < 0:
         raise ConfigError(
-            f"memory.emotional_log.decay.magnitude_per_day must be ≥ 0; "
-            f"got {emotional_log.decay.magnitude_per_day}."
+            f"memory.diary.decay.magnitude_per_day must be ≥ 0; "
+            f"got {diary.decay.magnitude_per_day}."
         )
 
     return MemoryConfig(
         length_unit=length_unit,
         skills=skills,
         must_remember=must_remember,
-        emotional_log=emotional_log,
+        diary=diary,
     )
 
 

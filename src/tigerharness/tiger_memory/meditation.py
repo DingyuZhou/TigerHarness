@@ -41,14 +41,14 @@ from dataclasses import dataclass, field
 
 from .bounded_store import BoundedStore, ForgetGuardError
 from .config import Config
-from .emotional import clamp_weight, emotional_keep_rank
+from .diary import clamp_weight, emotional_keep_rank
 from .entries import (
     KIND_DECISION,
     KIND_OWNER_EXPLICIT,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
     BaseEntry,
-    EmotionalEntry,
+    DiaryEntry,
     MustRememberEntry,
     SkillEntry,
 )
@@ -264,7 +264,7 @@ def keep_rank(entry: BaseEntry, now: str, cfg: Config) -> tuple[float, float]:
     by decayed ``|weight|`` + recency, skills by ``importance``(usage) +
     recency. The single entry point meditation sorts by to choose drop order.
     """
-    if isinstance(entry, EmotionalEntry):
+    if isinstance(entry, DiaryEntry):
         return emotional_keep_rank(entry, now, cfg)
     if isinstance(entry, SkillEntry):
         return skills_keep_rank(entry, now, cfg)
@@ -404,7 +404,7 @@ def _absorb(target: BaseEntry, dropped: BaseEntry, cfg: Config) -> None:
     and ``dropped`` are always the same concrete type — dispatch on the
     survivor's type alone.
     """
-    if isinstance(target, EmotionalEntry):
+    if isinstance(target, DiaryEntry):
         _absorb_emotional(target, dropped, cfg)
     elif isinstance(target, SkillEntry):
         _absorb_skill(target, dropped, cfg)
@@ -414,7 +414,7 @@ def _absorb(target: BaseEntry, dropped: BaseEntry, cfg: Config) -> None:
 
 
 def _absorb_emotional(
-    target: EmotionalEntry, dropped: BaseEntry, cfg: Config
+    target: DiaryEntry, dropped: BaseEntry, cfg: Config
 ) -> None:
     """Magnitude grows toward the stronger feeling; clamp at the cap."""
     other = dropped.weight  # type: ignore[attr-defined]

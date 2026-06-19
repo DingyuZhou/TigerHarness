@@ -7,10 +7,10 @@ from textwrap import dedent
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
-    EmotionalEntry,
+    DiaryEntry,
     MustRememberEntry,
     SkillEntry,
 )
@@ -41,7 +41,7 @@ def test_compute_state_empty(tmp_path: Path) -> None:
     store.init_layout()
     payload = compute_state(cfg, store)
     assert payload["agent"] == "T"
-    assert set(payload["stores"]) == {STORE_SKILLS, STORE_MUST_REMEMBER, STORE_EMOTIONAL}
+    assert set(payload["stores"]) == {STORE_SKILLS, STORE_MUST_REMEMBER, STORE_DIARY}
     skills = payload["stores"][STORE_SKILLS]
     assert skills["count"] == 0
     assert skills["bound_unit"] == "count"
@@ -62,14 +62,14 @@ def test_compute_state_with_entries(tmp_path: Path) -> None:
         MustRememberEntry(text="m", created_at=NOW, last_used=NOW, source="x",
                           kind="decision", importance=1.0),
     ])
-    bstore.save_atomic(STORE_EMOTIONAL, [
-        EmotionalEntry(text="e", created_at=NOW, last_used=NOW, source="x",
+    bstore.save_atomic(STORE_DIARY, [
+        DiaryEntry(text="e", created_at=NOW, last_used=NOW, source="x",
                        weight=2.0, reaction="r"),
     ])
     payload = compute_state(cfg, store)
     assert payload["stores"][STORE_SKILLS]["count"] == 1
     assert payload["stores"][STORE_MUST_REMEMBER]["count"] == 1
-    assert payload["stores"][STORE_EMOTIONAL]["chars"] > 0
+    assert payload["stores"][STORE_DIARY]["chars"] > 0
     assert payload["stores"][STORE_SKILLS]["over_overflow"] is False
 
 

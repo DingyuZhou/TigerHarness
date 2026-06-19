@@ -20,7 +20,7 @@ from tigerharness.tiger_memory.bounded_store import (
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory import entries as E
 from tigerharness.tiger_memory.entries import (
-    EmotionalEntry,
+    DiaryEntry,
     EntryError,
     MustRememberEntry,
     SkillEntry,
@@ -55,7 +55,7 @@ def bounded(tmp_path: Path) -> BoundedStore:
               must_remember:
                 max_length: 40
                 overflow_limit: 60
-              emotional_log:
+              diary:
                 max_length: 40
                 overflow_limit: 60
                 weight_cap: 10
@@ -81,8 +81,8 @@ def _mr(kind: str = "preference", text: str = "memo") -> MustRememberEntry:
     )
 
 
-def _emo(weight: float = 1.0, reaction: str = "ok") -> EmotionalEntry:
-    return EmotionalEntry(
+def _emo(weight: float = 1.0, reaction: str = "ok") -> DiaryEntry:
+    return DiaryEntry(
         text="did x", created_at=NOW, last_used=NOW, source="extract",
         weight=weight, reaction=reaction,
     )
@@ -108,8 +108,8 @@ def test_save_load_roundtrip_all_stores(bounded: BoundedStore) -> None:
     assert [e.id for e in gm] == [m1.id, m2.id]
 
     e1 = _emo(-4.0, "annoyed")
-    bounded.save_atomic("emotional", [e1])
-    ge = bounded.load("emotional")
+    bounded.save_atomic("diary", [e1])
+    ge = bounded.load("diary")
     assert ge[0].weight == -4.0 and ge[0].reaction == "annoyed"
 
 
@@ -132,9 +132,9 @@ def test_save_validates_emotional_against_config_cap(
     bounded: BoundedStore,
 ) -> None:
     # cfg weight_cap is 10; this entry is fine at 10 but a >10 must fail.
-    bounded.save_atomic("emotional", [_emo(10.0)])
+    bounded.save_atomic("diary", [_emo(10.0)])
     with pytest.raises(EntryError, match="weight_cap"):
-        bounded.save_atomic("emotional", [_emo(10.5)])
+        bounded.save_atomic("diary", [_emo(10.5)])
 
 
 def test_save_rejects_cross_store_entry(bounded: BoundedStore) -> None:
@@ -217,7 +217,7 @@ def test_is_over_overflow_length_based(bounded: BoundedStore) -> None:
 def test_is_over_overflow_emotional(bounded: BoundedStore) -> None:
     # emotional overflow_limit = 60; weight is config-capped at 10.
     big = [_emo(1.0, "y" * 60)]
-    assert bounded.is_over_overflow("emotional", big) is True
+    assert bounded.is_over_overflow("diary", big) is True
 
 
 def test_hysteresis_band_does_not_overflow(bounded: BoundedStore) -> None:
@@ -231,7 +231,7 @@ def test_hysteresis_band_does_not_overflow(bounded: BoundedStore) -> None:
 def test_max_bound(bounded: BoundedStore) -> None:
     assert bounded.max_bound("skills") == 3
     assert bounded.max_bound("must_remember") == 40
-    assert bounded.max_bound("emotional") == 40
+    assert bounded.max_bound("diary") == 40
 
 
 # ----- store_lock ----------------------------------------------------------

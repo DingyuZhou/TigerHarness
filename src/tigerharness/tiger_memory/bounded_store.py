@@ -43,6 +43,7 @@ from . import frontmatter
 from .config import Config
 from .entries import (
     KIND_OWNER_EXPLICIT,
+    STORE_DIARY,
     STORE_NAMES,
     STORE_SKILLS,
     BaseEntry,
@@ -187,8 +188,8 @@ class BoundedStore:
     def _validate_entry(self, entry: BaseEntry) -> None:
         # The emotional store's cap is config-driven; everything else
         # validates with no argument.
-        if entry.store_name == "emotional":
-            entry.validate(weight_cap=self.memory.emotional_log.weight_cap)
+        if entry.store_name == STORE_DIARY:
+            entry.validate(weight_cap=self.memory.diary.weight_cap)
         else:
             entry.validate()
 
@@ -221,7 +222,7 @@ class BoundedStore:
         if store_name == "must_remember":
             limit = self.memory.must_remember.overflow_limit
         else:  # emotional
-            limit = self.memory.emotional_log.overflow_limit
+            limit = self.memory.diary.overflow_limit
         return self.length_chars(entries) >= limit
 
     def max_bound(self, store_name: str) -> int:
@@ -230,7 +231,7 @@ class BoundedStore:
             return self.memory.skills.max_count
         if store_name == "must_remember":
             return self.memory.must_remember.max_length
-        return self.memory.emotional_log.max_length
+        return self.memory.diary.max_length
 
     # ----- per-store lock (design §5) -----------------------------------
 

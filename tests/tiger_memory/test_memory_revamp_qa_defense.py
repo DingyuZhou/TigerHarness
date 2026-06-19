@@ -33,12 +33,12 @@ from tigerharness.tiger_memory.bounded_store import (
 )
 from tigerharness.tiger_memory.briefing import _render_skill_index
 from tigerharness.tiger_memory.config import load_config
-from tigerharness.tiger_memory.emotional import clamp_weight, decay_entry, decay_weight
+from tigerharness.tiger_memory.diary import clamp_weight, decay_entry, decay_weight
 from tigerharness.tiger_memory.entries import (
     KIND_DECISION,
     KIND_OWNER_EXPLICIT,
     KIND_PREFERENCE,
-    EmotionalEntry,
+    DiaryEntry,
     EntryError,
     MustRememberEntry,
     SkillEntry,
@@ -102,7 +102,7 @@ def _make_store(tmp_path: Path, **memory) -> BoundedStore:
           must_remember:
             max_length: {memory.get('mr_max', 30)}
             overflow_limit: {memory.get('mr_overflow', 50)}
-          emotional_log:
+          diary:
             max_length: {memory.get('emo_max', 30)}
             overflow_limit: {memory.get('emo_overflow', 50)}
             weight_cap: {memory.get('cap', 10)}
@@ -144,7 +144,7 @@ def _mr(kind, text, last_used=NOW, imp=0.0):
 
 
 def _emo(weight, text, last_used=NOW):
-    return EmotionalEntry(
+    return DiaryEntry(
         text=text, created_at=NOW, last_used=last_used, source="extract",
         weight=weight, reaction="r",
     )
@@ -344,10 +344,10 @@ def test_merge_clamps_at_cap_on_combine(tmp_path: Path) -> None:
     # (scripted) summarizer — a real near-duplicate always shares tokens.
     a = _emo(8.0, "loved the clean api design")
     b = _emo(7.0, "loved that clean api so much")
-    bs.save_atomic("emotional", [a, b])
+    bs.save_atomic("diary", [a, b])
     summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
-    meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
-    survivors = bs.load("emotional")
+    meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
+    survivors = bs.load("diary")
     assert len(survivors) == 1
     assert survivors[0].weight == 10.0  # clamped at cap
 
@@ -439,11 +439,11 @@ def test_second_live_holder_refused_with_store_lock_held(
 def test_crashed_holder_lock_is_reclaimed(tmp_path: Path) -> None:
     """A stale lock from a dead PID is reclaimed so meditation proceeds."""
     bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
-    bs.save_atomic("emotional", [_emo(0.5, "a" * 15), _emo(9.0, "b" * 15)])
-    lock_file = bs.store.paths.journal / ".emotional.lock"
+    bs.save_atomic("diary", [_emo(0.5, "a" * 15), _emo(9.0, "b" * 15)])
+    lock_file = bs.store.paths.journal / ".diary.lock"
     lock_file.write_text("999999 0")  # dead PID
     summ = ScriptedSummarizer()
-    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
+    log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
     assert log.changed is True  # proceeded after reclaiming the stale lock
     assert not lock_file.exists()  # released on exit
 
@@ -557,7 +557,7 @@ def test_empty_store_length_is_zero_and_not_over_overflow(
 ) -> None:
     bs = _make_store(tmp_path)
     assert bs.length_chars([]) == 0
-    assert bs.is_over_overflow("emotional", []) is False
+    assert bs.is_over_overflow("diary", []) is False
     assert bs.count([]) == 0
 
 
@@ -585,8 +585,8 @@ def test_unicode_entry_roundtrips_through_save_load(tmp_path: Path) -> None:
     """A multibyte/emoji entry survives the atomic save+load roundtrip intact."""
     bs = _make_store(tmp_path)
     e = _emo(3.0, "決定: ship 🚀 — café")
-    bs.save_atomic("emotional", [e])
-    got = bs.load("emotional")
+    bs.save_atomic("diary", [e])
+    got = bs.load("diary")
     assert len(got) == 1 and got[0].text == "決定: ship 🚀 — café"
 
 
@@ -609,18 +609,18 @@ def test_meditate_twice_is_stable(tmp_path: Path) -> None:
     """Running meditate twice: the second pass is a no-op and the store is
     byte-for-byte stable (idempotent compaction)."""
     bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
-    bs.save_atomic("emotional", [_emo(0.5, "a" * 15), _emo(9.0, "b" * 15)])
+    bs.save_atomic("diary", [_emo(0.5, "a" * 15), _emo(9.0, "b" * 15)])
     summ1 = ScriptedSummarizer()
-    log1 = meditate("emotional", "ctx", MISSION, summ1, bs.cfg, bs)
+    log1 = meditate("diary", "ctx", MISSION, summ1, bs.cfg, bs)
     assert log1.changed is True
-    after1 = (bs.store.paths.journal / "emotional.md").read_text()
+    after1 = (bs.store.paths.journal / "diary.md").read_text()
 
     summ2 = ScriptedSummarizer()
-    log2 = meditate("emotional", "ctx", MISSION, summ2, bs.cfg, bs)
+    log2 = meditate("diary", "ctx", MISSION, summ2, bs.cfg, bs)
     assert log2.skipped_no_op is True
     assert log2.changed is False
     assert summ2.calls == []  # no LLM work on the stable second pass
-    after2 = (bs.store.paths.journal / "emotional.md").read_text()
+    after2 = (bs.store.paths.journal / "diary.md").read_text()
     assert after1 == after2  # byte-for-byte stable
 
 
@@ -652,8 +652,8 @@ def test_save_rejects_bad_weight_type_with_entry_error(tmp_path: Path) -> None:
     e = _emo(1.0, "x")
     e.weight = "heavy"  # type: ignore[assignment]
     with pytest.raises(EntryError, match="weight"):
-        bs.save_atomic("emotional", [e])
-    assert not (bs.store.paths.journal / "emotional.md").exists()
+        bs.save_atomic("diary", [e])
+    assert not (bs.store.paths.journal / "diary.md").exists()
 
 
 def test_save_rejects_bool_weight_with_entry_error(tmp_path: Path) -> None:
@@ -663,7 +663,7 @@ def test_save_rejects_bool_weight_with_entry_error(tmp_path: Path) -> None:
     e = _emo(1.0, "x")
     e.weight = True  # type: ignore[assignment]
     with pytest.raises(EntryError, match="weight"):
-        bs.save_atomic("emotional", [e])
+        bs.save_atomic("diary", [e])
 
 
 def test_save_rejects_missing_required_skill_field(tmp_path: Path) -> None:
@@ -862,7 +862,7 @@ def test_load_skips_block_failing_validate(tmp_path: Path) -> None:
     must be skipped on load, not silently kept. Load is now symmetric with
     ``save_atomic`` — the good sibling survives, the invalid one is dropped."""
     bs = _make_store(tmp_path)
-    path = bs.store.paths.journal / "emotional.md"
+    path = bs.store.paths.journal / "diary.md"
     bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
     path.write_text(
         dedent(
@@ -891,7 +891,7 @@ def test_load_skips_block_failing_validate(tmp_path: Path) -> None:
             """
         )
     )
-    got = bs.load("emotional")
+    got = bs.load("diary")
     assert any(e.id == "emogood" for e in got)
     assert not any(e.id == "emobad" for e in got), (
         "an empty-reaction entry must be skipped on load (load/save symmetry)"
@@ -903,7 +903,7 @@ def test_load_skips_nan_weight_entry(tmp_path: Path) -> None:
     ``validate`` (non-finite), so load skips it — a NaN entry can never reach
     the keep-rank ordering or the next save."""
     bs = _make_store(tmp_path)
-    path = bs.store.paths.journal / "emotional.md"
+    path = bs.store.paths.journal / "diary.md"
     bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
     path.write_text(
         dedent(
@@ -932,7 +932,7 @@ def test_load_skips_nan_weight_entry(tmp_path: Path) -> None:
             """
         )
     )
-    got = bs.load("emotional")
+    got = bs.load("diary")
     assert [e.id for e in got] == ["emofinite"]
 
 
@@ -947,7 +947,7 @@ def test_meditate_does_not_crash_on_preexisting_invalid_entry(
     # emotional max_length=30, overflow_limit=50; push over overflow so
     # meditation actually runs (not a no-op).
     bs = _make_store(tmp_path, emo_max=30, emo_overflow=50)
-    path = bs.store.paths.journal / "emotional.md"
+    path = bs.store.paths.journal / "diary.md"
     bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
     path.write_text(
         dedent(
@@ -989,8 +989,8 @@ def test_meditate_does_not_crash_on_preexisting_invalid_entry(
     )
     summ = ScriptedSummarizer()  # nothing similar/stale
     # Must NOT raise EntryError from the final save_atomic.
-    log = meditate("emotional", "ctx", MISSION, summ, bs.cfg, bs)
-    survivors = bs.load("emotional")
+    log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
+    survivors = bs.load("diary")
     # The invalid entry never reached meditation; good entries persisted.
     assert not any(e.id == "emoinvalid" for e in survivors)
     assert all(e.reaction.strip() for e in survivors)

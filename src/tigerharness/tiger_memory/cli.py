@@ -228,7 +228,7 @@ def _cmd_import_legacy(cfg: Config, store: Store, *, mock: bool, force: bool) ->
         print("import-legacy: already imported; nothing to do (use --force to re-seed)")
         return 0
     print(f"import-legacy seeded: {result['skills']} skills, "
-          f"{result['must_remember']} must_remember, {result['emotional']} emotional")
+          f"{result['must_remember']} must_remember, {result['diary']} emotional")
     return 0
 
 

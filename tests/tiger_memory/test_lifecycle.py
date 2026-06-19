@@ -19,7 +19,7 @@ from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
     KIND_OWNER_EXPLICIT,
     KIND_PREFERENCE,
-    STORE_EMOTIONAL,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
 )
@@ -109,9 +109,9 @@ def test_parse_full_bundle() -> None:
     assert c.skills[0].name == "Bound a markdown store"
     assert c.skills[0].procedure.startswith("write one entry")
     assert [e.kind for e in c.must_remember] == [KIND_OWNER_EXPLICIT, KIND_PREFERENCE]
-    assert len(c.emotional) == 1
-    assert c.emotional[0].weight == 7.0
-    assert c.emotional[0].reaction == "proud"
+    assert len(c.diary) == 1
+    assert c.diary[0].weight == 7.0
+    assert c.diary[0].reaction == "proud"
     assert not c.is_empty()
     assert c.total() == 4
 
@@ -164,7 +164,7 @@ def test_parse_skips_malformed_blocks() -> None:
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.skills == []           # missing trigger/procedure
     assert c.must_remember == []    # bad kind + empty memo
-    assert c.emotional == []        # bad weight + missing reaction
+    assert c.diary == []        # bad weight + missing reaction
 
 
 def test_parse_emotional_text_falls_back_to_reaction() -> None:
@@ -173,8 +173,8 @@ def test_parse_emotional_text_falls_back_to_reaction() -> None:
         "@@EMOTIONAL@@\nWEIGHT: -4\nREACTION: frustrated\n"
     )
     c = lc.parse_extraction(bundle, now=NOW, source="x")
-    assert len(c.emotional) == 1
-    assert c.emotional[0].text == "frustrated"  # TEXT absent → reaction
+    assert len(c.diary) == 1
+    assert c.diary[0].text == "frustrated"  # TEXT absent → reaction
 
 
 def test_parse_multiline_value_continuation() -> None:
@@ -272,11 +272,11 @@ def test_ingest_writes_three_stores(tmp_path: Path) -> None:
     store.init_layout()
     c = lc.parse_extraction(_FULL_BUNDLE, now=NOW, source="x")
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert added == {STORE_SKILLS: 1, STORE_MUST_REMEMBER: 2, STORE_EMOTIONAL: 1}
+    assert added == {STORE_SKILLS: 1, STORE_MUST_REMEMBER: 2, STORE_DIARY: 1}
     bstore = BoundedStore(cfg, store)
     assert len(bstore.load(STORE_SKILLS)) == 1
     assert len(bstore.load(STORE_MUST_REMEMBER)) == 2
-    assert len(bstore.load(STORE_EMOTIONAL)) == 1
+    assert len(bstore.load(STORE_DIARY)) == 1
     # Skill importance refreshed (>=0; log1p(0)=0 for usage_count 0).
     assert bstore.load(STORE_SKILLS)[0].importance >= 0.0
 
@@ -290,7 +290,7 @@ def test_ingest_empty_is_noop(tmp_path: Path) -> None:
         now=NOW, source="x",
     )
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, empty)
-    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_EMOTIONAL: 0}
+    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_DIARY: 0}
 
 
 def test_ingest_appends_to_existing(tmp_path: Path) -> None:
@@ -300,7 +300,7 @@ def test_ingest_appends_to_existing(tmp_path: Path) -> None:
     c = lc.parse_extraction(_FULL_BUNDLE, now=NOW, source="x")
     lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
     lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert len(BoundedStore(cfg, store).load(STORE_EMOTIONAL)) == 2
+    assert len(BoundedStore(cfg, store).load(STORE_DIARY)) == 2
 
 
 def test_extract_and_ingest(tmp_path: Path) -> None:

@@ -373,7 +373,7 @@ def _meditation_cfg(tmp_path: Path) -> object:
             project_path: {tmp_path}/proj/
         summarizer: {{backend: anthropic, model: m, prompts: default/v1}}
         memory:
-          emotional_log:
+          diary:
             max_length: 20
             overflow_limit: 40
     """))
@@ -381,8 +381,8 @@ def _meditation_cfg(tmp_path: Path) -> object:
 
 
 def _emo_entry(text: str, weight: float):
-    from tigerharness.tiger_memory.entries import EmotionalEntry
-    return EmotionalEntry(
+    from tigerharness.tiger_memory.entries import DiaryEntry
+    return DiaryEntry(
         text=text, created_at="2026-06-17T00:00:00Z",
         last_used="2026-06-17T00:00:00Z", source="x",
         weight=weight, reaction="r",
@@ -412,21 +412,21 @@ class _NoMergeSummarizer:
 
 def test_meditate_all_stores_skips_under_overflow(tmp_path: Path) -> None:
     from tigerharness.tiger_memory.bounded_store import BoundedStore
-    from tigerharness.tiger_memory.entries import STORE_EMOTIONAL
+    from tigerharness.tiger_memory.entries import STORE_DIARY
     from tigerharness.tiger_memory.store import Store
     from tigerharness.tiger_memory.sweep import meditate_all_stores
 
     cfg = _meditation_cfg(tmp_path)
     store = Store(cfg.store.root)
     store.init_layout()
-    BoundedStore(cfg, store).save_atomic(STORE_EMOTIONAL, [_emo_entry("a", 1.0)])
+    BoundedStore(cfg, store).save_atomic(STORE_DIARY, [_emo_entry("a", 1.0)])
     logs = meditate_all_stores(cfg, store, _NoMergeSummarizer())
     assert logs == {}  # under overflow → no meditation
 
 
 def test_meditate_all_stores_runs_when_over_overflow(tmp_path: Path) -> None:
     from tigerharness.tiger_memory.bounded_store import BoundedStore
-    from tigerharness.tiger_memory.entries import STORE_EMOTIONAL
+    from tigerharness.tiger_memory.entries import STORE_DIARY
     from tigerharness.tiger_memory.store import Store
     from tigerharness.tiger_memory.sweep import meditate_all_stores
 
@@ -435,22 +435,22 @@ def test_meditate_all_stores_runs_when_over_overflow(tmp_path: Path) -> None:
     store.init_layout()
     # Several long-bodied entries → well over the 40-char overflow.
     entries = [_emo_entry("x" * 30, w) for w in (1.0, 2.0, 3.0)]
-    BoundedStore(cfg, store).save_atomic(STORE_EMOTIONAL, entries)
+    BoundedStore(cfg, store).save_atomic(STORE_DIARY, entries)
     logs = meditate_all_stores(cfg, store, _NoMergeSummarizer())
-    assert STORE_EMOTIONAL in logs  # meditation fired
+    assert STORE_DIARY in logs  # meditation fired
 
 
 def test_meditate_all_stores_lock_held_is_skipped(tmp_path: Path, monkeypatch) -> None:
     from tigerharness.tiger_memory import sweep as sweep_mod
     from tigerharness.tiger_memory.bounded_store import BoundedStore, StoreLockHeld
-    from tigerharness.tiger_memory.entries import STORE_EMOTIONAL
+    from tigerharness.tiger_memory.entries import STORE_DIARY
     from tigerharness.tiger_memory.store import Store
 
     cfg = _meditation_cfg(tmp_path)
     store = Store(cfg.store.root)
     store.init_layout()
     entries = [_emo_entry("x" * 30, w) for w in (1.0, 2.0, 3.0)]
-    BoundedStore(cfg, store).save_atomic(STORE_EMOTIONAL, entries)
+    BoundedStore(cfg, store).save_atomic(STORE_DIARY, entries)
 
     def boom(*a, **kw):
         raise StoreLockHeld("held by another session")

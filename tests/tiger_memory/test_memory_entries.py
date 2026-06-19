@@ -5,7 +5,7 @@ import pytest
 
 from tigerharness.tiger_memory import entries as E
 from tigerharness.tiger_memory.entries import (
-    EmotionalEntry,
+    DiaryEntry,
     EntryError,
     MustRememberEntry,
     SkillEntry,
@@ -106,47 +106,47 @@ def test_must_remember_rejects_bool_importance() -> None:
 
 
 def test_emotional_valid() -> None:
-    e = EmotionalEntry(weight=-7.5, reaction="frustrated", **_base())
+    e = DiaryEntry(weight=-7.5, reaction="frustrated", **_base())
     e.validate()
-    assert e.store_name == E.STORE_EMOTIONAL
+    assert e.store_name == E.STORE_DIARY
     assert e.frontmatter()["weight"] == -7.5
 
 
 def test_emotional_rejects_over_cap() -> None:
-    e = EmotionalEntry(weight=11, reaction="r", **_base())
+    e = DiaryEntry(weight=11, reaction="r", **_base())
     with pytest.raises(EntryError, match="weight_cap"):
         e.validate()
 
 
 def test_emotional_custom_cap() -> None:
-    e = EmotionalEntry(weight=9, reaction="r", **_base())
+    e = DiaryEntry(weight=9, reaction="r", **_base())
     e.validate(weight_cap=10)
     with pytest.raises(EntryError, match="weight_cap"):
         e.validate(weight_cap=8)
 
 
 def test_emotional_rejects_bool_weight() -> None:
-    e = EmotionalEntry(weight=True, reaction="r", **_base())
+    e = DiaryEntry(weight=True, reaction="r", **_base())
     with pytest.raises(EntryError, match="weight"):
         e.validate()
 
 
 def test_emotional_rejects_blank_reaction() -> None:
-    e = EmotionalEntry(weight=1, reaction="   ", **_base())
+    e = DiaryEntry(weight=1, reaction="   ", **_base())
     with pytest.raises(EntryError, match="reaction"):
         e.validate()
 
 
 def test_emotional_weight_at_cap_ok() -> None:
-    EmotionalEntry(weight=10, reaction="r", **_base()).validate()
-    EmotionalEntry(weight=-10, reaction="r", **_base()).validate()
+    DiaryEntry(weight=10, reaction="r", **_base()).validate()
+    DiaryEntry(weight=-10, reaction="r", **_base()).validate()
 
 
 def test_emotional_rejects_nan_weight() -> None:
     """GAP-3 (schema): a NaN weight is a non-value — ``abs(nan) > cap`` is
     False so it would slip past the cap check and poison the keep-rank
     ordering. ``validate`` must reject it as non-finite."""
-    e = EmotionalEntry(weight=float("nan"), reaction="r", **_base())
+    e = DiaryEntry(weight=float("nan"), reaction="r", **_base())
     with pytest.raises(EntryError, match="finite"):
         e.validate()
 
@@ -155,7 +155,7 @@ def test_emotional_rejects_nan_weight() -> None:
 def test_emotional_rejects_inf_weight(weight: float) -> None:
     """GAP-3 (schema): ±inf are non-finite and explicitly rejected (the
     finite check subsumes the over-cap path for them)."""
-    e = EmotionalEntry(weight=weight, reaction="r", **_base())
+    e = DiaryEntry(weight=weight, reaction="r", **_base())
     with pytest.raises(EntryError, match="finite"):
         e.validate()
 
@@ -187,7 +187,7 @@ def test_base_rejects_blank_id() -> None:
 def test_entry_class_for_known() -> None:
     assert entry_class_for("skills") is SkillEntry
     assert entry_class_for("must_remember") is MustRememberEntry
-    assert entry_class_for("emotional") is EmotionalEntry
+    assert entry_class_for("diary") is DiaryEntry
 
 
 def test_entry_class_for_unknown_raises() -> None:
@@ -214,14 +214,14 @@ def test_from_frontmatter_must_remember_roundtrip() -> None:
 
 
 def test_from_frontmatter_emotional_roundtrip() -> None:
-    e = EmotionalEntry(weight=3.5, reaction="glad", **_base())
-    rebuilt = entry_from_frontmatter("emotional", e.frontmatter(), e.text)
-    assert isinstance(rebuilt, EmotionalEntry)
+    e = DiaryEntry(weight=3.5, reaction="glad", **_base())
+    rebuilt = entry_from_frontmatter("diary", e.frontmatter(), e.text)
+    assert isinstance(rebuilt, DiaryEntry)
     assert rebuilt.weight == 3.5 and rebuilt.reaction == "glad"
 
 
 def test_from_frontmatter_missing_id_gets_fresh() -> None:
     fm = {"created_at": NOW, "last_used": NOW, "source": "s"}
-    rebuilt = entry_from_frontmatter("emotional", fm, "body")
+    rebuilt = entry_from_frontmatter("diary", fm, "body")
     assert rebuilt.id  # a fresh id was minted
     assert rebuilt.weight == 0.0

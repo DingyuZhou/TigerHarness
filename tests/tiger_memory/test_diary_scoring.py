@@ -14,13 +14,13 @@ from textwrap import dedent
 import pytest
 
 from tigerharness.tiger_memory.config import load_config
-from tigerharness.tiger_memory.emotional import (
+from tigerharness.tiger_memory.diary import (
     clamp_weight,
     decay_entry,
     decay_weight,
     emotional_keep_rank,
 )
-from tigerharness.tiger_memory.entries import EmotionalEntry, EntryError
+from tigerharness.tiger_memory.entries import DiaryEntry, EntryError
 
 NOW = "2026-06-17T00:00:00Z"
 
@@ -43,7 +43,7 @@ def _cfg(tmp_path: Path, *, cap: float = 10.0, rate: float = 0.1):
               model: m
               prompts: default/v1
             memory:
-              emotional_log:
+              diary:
                 max_length: 40
                 overflow_limit: 60
                 weight_cap: {cap}
@@ -55,8 +55,8 @@ def _cfg(tmp_path: Path, *, cap: float = 10.0, rate: float = 0.1):
     return load_config(p)
 
 
-def _emo(weight: float, last_used: str = NOW) -> EmotionalEntry:
-    return EmotionalEntry(
+def _emo(weight: float, last_used: str = NOW) -> DiaryEntry:
+    return DiaryEntry(
         text="did x", created_at=NOW, last_used=last_used, source="extract",
         weight=weight, reaction="ok",
     )

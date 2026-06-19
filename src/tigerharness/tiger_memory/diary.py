@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 
 from .config import Config
-from .entries import EmotionalEntry, EntryError
+from .entries import DiaryEntry, EntryError
 from .ranking import days_between, recency_score
 
 
@@ -38,7 +38,7 @@ def clamp_weight(weight: float, cfg: Config) -> float:
     Returns a plain ``float`` (never ``-0.0`` — see :func:`_zero_safe`).
 
     **Non-finite defense (GAP-3, defense in depth).** Mitsui's
-    :meth:`EmotionalEntry.validate` already rejects a non-finite weight at the
+    :meth:`DiaryEntry.validate` already rejects a non-finite weight at the
     schema/load gate, so a ``NaN``/``±inf`` should never reach here. But the
     scoring math must not *silently* propagate one if it ever does (a ``NaN``
     poisons the keep-rank ``sorted()`` into a non-deterministic order — the
@@ -55,9 +55,9 @@ def clamp_weight(weight: float, cfg: Config) -> float:
     """
     if math.isnan(weight):
         raise EntryError(
-            "emotional.weight must be finite (no NaN); cannot clamp NaN."
+            "diary.weight must be finite (no NaN); cannot clamp NaN."
         )
-    cap = cfg.memory.emotional_log.weight_cap
+    cap = cfg.memory.diary.weight_cap
     if weight > cap:
         return cap
     if weight < -cap:
@@ -75,7 +75,7 @@ def decay_weight(weight: float, days: float, cfg: Config) -> float:
     leaves the magnitude alone. The result is always within the cap.
     """
     clamped = clamp_weight(weight, cfg)
-    rate = cfg.memory.emotional_log.decay.magnitude_per_day
+    rate = cfg.memory.diary.decay.magnitude_per_day
     if days <= 0 or rate <= 0 or clamped == 0:
         return clamped
     shrink = rate * days
@@ -87,7 +87,7 @@ def decay_weight(weight: float, days: float, cfg: Config) -> float:
     return _zero_safe(sign * magnitude)
 
 
-def decay_entry(entry: EmotionalEntry, now: str, cfg: Config) -> float:
+def decay_entry(entry: DiaryEntry, now: str, cfg: Config) -> float:
     """Decayed weight for *entry* as of *now* (its ``last_used`` is the anchor).
 
     A convenience over :func:`decay_weight` that derives ``days`` from the
@@ -99,7 +99,7 @@ def decay_entry(entry: EmotionalEntry, now: str, cfg: Config) -> float:
 
 
 def emotional_keep_rank(
-    entry: EmotionalEntry, now: str, cfg: Config
+    entry: DiaryEntry, now: str, cfg: Config
 ) -> tuple[float, float]:
     """Keep-rank for one emotional entry: higher = more worth keeping.
 
