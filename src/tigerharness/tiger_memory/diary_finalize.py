@@ -62,20 +62,25 @@ def finalize_diary(
     """Write *serialized* diary to the live store under the per-store lock.
 
     The destructive sequence — snapshot ``emotional.md`` -> ``emotional.md.bak``
-    (only if it still exists), ``atomic_write`` of ``diary.md``, and stamping the
-    :data:`STATE_KEY` marker with *state_extra* — runs entirely inside
-    ``store_lock(STORE_DIARY)`` so it can never race a concurrent meditation
-    (plan §6). Returns ``None`` on success, or :data:`LOCKED_SKIP` if a live
-    session holds the lock (nothing is written). Each caller supplies its own
-    marker payload via *state_extra*.
+    AND any existing ``diary.md`` -> ``diary.md.bak`` (each only if present),
+    ``atomic_write`` of the new ``diary.md``, and stamping the :data:`STATE_KEY`
+    marker with *state_extra* — runs entirely inside ``store_lock(STORE_DIARY)``
+    so it can never race a concurrent meditation (plan §6). Snapshotting an
+    existing diary.md is the 4-store correction (brief): a persona that already
+    authored a diary must not be overwritten without a backup. Returns ``None``
+    on success, or :data:`LOCKED_SKIP` if a live session holds the lock (nothing
+    is written). Each caller supplies its own marker payload via *state_extra*.
     """
     emo_path = store.paths.journal / "emotional.md"
+    diary_path = store.paths.journal / "diary.md"
     try:
         with BoundedStore(cfg, store).store_lock(STORE_DIARY):
             store.paths.journal.mkdir(parents=True, exist_ok=True)
             if emo_path.exists():
                 emo_path.rename(emo_path.with_suffix(".md.bak"))
-            store.atomic_write(store.paths.journal / "diary.md", serialized)
+            if diary_path.exists():
+                diary_path.rename(diary_path.with_suffix(".md.bak"))
+            store.atomic_write(diary_path, serialized)
             state = store.read_state() or {}
             state[STATE_KEY] = state_extra
             store.write_state(state)

@@ -119,6 +119,20 @@ def test_finalize_with_no_emotional_still_writes(tmp_path: Path):
     assert not (store.paths.journal / "emotional.md.bak").exists()
 
 
+def test_finalize_snapshots_existing_diary(tmp_path: Path):
+    # 4-store correction: an already-authored diary.md must be backed up, not
+    # silently overwritten.
+    cfg, store = _store(tmp_path)
+    (store.paths.journal / "diary.md").write_text("## 2026-01-01\n- (+1) old authored\n")
+    serialized = diary_format.serialize(_bullets())
+    skip = df.finalize_diary(cfg, store, serialized, state_extra={"kept": 3})
+    assert skip is None
+    assert (store.paths.journal / "diary.md").read_text() == serialized
+    assert (store.paths.journal / "diary.md.bak").read_text() == (
+        "## 2026-01-01\n- (+1) old authored\n"
+    )
+
+
 def test_finalize_refuses_when_locked(tmp_path: Path):
     cfg, store = _store(tmp_path)
     (store.paths.journal / "emotional.md").write_text("legacy\n")
