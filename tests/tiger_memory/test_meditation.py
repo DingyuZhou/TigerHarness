@@ -618,36 +618,36 @@ def test_ask_yes_no_only_yes_or_only_no() -> None:
     ) is False
 
 
-# ----- internal helpers: _absorb_emotional sign-follows-larger --------------
+# ----- internal helpers: _absorb_diary sign-follows-larger --------------
 
 
-def test_absorb_emotional_dropped_larger_positive(tmp_path: Path) -> None:
-    from tigerharness.tiger_memory.meditation import _absorb_emotional
+def test_absorb_diary_dropped_larger_positive(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.meditation import _absorb_diary
 
     bs = _make_store(tmp_path)
     target = _emo(2.0, "t")
     dropped = _emo(6.0, "d")  # larger magnitude, positive
-    _absorb_emotional(target, dropped, bs.cfg)
+    _absorb_diary(target, dropped, bs.cfg)
     # sign follows dropped (positive); magnitude = max(2,6,8)=8.
     assert target.weight == 8.0
 
 
-def test_absorb_emotional_dropped_larger_negative(tmp_path: Path) -> None:
-    from tigerharness.tiger_memory.meditation import _absorb_emotional
+def test_absorb_diary_dropped_larger_negative(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.meditation import _absorb_diary
 
     bs = _make_store(tmp_path)
     target = _emo(2.0, "t")
     dropped = _emo(-6.0, "d")  # larger magnitude, negative
-    _absorb_emotional(target, dropped, bs.cfg)
+    _absorb_diary(target, dropped, bs.cfg)
     # sign follows dropped (negative); magnitude = max(2,6,|2-6|=4)=6.
     assert target.weight == -6.0
 
 
-def test_absorb_emotional_target_larger_negative(tmp_path: Path) -> None:
-    from tigerharness.tiger_memory.meditation import _absorb_emotional
+def test_absorb_diary_target_larger_negative(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.meditation import _absorb_diary
 
     bs = _make_store(tmp_path)
     target = _emo(-7.0, "t")  # larger magnitude, negative
     dropped = _emo(3.0, "d")
-    _absorb_emotional(target, dropped, bs.cfg)
+    _absorb_diary(target, dropped, bs.cfg)
     assert target.weight == -7.0  # max(7,3,|-4|)=7, sign from target (neg)

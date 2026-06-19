@@ -376,3 +376,31 @@ def test_save_diary_refuses_unroundtrippable(bounded: BoundedStore) -> None:
     )
     with pytest.raises(EntryError, match="round-trip"):
         bounded.save_atomic("diary", [bad])
+
+
+def test_diary_decay_anchored_on_bullet_date(bounded: BoundedStore) -> None:
+    """The diary's decay anchor is the bullet's DATE (plan §6, Rukawa b1-dev-2):
+    the compact format persists only the day, so a save->load round-trip sets
+    last_used to that day header, and decay then ages from the bullet's date —
+    not from when it was last touched."""
+    from tigerharness.tiger_memory.diary import decay_entry
+    old = DiaryEntry(
+        text="shipped the substrate", created_at="2026-06-01T12:00:00Z",
+        last_used="2026-06-01T12:00:00Z", source="extract", weight=8.0,
+    )
+    bounded.save_atomic("diary", [old])
+    loaded = bounded.load("diary")[0]
+    # only the DATE survives; last_used is anchored to the bullet's day header.
+    assert loaded.last_used == "2026-06-01T00:00:00Z"
+    # decay ages from that date: 16 days * 0.1/day -> 8.0 - 1.6 = 6.4 (cap 10).
+    assert decay_entry(loaded, "2026-06-17T00:00:00Z", bounded.cfg) == pytest.approx(6.4)
+
+
+def test_diary_higher_weight_harder_to_forget(bounded: BoundedStore) -> None:
+    """The retention guarantee: among same-dated notes, the higher |weight|
+    ranks higher (kept) and the near-neutral one ranks lowest (forgotten first)."""
+    from tigerharness.tiger_memory.diary import diary_keep_rank
+    strong = DiaryEntry(text="a", created_at=NOW, last_used=NOW, source="x", weight=9.0)
+    weak = DiaryEntry(text="b", created_at=NOW, last_used=NOW, source="x", weight=0.5)
+    # keep-rank sorts ascending -> the weak (lowest |weight|) sorts first (forgotten first).
+    assert diary_keep_rank(weak, NOW, bounded.cfg) < diary_keep_rank(strong, NOW, bounded.cfg)

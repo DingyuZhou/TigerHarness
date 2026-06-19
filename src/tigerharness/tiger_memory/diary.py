@@ -1,4 +1,4 @@
-"""Signed-weight scoring for the emotional log (design §4.3; plan §2 dev-2).
+"""Signed-weight scoring for the diary store (design §4.3; plan §2 dev-2).
 
 The diary store carries a single signed scalar per entry — a ``weight``
 in ``[-weight_cap, +weight_cap]`` (default ±10, design §4.3): positive =
@@ -17,9 +17,10 @@ Two pure functions live here, with NO I/O and NO summarizer dependency
 
 Forgetting ranks by **magnitude** ``|weight|`` plus recency, so strong
 feelings (positive *or* negative) survive while near-neutral / decayed items
-are compacted or forgotten first. :func:`emotional_keep_rank` produces that
-sort key; see :mod:`tigerharness.tiger_memory.meditation` for how it is used
-to drop the lowest-ranked entries.
+are compacted or forgotten first. :func:`diary_keep_rank` produces that
+sort key (anchored on each entry's dated-bullet day via ``last_used``); see
+:mod:`tigerharness.tiger_memory.meditation` for how it drops the lowest-ranked
+entries to keep the whole-loaded diary under its bound.
 """
 from __future__ import annotations
 
@@ -98,7 +99,7 @@ def decay_entry(entry: DiaryEntry, now: str, cfg: Config) -> float:
     return decay_weight(entry.weight, days, cfg)
 
 
-def emotional_keep_rank(
+def diary_keep_rank(
     entry: DiaryEntry, now: str, cfg: Config
 ) -> tuple[float, float]:
     """Keep-rank for one emotional entry: higher = more worth keeping.

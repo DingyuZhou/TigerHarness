@@ -17,7 +17,7 @@ from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.diary import (
     clamp_weight,
     decay_entry,
-    emotional_keep_rank,
+    diary_keep_rank,
 )
 from tigerharness.tiger_memory.entries import (
     DiaryEntry,
@@ -316,7 +316,7 @@ def test_seed_emotional_not_double_decayed_matches_organic(tmp_path: Path) -> No
     )
     # single rank-time decay is identical for both -> intended 5.0, not 2.0.
     assert decay_entry(seeded, NOW, cfg) == decay_entry(organic, NOW, cfg) == 5.0
-    assert emotional_keep_rank(seeded, NOW, cfg) == emotional_keep_rank(
+    assert diary_keep_rank(seeded, NOW, cfg) == diary_keep_rank(
         organic, NOW, cfg
     )
 

@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 
 from .bounded_store import BoundedStore, ForgetGuardError
 from .config import Config
-from .diary import clamp_weight, emotional_keep_rank
+from .diary import clamp_weight, diary_keep_rank
 from .entries import (
     KIND_DECISION,
     KIND_OWNER_EXPLICIT,
@@ -265,7 +265,7 @@ def keep_rank(entry: BaseEntry, now: str, cfg: Config) -> tuple[float, float]:
     recency. The single entry point meditation sorts by to choose drop order.
     """
     if isinstance(entry, DiaryEntry):
-        return emotional_keep_rank(entry, now, cfg)
+        return diary_keep_rank(entry, now, cfg)
     if isinstance(entry, SkillEntry):
         return skills_keep_rank(entry, now, cfg)
     # MustRememberEntry: keep by importance, recency tie-break.
@@ -405,7 +405,7 @@ def _absorb(target: BaseEntry, dropped: BaseEntry, cfg: Config) -> None:
     survivor's type alone.
     """
     if isinstance(target, DiaryEntry):
-        _absorb_emotional(target, dropped, cfg)
+        _absorb_diary(target, dropped, cfg)
     elif isinstance(target, SkillEntry):
         _absorb_skill(target, dropped, cfg)
     else:  # MustRememberEntry
@@ -413,7 +413,7 @@ def _absorb(target: BaseEntry, dropped: BaseEntry, cfg: Config) -> None:
         target.importance = float(target.importance) + 1.0
 
 
-def _absorb_emotional(
+def _absorb_diary(
     target: DiaryEntry, dropped: BaseEntry, cfg: Config
 ) -> None:
     """Magnitude grows toward the stronger feeling; clamp at the cap."""
