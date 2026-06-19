@@ -145,6 +145,46 @@ def parse(text: str, weight_cap: float = DEFAULT_WEIGHT_CAP) -> list[DiaryEntry]
     return entries
 
 
+def parse_lenient(
+    text: str, weight_cap: float = DEFAULT_WEIGHT_CAP
+) -> tuple[list[DiaryEntry], list[str]]:
+    """Like :func:`parse` but COLLECTS malformed lines instead of raising.
+
+    Returns ``(entries, rejected)``: the good bullets (under valid day headers)
+    and the raw text of every line that could not be parsed (a stray line, a
+    bullet before any header, an invalid date, an over-cap weight, or an empty
+    note). Used by ``tiger-memory check --fix`` to keep the good content while
+    quarantining the bad lines to a ``<store>.rejected.md`` sidecar.
+    """
+    entries: list[DiaryEntry] = []
+    rejected: list[str] = []
+    current_day: str | None = None
+    for raw in text.splitlines():
+        if raw == "":
+            continue
+        day_m = _DAY_RE.match(raw)
+        if day_m is not None:
+            day = "-".join(day_m.groups())
+            if _valid_day(day):
+                current_day = day
+            else:
+                rejected.append(raw)
+            continue
+        bullet_m = _BULLET_RE.match(raw)
+        if bullet_m is not None and current_day is not None:
+            weight = float(bullet_m.group(1))
+            note = bullet_m.group(2).strip()
+            if abs(weight) > weight_cap or not note:
+                rejected.append(raw)
+            else:
+                entries.append(
+                    DiaryEntry(date=current_day, weight=weight, text=note)
+                )
+            continue
+        rejected.append(raw)
+    return entries, rejected
+
+
 def validate(text: str, weight_cap: float = DEFAULT_WEIGHT_CAP) -> list[str]:
     """Return a list of format errors for *text* (empty list = valid).
 

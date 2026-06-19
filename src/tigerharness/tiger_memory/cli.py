@@ -151,6 +151,14 @@ def main(argv: list[str] | None = None) -> int:
         "sweep-release",
         help="Drop the claim WITHOUT advancing the watermark (per-wake cap hit).")
 
+    p_chk = sub.add_parser(
+        "check",
+        help="Validate the 3 stores' format; exit non-zero if any are invalid.")
+    p_chk.add_argument(
+        "--fix", action="store_true",
+        help="Repair mechanical drift + quarantine non-mechanical to "
+             "<store>.rejected.md (no silent loss).")
+
     args = parser.parse_args(argv)
 
     try:
@@ -189,8 +197,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_sweep_done(cfg, args.persona)
     if args.cmd == "sweep-complete":
         return _cmd_sweep_complete(cfg, now=args.now)
-    if args.cmd == "sweep-release":  # pragma: no branch  # exhaustive dispatch
+    if args.cmd == "sweep-release":
         return _cmd_sweep_release(cfg)
+    if args.cmd == "check":  # pragma: no branch  # exhaustive dispatch
+        return _cmd_check(cfg, store, fix=args.fix)
     return 2  # pragma: no cover  # argparse rejects unknown subcommands first
 
 
@@ -210,6 +220,31 @@ def _cmd_state(cfg: Config, store: Store) -> int:
     from .state import compute_state
     print(json.dumps(compute_state(cfg, store), indent=2, sort_keys=True))
     return 0
+
+
+def _cmd_check(cfg: Config, store: Store, *, fix: bool) -> int:
+    """Validate (``--fix``: repair + quarantine) the 3 stores' on-disk format.
+
+    Exit 0 when clean (or after ``--fix`` left every store valid); exit 1 on
+    any problem WITHOUT ``--fix`` — so CI / the sweep gate fails on malformed
+    memory rather than letting it persist.
+    """
+    from .check import check_all
+    report = check_all(cfg, store, fix=fix)
+    print(json.dumps({
+        "ok": report.ok,
+        "fixed": fix,
+        "stores": [
+            {
+                "store": s.store_name, "valid": s.valid, "problems": s.problems,
+                "quarantined": s.quarantined, "repaired": s.repaired,
+            }
+            for s in report.stores
+        ],
+    }, indent=2))
+    if fix:
+        return 0
+    return 0 if report.ok else 1
 
 
 def _cmd_import_legacy(cfg: Config, store: Store, *, mock: bool, force: bool) -> int:

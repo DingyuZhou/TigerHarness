@@ -167,3 +167,37 @@ def test_format_weight_int_and_float():
     assert df._format_weight(7) == "+7"
     assert df._format_weight(-5.0) == "-5"
     assert df._format_weight(7.5) == "+7.5"
+
+
+# ----- parse_lenient (check --fix support) ---------------------------------
+
+def test_parse_lenient_collects_good_and_rejected():
+    text = (
+        "## 2026-06-17\n"
+        "- (+2) good note\n"
+        "- (.nan) bad weight token\n"      # stray (unparseable bullet) -> rejected
+        "stray line\n"                       # stray -> rejected
+        "## 2026-13-01\n"                    # invalid date -> rejected
+        "- (+99) over cap\n"                 # over default cap 10 -> rejected (no current day after bad header? still under 06-17)
+    )
+    entries, rejected = df.parse_lenient(text)
+    assert entries == [DiaryEntry("2026-06-17", 2, "good note")]
+    assert "- (.nan) bad weight token" in rejected
+    assert "stray line" in rejected
+    assert "## 2026-13-01" in rejected
+    assert "- (+99) over cap" in rejected
+
+
+def test_parse_lenient_bullet_before_header_rejected():
+    entries, rejected = df.parse_lenient("- (+1) orphan\n")
+    assert entries == [] and rejected == ["- (+1) orphan"]
+
+
+def test_parse_lenient_empty_note_rejected():
+    entries, rejected = df.parse_lenient("## 2026-06-17\n- (+1)   \n")
+    assert entries == [] and rejected == ["- (+1)   "]
+
+
+def test_parse_lenient_clean_has_no_rejects():
+    entries, rejected = df.parse_lenient("## 2026-06-17\n- (+1) ok\n")
+    assert entries == [DiaryEntry("2026-06-17", 1, "ok")] and rejected == []
