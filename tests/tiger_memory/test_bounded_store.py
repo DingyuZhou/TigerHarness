@@ -81,10 +81,10 @@ def _mr(kind: str = "preference", text: str = "memo") -> MustRememberEntry:
     )
 
 
-def _emo(weight: float = 1.0, reaction: str = "ok") -> DiaryEntry:
+def _emo(weight: float = 1.0, text: str = "did x") -> DiaryEntry:
     return DiaryEntry(
-        text="did x", created_at=NOW, last_used=NOW, source="extract",
-        weight=weight, reaction=reaction,
+        text=text, created_at=NOW, last_used=NOW, source="extract",
+        weight=weight,
     )
 
 
@@ -110,7 +110,7 @@ def test_save_load_roundtrip_all_stores(bounded: BoundedStore) -> None:
     e1 = _emo(-4.0, "annoyed")
     bounded.save_atomic("diary", [e1])
     ge = bounded.load("diary")
-    assert ge[0].weight == -4.0 and ge[0].reaction == "annoyed"
+    assert ge[0].weight == -4.0
 
 
 def test_save_empty_then_load(bounded: BoundedStore) -> None:
@@ -182,8 +182,8 @@ def test_save_overwrites_atomically(bounded: BoundedStore) -> None:
 
 
 def test_length_chars_counts_characters(bounded: BoundedStore) -> None:
-    e = _emo(1.0, "reaction")  # text "did x" (5) + reaction "reaction" (8)
-    assert bounded.length_chars([e]) == len("did x") + len("reaction")
+    e = _emo(1.0)  # text "did x" (5); reaction dropped, not counted
+    assert bounded.length_chars([e]) == len("did x")
 
 
 def test_length_chars_skill_counts_prose_fields(bounded: BoundedStore) -> None:

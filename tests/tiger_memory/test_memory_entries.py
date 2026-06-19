@@ -106,47 +106,41 @@ def test_must_remember_rejects_bool_importance() -> None:
 
 
 def test_emotional_valid() -> None:
-    e = DiaryEntry(weight=-7.5, reaction="frustrated", **_base())
+    e = DiaryEntry(weight=-7.5, **_base())
     e.validate()
     assert e.store_name == E.STORE_DIARY
     assert e.frontmatter()["weight"] == -7.5
 
 
 def test_emotional_rejects_over_cap() -> None:
-    e = DiaryEntry(weight=11, reaction="r", **_base())
+    e = DiaryEntry(weight=11, **_base())
     with pytest.raises(EntryError, match="weight_cap"):
         e.validate()
 
 
 def test_emotional_custom_cap() -> None:
-    e = DiaryEntry(weight=9, reaction="r", **_base())
+    e = DiaryEntry(weight=9, **_base())
     e.validate(weight_cap=10)
     with pytest.raises(EntryError, match="weight_cap"):
         e.validate(weight_cap=8)
 
 
 def test_emotional_rejects_bool_weight() -> None:
-    e = DiaryEntry(weight=True, reaction="r", **_base())
+    e = DiaryEntry(weight=True, **_base())
     with pytest.raises(EntryError, match="weight"):
         e.validate()
 
 
-def test_emotional_rejects_blank_reaction() -> None:
-    e = DiaryEntry(weight=1, reaction="   ", **_base())
-    with pytest.raises(EntryError, match="reaction"):
-        e.validate()
-
-
 def test_emotional_weight_at_cap_ok() -> None:
-    DiaryEntry(weight=10, reaction="r", **_base()).validate()
-    DiaryEntry(weight=-10, reaction="r", **_base()).validate()
+    DiaryEntry(weight=10, **_base()).validate()
+    DiaryEntry(weight=-10, **_base()).validate()
 
 
 def test_emotional_rejects_nan_weight() -> None:
     """GAP-3 (schema): a NaN weight is a non-value — ``abs(nan) > cap`` is
     False so it would slip past the cap check and poison the keep-rank
     ordering. ``validate`` must reject it as non-finite."""
-    e = DiaryEntry(weight=float("nan"), reaction="r", **_base())
+    e = DiaryEntry(weight=float("nan"), **_base())
     with pytest.raises(EntryError, match="finite"):
         e.validate()
 
@@ -155,7 +149,7 @@ def test_emotional_rejects_nan_weight() -> None:
 def test_emotional_rejects_inf_weight(weight: float) -> None:
     """GAP-3 (schema): ±inf are non-finite and explicitly rejected (the
     finite check subsumes the over-cap path for them)."""
-    e = DiaryEntry(weight=weight, reaction="r", **_base())
+    e = DiaryEntry(weight=weight, **_base())
     with pytest.raises(EntryError, match="finite"):
         e.validate()
 
@@ -214,10 +208,10 @@ def test_from_frontmatter_must_remember_roundtrip() -> None:
 
 
 def test_from_frontmatter_emotional_roundtrip() -> None:
-    e = DiaryEntry(weight=3.5, reaction="glad", **_base())
+    e = DiaryEntry(weight=3.5, **_base())
     rebuilt = entry_from_frontmatter("diary", e.frontmatter(), e.text)
     assert isinstance(rebuilt, DiaryEntry)
-    assert rebuilt.weight == 3.5 and rebuilt.reaction == "glad"
+    assert rebuilt.weight == 3.5
 
 
 def test_from_frontmatter_missing_id_gets_fresh() -> None:

@@ -145,7 +145,7 @@ def _mr(kind: str, text: str, last_used: str = NOW, imp: float = 0.0):
 def _emo(weight: float, text: str, last_used: str = NOW):
     return DiaryEntry(
         text=text, created_at=NOW, last_used=last_used, source="extract",
-        weight=weight, reaction="r",
+        weight=weight,
     )
 
 

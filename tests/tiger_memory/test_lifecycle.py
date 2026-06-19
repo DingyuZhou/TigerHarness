@@ -95,7 +95,6 @@ _FULL_BUNDLE = dedent("""\
 
     @@EMOTIONAL@@
     WEIGHT: 7
-    REACTION: proud
     TEXT: landed the bounded-store substrate clean and green
 """)
 
@@ -111,7 +110,7 @@ def test_parse_full_bundle() -> None:
     assert [e.kind for e in c.must_remember] == [KIND_OWNER_EXPLICIT, KIND_PREFERENCE]
     assert len(c.diary) == 1
     assert c.diary[0].weight == 7.0
-    assert c.diary[0].reaction == "proud"
+    assert c.diary[0].text == "landed the bounded-store substrate clean and green"
     assert not c.is_empty()
     assert c.total() == 4
 
@@ -154,27 +153,14 @@ def test_parse_skips_malformed_blocks() -> None:
 
         @@EMOTIONAL@@
         WEIGHT: not-a-number
-        REACTION: x
         TEXT: y
 
         WEIGHT: 3
-        REACTION:
-        TEXT: missing reaction
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.skills == []           # missing trigger/procedure
     assert c.must_remember == []    # bad kind + empty memo
-    assert c.diary == []        # bad weight + missing reaction
-
-
-def test_parse_emotional_text_falls_back_to_reaction() -> None:
-    bundle = (
-        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
-        "@@EMOTIONAL@@\nWEIGHT: -4\nREACTION: frustrated\n"
-    )
-    c = lc.parse_extraction(bundle, now=NOW, source="x")
-    assert len(c.diary) == 1
-    assert c.diary[0].text == "frustrated"  # TEXT absent → reaction
+    assert c.diary == []        # bad weight + missing TEXT
 
 
 def test_parse_multiline_value_continuation() -> None:

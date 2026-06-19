@@ -63,9 +63,9 @@ def _must(text, kind="preference", imp=1.0) -> MustRememberEntry:
                              source="x", kind=kind, importance=imp)
 
 
-def _emo(text, weight, reaction="felt") -> DiaryEntry:
+def _emo(text, weight) -> DiaryEntry:
     return DiaryEntry(text=text, created_at=NOW, last_used=NOW, source="x",
-                          weight=weight, reaction=reaction)
+                          weight=weight)
 
 
 # ----- full rebuild ---------------------------------------------------------

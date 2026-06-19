@@ -70,13 +70,13 @@ MEMO: <= {memo_max_words} words; one sentence; specific>
 
 If none, write exactly `NONE` under the marker.
 
-### @@EMOTIONAL@@ — your reactions (0 to 3)
-How this session felt to you, as {agent_name}. One block per reaction,
-blank line between:
+### @@EMOTIONAL@@ — your diary (0 to 3)
+A short, dated diary note, as {agent_name}: what you did / why / learned /
+could-do-better, with how it felt folded into the words and the sign of the
+weight. One block per note, blank line between:
 
 ```
 WEIGHT: <signed number in [-{weight_cap}, +{weight_cap}]; + = liked/for, - = disliked/against>
-REACTION: <a few words naming the feeling>
 TEXT: <= {reaction_max_words} words; what happened and your reaction to it>
 ```
 

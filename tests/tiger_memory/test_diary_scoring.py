@@ -58,7 +58,7 @@ def _cfg(tmp_path: Path, *, cap: float = 10.0, rate: float = 0.1):
 def _emo(weight: float, last_used: str = NOW) -> DiaryEntry:
     return DiaryEntry(
         text="did x", created_at=NOW, last_used=last_used, source="extract",
-        weight=weight, reaction="ok",
+        weight=weight,
     )
 
 

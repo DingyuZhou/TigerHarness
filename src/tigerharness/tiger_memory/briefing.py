@@ -198,11 +198,11 @@ def _render_diary(entries: list[DiaryEntry], top: int) -> str:
     ordered = sorted(entries, key=lambda e: abs(float(e.weight)), reverse=True)
     if top > 0:
         ordered = ordered[:top]
-    lines = ["# Emotional log (strongest feelings first)", ""]
+    lines = ["# Diary (strongest feelings first)", ""]
     for e in ordered:
         sign = "+" if e.weight >= 0 else ""
         lines.append(
-            f"- **({sign}{float(e.weight):.1f}) {e.reaction}** — {e.text}"
+            f"- **({sign}{float(e.weight):.1f})** {e.text}"
         )
     return "\n".join(lines) + "\n"
 

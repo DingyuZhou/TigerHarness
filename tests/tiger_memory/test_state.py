@@ -64,7 +64,7 @@ def test_compute_state_with_entries(tmp_path: Path) -> None:
     ])
     bstore.save_atomic(STORE_DIARY, [
         DiaryEntry(text="e", created_at=NOW, last_used=NOW, source="x",
-                       weight=2.0, reaction="r"),
+                       weight=2.0),
     ])
     payload = compute_state(cfg, store)
     assert payload["stores"][STORE_SKILLS]["count"] == 1

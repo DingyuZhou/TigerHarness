@@ -442,7 +442,6 @@ def score_seed_candidates(
                 last_used=src,
                 source=IMPORT_SOURCE,
                 weight=weight,
-                reaction=e.reaction,
             )
         )
 

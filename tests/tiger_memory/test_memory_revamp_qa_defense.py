@@ -146,7 +146,7 @@ def _mr(kind, text, last_used=NOW, imp=0.0):
 def _emo(weight, text, last_used=NOW):
     return DiaryEntry(
         text=text, created_at=NOW, last_used=last_used, source="extract",
-        weight=weight, reaction="r",
+        weight=weight,
     )
 
 
@@ -549,7 +549,7 @@ def test_length_chars_counts_unicode_codepoints_not_bytes(
     UTF-8 bytes — so an emoji counts as one character."""
     bs = _make_store(tmp_path)
     e = _emo(1.0, "café☕日本語")  # 8 code points, many more bytes
-    assert bs.length_chars([e]) == len("café☕日本語") + len("r")
+    assert bs.length_chars([e]) == len("café☕日本語")
 
 
 def test_empty_store_length_is_zero_and_not_over_overflow(
@@ -858,7 +858,7 @@ def test_load_non_utf8_byte_does_not_crash_store(
 
 
 def test_load_skips_block_failing_validate(tmp_path: Path) -> None:
-    """QI-1: an entry that PARSES but is schema-invalid (empty ``reaction``)
+    """QI-1: an entry that PARSES but is schema-invalid (empty ``text``)
     must be skipped on load, not silently kept. Load is now symmetric with
     ``save_atomic`` — the good sibling survives, the invalid one is dropped."""
     bs = _make_store(tmp_path)
@@ -869,32 +869,30 @@ def test_load_skips_block_failing_validate(tmp_path: Path) -> None:
             """\
             ---
             id: emogood
-            store: emotional
+            store: diary
             created_at: 2026-06-17T00:00:00Z
             last_used: 2026-06-17T00:00:00Z
             source: extract
             weight: 2.0
-            reaction: glad it shipped
             ---
-            good emotional body
+            good diary body
             <!-- tiger-memory-entry -->
             ---
             id: emobad
-            store: emotional
+            store: diary
             created_at: 2026-06-17T00:00:00Z
             last_used: 2026-06-17T00:00:00Z
             source: extract
             weight: 1.0
-            reaction: ""
             ---
-            bad emotional body
+            
             """
         )
     )
     got = bs.load("diary")
     assert any(e.id == "emogood" for e in got)
     assert not any(e.id == "emobad" for e in got), (
-        "an empty-reaction entry must be skipped on load (load/save symmetry)"
+        "an empty-text entry must be skipped on load (load/save symmetry)"
     )
 
 
@@ -910,7 +908,7 @@ def test_load_skips_nan_weight_entry(tmp_path: Path) -> None:
             """\
             ---
             id: emofinite
-            store: emotional
+            store: diary
             created_at: 2026-06-17T00:00:00Z
             last_used: 2026-06-17T00:00:00Z
             source: extract
@@ -921,7 +919,7 @@ def test_load_skips_nan_weight_entry(tmp_path: Path) -> None:
             <!-- tiger-memory-entry -->
             ---
             id: emonan
-            store: emotional
+            store: diary
             created_at: 2026-06-17T00:00:00Z
             last_used: 2026-06-17T00:00:00Z
             source: extract
@@ -954,7 +952,7 @@ def test_meditate_does_not_crash_on_preexisting_invalid_entry(
             """\
             ---
             id: emoA
-            store: emotional
+            store: diary
             created_at: 2026-06-17T00:00:00Z
             last_used: 2026-06-17T00:00:00Z
             source: extract
@@ -965,7 +963,7 @@ def test_meditate_does_not_crash_on_preexisting_invalid_entry(
             <!-- tiger-memory-entry -->
             ---
             id: emoB
-            store: emotional
+            store: diary
             created_at: 2026-06-17T00:00:00Z
             last_used: 2026-06-17T00:00:00Z
             source: extract
@@ -976,12 +974,11 @@ def test_meditate_does_not_crash_on_preexisting_invalid_entry(
             <!-- tiger-memory-entry -->
             ---
             id: emoinvalid
-            store: emotional
+            store: diary
             created_at: 2026-06-17T00:00:00Z
             last_used: 2026-06-17T00:00:00Z
             source: extract
             weight: 1.0
-            reaction: ""
             ---
             invalid entry with empty reaction
             """
@@ -993,7 +990,7 @@ def test_meditate_does_not_crash_on_preexisting_invalid_entry(
     survivors = bs.load("diary")
     # The invalid entry never reached meditation; good entries persisted.
     assert not any(e.id == "emoinvalid" for e in survivors)
-    assert all(e.reaction.strip() for e in survivors)
+    assert all(e.text.strip() for e in survivors)
     assert log.skipped_no_op is False
 
 

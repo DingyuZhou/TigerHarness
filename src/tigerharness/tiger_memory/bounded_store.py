@@ -373,7 +373,7 @@ def _entry_chars(entry: BaseEntry) -> int:
     """
     total = len(entry.text)
     fm = entry.frontmatter()
-    for key in ("name", "trigger", "procedure", "reaction"):
+    for key in ("name", "trigger", "procedure"):
         val = fm.get(key)
         if isinstance(val, str):
             total += len(val)

@@ -208,15 +208,14 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
         )
     emo: list[DiaryEntry] = []
     for b in _section_blocks(sections[STORE_DIARY]):
-        reaction = b.get("REACTION")
-        body = b.get("TEXT") or reaction
+        body = b.get("TEXT")
         weight = _parse_weight(b.get("WEIGHT"))
-        if weight is None or not reaction or not body:
+        if weight is None or not body:
             continue
         emo.append(
             DiaryEntry(
                 text=body, created_at=now, last_used=now, source=source,
-                weight=weight, reaction=reaction,
+                weight=weight,
             )
         )
     return Candidates(skills=skills, must_remember=must, diary=emo)

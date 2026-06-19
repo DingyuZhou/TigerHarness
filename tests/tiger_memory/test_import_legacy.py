@@ -110,7 +110,7 @@ def _mr(src=IMPORT_SOURCE):
 def _emo(src=IMPORT_SOURCE, weight=3.0):
     return DiaryEntry(
         text="shipping the revamp felt great", created_at=SRC, last_used=SRC,
-        source=src, weight=weight, reaction="proud",
+        source=src, weight=weight,
     )
 
 
@@ -256,7 +256,7 @@ def _raw_mr(src=SRC, kind="owner_explicit", importance=5.0):
 def _raw_emo(src=SRC, weight=8.0):
     return DiaryEntry(
         text="shipping the revamp felt great", created_at=src, last_used=src,
-        source="reauthor", weight=weight, reaction="proud",
+        source="reauthor", weight=weight,
     )
 
 
@@ -311,7 +311,7 @@ def test_seed_emotional_not_double_decayed_matches_organic(tmp_path: Path) -> No
     assert seeded.weight == clamp_weight(8.0, cfg)  # stored raw, not pre-decayed
     organic = DiaryEntry(
         text="x", created_at=old, last_used=old, source="extract",
-        weight=8.0, reaction="r",
+        weight=8.0,
     )
     # single rank-time decay is identical for both -> intended 5.0, not 2.0.
     assert decay_entry(seeded, NOW, cfg) == decay_entry(organic, NOW, cfg) == 5.0
@@ -395,7 +395,7 @@ def test_score_falls_back_to_now_when_no_source_date(tmp_path: Path) -> None:
     # an empty timestamp, which would fail validation).
     raw_emo = DiaryEntry(
         text="neutral note", created_at="", last_used="", source="reauthor",
-        weight=2.0, reaction="meh",
+        weight=2.0,
     )
     out = score_seed_candidates(_raw(emo=[raw_emo]), cfg=cfg, now=NOW)
     e = out.diary[0]

@@ -385,7 +385,7 @@ def _emo_entry(text: str, weight: float):
     return DiaryEntry(
         text=text, created_at="2026-06-17T00:00:00Z",
         last_used="2026-06-17T00:00:00Z", source="x",
-        weight=weight, reaction="r",
+        weight=weight,
     )
 
 
