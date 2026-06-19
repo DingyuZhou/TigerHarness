@@ -25,7 +25,7 @@ _BUNDLE = dedent("""\
     @@MUST_REMEMBER@@
     KIND: decision
     MEMO: store lives in-repo
-    @@EMOTIONAL@@
+    @@DIARY@@
     WEIGHT: 2
     REACTION: ok
     TEXT: shipped a thing

@@ -432,7 +432,7 @@ class _BundleSummarizer(Summarizer):
     """A scripted summarizer emitting one valid re-author bundle per call.
 
     The deterministic ``MockSummarizer`` returns prose bullets that do NOT
-    satisfy the strict ``@@SKILLS@@/.../@@EMOTIONAL@@`` marker contract (so the
+    satisfy the strict ``@@SKILLS@@/.../@@DIARY@@`` marker contract (so the
     re-author of a rollup yields no skill/emotional seeds under ``--mock`` — only
     the mechanical pins seed). This stand-in returns a full, parseable bundle so
     the end-to-end "seeds all three stores" path is exercised.
@@ -452,7 +452,7 @@ class _BundleSummarizer(Summarizer):
             "KIND: decision\n"
             "MEMO: migration is a fresh start with a one-off import seed\n"
             "\n"
-            "@@EMOTIONAL@@\n"
+            "@@DIARY@@\n"
             "WEIGHT: 6\n"
             "REACTION: proud\n"
             "TEXT: shipping the bounded-store revamp felt great\n"

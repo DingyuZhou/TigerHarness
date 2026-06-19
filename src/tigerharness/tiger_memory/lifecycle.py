@@ -87,8 +87,8 @@ class Decision:
 # section markers, in this order.
 MARK_SKILLS = "@@SKILLS@@"
 MARK_MUST_REMEMBER = "@@MUST_REMEMBER@@"
-MARK_EMOTIONAL = "@@EMOTIONAL@@"
-_MARKERS = (MARK_SKILLS, MARK_MUST_REMEMBER, MARK_EMOTIONAL)
+MARK_DIARY = "@@DIARY@@"
+_MARKERS = (MARK_SKILLS, MARK_MUST_REMEMBER, MARK_DIARY)
 
 
 class ExtractionParseError(ValueError):
@@ -129,7 +129,7 @@ def _split_sections(text: str) -> dict[str, str]:
             pos[stripped] = i
     if any(m not in pos for m in _MARKERS):
         raise ExtractionParseError("missing one or more section markers")
-    i_s, i_m, i_e = pos[MARK_SKILLS], pos[MARK_MUST_REMEMBER], pos[MARK_EMOTIONAL]
+    i_s, i_m, i_e = pos[MARK_SKILLS], pos[MARK_MUST_REMEMBER], pos[MARK_DIARY]
     if not (i_s < i_m < i_e):
         raise ExtractionParseError("section markers out of order")
     return {

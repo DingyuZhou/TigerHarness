@@ -36,7 +36,7 @@ trailing commentary.
 <skill blocks, or NONE>
 @@MUST_REMEMBER@@
 <must-remember blocks, or NONE>
-@@EMOTIONAL@@
+@@DIARY@@
 <emotional blocks, or NONE>
 ```
 
@@ -70,7 +70,7 @@ MEMO: <= {memo_max_words} words; one sentence; specific>
 
 If none, write exactly `NONE` under the marker.
 
-### @@EMOTIONAL@@ — your diary (0 to 3)
+### @@DIARY@@ — your diary (0 to 3)
 A short, dated diary note, as {agent_name}: what you did / why / learned /
 could-do-better, with how it felt folded into the words and the sign of the
 weight. One block per note, blank line between:

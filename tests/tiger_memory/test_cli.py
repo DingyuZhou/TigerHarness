@@ -49,7 +49,7 @@ _BUNDLE = dedent("""\
     @@MUST_REMEMBER@@
     KIND: decision
     MEMO: d
-    @@EMOTIONAL@@
+    @@DIARY@@
     NONE
 """)
 

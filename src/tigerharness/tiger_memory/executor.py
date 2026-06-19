@@ -2,7 +2,7 @@
 
 The subscription-safe sweep runs extraction inside an isolated, in-persona
 Task sub-agent (design §2): it reads one staged transcript prompt, emits the
-``@@SKILLS@@ / @@MUST_REMEMBER@@ / @@EMOTIONAL@@`` bundle, and turns it into
+``@@SKILLS@@ / @@MUST_REMEMBER@@ / @@DIARY@@`` bundle, and turns it into
 stored entries through THIS entry point — typically via a ``tiger-memory``
 CLI that wraps it, so the bulky bundle never transits the driver's context.
 

@@ -93,7 +93,7 @@ _FULL_BUNDLE = dedent("""\
     KIND: preference
     MEMO: targeted git add, never -A
 
-    @@EMOTIONAL@@
+    @@DIARY@@
     WEIGHT: 7
     TEXT: landed the bounded-store substrate clean and green
 """)
@@ -117,7 +117,7 @@ def test_parse_full_bundle() -> None:
 
 def test_parse_all_none() -> None:
     c = lc.parse_extraction(
-        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@EMOTIONAL@@\nNONE\n",
+        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@DIARY@@\nNONE\n",
         now=NOW, source="x",
     )
     assert c.is_empty()
@@ -125,7 +125,7 @@ def test_parse_all_none() -> None:
 
 def test_parse_missing_marker_raises() -> None:
     with pytest.raises(lc.ExtractionParseError, match="missing"):
-        lc.parse_extraction("@@SKILLS@@\nNONE\n@@EMOTIONAL@@\nNONE\n", now=NOW, source="x")
+        lc.parse_extraction("@@SKILLS@@\nNONE\n@@DIARY@@\nNONE\n", now=NOW, source="x")
 
 
 def test_parse_empty_raises() -> None:
@@ -134,7 +134,7 @@ def test_parse_empty_raises() -> None:
 
 
 def test_parse_out_of_order_raises() -> None:
-    bundle = "@@EMOTIONAL@@\nNONE\n@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
+    bundle = "@@DIARY@@\nNONE\n@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
     with pytest.raises(lc.ExtractionParseError, match="out of order"):
         lc.parse_extraction(bundle, now=NOW, source="x")
 
@@ -151,7 +151,7 @@ def test_parse_skips_malformed_blocks() -> None:
         KIND: decision
         MEMO:
 
-        @@EMOTIONAL@@
+        @@DIARY@@
         WEIGHT: not-a-number
         TEXT: y
 
@@ -173,7 +173,7 @@ def test_parse_multiline_value_continuation() -> None:
 
         @@MUST_REMEMBER@@
         NONE
-        @@EMOTIONAL@@
+        @@DIARY@@
         NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
@@ -272,7 +272,7 @@ def test_ingest_empty_is_noop(tmp_path: Path) -> None:
     store = Store(cfg.store.root)
     store.init_layout()
     empty = lc.parse_extraction(
-        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@EMOTIONAL@@\nNONE\n",
+        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@DIARY@@\nNONE\n",
         now=NOW, source="x",
     )
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, empty)

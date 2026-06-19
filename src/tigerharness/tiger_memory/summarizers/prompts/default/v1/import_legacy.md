@@ -33,7 +33,7 @@ trailing commentary.
 <skill blocks, or NONE>
 @@MUST_REMEMBER@@
 <must-remember blocks, or NONE>
-@@EMOTIONAL@@
+@@DIARY@@
 <emotional blocks, or NONE>
 ```
 
@@ -67,7 +67,7 @@ MEMO: <= {memo_max_words} words; one sentence; specific>
 
 If none, write exactly `NONE` under the marker.
 
-### @@EMOTIONAL@@ — your reactions (0 to 3)
+### @@DIARY@@ — your reactions (0 to 3)
 How this period felt to you, as {agent_name}. One block per reaction,
 blank line between:
 

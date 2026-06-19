@@ -710,7 +710,7 @@ def _reauthor_one(
     The single LLM call per rollup (mock in CI), mirroring
     ``lifecycle.extract_candidates``: fill the ``import_legacy.md`` template with
     the rollup prose, call the summarizer, and parse the strict
-    ``@@SKILLS@@/@@MUST_REMEMBER@@/@@EMOTIONAL@@`` bundle via the SHARED
+    ``@@SKILLS@@/@@MUST_REMEMBER@@/@@DIARY@@`` bundle via the SHARED
     :func:`lifecycle.parse_extraction`. Every parsed entry is stamped with the
     rollup's source date (``created_at``) so the scorer can backdate it; the
     provenance ``source`` is set at scoring time, not here. A backend error or a
