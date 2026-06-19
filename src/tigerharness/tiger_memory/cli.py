@@ -159,6 +159,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Repair mechanical drift + quarantine non-mechanical to "
              "<store>.rejected.md (no silent loss).")
 
+    p_mig = sub.add_parser(
+        "migrate-emotional-to-diary",
+        help="Convert legacy emotional.md -> dated-bullet diary.md.")
+    p_mig.add_argument(
+        "--apply", action="store_true",
+        help="Perform it (snapshot .bak, write diary.md, mark done). "
+             "Default: dry-run (preview only, nothing written).")
+
     args = parser.parse_args(argv)
 
     try:
@@ -199,8 +207,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_sweep_complete(cfg, now=args.now)
     if args.cmd == "sweep-release":
         return _cmd_sweep_release(cfg)
-    if args.cmd == "check":  # pragma: no branch  # exhaustive dispatch
+    if args.cmd == "check":
         return _cmd_check(cfg, store, fix=args.fix)
+    if args.cmd == "migrate-emotional-to-diary":  # pragma: no branch  # exhaustive
+        return _cmd_migrate_diary(cfg, store, apply=args.apply)
     return 2  # pragma: no cover  # argparse rejects unknown subcommands first
 
 
@@ -245,6 +255,23 @@ def _cmd_check(cfg: Config, store: Store, *, fix: bool) -> int:
     if fix:
         return 0
     return 0 if report.ok else 1
+
+
+def _cmd_migrate_diary(cfg: Config, store: Store, *, apply: bool) -> int:
+    """Convert legacy emotional.md -> diary.md (dry-run unless ``--apply``).
+
+    Exit 0 on a clean dry-run/apply or a no-op skip; exit 1 if accounting does
+    not balance (a source block neither kept nor explicitly forgotten).
+    """
+    from .migrate_emotional_to_diary import migrate_store
+    res = migrate_store(cfg, store, apply=apply)
+    print(json.dumps({
+        "persona": res.persona, "applied": res.applied,
+        "skipped_reason": res.skipped_reason, "source_blocks": res.source_blocks,
+        "converted": res.converted, "kept": res.kept, "forgotten": res.forgotten,
+        "no_loss": res.no_loss,
+    }, indent=2))
+    return 0 if (res.skipped_reason or res.no_loss) else 1
 
 
 def _cmd_import_legacy(cfg: Config, store: Store, *, mock: bool, force: bool) -> int:
