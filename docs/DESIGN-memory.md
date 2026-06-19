@@ -164,7 +164,16 @@ in **characters**, never tokens (§8).
   line); the store's **validate-on-write round-trip** (serialize -> re-parse
   -> validate) REFUSES to persist a store that does not round-trip clean. The
   compact format intentionally drops per-entry `id`/`source` (only date /
-  weight / note persist).
+  weight / note persist). Example `diary.md`:
+
+  ```
+  ## 2026-06-17
+  - (+7) Drove the harness to true 100% — patient thoroughness, earned not declared.
+  - (-5) Agents declaring success on near-misses; optimism that skips verification bugs me.
+
+  ## 2026-06-18
+  - (+4) Reframed the diary store with the Operator — simpler than what we shipped.
+  ```
 - **Signed scalar, hard cap [-10, +10]** (`diary.clamp_weight`): positive =
   *for* / liked, negative = *against* / disliked, `0` = neutral. Repeated
   merges can never inflate past ±10.

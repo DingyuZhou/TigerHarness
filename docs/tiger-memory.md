@@ -191,7 +191,7 @@ verbs (`plan` / `ingest-extraction` / `ingest-staged`) are driven by the
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
 | `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free) |
 | `sweep-plan` / `sweep-done` / `sweep-complete` / `sweep-release` | team-sweep gating (non-AI) |
-| `check [--fix]` | validate the 3 stores' on-disk format; exit non-zero if any invalid. `--fix` repairs mechanical drift + quarantines non-mechanical to `<store>.rejected.md` (no silent loss). Runs as the per-persona gate at the end of every `rebuild` and in CI / pre-commit |
+| `check [--fix]` | validate the 3 stores' on-disk format; exit non-zero if any invalid. `--fix` repairs mechanical drift + quarantines non-mechanical to `<store>.rejected.md` (no silent loss — the quarantined block stays in the sidecar for the persona's next in-character meditation to re-author; it is not auto-restored). Runs as the per-persona gate at the end of every `rebuild` and in CI / pre-commit |
 | `migrate-emotional-to-diary [--apply]` | one-off legacy `emotional.md` -> dated-bullet `diary.md`. **`--dry-run` is the default** (preview only); `--apply` snapshots `emotional.md.bak`, writes `diary.md`, marks done (idempotent), takes the diary store-lock and refuses if a sweep holds it |
 
 The retired verbs `bootstrap`, `search`, `drill`, `tree`, `raw`,
@@ -347,7 +347,7 @@ tiger-memory --config <persona-config> migrate-emotional-to-diary --apply    # p
 
 - **`--dry-run` is the default**: it parses + previews
   (`source_blocks` / `converted` / `kept` / `forgotten` / `no_loss`), writing
-  nothing. Run it on every persona first.
+  nothing. Run it on every persona first, and **CONFIRM `no_loss: true`** (i.e. `source_blocks == kept + forgotten`) before `--apply`.
 - **`--apply`** snapshots `emotional.md` → `emotional.md.bak`, writes the
   validated `diary.md`, removes `emotional.md`, and marks a durable
   `diary_migrated` state marker (**idempotent** — a re-run is a no-op). It
@@ -363,6 +363,11 @@ tiger-memory --config <persona-config> migrate-emotional-to-diary --apply    # p
 Safe order: **dry-run all personas → review the previews → `--apply` per
 persona when no sweep is running → `tiger-memory check` to confirm valid.** The
 live `--apply` over a real roster is the Operator's call.
+
+> **Verify forgetting kept it bounded.** After a sweep/meditation, a diary
+> is in-bound iff its character length is `<= max_length` (4000) AND
+> `tiger-memory check` exits 0 — the bound is enforced by forgetting, so
+> this is the check a verifier runs, not an assumption.
 
 `tigerharness init` already scaffolds new personas with the new model (no
 retired keys), so this migration only applies to configs created before the
