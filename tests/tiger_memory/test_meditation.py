@@ -191,13 +191,13 @@ def test_merge_emotional_raises_magnitude_clamped(tmp_path: Path) -> None:
     # The bodies share content words ("loved the clean api ...") so the QI-2
     # prefilter lets the pair reach the (scripted) summarizer — a realistic
     # near-duplicate always shares tokens.
-    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
+    bs = _make_store(tmp_path, emo_max=60, emo_overflow=65)
     a = _emo(8.0, "loved the clean api design")
     b = _emo(7.0, "loved that clean api so much")
     bs.save_atomic("diary", [a, b])
     summ = ScriptedSummarizer(similar_pairs=[(a.text, b.text)])
     log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
-    assert b.id in log.merged and log.merged[b.id] == a.id
+    assert len(log.merged) == 1  # b folded into a (ids regen on load)
     assert log.forgotten == []  # survivor fits; no forget
     survivors = bs.load("diary")
     assert len(survivors) == 1
@@ -290,28 +290,28 @@ def test_ordering_relevance_before_forget_allows_downgraded_drop(
 
 
 def test_compact_shortens_verbose_survivor(tmp_path: Path) -> None:
-    bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
+    bs = _make_store(tmp_path, emo_max=30, emo_overflow=40)
     long = _emo(9.0, "x" * 40)  # over max, strong feeling (kept)
     bs.save_atomic("diary", [long])
     summ = ScriptedSummarizer(compact_map={"x" * 40: "short"})
     log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
-    assert long.id in log.compacted
+    assert len(log.compacted) == 1
     survivors = bs.load("diary")
     assert survivors[0].text == "short"
     assert log.over_max is False
 
 
 def test_compact_rejected_when_not_shorter(tmp_path: Path) -> None:
-    bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
+    bs = _make_store(tmp_path, emo_max=30, emo_overflow=40)
     long = _emo(9.0, "y" * 40)
     bs.save_atomic("diary", [long])
     # compact returns same text -> not accepted; falls through to forget.
     summ = ScriptedSummarizer(compact_map={})  # echoes body unchanged
     log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
-    assert long.id not in log.compacted
+    assert log.compacted == []
     # Single strong entry can't be forgotten below max either (only entry):
     # it is dropped because emotional has no guard -> store empties.
-    assert long.id in log.forgotten
+    assert len(log.forgotten) == 1 and bs.load("diary") == []
 
 
 def test_skills_store_skips_compaction(tmp_path: Path) -> None:
@@ -332,15 +332,15 @@ def test_skills_store_skips_compaction(tmp_path: Path) -> None:
 
 
 def test_forget_drops_lowest_ranked_first(tmp_path: Path) -> None:
-    bs = _make_store(tmp_path, emo_max=20, emo_overflow=30)
+    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
     weak = _emo(0.5, "a" * 15)
     strong = _emo(9.0, "b" * 15)
     bs.save_atomic("diary", [weak, strong])  # 30 chars > max 20
     summ = ScriptedSummarizer()
     log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
     survivors = bs.load("diary")
-    assert weak.id in log.forgotten
-    assert [e.id for e in survivors] == [strong.id]
+    assert len(log.forgotten) == 1  # the weak entry (ids regen on load)
+    assert len(survivors) == 1 and survivors[0].weight == 9.0
 
 
 # ----- QI-2: merge prefilter keeps summarizer calls sub-quadratic -----------
@@ -462,7 +462,7 @@ def test_merge_prefilter_disjoint_tokens_gates_all(tmp_path: Path) -> None:
 def test_merge_prefilter_lets_similar_pairs_merge(tmp_path: Path) -> None:
     """The prefilter must not block a genuine merge: two entries sharing
     content words reach the summarizer and (when it judges YES) still merge."""
-    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
+    bs = _make_store(tmp_path, emo_max=60, emo_overflow=70)
     a = _emo(8.0, "shipped the bounded memory revamp")
     b = _emo(7.0, "bounded memory revamp shipped today")
     bs.save_atomic("diary", [a, b])
@@ -470,7 +470,7 @@ def test_merge_prefilter_lets_similar_pairs_merge(tmp_path: Path) -> None:
     log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
     # The shared words ("bounded memory revamp shipped") passed the gate, the
     # scripted summarizer judged YES, so b folded into a (and clamped to cap).
-    assert b.id in log.merged and log.merged[b.id] == a.id
+    assert len(log.merged) == 1  # b folded into a (ids regen on load)
     assert _similarity_calls(summ) >= 1  # the pair DID reach the LLM
     survivors = bs.load("diary")
     assert len(survivors) == 1 and survivors[0].weight == 10.0
@@ -487,7 +487,7 @@ def test_merge_similar_prose_sharing_stopwords_still_merges(
     going green; they share the content words ``deploy``/``green`` (plus
     stopwords), so the gate defers them to the LLM, which judges YES and merges.
     """
-    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50)
+    bs = _make_store(tmp_path, emo_max=60, emo_overflow=70)
     a = _emo(8.0, "the deploy finally went green")
     b = _emo(7.0, "so glad the deploy was green")
     bs.save_atomic("diary", [a, b])
@@ -495,7 +495,7 @@ def test_merge_similar_prose_sharing_stopwords_still_merges(
     log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
     # Shared content words (deploy/green) passed the gate despite the entries
     # also sharing stopwords; the scripted summarizer judged YES, so b merged.
-    assert b.id in log.merged and log.merged[b.id] == a.id
+    assert len(log.merged) == 1  # b folded into a (ids regen on load)
     assert _similarity_calls(summ) >= 1  # the pair DID reach the LLM
     survivors = bs.load("diary")
     assert len(survivors) == 1 and survivors[0].weight == 10.0

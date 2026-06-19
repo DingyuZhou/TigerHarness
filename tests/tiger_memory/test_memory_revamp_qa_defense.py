@@ -339,7 +339,7 @@ def test_decay_entry_unparseable_last_used_is_clamped_identity(
 def test_merge_clamps_at_cap_on_combine(tmp_path: Path) -> None:
     """Merging two strong same-sign feelings clamps the survivor at the cap —
     repeated merges can never inflate past ±cap (design §4.3)."""
-    bs = _make_store(tmp_path, emo_max=40, emo_overflow=50, cap=10)
+    bs = _make_store(tmp_path, emo_max=60, emo_overflow=65, cap=10)
     # Share content words so the QI-2 prefilter lets the pair reach the
     # (scripted) summarizer — a real near-duplicate always shares tokens.
     a = _emo(8.0, "loved the clean api design")
@@ -549,7 +549,9 @@ def test_length_chars_counts_unicode_codepoints_not_bytes(
     UTF-8 bytes — so an emoji counts as one character."""
     bs = _make_store(tmp_path)
     e = _emo(1.0, "café☕日本語")  # 8 code points, many more bytes
-    assert bs.length_chars([e]) == len("café☕日本語")
+    exp = f"## {e.last_used[:10]}\n- (+1) {e.text}\n"
+    # length is the serialized diary file, counted in CODE POINTS not bytes.
+    assert bs.length_chars([e]) == len(exp) < len(exp.encode("utf-8"))
 
 
 def test_empty_store_length_is_zero_and_not_over_overflow(
@@ -858,142 +860,38 @@ def test_load_non_utf8_byte_does_not_crash_store(
 
 
 def test_load_skips_block_failing_validate(tmp_path: Path) -> None:
-    """QI-1: an entry that PARSES but is schema-invalid (empty ``text``)
-    must be skipped on load, not silently kept. Load is now symmetric with
-    ``save_atomic`` — the good sibling survives, the invalid one is dropped."""
+    """The diary store is lenient WHOLE-FILE: the compact dated-bullet format
+    can't be partially parsed, so a malformed file loads EMPTY (+ warning)
+    rather than raising — validate-on-write means a bad file only comes from
+    external corruption, which `tiger-memory check --fix` quarantines/repairs."""
     bs = _make_store(tmp_path)
     path = bs.store.paths.journal / "diary.md"
     bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        dedent(
-            """\
-            ---
-            id: emogood
-            store: diary
-            created_at: 2026-06-17T00:00:00Z
-            last_used: 2026-06-17T00:00:00Z
-            source: extract
-            weight: 2.0
-            ---
-            good diary body
-            <!-- tiger-memory-entry -->
-            ---
-            id: emobad
-            store: diary
-            created_at: 2026-06-17T00:00:00Z
-            last_used: 2026-06-17T00:00:00Z
-            source: extract
-            weight: 1.0
-            ---
-            
-            """
-        )
-    )
-    got = bs.load("diary")
-    assert any(e.id == "emogood" for e in got)
-    assert not any(e.id == "emobad" for e in got), (
-        "an empty-text entry must be skipped on load (load/save symmetry)"
-    )
-
-
+    # a bullet before any day header is malformed -> whole file unparseable.
+    path.write_text("- (+2) orphan bullet with no day header\n")
+    assert bs.load("diary") == []
 def test_load_skips_nan_weight_entry(tmp_path: Path) -> None:
-    """QI-1 / GAP-3 load side: a ``weight: .nan`` block parses but fails
-    ``validate`` (non-finite), so load skips it — a NaN entry can never reach
-    the keep-rank ordering or the next save."""
+    """GAP-3 load side, dated-bullet format: a non-numeric / over-cap inline
+    weight is unparseable, so the malformed file loads empty — a NaN/over-cap
+    weight can never reach the keep-rank ordering or the next save."""
     bs = _make_store(tmp_path)
     path = bs.store.paths.journal / "diary.md"
     bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        dedent(
-            """\
-            ---
-            id: emofinite
-            store: diary
-            created_at: 2026-06-17T00:00:00Z
-            last_used: 2026-06-17T00:00:00Z
-            source: extract
-            weight: 9.0
-            reaction: strongest feeling
-            ---
-            finite body
-            <!-- tiger-memory-entry -->
-            ---
-            id: emonan
-            store: diary
-            created_at: 2026-06-17T00:00:00Z
-            last_used: 2026-06-17T00:00:00Z
-            source: extract
-            weight: .nan
-            reaction: poison
-            ---
-            nan body
-            """
-        )
-    )
-    got = bs.load("diary")
-    assert [e.id for e in got] == ["emofinite"]
-
-
+    path.write_text("## 2026-06-17\n- (.nan) poison weight\n")
+    assert bs.load("diary") == []
 def test_meditate_does_not_crash_on_preexisting_invalid_entry(
     tmp_path: Path,
 ) -> None:
-    """QI-1: a store carrying a previously-tolerated schema-invalid entry
-    (empty ``reaction``) used to crash meditation's FINAL ``save_atomic`` after
-    merge/forget already mutated state. With validate-on-load the invalid entry
-    is skipped on load, so meditation runs cleanly over only the good entries
-    and persists without raising."""
-    # emotional max_length=30, overflow_limit=50; push over overflow so
-    # meditation actually runs (not a no-op).
+    """A diary file that is malformed (external corruption) loads empty, so
+    meditation runs as a clean no-op over zero entries and never raises from a
+    final save_atomic over a poisoned store."""
     bs = _make_store(tmp_path, emo_max=30, emo_overflow=50)
     path = bs.store.paths.journal / "diary.md"
     bs.store.paths.journal.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        dedent(
-            """\
-            ---
-            id: emoA
-            store: diary
-            created_at: 2026-06-17T00:00:00Z
-            last_used: 2026-06-17T00:00:00Z
-            source: extract
-            weight: 2.0
-            reaction: reaction about the long first emotional memory entry
-            ---
-            the first emotional memory body that is fairly long
-            <!-- tiger-memory-entry -->
-            ---
-            id: emoB
-            store: diary
-            created_at: 2026-06-17T00:00:00Z
-            last_used: 2026-06-17T00:00:00Z
-            source: extract
-            weight: 3.0
-            reaction: reaction about the long second emotional memory entry
-            ---
-            the second emotional memory body that is also fairly long
-            <!-- tiger-memory-entry -->
-            ---
-            id: emoinvalid
-            store: diary
-            created_at: 2026-06-17T00:00:00Z
-            last_used: 2026-06-17T00:00:00Z
-            source: extract
-            weight: 1.0
-            ---
-            invalid entry with empty reaction
-            """
-        )
-    )
-    summ = ScriptedSummarizer()  # nothing similar/stale
-    # Must NOT raise EntryError from the final save_atomic.
-    log = meditate("diary", "ctx", MISSION, summ, bs.cfg, bs)
-    survivors = bs.load("diary")
-    # The invalid entry never reached meditation; good entries persisted.
-    assert not any(e.id == "emoinvalid" for e in survivors)
-    assert all(e.text.strip() for e in survivors)
-    assert log.skipped_no_op is False
-
-
+    path.write_text("garbage that is not a valid diary file\n")
+    log = meditate("diary", "ctx", MISSION, ScriptedSummarizer(), bs.cfg, bs)
+    assert bs.load("diary") == []
+    assert log.skipped_no_op is True
 def test_keep_rank_corrupt_timestamp_sinks_to_bottom(tmp_path: Path) -> None:
     """A corrupt last_used yields a -inf recency, so the entry sorts to the
     very bottom of the keep-rank (forgotten first), never raising."""

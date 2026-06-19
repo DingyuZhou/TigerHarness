@@ -39,7 +39,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from . import frontmatter
+from . import diary_format, frontmatter
 from .config import Config
 from .entries import (
     KIND_OWNER_EXPLICIT,
@@ -47,9 +47,11 @@ from .entries import (
     STORE_NAMES,
     STORE_SKILLS,
     BaseEntry,
+    DiaryEntry,
     EntryError,
     MustRememberEntry,
     entry_from_frontmatter,
+    new_id,
 )
 from .store import Store, _pid_alive
 
@@ -146,6 +148,8 @@ class BoundedStore:
                 store_name,
                 path,
             )
+        if store_name == STORE_DIARY:
+            return self._load_diary(text, path)
         out: list[BaseEntry] = []
         for block in _split_blocks(text):
             fm, body = frontmatter.parse(block)
@@ -165,14 +169,51 @@ class BoundedStore:
             out.append(entry)
         return out
 
+    def _load_diary(self, text: str, path: Path) -> list[BaseEntry]:
+        """Load the diary store from its dated-bullet text (design §4.3).
+
+        The diary diverges from the frontmatter machinery: it is the compact
+        ``## YYYY-MM-DD`` / ``- (±N) note`` format parsed by the single
+        :mod:`diary_format` parser. Lenient by design (the no-safety-net store
+        has no backup): a malformed file logs a warning and loads **empty**
+        rather than raising — ``tiger-memory check --fix`` quarantines the bad
+        content. Each bullet reconstructs a :class:`DiaryEntry` whose
+        ``last_used``/``created_at`` anchor on the bullet's day (the decay
+        anchor); ``id``/``source`` are not persisted in the compact format, so
+        a fresh id and ``source="diary"`` are synthesised.
+        """
+        try:
+            bullets = diary_format.parse(text, self.memory.diary.weight_cap)
+        except diary_format.DiaryFormatError as exc:
+            log.warning(
+                "tiger-memory: diary store file %s is malformed (%s); loading "
+                "empty — run `tiger-memory check --fix` to quarantine + repair.",
+                path,
+                exc,
+            )
+            return []
+        out: list[BaseEntry] = []
+        for b in bullets:
+            ts = f"{b.date}T00:00:00Z"
+            out.append(
+                DiaryEntry(
+                    text=b.text, created_at=ts, last_used=ts,
+                    source="diary", weight=b.weight, id=new_id(),
+                )
+            )
+        return out
+
     def save_atomic(
         self, store_name: str, entries: Sequence[BaseEntry]
     ) -> None:
         """Atomically rewrite *store_name* with *entries* (temp + ``os.replace``).
 
         Every entry is validated before any byte is written, so a malformed
-        entry aborts the whole save (no partial / corrupt store). Uses the
-        base store's ``atomic_write`` (write-tmp, fsync, ``os.replace``).
+        entry aborts the whole save (no partial / corrupt store). The diary
+        store serialises via :mod:`diary_format` with a **validate-on-write
+        round-trip** (serialize -> re-parse -> validate) that REFUSES to persist
+        a store that would not round-trip clean; the other two stores use the
+        frontmatter renderer. Uses ``atomic_write`` (write-tmp, fsync, replace).
         """
         path = self._store_path(store_name)
         for entry in entries:
@@ -183,6 +224,16 @@ class BoundedStore:
                 )
             self._validate_entry(entry)
         self.store.paths.journal.mkdir(parents=True, exist_ok=True)
+        if store_name == STORE_DIARY:
+            text = _diary_text(entries)
+            errs = diary_format.validate(text, self.memory.diary.weight_cap)
+            if errs:
+                raise EntryError(
+                    "diary store would not round-trip clean (refusing to "
+                    f"persist): {errs[0]}"
+                )
+            self.store.atomic_write(path, text)
+            return
         self.store.atomic_write(path, _serialize(entries))
 
     def _validate_entry(self, entry: BaseEntry) -> None:
@@ -198,10 +249,14 @@ class BoundedStore:
     def length_chars(self, entries: Iterable[BaseEntry]) -> int:
         """Total length of *entries* in CHARACTERS (design §8).
 
-        Counts the rendered text of each entry — body plus the structured
-        fields that contribute prose (the persona never reads token counts;
-        the bound is purely vendor-neutral character length).
+        For skills/must_remember, the sum of each entry's rendered text + prose
+        fields. For the diary store the bound is the **serialised file** length
+        (day headers + bullets), since that is what is loaded whole each
+        session. Purely vendor-neutral character length — never tokens.
         """
+        entries = list(entries)
+        if entries and entries[0].store_name == STORE_DIARY:
+            return len(_diary_text(entries))
         return sum(_entry_chars(e) for e in entries)
 
     def count(self, entries: Iterable[BaseEntry]) -> int:
@@ -338,6 +393,23 @@ class BoundedStore:
 
 
 # ----- module-level serialization helpers ----------------------------------
+
+
+def _diary_text(entries: Iterable[BaseEntry]) -> str:
+    """Serialise diary *entries* to the dated-bullet text (no validation).
+
+    Each entry's day is its ``last_used`` date (the decay anchor); the single
+    :mod:`diary_format` serializer groups by day (ascending) and renders the
+    ``- (±N) note`` bullets. Used by ``save_atomic`` (which then validate-on-
+    writes) and ``length_chars`` (which only measures).
+    """
+    bullets = [
+        diary_format.DiaryEntry(
+            date=e.last_used[:10], weight=float(e.weight), text=e.text
+        )
+        for e in entries
+    ]
+    return diary_format.serialize(bullets)
 
 
 def _serialize(entries: Sequence[BaseEntry]) -> str:

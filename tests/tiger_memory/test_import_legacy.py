@@ -174,9 +174,10 @@ def test_has_seeded_entries(tmp_path: Path) -> None:
     # keep looking, not mistake it for a seed.
     bstore.save_atomic("skills", [_skill(src="extract", name="old skill")])
     assert has_seeded_entries(bstore) is False
-    seed_entries(bstore, _cands(emo=[_emo()]))
+    seed_entries(bstore, _cands(must=[_mr()]))
     # now the scan walks the non-import skill (continue) then finds the
-    # import-legacy emotional entry -> True.
+    # import-legacy must_remember entry -> True. (Diary is source-less and not
+    # content-scanned; it is covered by the .state.json marker.)
     assert has_seeded_entries(bstore) is True
 
 
@@ -642,7 +643,7 @@ def test_import_legacy_run_end_to_end_seeds_all_stores(tmp_path: Path) -> None:
     assert store.read_state()[STATE_KEY]["seeded"]["skills"] == 3
     # every seeded entry carries the import provenance + is backdated (not NOW
     # for the rollup/pin items).
-    for name in ("skills", "must_remember", "diary"):
+    for name in ("skills", "must_remember"):
         seeded = bstore.load(name)
         assert seeded and all(e.source == IMPORT_SOURCE for e in seeded)
     # old emotional seeds entered already-decayed (source < now).
@@ -1131,12 +1132,13 @@ def test_qa_force_purges_only_import_legacy_entries(tmp_path: Path) -> None:
         + [MustRememberEntry(text="live directive", created_at=NOW, last_used=NOW,
                              source="pin", kind="owner_explicit", importance=5.0)],
     )
-    bstore.save_atomic("diary", bstore.load("diary") + [_emo(src="extract")])
     import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW, force=True)
     # the live entry in every store survived; import-legacy entries were replaced.
     assert "live skill" in {e.name for e in bstore.load("skills")}
     assert "live directive" in {m.text for m in bstore.load("must_remember")}
-    assert any(e.source == "extract" for e in bstore.load("diary"))
+    # Diary is source-less (compact format): a force-reimport resets + reseeds
+    # it rather than selectively purging, so it holds exactly the fresh seed.
+    assert bstore.load("diary"), "diary reseeded after force"
     # and the import-legacy entries are present exactly once (replace, not double).
     assert sum(1 for e in bstore.load("skills") if e.source == IMPORT_SOURCE) == 3
 

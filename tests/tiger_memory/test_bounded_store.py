@@ -182,8 +182,10 @@ def test_save_overwrites_atomically(bounded: BoundedStore) -> None:
 
 
 def test_length_chars_counts_characters(bounded: BoundedStore) -> None:
-    e = _emo(1.0)  # text "did x" (5); reaction dropped, not counted
-    assert bounded.length_chars([e]) == len("did x")
+    e = _emo(1.0)  # text "did x"; diary length is the serialized file (header + bullet)
+    assert bounded.length_chars([e]) == len(
+        f"## {e.last_used[:10]}\n- (+1) {e.text}\n"
+    )
 
 
 def test_length_chars_skill_counts_prose_fields(bounded: BoundedStore) -> None:
@@ -362,3 +364,15 @@ def test_forget_preserves_owner_when_other_dropped(
 def test_split_blocks_empty() -> None:
     assert _split_blocks("") == []
     assert _split_blocks("   \n  ") == []
+
+
+def test_save_diary_refuses_unroundtrippable(bounded: BoundedStore) -> None:
+    """validate-on-write: an entry that passes the schema gate but serialises
+    to a malformed diary file (here, a ``last_used`` that is not a valid date)
+    is REFUSED — the diary store can never persist a non-round-tripping file."""
+    bad = DiaryEntry(
+        text="note", created_at=NOW, last_used="not-a-date",
+        source="extract", weight=1.0,
+    )
+    with pytest.raises(EntryError, match="round-trip"):
+        bounded.save_atomic("diary", [bad])

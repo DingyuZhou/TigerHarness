@@ -109,7 +109,10 @@ def has_seeded_entries(bstore: BoundedStore) -> bool:
     actual store contents, so a hand-deleted marker over already-seeded stores
     still reports "imported" and blocks a re-seed.
     """
-    for store_name in STORE_NAMES:
+    # The diary store is source-less on disk (compact dated bullets), so its
+    # import-seeds can't be content-detected by ``source``; it is covered by the
+    # .state.json marker instead. Scan only the frontmatter stores here.
+    for store_name in (STORE_SKILLS, STORE_MUST_REMEMBER):
         for entry in bstore.load(store_name):
             if entry.source == IMPORT_SOURCE:
                 return True
@@ -128,6 +131,14 @@ def _purge_seeded_entries(bstore: BoundedStore) -> None:
     """
     for store_name in STORE_NAMES:
         existing = bstore.load(store_name)
+        if store_name == STORE_DIARY:
+            # Source-less compact format: import-seeds can't be told apart from
+            # live entries, so a force-reimport RESETS the diary (rebuildable;
+            # the legacy seed is re-authored). b1-dev-3/Mitsui may refine this to
+            # preserve live diary entries via a marker-tracked seed set.
+            if existing:
+                bstore.save_atomic(store_name, [])
+            continue
         kept = [e for e in existing if e.source != IMPORT_SOURCE]
         if len(kept) != len(existing):
             bstore.save_atomic(store_name, kept)
