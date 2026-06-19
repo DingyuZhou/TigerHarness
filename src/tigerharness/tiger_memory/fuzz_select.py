@@ -10,10 +10,11 @@ kept verbatim (incl. 0-weight), regardless of bound.
 from __future__ import annotations
 
 from . import diary_format
+from .bounded_store import _entry_chars
 from .config import Config
 from .diary import diary_keep_rank
-from .entries import DiaryEntry
-from .ranking import days_between
+from .entries import DiaryEntry, MustRememberEntry
+from .ranking import days_between, recency_score
 
 
 def _diary_len(entries: list[DiaryEntry]) -> int:
@@ -58,4 +59,50 @@ def select_diary_fuzz(
         keep_ids.discard(e.id)
         fuzzed.append(e)
     kept = [e for e in entries if e.id in keep_ids]
+    return kept, fuzzed
+
+
+def _mr_len(entries: list[MustRememberEntry]) -> int:
+    """must_remember length in CHARACTERS (matches BoundedStore.length_chars)."""
+    return sum(_entry_chars(e) for e in entries)
+
+
+def mr_keep_rank(entry: MustRememberEntry, now: str) -> tuple[float, float]:
+    """Keep-rank for a must_remember entry: ``(importance, recency)``.
+
+    Importance derives from the reinforcement repeat-count; recency is the
+    tie-break. Sorting ASCENDING is the fuzz order — low repeat-count (rarely
+    reinforced) and old items go first.
+    """
+    return (float(entry.importance), recency_score(entry.last_used, now))
+
+
+def select_mr_fuzz(
+    entries: list[MustRememberEntry],
+    downgraded_ids: set[str],
+    now: str,
+    cfg: Config,
+) -> tuple[list[MustRememberEntry], list[MustRememberEntry]]:
+    """Split must_remember *entries* into ``(kept, fuzzed)`` for meditation.
+
+    - Relevance-downgraded items (ids in *downgraded_ids*) are ALWAYS fuzzed:
+      demoted off the goal, they are eligible to age — routed to fuzzy (kept,
+      recoverable, re-sharpen via repeat-count if they recur), never deleted.
+    - Of the rest, when the store is over ``max_length`` the lowest keep-ranked
+      (low repeat-count / importance, then oldest) are routed to fuzz one at a
+      time until the survivors fit — never dropped (no-hard-drop, plan §7).
+
+    Returns ``(kept, fuzzed)``; ``fuzzed`` feeds the fuzzy re-compaction.
+    """
+    max_length = cfg.memory.must_remember.max_length
+    fuzzed = [e for e in entries if e.id in downgraded_ids]
+    rest = [e for e in entries if e.id not in downgraded_ids]
+    drop_order = sorted(rest, key=lambda e: mr_keep_rank(e, now))
+    keep_ids = {e.id for e in rest}
+    for e in drop_order:
+        if _mr_len([x for x in rest if x.id in keep_ids]) <= max_length:
+            break
+        keep_ids.discard(e.id)
+        fuzzed.append(e)
+    kept = [e for e in rest if e.id in keep_ids]
     return kept, fuzzed
