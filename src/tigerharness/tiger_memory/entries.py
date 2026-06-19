@@ -44,7 +44,17 @@ class EntryError(ValueError):
 STORE_SKILLS = "skills"
 STORE_MUST_REMEMBER = "must_remember"
 STORE_DIARY = "diary"
+#: The three ENTRY-based stores (typed entries; driven by BoundedStore). The
+#: fuzzy store is deliberately NOT here — it is free-text, not an entry list.
 STORE_NAMES = (STORE_SKILLS, STORE_MUST_REMEMBER, STORE_DIARY)
+
+#: The NEW 4th store (4-store model): coarsened, grouped free-text aged out of
+#: diary + must_remember; length-bounded; loaded whole at session start. Handled
+#: by :mod:`fuzzy_store` (not the entry machinery).
+STORE_FUZZY = "fuzzy"
+#: All four stores in session-start load order (skills, must_remember, diary,
+#: fuzzy) — for the briefing view and the format-check gate.
+ALL_STORE_NAMES = (*STORE_NAMES, STORE_FUZZY)
 
 # must_remember kinds (design §4.2). ``owner_explicit`` is the elevated
 # directive the forget-guard protects until the relevance-check runs (§5).

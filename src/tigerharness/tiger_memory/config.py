@@ -208,7 +208,26 @@ class DiaryStoreConfig:
     max_length: int = 4000
     overflow_limit: int = 6000
     weight_cap: float = 10.0
+    #: Recency window (days): diary items dated within ``fresh_days`` of "now"
+    #: are kept verbatim by meditation (never fuzzed), regardless of weight —
+    #: incl. 0-weight (the 4-store model, brief §A.2). Default 7.
+    fresh_days: int = 7
     decay: DiaryDecayConfig = field(default_factory=DiaryDecayConfig)
+
+
+@dataclass(frozen=True)
+class FuzzyStoreConfig:
+    """Bound for the NEW fuzzy store — length-based (4-store model, brief §store roster).
+
+    ``fuzzy.md`` holds coarsened, grouped memory aged out of BOTH the diary and
+    must_remember. It loads whole at session start, so it is length-bounded
+    (characters); meditation re-summarises it under ``max_length`` every cycle so
+    it CONVERGES rather than grows. ``overflow_limit`` gives the same hysteresis
+    band as the other length-based stores.
+    """
+
+    max_length: int = 4000
+    overflow_limit: int = 6000
 
 
 @dataclass(frozen=True)
@@ -227,6 +246,9 @@ class MemoryConfig:
     )
     diary: DiaryStoreConfig = field(
         default_factory=DiaryStoreConfig
+    )
+    fuzzy: FuzzyStoreConfig = field(
+        default_factory=FuzzyStoreConfig
     )
 
 
@@ -574,6 +596,9 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
         weight_cap=_cfg_float(
             el_raw.get("weight_cap", 10.0), "memory.diary.weight_cap"
         ),
+        fresh_days=_cfg_int(
+            el_raw.get("fresh_days", 7), "memory.diary.fresh_days"
+        ),
         decay=DiaryDecayConfig(
             magnitude_per_day=_cfg_float(
                 decay_raw.get("magnitude_per_day", 0.1),
@@ -597,12 +622,30 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
             f"memory.diary.decay.magnitude_per_day must be ≥ 0; "
             f"got {diary.decay.magnitude_per_day}."
         )
+    if diary.fresh_days < 0:
+        raise ConfigError(
+            f"memory.diary.fresh_days must be ≥ 0; got {diary.fresh_days}."
+        )
+
+    fz_raw = memory_raw.get("fuzzy") or {}
+    fuzzy = FuzzyStoreConfig(
+        max_length=_cfg_int(
+            fz_raw.get("max_length", 4000), "memory.fuzzy.max_length"
+        ),
+        overflow_limit=_cfg_int(
+            fz_raw.get("overflow_limit", 6000), "memory.fuzzy.overflow_limit"
+        ),
+    )
+    _validate_bound(
+        "memory.fuzzy", "max_length", fuzzy.max_length, fuzzy.overflow_limit
+    )
 
     return MemoryConfig(
         length_unit=length_unit,
         skills=skills,
         must_remember=must_remember,
         diary=diary,
+        fuzzy=fuzzy,
     )
 
 
