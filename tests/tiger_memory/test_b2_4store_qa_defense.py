@@ -139,3 +139,33 @@ def test_fuzzy_bound_counts_characters_not_bytes(tmp_path: Path):
     text = fuzzy_store.load_fuzzy(store)
     assert len(text) <= 10           # characters, not bytes
     assert all(ch == "é" for ch in text)
+
+
+# ----- b2-qa-haruko: user/operator-perspective end-to-end ------------------
+
+def test_session_start_sees_four_stores_in_order(tmp_path: Path):
+    """Follow the runbook as an operator: seed a real 4-store persona, rebuild
+    the session-start briefing, and run `check`. The briefing must present all
+    four stores in read order and check must be green across all four."""
+    from tigerharness.tiger_memory import briefing, check
+    from tigerharness.tiger_memory.entries import SkillEntry
+
+    cfg, store, bs = _store(tmp_path, dmax=4000, mmax=8000)
+    bs.save_atomic("skills", [SkillEntry(
+        id="s1", text="lesson body", created_at="2026-06-19T00:00:00Z",
+        last_used="2026-06-19T00:00:00Z", source="x",
+        name="N", trigger="when X", procedure="do Y", usage_count=2)])
+    bs.save_atomic("must_remember", [_m("m1", 19, "operator said ship it")])
+    bs.save_atomic("diary", [_d("d1", 19, 4.0, "shipped the 4-store model")])
+    fuzzy_store.save_fuzzy(cfg, store, "## Fuzzy memory\n- older coarsened gist\n")
+
+    briefing.rebuild_briefing(cfg, store)
+    b = store.paths.briefing
+    manifest = (b / "MANIFEST.md").read_text()
+    for name in ("must_remember.md", "skill_index.md", "diary.md", "fuzzy.md"):
+        assert (b / name).exists(), name
+        assert name in manifest, f"{name} missing from read order"
+    assert "older coarsened gist" in (b / "fuzzy.md").read_text()
+
+    rep = check.check_all(cfg, store)
+    assert rep.ok and len(rep.stores) == 4
