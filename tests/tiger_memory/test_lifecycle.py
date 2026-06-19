@@ -17,7 +17,7 @@ from tigerharness.tiger_memory import lifecycle as lc
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
     KIND_PREFERENCE,
     STORE_DIARY,
     STORE_MUST_REMEMBER,
@@ -87,7 +87,7 @@ _FULL_BUNDLE = dedent("""\
     PROCEDURE: write one entry per block; rewrite the whole file atomically
 
     @@MUST_REMEMBER@@
-    KIND: owner_explicit
+    KIND: operator_explicit
     MEMO: never push without asking
 
     KIND: preference
@@ -107,7 +107,7 @@ def test_parse_full_bundle() -> None:
     assert len(c.skills) == 1
     assert c.skills[0].name == "Bound a markdown store"
     assert c.skills[0].procedure.startswith("write one entry")
-    assert [e.kind for e in c.must_remember] == [KIND_OWNER_EXPLICIT, KIND_PREFERENCE]
+    assert [e.kind for e in c.must_remember] == [KIND_OPERATOR_EXPLICIT, KIND_PREFERENCE]
     assert len(c.diary) == 1
     assert c.diary[0].weight == 7.0
     assert c.diary[0].text == "landed the bounded-store substrate clean and green"
@@ -443,10 +443,10 @@ def test_rebuild_idempotent_no_legacy(tmp_path: Path) -> None:
 def test_pin_writes_must_remember(tmp_path: Path, capsys) -> None:
     cfg = _cfg(tmp_path)
     store = Store(cfg.store.root)
-    assert lc.pin(cfg, store, memo="never force push", kind="owner_explicit") == 0
+    assert lc.pin(cfg, store, memo="never force push", kind="operator_explicit") == 0
     entries = BoundedStore(cfg, store).load(STORE_MUST_REMEMBER)
     assert len(entries) == 1
-    assert entries[0].kind == KIND_OWNER_EXPLICIT
+    assert entries[0].kind == KIND_OPERATOR_EXPLICIT
     assert entries[0].importance == 5.0
     assert "pinned" in capsys.readouterr().out
 

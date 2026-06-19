@@ -17,7 +17,7 @@ Conversation transcript:
 
 **Large transcripts:** this may be long and span more than one read
 window. Read it in FULL before extracting — page through to the end. No
-owner-explicit directive, hard-won lesson, or strong reaction should be
+operator-explicit directive, hard-won lesson, or strong reaction should be
 lost to length.
 
 **Ignore memory boilerplate.** If the session includes you reading or
@@ -58,11 +58,11 @@ Requirements from outside that make the work land better. One block per
 item, blank line between:
 
 ```
-KIND: <owner_explicit | preference | decision | incident>
+KIND: <operator_explicit | preference | decision | incident>
 MEMO: <= {memo_max_words} words; one sentence; specific>
 ```
 
-- **owner_explicit**: the owner said "remember" / "never" / "always" /
+- **operator_explicit**: the owner said "remember" / "never" / "always" /
   "don't forget" (quote-faithful is best).
 - **preference**: a stylistic / process / tooling preference.
 - **decision**: a factual / architectural / strategic decision.

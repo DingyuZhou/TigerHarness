@@ -77,7 +77,7 @@ def test_rebuild_assembles_all_files(tmp_path: Path) -> None:
     _seed(
         cfg, store,
         skills=[_skill("A", imp=2.0), _skill("B", imp=5.0)],
-        must=[_must("never push", "owner_explicit", imp=5.0), _must("use uv")],
+        must=[_must("never push", "operator_explicit", imp=5.0), _must("use uv")],
         emo=[_emo("good", 3.0), _emo("bad", -8.0)],
     )
     bf.rebuild_briefing(cfg, store)
@@ -96,7 +96,7 @@ def test_rebuild_assembles_all_files(tmp_path: Path) -> None:
     assert emo.index("bad") < emo.index("good")
     # must_remember shows kind + importance.
     mr = (b / bf.MUST_REMEMBER_NAME).read_text()
-    assert "owner_explicit" in mr and "never push" in mr
+    assert "operator_explicit" in mr and "never push" in mr
 
 
 def test_rebuild_empty_stores(tmp_path: Path) -> None:

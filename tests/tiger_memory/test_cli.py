@@ -86,7 +86,7 @@ def test_state(tmp_path: Path, capsys) -> None:
 def test_pin(tmp_path: Path, capsys) -> None:
     cfg_path = _cfg_path(tmp_path)
     assert main(["--config", str(cfg_path), "pin", "never push",
-                 "--kind", "owner_explicit"]) == 0
+                 "--kind", "operator_explicit"]) == 0
     assert "pinned" in capsys.readouterr().out
     cfg = load_config(cfg_path)
     store = Store(cfg.store.root)

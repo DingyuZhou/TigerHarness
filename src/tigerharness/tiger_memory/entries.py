@@ -7,7 +7,7 @@ with a YAML frontmatter carrying the structured fields:
 - **skills** (§4.1): a learned, invokable lesson — ``name``, ``trigger``,
   ``procedure``, ``usage_count``, ``importance``.
 - **must_remember** (§4.2): an external directive — ``kind``
-  (``owner_explicit`` / ``preference`` / ``decision`` / ``incident``),
+  (``operator_explicit`` / ``preference`` / ``decision`` / ``incident``),
   ``importance``.
 - **emotional** (§4.3): a persona reaction — a signed ``weight`` in
   ``[-weight_cap, +weight_cap]`` and a ``reaction`` string.
@@ -56,18 +56,30 @@ STORE_FUZZY = "fuzzy"
 #: fuzzy) — for the briefing view and the format-check gate.
 ALL_STORE_NAMES = (*STORE_NAMES, STORE_FUZZY)
 
-# must_remember kinds (design §4.2). ``owner_explicit`` is the elevated
+# must_remember kinds (design §4.2). ``operator_explicit`` is the elevated
 # directive the forget-guard protects until the relevance-check runs (§5).
-KIND_OWNER_EXPLICIT = "owner_explicit"
+KIND_OPERATOR_EXPLICIT = "operator_explicit"
 KIND_PREFERENCE = "preference"
 KIND_DECISION = "decision"
 KIND_INCIDENT = "incident"
 VALID_KINDS = (
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
     KIND_PREFERENCE,
     KIND_DECISION,
     KIND_INCIDENT,
 )
+
+#: Legacy must_remember ``kind`` values mapped to their current names on READ.
+#: ``owner_explicit`` was renamed to ``operator_explicit`` (Operator-mandated);
+#: stores written before the rename still carry the old value, so we normalize
+#: it at load time — otherwise those elevated directives would fail validation
+#: and be silently dropped (no silent loss). Write side always uses the new name.
+_LEGACY_KIND_ALIASES = {"owner_explicit": KIND_OPERATOR_EXPLICIT}
+
+
+def normalize_kind(kind: str) -> str:
+    """Map a legacy must_remember ``kind`` value to its current name (read-side)."""
+    return _LEGACY_KIND_ALIASES.get(kind, kind)
 
 
 def new_id() -> str:
@@ -188,7 +200,7 @@ class SkillEntry(BaseEntry):
 class MustRememberEntry(BaseEntry):
     """An external directive (design §4.2).
 
-    ``kind`` is one of ``VALID_KINDS``. ``owner_explicit`` directives start
+    ``kind`` is one of ``VALID_KINDS``. ``operator_explicit`` directives start
     elevated; meditation's relevance-check may downgrade a stale one to a
     normal kind (``decision``), after which it rejoins the decay pool (§4.2).
     """
@@ -346,7 +358,7 @@ def entry_from_frontmatter(
         )
     if cls is MustRememberEntry:
         return MustRememberEntry(
-            kind=str(fm.get("kind", KIND_PREFERENCE)),
+            kind=normalize_kind(str(fm.get("kind", KIND_PREFERENCE))),
             importance=_coerce_float(
                 fm.get("importance", 0.0), "must_remember.importance"
             ),

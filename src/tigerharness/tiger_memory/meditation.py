@@ -5,10 +5,10 @@ One engine, run per store, that turns "over the overflow limit" back into
 
   1. **merge** duplicate / near-duplicate entries — merging RAISES the
      survivor's scalar (importance, or emotional magnitude), clamped;
-  2. *(must_remember only)* **relevance-check** each ``owner_explicit``
+  2. *(must_remember only)* **relevance-check** each ``operator_explicit``
      directive against the live ``mission_text`` and **downgrade** stale ones
      to a normal kind — this runs BEFORE any forget so Mitsui's forget-guard
-     never trips on an un-relevance-checked owner directive;
+     never trips on an un-relevance-checked operator directive;
   3. **compact** verbose survivors (summarizer rewrites the body shorter);
   4. **forget** the lowest-keep-ranked entries until length/count < ``max``,
      via Mitsui's guarded :meth:`BoundedStore.forget`.
@@ -16,7 +16,7 @@ One engine, run per store, that turns "over the overflow limit" back into
 Invariants (design §5; plan §4):
 
 - **Ordered.** Steps run 1→4. The relevance-check (step 2) always precedes
-  any forget so a still-relevant owner directive is never dropped.
+  any forget so a still-relevant operator directive is never dropped.
 - **Idempotent.** A store already under ``max`` is a no-op (no summarizer
   calls, empty log).
 - **Hysteresis.** The *caller* fires meditation only at/above
@@ -24,7 +24,7 @@ Invariants (design §5; plan §4):
   compacts back below ``max`` and then stops.
 - **Terminal "nothing safe to forget"** (plan §4 Kogure R1#1). If, after
   merge + compact, the store is still over ``max`` and the only entries left
-  to drop are still-relevant ``owner_explicit`` directives, meditation LOGS
+  to drop are still-relevant ``operator_explicit`` directives, meditation LOGS
   an over-max warning and LEAVES the store intact — it never force-drops to
   hit the number.
 
@@ -45,7 +45,7 @@ from .config import Config
 from .diary import clamp_weight, diary_keep_rank
 from .entries import (
     KIND_DECISION,
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
     STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
@@ -70,12 +70,12 @@ class MeditationLog:
     """A record of what one meditation pass did to one store (design §5).
 
     Every list holds entry ids. ``merged`` maps each *dropped* duplicate's id
-    to the survivor it folded into; ``downgraded`` lists owner directives
+    to the survivor it folded into; ``downgraded`` lists operator directives
     relevance-checked-and-downgraded to normal; ``compacted`` lists survivors
     whose body the summarizer shortened; ``forgotten`` lists ids dropped to
     get under ``max``. ``over_max`` is the terminal warning flag (plan §4):
     True iff the pass finished still over ``max`` because the only remaining
-    drops would be still-relevant owner directives.
+    drops would be still-relevant operator directives.
     """
 
     store_name: str
@@ -220,13 +220,13 @@ def _might_be_similar(a: BaseEntry, b: BaseEntry) -> bool:
 def _judge_stale(
     summarizer: Summarizer, entry: MustRememberEntry, mission_text: str
 ) -> bool:
-    """Is this owner directive stale vs the live mission? (default: NO).
+    """Is this operator directive stale vs the live mission? (default: NO).
 
     Default NO = "still relevant": an unparseable judgement keeps the
     directive elevated rather than downgrading-then-forgetting it.
     """
     prompt = (
-        "An owner directive is STALE if it was tied to a feature/goal the "
+        "An operator directive is STALE if it was tied to a feature/goal the "
         "team no longer pursues under the current mission. Is this directive "
         "stale? Answer with a single word: YES (stale) or NO (still "
         "relevant).\n\n"
@@ -297,7 +297,7 @@ def meditate(
     caller-supplied summarizer wiring; it is accepted here to keep the seam
     end-to-end even though the ranking/ordering logic does not branch on it.
     ``mission_text`` is the live team goal (Miyagi sources it from
-    ``charter/README.md``) against which owner directives are relevance-checked.
+    ``charter/README.md``) against which operator directives are relevance-checked.
     """
     del persona_ctx  # context is carried by the summarizer backend wiring.
     now = iso_now()
@@ -450,22 +450,22 @@ def _relevance_pass(
     log_rec: MeditationLog,
     relevance_checked: set[str],
 ) -> list[BaseEntry]:
-    """Relevance-check every owner directive; downgrade stale ones to normal.
+    """Relevance-check every operator directive; downgrade stale ones to normal.
 
     A directive judged **stale** vs the mission is downgraded to ``decision``
     (a normal kind) and its id added to *relevance_checked* — after which it
     rejoins the ordinary forget pool and the forget-guard will permit dropping
     it (design §4.2). A directive judged **still relevant** is left
-    ``owner_explicit`` and deliberately NOT added: the forget-guard then
+    ``operator_explicit`` and deliberately NOT added: the forget-guard then
     refuses to drop it, which is exactly the terminal "never drop a
-    still-relevant owner directive" invariant (design §5; plan §4). So
+    still-relevant operator directive" invariant (design §5; plan §4). So
     *relevance_checked* ends up holding precisely the downgraded ids — the
-    only owner directives this cycle licensed for forgetting.
+    only operator directives this cycle licensed for forgetting.
     """
     for entry in entries:
         if (
             isinstance(entry, MustRememberEntry)
-            and entry.kind == KIND_OWNER_EXPLICIT
+            and entry.kind == KIND_OPERATOR_EXPLICIT
             and _judge_stale(summarizer, entry, mission_text)
         ):
             entry.kind = KIND_DECISION
@@ -524,7 +524,7 @@ def _forget_pass(
     """Drop the lowest-keep-ranked entries until under ``max`` (guarded).
 
     Forget order = keep-rank ascending (lowest value first). A candidate that
-    Mitsui's forget-guard refuses (a still-relevant owner directive not in
+    Mitsui's forget-guard refuses (a still-relevant operator directive not in
     *relevance_checked*) is SKIPPED, not forced — we move to the next-lowest.
     If the store cannot get under ``max`` without dropping a protected
     directive, we stop and set the terminal ``over_max`` warning (plan §4):
@@ -545,7 +545,7 @@ def _forget_pass(
                 relevance_checked_ids=relevance_checked,
             )
         except ForgetGuardError:
-            # Protected owner directive (not relevance-checked this cycle):
+            # Protected operator directive (not relevance-checked this cycle):
             # skip it, do not force-drop, move to the next-lowest candidate.
             continue
         entries = survivors
@@ -553,11 +553,11 @@ def _forget_pass(
 
     if _over_max(store, store_name, entries):
         # Terminal: still over max, but the only remaining drops are protected
-        # owner directives. Leave the store intact, warn, do not force-drop.
+        # operator directives. Leave the store intact, warn, do not force-drop.
         log_rec.over_max = True
         log.warning(
             "meditation: store %r still over max after merge+compact "
-            "(%d entries remain, all still-relevant owner directives); "
+            "(%d entries remain, all still-relevant operator directives); "
             "leaving intact (design §5 nothing-safe-to-forget).",
             store_name,
             len(entries),
@@ -621,7 +621,7 @@ def meditate_persona(
             diary = _merge_pass(diary, summarizer, cfg, diary_log)
             diary = _compact_pass(diary, store, STORE_DIARY, summarizer, diary_log)
 
-            # 1-3 (must_remember): merge, relevance-downgrade stale owner
+            # 1-3 (must_remember): merge, relevance-downgrade stale operator
             # directives, then compact.
             mr = _merge_pass(mr, summarizer, cfg, mr_log)
             downgraded: set[str] = set()

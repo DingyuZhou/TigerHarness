@@ -55,11 +55,11 @@ Requirements from outside that make the work land better. One block per
 item, blank line between:
 
 ```
-KIND: <owner_explicit | preference | decision | incident>
+KIND: <operator_explicit | preference | decision | incident>
 MEMO: <= {memo_max_words} words; one sentence; specific>
 ```
 
-- **owner_explicit**: the owner said "remember" / "never" / "always" /
+- **operator_explicit**: the owner said "remember" / "never" / "always" /
   "don't forget" (quote-faithful is best).
 - **preference**: a stylistic / process / tooling preference.
 - **decision**: a factual / architectural / strategic decision.

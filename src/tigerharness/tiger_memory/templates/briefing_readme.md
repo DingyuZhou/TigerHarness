@@ -13,16 +13,16 @@ ignorance.**
 
 ## 2. `must_remember.md` — external directives (read first, load-bearing)
 
-Owner directives and expensive lessons that must not be violated. Each
+Operator directives and expensive lessons that must not be violated. Each
 entry shows its `kind`:
 
-- **owner_explicit** — the owner explicitly asked you to remember this
+- **operator_explicit** — the owner explicitly asked you to remember this
 - **preference** — a stylistic/process/tooling preference
 - **decision** — a factual/architectural/strategic decision
 - **incident** — a bug, near-miss, or expensive lesson worth never re-learning
 
 If a request conflicts with anything here, **surface the conflict**
-rather than acting on it. Owner directives start elevated but are not
+rather than acting on it. Operator directives start elevated but are not
 immortal: meditation downgrades one that no longer serves the live
 mission.
 
@@ -50,14 +50,14 @@ what makes the memory *yours*.
 
 Every store is bounded. When a store overflows, **meditation** runs (in
 character, on the subscription rail): it merges near-duplicates,
-relevance-checks owner directives against the live mission, compacts
+relevance-checks operator directives against the live mission, compacts
 verbose entries, and forgets the lowest-ranked — keeping memory focused
 on what helps the team now.
 
 ## When you learn something worth remembering
 
 Pin a directive directly:
-`tiger-memory pin "<memo>" --kind <owner_explicit|preference|decision|incident>`.
+`tiger-memory pin "<memo>" --kind <operator_explicit|preference|decision|incident>`.
 Skills and diary notes are extracted automatically by the sweep
 when a session goes idle.
 

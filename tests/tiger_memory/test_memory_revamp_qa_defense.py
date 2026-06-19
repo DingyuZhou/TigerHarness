@@ -36,7 +36,7 @@ from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.diary import clamp_weight, decay_entry, decay_weight
 from tigerharness.tiger_memory.entries import (
     KIND_DECISION,
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
     KIND_PREFERENCE,
     DiaryEntry,
     EntryError,
@@ -169,9 +169,9 @@ def test_all_owner_directives_over_max_left_intact_no_force_drop(
     NOTHING is force-dropped; over_max warns; every directive survives."""
     bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
     owners = [
-        _mr(KIND_OWNER_EXPLICIT, "never push without approval here"),
-        _mr(KIND_OWNER_EXPLICIT, "always run the full test suite!!"),
-        _mr(KIND_OWNER_EXPLICIT, "commit messages must use a heredoc"),
+        _mr(KIND_OPERATOR_EXPLICIT, "never push without approval here"),
+        _mr(KIND_OPERATOR_EXPLICIT, "always run the full test suite!!"),
+        _mr(KIND_OPERATOR_EXPLICIT, "commit messages must use a heredoc"),
     ]
     bs.save_atomic("must_remember", owners)
     summ = ScriptedSummarizer()  # nothing similar, nothing stale
@@ -180,7 +180,7 @@ def test_all_owner_directives_over_max_left_intact_no_force_drop(
     assert log.forgotten == []
     survivors = bs.load("must_remember")
     assert len(survivors) == 3
-    assert all(e.kind == KIND_OWNER_EXPLICIT for e in survivors)
+    assert all(e.kind == KIND_OPERATOR_EXPLICIT for e in survivors)
     assert {e.id for e in survivors} == {o.id for o in owners}
 
 
@@ -194,7 +194,7 @@ def test_guard_skips_protected_owner_drops_droppable_neighbor(
     bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
     # owner has the LOWER importance, so it sorts first in forget order, but
     # the guard must refuse it and move on to the preference.
-    owner = _mr(KIND_OWNER_EXPLICIT, "protected owner directive!!", imp=0.0)
+    owner = _mr(KIND_OPERATOR_EXPLICIT, "protected owner directive!!", imp=0.0)
     pref = _mr(KIND_PREFERENCE, "droppable preference text!!", imp=5.0)
     bs.save_atomic("must_remember", [owner, pref])
     summ = ScriptedSummarizer()
@@ -214,7 +214,7 @@ def test_meditation_logs_irreversible_mutations_for_audit(
     irreversible with no safety net, so the loss cannot be invisible to an
     auditor (b2g-logs REVISE -> b1-dev-2 fix)."""
     bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
-    owner = _mr(KIND_OWNER_EXPLICIT, "protected owner directive!!", imp=9.0)
+    owner = _mr(KIND_OPERATOR_EXPLICIT, "protected owner directive!!", imp=9.0)
     pref = _mr(KIND_PREFERENCE, "droppable preference text!!", imp=0.0)
     bs.save_atomic("must_remember", [owner, pref])
     summ = ScriptedSummarizer()
@@ -235,7 +235,7 @@ def test_forget_guard_raises_on_direct_unchecked_owner_drop(
     """The guard primitive itself: dropping an owner directive whose id is NOT
     in relevance_checked_ids raises ForgetGuardError (no silent loss)."""
     bs = _make_store(tmp_path)
-    owner = _mr(KIND_OWNER_EXPLICIT, "ship friday")
+    owner = _mr(KIND_OPERATOR_EXPLICIT, "ship friday")
     with pytest.raises(ForgetGuardError, match="relevance-check"):
         bs.forget("must_remember", [owner], [owner.id])
 
@@ -247,7 +247,7 @@ def test_merge_into_owner_then_terminal_over_max_protects_survivor(
     owner survivor is still over max but still-relevant -> the guard protects
     it and the terminal over_max path fires (no force-drop of a merged owner)."""
     bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
-    owner = _mr(KIND_OWNER_EXPLICIT, "ship the revamp now ok")  # 22 > max 20
+    owner = _mr(KIND_OPERATOR_EXPLICIT, "ship the revamp now ok")  # 22 > max 20
     dup = _mr(KIND_PREFERENCE, "ship the revamp now ok")
     bs.save_atomic("must_remember", [owner, dup])
     summ = ScriptedSummarizer(similar_pairs=[(owner.text, dup.text)])
@@ -257,7 +257,7 @@ def test_merge_into_owner_then_terminal_over_max_protects_survivor(
     assert log.over_max is True
     survivors = bs.load("must_remember")
     assert len(survivors) == 1
-    assert survivors[0].kind == KIND_OWNER_EXPLICIT
+    assert survivors[0].kind == KIND_OPERATOR_EXPLICIT
     # reinforcement: two count-1 facts merge -> repeat_count 2, importance 2.0.
     assert survivors[0].repeat_count == 2
     assert survivors[0].importance == 2.0
@@ -367,7 +367,7 @@ def test_stale_owner_downgraded_then_forgotten_no_guard_error(
     the forget-guard tripping."""
     bs = _make_store(tmp_path, mr_max=15, mr_overflow=25)
     keep = _mr(KIND_PREFERENCE, "keep me short", imp=5.0)
-    stale = _mr(KIND_OWNER_EXPLICIT, "stale directive to be dropped", OLD)
+    stale = _mr(KIND_OPERATOR_EXPLICIT, "stale directive to be dropped", OLD)
     bs.save_atomic("must_remember", [keep, stale])
     summ = ScriptedSummarizer(stale_texts=[stale.text])
     log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
@@ -375,7 +375,7 @@ def test_stale_owner_downgraded_then_forgotten_no_guard_error(
     assert stale.id in log.forgotten
     survivors = bs.load("must_remember")
     assert [e.id for e in survivors] == [keep.id]
-    assert all(e.kind != KIND_OWNER_EXPLICIT for e in survivors)
+    assert all(e.kind != KIND_OPERATOR_EXPLICIT for e in survivors)
 
 
 def test_downgraded_directive_rejoins_pool_but_ranks_by_importance(
@@ -388,7 +388,7 @@ def test_downgraded_directive_rejoins_pool_but_ranks_by_importance(
     # both ~14 chars; total 28 < max(30) AFTER one drop. weak pref imp 0,
     # downgraded-but-important owner imp 9 -> weak goes first.
     weak = _mr(KIND_PREFERENCE, "weak little x", imp=0.0)
-    big = _mr(KIND_OWNER_EXPLICIT, "big important", imp=9.0)
+    big = _mr(KIND_OPERATOR_EXPLICIT, "big important", imp=9.0)
     extra = _mr(KIND_PREFERENCE, "filler entry x", imp=1.0)
     bs.save_atomic("must_remember", [weak, big, extra])  # ~40 chars > max 30
     summ = ScriptedSummarizer(stale_texts=[big.text])  # big is downgraded
@@ -406,7 +406,7 @@ def test_relevant_owner_not_added_to_checked_set(tmp_path: Path) -> None:
     relevance-checked set, so the guard keeps protecting it (policy reading
     Rukawa flagged: relevant directives are never licensed to drop)."""
     bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
-    relevant = _mr(KIND_OWNER_EXPLICIT, "still relevant directive x")
+    relevant = _mr(KIND_OPERATOR_EXPLICIT, "still relevant directive x")
     droppable = _mr(KIND_PREFERENCE, "droppable filler entry zz")
     bs.save_atomic("must_remember", [relevant, droppable])
     summ = ScriptedSummarizer()  # nothing stale
@@ -414,7 +414,7 @@ def test_relevant_owner_not_added_to_checked_set(tmp_path: Path) -> None:
     assert relevant.id not in log.downgraded
     survivors = bs.load("must_remember")
     # the relevant owner is protected; the preference is the only legal drop.
-    assert any(e.id == relevant.id and e.kind == KIND_OWNER_EXPLICIT
+    assert any(e.id == relevant.id and e.kind == KIND_OPERATOR_EXPLICIT
                for e in survivors)
 
 
@@ -633,8 +633,8 @@ def test_terminal_over_max_is_idempotent(tmp_path: Path) -> None:
     repeated meditation — over_max each time, never erodes."""
     bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
     owners = [
-        _mr(KIND_OWNER_EXPLICIT, "directive one cannot drop"),
-        _mr(KIND_OWNER_EXPLICIT, "directive two cannot drop"),
+        _mr(KIND_OPERATOR_EXPLICIT, "directive one cannot drop"),
+        _mr(KIND_OPERATOR_EXPLICIT, "directive two cannot drop"),
     ]
     bs.save_atomic("must_remember", owners)
     for _ in range(3):

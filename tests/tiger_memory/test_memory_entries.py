@@ -234,3 +234,16 @@ def test_from_frontmatter_missing_id_gets_fresh() -> None:
     rebuilt = entry_from_frontmatter("diary", fm, "body")
     assert rebuilt.id  # a fresh id was minted
     assert rebuilt.weight == 0.0
+
+
+def test_legacy_owner_explicit_kind_normalized_on_read() -> None:
+    # A store written before the owner->operator rename carries kind=owner_explicit;
+    # it must load as operator_explicit (no silent drop of an elevated directive).
+    fm = {"id": "x", "created_at": "t", "last_used": "t", "source": "s",
+          "kind": "owner_explicit", "importance": 5}
+    rebuilt = entry_from_frontmatter("must_remember", fm, "legacy directive")
+    assert isinstance(rebuilt, MustRememberEntry)
+    assert rebuilt.kind == "operator_explicit"
+    rebuilt.validate()  # the normalized kind is valid
+    # a current value passes through unchanged.
+    assert E.normalize_kind("operator_explicit") == "operator_explicit"
