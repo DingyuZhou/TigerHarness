@@ -1,4 +1,4 @@
-# Memory system design — the three bounded stores
+# Memory system design — the four bounded stores (incl. fuzzy)
 
 Status: **SHIPPED** (2026-06-17). This is the canonical design for the
 tiger-memory bounded-store revamp, as built on
@@ -90,6 +90,10 @@ Kept and adapted:
 - **The pin command**, reframed to write a must-remember entry.
 
 ## 4. The three bounded stores
+
+> **Superseded by §11 (2026-06-19): the model is now FOUR stores** — a `fuzzy`
+> store was added and `owner_explicit` renamed to `operator_explicit`. §4–§7
+> below describe the original three; read §11 for the current model.
 
 Memory is now exactly three stores per persona (`tiger_memory/entries.py`,
 `bounded_store.py`). Each has a scalar, an ordering rule, and a two-number
@@ -194,6 +198,11 @@ in **characters**, never tokens (§8).
   oldest items until length < `max_length`.
 
 ## 5. Meditation — the compaction engine
+
+> **See §11.2 for the current 4-store pipeline** (`meditate_persona`): this §5
+> describes the original per-store engine, which still runs for skills; the diary
+> + must_remember + fuzzy stores now meditate together (aged items route to
+> `fuzzy.md`, never hard-dropped).
 
 One engine (`meditation.meditate`), run per store, that turns "over the
 overflow limit" back into "under max."
@@ -346,7 +355,10 @@ tuning later; `length_unit` and `weight_cap` are confirmed final.
 | `migrate_emotional_to_diary.py` | one-off legacy `emotional.md` -> `diary.md` migration |
 | `skills.py` | `log1p(usage)` importance + skills keep-rank |
 | `ranking.py` | shared recency / date-math helpers |
-| `meditation.py` | the compaction engine: `keep_rank`, `MeditationLog`, `meditate` (merge → relevance/downgrade → compact → guarded-forget) |
+| `meditation.py` | the compaction engine: `keep_rank`, `MeditationLog`, `meditate` (per-store), and `meditate_persona` (the 4-store pipeline: merge → relevance-downgrade → compact → fuzz-select → recompact → bound, no hard drop) |
+| `fuzzy_store.py` | the 4th store I/O: `load_fuzzy` / `bound_fuzzy` (deterministic char-bound = convergence) / `save_fuzzy` |
+| `fuzz_select.py` | pure fuzz-candidate selection: `select_diary_fuzz` (fresh-window-protected) / `select_mr_fuzz` (downgraded + low-repeat-count) |
+| `fuzzy_recompact.py` | `recompact_fuzzy`: summarizer folds aging diary + must_remember + existing fuzzy into one coarse blob |
 | `lifecycle.py` | extraction (`parse_extraction` / `extract_candidates` / `ingest_candidates`), the in-session staging (`plan_extraction`), fresh-start `rebuild`, `pin`, `team_mission_text` |
 | `import_legacy.py` | the one-off legacy import (§12): reader (`read_legacy`), persona-driven re-author (`reauthor`), backdated seeding scorer (`score_seed_candidates`), seed-writer + idempotency guards (`seed_entries` / `already_imported` / `mark_imported`), orchestrator (`import_legacy_run`) |
 | `sweep.py` | team-sweep gating + `meditate_all_stores` (post-ingest, over-overflow only) |
@@ -374,3 +386,97 @@ tuning later; `length_unit` and `weight_cap` are confirmed final.
 7. **Forget-guard semantics:** `relevance_checked_ids` carries only the
    downgraded directives, so a still-relevant owner directive is never
    licensed to drop (§5.1). (Ratified, do not revert.)
+
+## 11. The 4-store evolution — fuzzy memory (Operator, 2026-06-19)
+
+This supersedes the "three stores" framing of §4–§7 where they differ. The model
+is now **four** length-bounded stores, all loaded whole at session start, plus a
+richer meditation pipeline that **never hard-deletes** — older memory loses
+granularity, not existence.
+
+### 11.1 The four stores
+
+1. **`skills.md`** — unchanged (count-bounded, importance = log1p(usage)).
+2. **`must_remember.md`** — external directives. Importance is now a
+   **reinforcement / repeat-count**: each time a fact recurs across sessions the
+   meditation merge increments `repeat_count` (a fact seen N times outranks a
+   one-off). Kinds: `operator_explicit` / `preference` / `decision` / `incident`
+   (renamed from `owner_explicit`; see §11.5). `operator_explicit` + `decision`
+   stay sharp until a **relevance-downgrade** demotes them.
+3. **`diary.md`** — dated weighted bullets `## YYYY-MM-DD` / `- (±N) <note>`.
+   EVERY item is written after summarization regardless of weight (incl. 0) —
+   forgetting is a meditation concern, never an ingest-time filter. A
+   `fresh_days` window (default 7) keeps recent bullets verbatim, any weight.
+   The note carries *what I did + why this weight + what I learned / could do
+   better* (richer than before; the on-disk `- (±N) <note>` format is unchanged).
+4. **`fuzzy.md`** — **NEW.** Coarsened, grouped FREE TEXT aged out of BOTH diary
+   and must_remember. Length-bounded; loaded whole so the persona keeps the gist.
+   Not an entry list — `tiger_memory/fuzzy_store.py` owns it (load / hard-bound /
+   atomic write). `tiger-memory check` validates it (over-overflow → `--fix`
+   re-bounds).
+
+### 11.2 The meditation pipeline (ordered) — `meditation.meditate_persona`
+
+Per persona, under the diary + must_remember store locks:
+
+1. **merge** near-duplicates (bumps must_remember `repeat_count`).
+2. **decay** diary effective weight by age (existing `diary.decay_weight`).
+3. **relevance-downgrade** (must_remember): each `operator_explicit` / `decision`
+   directive is judged against the current team/project goal (charter mission);
+   a stale one is downgraded to a normal kind AND routed to fuzzy. Guardrail:
+   conservative + reversible — only when clearly off-goal; the demoted item goes
+   to fuzzy (retained, recoverable), never deleted; it **re-sharpens** via
+   repeat-count if it recurs. We never silently drop something the Operator said.
+4. **select fuzz candidates** (`fuzz_select`): diary items past `fresh_days` with
+   low decayed `|weight|`; must_remember items old + low repeat-count +
+   relevance-downgraded. The fresh window is always kept verbatim.
+5. **fuzzy re-compaction** (`fuzzy_recompact`): the summarizer compacts ONE bundle
+   {aging must_remember, aging diary, the existing fuzzy.md} into fuzzy.md under
+   its `max_length`. Aged content is re-summarised EVERY meditation, so it
+   coarsens progressively, and the hard bound forces fuzzy.md to **converge**,
+   never grow.
+6. **bound the sharp stores**: persist the kept diary + must_remember. The ONLY
+   items that leave a sharp store are the ones captured in fuzzy this cycle (or
+   fresh-window items, which stay). The old forget-that-drops is gone.
+
+### 11.3 The no-hard-drop invariant (the correctness anchor)
+
+For every meditation: each input item ends up **kept-sharp**, within the
+**fresh-window**, or present in the **fuzzy bundle** — `deleted == 0`. This is a
+named test (`test_meditate_persona.py`). "No silent loss" is structural: fuzz,
+never delete; demotions are recoverable; the live migration snapshots both
+`emotional.md` AND `diary.md` to `.bak` before any overwrite.
+
+### 11.4 Lifecycle: `sharp → fades → neutral → fuzzy-but-kept`
+
+A memory enters sharp (full granularity in diary/must_remember). With age its
+diary weight decays toward 0 / its must_remember repeat-count stays low; once
+past `fresh_days` and low-value it is selected, folded into fuzzy.md (coarser),
+and re-coarsened each subsequent meditation. It is never deleted; if it recurs it
+re-sharpens (repeat-count). The two AI judgements (relevance-downgrade, fuzzy
+re-compaction) go through the single summarizer seam — CI runs them mocked
+(model-free); the deterministic phases are independently tested.
+
+### 11.5 Terminology rename (Operator-mandated)
+
+`owner` is legacy from another project; TigerHarness uses **`operator`**. The
+must_remember kind `owner_explicit` → `operator_explicit` (and the human-role
+"owner directive" → "operator directive" in code/prompts/docs). A **legacy-read
+shim** (`entries.normalize_kind`) maps a stored `owner_explicit` → `operator_explicit`
+on load, so stores written before the rename keep their elevated directives (no
+silent loss). Unrelated technical `owner` (lock ownership, transcript thread
+owner) is left untouched.
+
+### 11.6 Config additions (extends §7)
+
+```yaml
+memory:
+  diary:
+    fresh_days: 7          # recents (<= N days) kept verbatim, never fuzzed
+  fuzzy:
+    max_length: 4000       # the 4th store (chars); converges under this bound
+    overflow_limit: 6000   # hysteresis trigger, like the other length stores
+```
+
+Note: session-start load is now the SUM of four whole stores — keep the combined
+size sane when tuning the bounds.

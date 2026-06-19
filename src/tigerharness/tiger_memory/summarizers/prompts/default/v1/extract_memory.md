@@ -71,13 +71,17 @@ MEMO: <= {memo_max_words} words; one sentence; specific>
 If none, write exactly `NONE` under the marker.
 
 ### @@DIARY@@ — your diary (0 to 3)
-A short, dated diary note, as {agent_name}: what you did / why / learned /
-could-do-better, with how it felt folded into the words and the sign of the
-weight. One block per note, blank line between:
+A short, dated diary note, as {agent_name}. Write a note for each substantive
+thing you did — **including neutral, low-charge work (weight 0)**; do NOT skip a
+note just because it was not emotionally strong (forgetting is a meditation
+concern, never a write-time filter). Each note carries, concisely: **what I did**,
+**why this weight** (the reasoning for the rating — this is what deepens your
+personality), and **what I learned / could do better** next time if applicable.
+One block per note, blank line between:
 
 ```
-WEIGHT: <signed number in [-{weight_cap}, +{weight_cap}]; + = liked/for, - = disliked/against>
-TEXT: <= {reaction_max_words} words; what happened and your reaction to it>
+WEIGHT: <signed number in [-{weight_cap}, +{weight_cap}]; + = liked/for, - = disliked/against, 0 = neutral>
+TEXT: <= {reaction_max_words} words; what I did + why this weight + what I learned / could do better>
 ```
 
 If none, write exactly `NONE` under the marker.

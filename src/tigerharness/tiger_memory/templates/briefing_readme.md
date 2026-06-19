@@ -16,7 +16,7 @@ ignorance.**
 Operator directives and expensive lessons that must not be violated. Each
 entry shows its `kind`:
 
-- **operator_explicit** — the owner explicitly asked you to remember this
+- **operator_explicit** — the operator explicitly asked you to remember this
 - **preference** — a stylistic/process/tooling preference
 - **decision** — a factual/architectural/strategic decision
 - **incident** — a bug, near-miss, or expensive lesson worth never re-learning
@@ -42,17 +42,28 @@ How past work felt to you, as {agent_name}: a signed weight (+ = liked,
 feelings survive; near-neutral ones decay and are forgotten. This is
 what makes the memory *yours*.
 
-## 5. `MANIFEST.md` — the inventory + read order
+## 5. `fuzzy.md` — your coarsened older memory (the gist)
+
+The long-term, low-resolution layer. Older diary notes and must-remember
+facts that have aged out of the sharp stores are **grouped and summarised**
+here — you keep the gist even after the detail fades. It is bounded and
+re-summarised each meditation, so it converges rather than grows. Nothing is
+deleted: memory loses granularity, not existence — and a fact that recurs
+re-sharpens back into the sharp stores.
+
+## 6. `MANIFEST.md` — the inventory + read order
 
 ---
 
-## Forgetting is a feature
+## Forgetting is a feature (but nothing is deleted)
 
 Every store is bounded. When a store overflows, **meditation** runs (in
 character, on the subscription rail): it merges near-duplicates,
 relevance-checks operator directives against the live mission, compacts
-verbose entries, and forgets the lowest-ranked — keeping memory focused
-on what helps the team now.
+verbose entries, and — instead of dropping the lowest-ranked — **coarsens
+them into `fuzzy.md`** (recoverable). Recent diary notes (within the fresh
+window) always stay verbatim. Memory stays focused on what helps the team now
+without ever silently losing what you were told.
 
 ## When you learn something worth remembering
 
