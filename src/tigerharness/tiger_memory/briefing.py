@@ -23,6 +23,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from . import fuzzy_store
 from .bounded_store import BoundedStore
 from .config import Config
 from .entries import (
@@ -42,14 +43,16 @@ log = logging.getLogger("tigerharness.tiger_memory.briefing")
 README_NAME = "README.md"
 MUST_REMEMBER_NAME = "must_remember.md"
 DIARY_NAME = "diary.md"
+FUZZY_NAME = "fuzzy.md"
 SKILL_INDEX_NAME = "skill_index.md"
 MANIFEST_NAME = "MANIFEST.md"
 NOTICE_NAME = "UNPROCESSED.md"
 FINGERPRINT_NAME = ".fingerprint"
 
 # The store files whose content drives the briefing — a fingerprint over them
-# powers the no-op shortcut (skip the rebuild when nothing changed).
-_SOURCE_STORE_FILES = ("skills.md", "must_remember.md", "diary.md")
+# powers the no-op shortcut (skip the rebuild when nothing changed). The fuzzy
+# store (4-store model) loads whole at session start too, so it is included.
+_SOURCE_STORE_FILES = ("skills.md", "must_remember.md", "diary.md", "fuzzy.md")
 
 
 def rebuild_briefing(cfg: Config, store: Store) -> None:
@@ -88,8 +91,11 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
             _render_skill_index(skills), encoding="utf-8"
         )
 
+        fuzzy = fuzzy_store.load_fuzzy(store)
+        (tmp / FUZZY_NAME).write_text(_render_fuzzy(fuzzy), encoding="utf-8")
+
         (tmp / MANIFEST_NAME).write_text(
-            _render_manifest(cfg, store, must, diary, skills),
+            _render_manifest(cfg, store, must, diary, skills, fuzzy),
             encoding="utf-8",
         )
         (tmp / FINGERPRINT_NAME).write_text(
@@ -206,6 +212,18 @@ def _render_diary(entries: list[DiaryEntry]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_fuzzy(text: str) -> str:
+    """Fuzzy-memory view (4-store model): the coarsened, grouped older memory.
+
+    The fuzzy store is free text the meditation re-compaction produced, loaded
+    whole. Shown verbatim under a heading; empty when nothing has aged out yet.
+    """
+    body = text.strip()
+    if not body:
+        return "# Fuzzy memory\n\n_(empty)_\n"
+    return f"# Fuzzy memory (coarsened older memory)\n\n{body}\n"
+
+
 # ----- skill index (Python-rebuilt at session start) ------------------------
 
 
@@ -258,6 +276,7 @@ def _render_manifest(
     must: list[MustRememberEntry],
     diary: list[DiaryEntry],
     skills: list[SkillEntry],
+    fuzzy: str,
 ) -> str:
     saved = store.read_state() or {}
     last_rebuild = saved.get("last_rebuild_at") or iso_now()
@@ -269,12 +288,14 @@ def _render_manifest(
         f"- must_remember: {len(must)} entries",
         f"- diary: {len(diary)} entries",
         f"- skills: {len(skills)} indexed",
+        f"- fuzzy: {len(fuzzy)} chars",
         "",
         "## Read order",
         f"1. `{NOTICE_NAME}` — the unprocessed-session rule.",
         f"2. `{MUST_REMEMBER_NAME}` — external directives (load-bearing).",
         f"3. `{SKILL_INDEX_NAME}` — reusable lessons (load full skill on demand).",
         f"4. `{DIARY_NAME}` — your reactions, strongest first.",
+        f"5. `{FUZZY_NAME}` — coarsened older memory (the gist).",
         "",
     ]
     return "\n".join(parts) + "\n"
