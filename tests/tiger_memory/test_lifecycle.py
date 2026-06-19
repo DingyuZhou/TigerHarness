@@ -580,3 +580,19 @@ def test_discover_runs_adapters(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     # No real transcripts on disk → discover yields nothing, but exercises the loop.
     assert lc._discover(cfg) == []
+
+
+def test_rebuild_runs_format_gate(tmp_path: Path) -> None:
+    """The per-persona rebuild runs `check --fix`: a non-canonical diary store
+    is mechanically repaired before the briefing is assembled from it."""
+    from tigerharness.tiger_memory.check import check_all
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    # days descending = parseable but non-canonical (the gate canonicalizes).
+    (store.paths.journal / "diary.md").write_text(
+        "## 2026-06-18\n- (+1) b\n\n## 2026-06-17\n- (+1) a\n"
+    )
+    assert lc.rebuild(cfg, store) == 0
+    assert check_all(cfg, store).ok
+    assert (store.paths.journal / "diary.md").read_text().startswith("## 2026-06-17")

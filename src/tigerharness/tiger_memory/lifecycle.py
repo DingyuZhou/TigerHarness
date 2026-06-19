@@ -594,9 +594,19 @@ def rebuild(cfg: Config, store: Store) -> int:
     """
     store.init_layout()
     _drop_legacy_surface(store)
+    # Per-persona format gate (plan §2 dev-3): validate + repair the three
+    # stores BEFORE the briefing is assembled from them, so malformed memory is
+    # mechanically fixed (or quarantined to <store>.rejected.md, no silent loss)
+    # rather than persisting past a wrap-up. Runs at the end of every sweep's
+    # per-persona rebuild.
+    from .check import check_all
+    report = check_all(cfg, store, fix=True)
+    repaired = [s.store_name for s in report.stores if s.repaired]
+    if repaired:
+        log.warning("rebuild: format-check repaired store(s): %s", ", ".join(repaired))
     from .briefing import rebuild_briefing
     rebuild_briefing(cfg, store)
-    log.info("rebuild: dropped legacy surface; briefing regenerated")
+    log.info("rebuild: dropped legacy surface; format-checked; briefing regenerated")
     return 0
 
 
