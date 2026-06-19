@@ -2,7 +2,7 @@
 
 ## At a glance
 - **What:** per-persona persistent memory built on **three bounded,
-  self-pruning stores** — `skills`, `must_remember`, `emotional` — with a
+  self-pruning stores** — `skills`, `must_remember`, `diary` — with a
   session-start briefing, in-persona extraction, and a meditation
   compaction engine (forgetting is first-class).
 - **When you need it:** configuring or inspecting a persona's memory. For the
@@ -35,7 +35,7 @@ Sources (Claude transcripts, Slack threads, journal worklogs, docs)
     |
     v
 Extraction (lifecycle.py): a finished session -> a strict
-  @@SKILLS@@ / @@MUST_REMEMBER@@ / @@EMOTIONAL@@ bundle, in-persona
+  @@SKILLS@@ / @@MUST_REMEMBER@@ / @@DIARY@@ bundle, in-persona
     |
     v
 Ingest (bounded_store.py): bundle blocks -> the three stores
@@ -45,10 +45,10 @@ Ingest (bounded_store.py): bundle blocks -> the three stores
     |          overflow_limit: merge -> relevance-downgrade -> compact ->
     |          guarded-forget, back under max
     v
-Stores (journal/skills.md + must_remember.md + emotional.md)
+Stores (journal/skills.md + must_remember.md + diary.md)
     |
     v
-Briefing (briefing.py): skill INDEX + full must_remember + emotional
+Briefing (briefing.py): skill INDEX + full must_remember + full diary
   view + unprocessed-session notice
     |
     v
@@ -66,10 +66,10 @@ compact it back under `max` — preventing meditate-every-session thrash.
 |---|---|---|---|
 | `skills` | learned, reusable lessons (name + trigger + procedure) | count (`max_count`) | `importance = log1p(usage_count)`; no time-decay; recency tie-break |
 | `must_remember` | external directives (`owner_explicit` / `preference` / `decision` / `incident`) | characters (`max_length`) | `importance`; `owner_explicit` protected until relevance-downgrade |
-| `emotional` | the persona's signed reactions | characters (`max_length`) | signed `weight` in `[-10, +10]`, decays toward 0; ranked by `|weight|` |
+| `diary` | the persona's dated, weighted work-log | characters (`max_length`) | dated bullets `- (±N) note`; signed `weight` in `[-10, +10]` decays from the bullet date; ranked by `|weight|`; **loaded whole** |
 
 On-disk, each store is one markdown file under the persona store's
-`journal/` dir (`skills.md`, `must_remember.md`, `emotional.md`); each entry
+`journal/` dir (`skills.md`, `must_remember.md`, `diary.md`); each entry
 is a YAML-frontmatter block + body. Don't hand-edit these — meditation owns
 pruning, and forgetting has no safety net.
 
@@ -82,7 +82,10 @@ pruning, and forgetting has no safety net.
 | `config.py` | YAML config loading + validation (the `memory:` block) |
 | `entries.py` | the three entry schemas + validation + frontmatter bridge |
 | `bounded_store.py` | crash-safe store I/O, length/count, overflow detection, per-store lock, the guarded `forget` |
-| `emotional.py` | signed-weight clamp + decay + emotional keep-rank |
+| `diary.py` | signed-weight clamp + decay + diary keep-rank |
+| `diary_format.py` | the single dated-bullet serialize / parse / validate |
+| `check.py` | the `check [--fix]` format gate + quarantine |
+| `migrate_emotional_to_diary.py` | the one-off legacy -> diary migration |
 | `skills.py` | usage-based skill importance + skills keep-rank |
 | `meditation.py` | the compaction engine (merge → relevance-downgrade → compact → guarded-forget) |
 | `lifecycle.py` | extraction, in-session staging, fresh-start `rebuild`, `pin`, charter mission sourcing |
@@ -131,9 +134,9 @@ memory:
   must_remember:
     max_length: 8000             # chars
     overflow_limit: 10000
-  emotional_log:
-    max_length: 12000            # chars
-    overflow_limit: 15000
+  diary:
+    max_length: 4000             # chars (loaded whole; kept small by forgetting)
+    overflow_limit: 6000
     weight_cap: 10               # hard cap: |weight| <= 10
     decay:
       magnitude_per_day: 0.1
@@ -142,8 +145,7 @@ rebuild:
   trigger: lazy
   idle_threshold_hours: 1
 
-briefing:
-  emotional_top: 20              # cap on emotional entries shown (top-by-|weight|); 0 = all
+# (diary loads whole — no top-N briefing knob)
 ```
 
 Validation is fail-fast at load: `length_unit` must be `characters` (token
@@ -157,7 +159,7 @@ units rejected); every store bound must satisfy `0 < max < overflow_limit`;
 tiger-memory --config my-config.yaml init
 
 # Fresh-start rebuild: drop the retired surface (first run), regenerate the
-# session-start briefing (skill index + must_remember + emotional + notice)
+# session-start briefing (skill index + must_remember + full diary + notice)
 tiger-memory --config my-config.yaml rebuild
 
 # Pin a must_remember entry directly.
@@ -189,6 +191,8 @@ verbs (`plan` / `ingest-extraction` / `ingest-staged`) are driven by the
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
 | `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free) |
 | `sweep-plan` / `sweep-done` / `sweep-complete` / `sweep-release` | team-sweep gating (non-AI) |
+| `check [--fix]` | validate the 3 stores' on-disk format; exit non-zero if any invalid. `--fix` repairs mechanical drift + quarantines non-mechanical to `<store>.rejected.md` (no silent loss). Runs as the per-persona gate at the end of every `rebuild` and in CI / pre-commit |
+| `migrate-emotional-to-diary [--apply]` | one-off legacy `emotional.md` -> dated-bullet `diary.md`. **`--dry-run` is the default** (preview only); `--apply` snapshots `emotional.md.bak`, writes `diary.md`, marks done (idempotent), takes the diary store-lock and refuses if a sweep holds it |
 
 The retired verbs `bootstrap`, `search`, `drill`, `tree`, `raw`,
 `resummarize`, and `ingest-summary` no longer exist — they belonged to the
@@ -205,13 +209,13 @@ whole-line section markers, in order (see
 <skill blocks, or NONE>
 @@MUST_REMEMBER@@
 <must-remember blocks, or NONE>
-@@EMOTIONAL@@
-<emotional blocks, or NONE>
+@@DIARY@@
+<diary blocks, or NONE>
 ```
 
 A skill block is `NAME:` / `TRIGGER:` / `PROCEDURE:`; a must-remember block
-is `KIND:` / `MEMO:`; an emotional block is `WEIGHT:` / `REACTION:` /
-`TEXT:`. A malformed *bundle* (missing/out-of-order markers) is rejected
+is `KIND:` / `MEMO:`; a diary block is `WEIGHT:` / `TEXT:` (the
+note is one line; its date is the session date). A malformed *bundle* (missing/out-of-order markers) is rejected
 before any write; an individual malformed *block* is skipped. `NONE` for a
 store is a valid, expected outcome — most sessions add little.
 
@@ -247,8 +251,8 @@ malformed-input handling) is
 `tiger-memory rebuild` assembles `briefing/` from the three stores:
 
 - the **full must_remember** store (highest-importance first);
-- an **emotional view** — top entries by `|weight|` (capped by
-  `briefing.emotional_top`);
+- the **full diary** — loaded whole, strongest feelings first by `|weight|`
+  (forgetting, not a display cap, keeps it bounded);
 - the **skill index** — name + trigger + one line per skill; only the index
   loads, the persona reads the full skill on demand;
 - the **unprocessed-session notice** (`UNPROCESSED.md`): memory is built
@@ -287,7 +291,7 @@ in §7 of the design). To tune, add the keys you want:
 memory:
   skills:        { max_count: 40, overflow_limit: 50 }
   must_remember: { max_length: 8000, overflow_limit: 10000 }
-  emotional_log:
+  diary:
     max_length: 12000
     overflow_limit: 15000
     weight_cap: 10
@@ -295,15 +299,15 @@ memory:
 ```
 
 Optionally also add `memory_extract:` (per-section word budgets) and
-`briefing.emotional_top` (see the example config).
+(the diary now loads whole — no top-N knob).
 
 **3. Seed from the old memory (one-off).** Before the fresh start drops the
 legacy files, run the one-off import to carry the old memory forward:
 `tiger-memory --config <persona-config> import-legacy`. It reads (and only
 reads — no deletion) each persona's old `must_memorize.md` pins + the
 daily/weekly/monthly rollups, re-authors them **in character** into the new
-`skills` / `must_remember` / `emotional` shapes, backdates them to their
-source dates (an old emotional reaction enters already-decayed; a skill's
+`skills` / `must_remember` / `diary` shapes, backdates them to their
+source dates (an old diary note enters already-decayed; a skill's
 `last_used` = its source date), and appends them to the three stores tagged
 `source: import-legacy`. It is **idempotent** (a durable `.state.json`
 `legacy_import` marker plus a detect-existing-seed fallback make a re-run a
@@ -329,6 +333,36 @@ sweep extracts new sessions.
 >
 > **merge the code → migrate the configs → `import-legacy` (seed) →
 > `rebuild` (fresh start) → ongoing sweep.**
+
+### Migrating `emotional.md` → `diary.md` (3-store model)
+
+A persona already on the 3-store model has an `emotional.md` (frontmatter:
+`weight` + `reaction` + body). The diary redesign replaces it with the compact
+dated-bullet `diary.md`. The one-off converter:
+
+```bash
+tiger-memory --config <persona-config> migrate-emotional-to-diary           # dry-run
+tiger-memory --config <persona-config> migrate-emotional-to-diary --apply    # perform it
+```
+
+- **`--dry-run` is the default**: it parses + previews
+  (`source_blocks` / `converted` / `kept` / `forgotten` / `no_loss`), writing
+  nothing. Run it on every persona first.
+- **`--apply`** snapshots `emotional.md` → `emotional.md.bak`, writes the
+  validated `diary.md`, removes `emotional.md`, and marks a durable
+  `diary_migrated` state marker (**idempotent** — a re-run is a no-op). It
+  takes the diary store-lock and **refuses if a live sweep holds it**.
+- **Map**: each old entry's body → the bullet note (the `reaction`'s valence is
+  folded into the weight sign); `weight` → `(±N)`; the entry date →
+  the `## YYYY-MM-DD` header. A converted file over `max_length` is bounded by a
+  forget pass (lowest `|weight|` first) — **no silent loss** (every source
+  block is counted: `source_blocks == converted == kept + forgotten`).
+- **Rollback**: restore `emotional.md.bak` → `emotional.md`, delete `diary.md`,
+  remove the `diary_migrated` marker from `.state.json`.
+
+Safe order: **dry-run all personas → review the previews → `--apply` per
+persona when no sweep is running → `tiger-memory check` to confirm valid.** The
+live `--apply` over a real roster is the Operator's call.
 
 `tigerharness init` already scaffolds new personas with the new model (no
 retired keys), so this migration only applies to configs created before the

@@ -35,10 +35,10 @@ loaded into context. When a skill's trigger applies, read the full skill
 This skill system is **ours**, persona-private — not Claude's
 `.claude/skills/`.
 
-## 4. `emotional.md` — your reactions, strongest first
+## 4. `diary.md` — your dated diary, strongest feelings first
 
 How past work felt to you, as {agent_name}: a signed weight (+ = liked,
-− = disliked; magnitude = strength) and a short reaction. Strong
+− = disliked; magnitude = strength), as dated `- (±N) note` bullets. Strong
 feelings survive; near-neutral ones decay and are forgotten. This is
 what makes the memory *yours*.
 
@@ -58,7 +58,7 @@ on what helps the team now.
 
 Pin a directive directly:
 `tiger-memory pin "<memo>" --kind <owner_explicit|preference|decision|incident>`.
-Skills and emotional reactions are extracted automatically by the sweep
+Skills and diary notes are extracted automatically by the sweep
 when a session goes idle.
 
 ---

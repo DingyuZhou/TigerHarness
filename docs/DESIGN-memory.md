@@ -26,7 +26,7 @@ The old tiger-memory had three weaknesses:
 The revamp answers all three: memory is **bounded and self-pruning**
 (forgetting is first-class), **skill-forming** (learned lessons become
 invokable skills that make future work easier), and **persona-coloured**
-(emotional logs carry each persona's reactions, decayed over time).
+(diary logs carry each persona's dated work-notes with emotional weight, decayed over time).
 
 ## 2. Principles (the non-negotiables)
 
@@ -98,7 +98,7 @@ may drift up to `overflow_limit`, and only *then* does meditation fire and
 compact it back below `max`. This prevents thrash (meditate every session).
 
 On-disk layout: one markdown file per store under the persona's `journal/`
-dir — `skills.md`, `must_remember.md`, `emotional.md`. Each file is a
+dir — `skills.md`, `must_remember.md`, `diary.md`. Each file is a
 sequence of entries; every entry is a YAML-frontmatter block (the structured
 fields) + a body, blocks separated by a sentinel line. `save_atomic`
 rewrites the whole file (meditation operates store-wide). Length is measured
@@ -140,7 +140,7 @@ in **characters**, never tokens (§8).
   the current mission is **downgraded to a normal kind** (`decision`), after
   which it becomes forgettable like any other entry. Nothing is permanently
   locked; relevance to the live mission is the gate.
-  **No time-decay here:** unlike the emotional store, must_remember
+  **No time-decay here:** unlike the diary store, must_remember
   `importance` does not tick down over time — the keep-rank is simply
   `importance` + recency (`meditation.keep_rank`). Downgrading an
   `owner_explicit` directive to `decision` does not start a decay clock; it
@@ -150,28 +150,35 @@ in **characters**, never tokens (§8).
   relevance-check and downgrade stale directives, compact verbose survivors,
   then guarded-forget old low-importance items until length < `max_length`.
 
-### 4.3 Emotional-weighted persona logs — the "more Sakuragi" layer
+### 4.3 Diary — the dated, weighted work-log (the "more Sakuragi" layer)
 
-- `EmotionalEntry`: "what I did this session / anything to remember for
-  future tasks / my reaction to it," plus a signed emotional `weight`, a
-  short `reaction` string, and a date.
-- **Signed scalar with a hard cap of [-10, +10]:** positive = *for* /
-  liked; negative = *against* / disliked; `0` = neutral. One scalar only.
-  The cap (`emotional.clamp_weight`) means repeated merges can never inflate
-  a single memory past ±10.
-- **Decay toward 0 from either side** (`emotional.decay_weight`). Each day
-  `|weight|` shrinks toward 0 by `magnitude_per_day * days`; the sign is
-  preserved until the magnitude reaches exactly 0 (never overshoots into the
-  opposite sign, never yields `-0.0`). Forgetting ranks by **magnitude
-  `|weight|`** plus recency, so strong feelings — positive *or* negative —
-  survive, while near-neutral / decayed items are compacted or forgotten
-  first.
-- **When decay is materialized:** decay is applied to the stored `weight`
-  **only at meditation time** (`emotional.decay_entry`, which fires on
-  overflow). It is **not** computed live on every read. In particular the
-  session-start emotional VIEW (`briefing._render_emotional`) sorts on the
-  raw **stored** `|weight|`, not a freshly decayed value — between
-  meditations, an entry's briefing rank reflects the weight as last written.
+- `DiaryEntry`: a short **dated diary note** — "what I did / why / learned /
+  could-do-better" — carrying a signed emotional `weight`. The feeling is
+  folded into the note text plus the **sign** of the weight; there is no
+  separate `reaction` field (dropped in the diary redesign).
+- **Compact dated-bullet on-disk format** (this store ONLY — skills and
+  must_remember keep YAML frontmatter): per-day sections headed
+  `## YYYY-MM-DD` (ascending), each entry a bullet `- (±N) <note>` with the
+  signed inline weight. The single `diary_format` module owns
+  serialize / parse / validate (the note's whitespace is flattened to one
+  line); the store's **validate-on-write round-trip** (serialize -> re-parse
+  -> validate) REFUSES to persist a store that does not round-trip clean. The
+  compact format intentionally drops per-entry `id`/`source` (only date /
+  weight / note persist).
+- **Signed scalar, hard cap [-10, +10]** (`diary.clamp_weight`): positive =
+  *for* / liked, negative = *against* / disliked, `0` = neutral. Repeated
+  merges can never inflate past ±10.
+- **Decay toward 0 from either side** (`diary.decay_weight`), **anchored on
+  each bullet's date**. Each day `|weight|` shrinks toward 0 by
+  `magnitude_per_day * days`, sign preserved until the magnitude hits exactly
+  0. Forgetting ranks by decayed `|weight|` plus recency
+  (`diary.diary_keep_rank`), so strong feelings — positive *or* negative —
+  survive while near-neutral / decayed items are forgotten first ("higher
+  emotional weight = harder to forget").
+- **Loaded WHOLE at session start** — there is no top-N display cap; the store
+  is kept loadable by *forgetting*, not by a view limit. Bounds are tighter
+  than the frontmatter stores for that reason: `max_length` 4000,
+  `overflow_limit` 6000 chars.
 - **Length-based** bound: `max_length` + `overflow_limit`. On overflow,
   meditation merges similar items (merging bumps magnitude toward the
   stronger feeling, clamped), then compacts/forgets the lowest-magnitude /
@@ -253,10 +260,9 @@ The session-start working set (`briefing.rebuild_briefing`) is exactly:
 
 - **the full must_remember store** (bounded, so cheap), highest-importance
   first;
-- **an emotional view** — the top entries by **stored** `|weight|` (capped by
-  `briefing.emotional_top`; strong feelings, for or against, survive). The
-  view ranks on the raw weight as last written, not a live-decayed value —
-  decay is materialized only at meditation time (§4.3);
+- **the full diary** — loaded WHOLE, strongest feelings first by stored
+  `|weight|` (forgetting, not a display cap, keeps it bounded; §4.3). It ranks
+  on the raw weight as last written; decay is materialized at meditation time;
 - **the skill index** — name + trigger + one-line summary per skill,
   Python-rebuilt; only the index loads, the persona pulls a full skill on
   demand;
@@ -285,9 +291,9 @@ memory:
   must_remember:
     max_length: 8000             # chars
     overflow_limit: 10000
-  emotional_log:
-    max_length: 12000            # chars
-    overflow_limit: 15000
+  diary:
+    max_length: 4000             # chars (loaded WHOLE; kept small by forgetting)
+    overflow_limit: 6000
     weight_cap: 10               # hard cap: |weight| <= 10
     decay:
       magnitude_per_day: 0.1     # how fast |weight| -> 0
@@ -295,11 +301,10 @@ memory:
 memory_extract:                  # per-section word budgets for extraction
   skill_procedure_words: 120
   memo_words: 25
-  reaction_words: 40
+  reaction_words: 40             # diary-note length hint
   max_output_words: 600
 
-briefing:
-  emotional_top: 20              # cap on emotional entries shown; 0 = all
+briefing: {}                     # diary loads whole — no top-N knob
 ```
 
 Validation is fail-fast at load time: `length_unit` must be `characters`
@@ -324,16 +329,19 @@ tuning later; `length_unit` and `weight_cap` are confirmed final.
 | Module | Role |
 |---|---|
 | `config.py` | the `memory:` / `memory_extract:` blocks + fail-fast validation |
-| `entries.py` | the three entry schemas (`SkillEntry` / `MustRememberEntry` / `EmotionalEntry`) + validation + frontmatter bridge |
+| `entries.py` | the three entry schemas (`SkillEntry` / `MustRememberEntry` / `DiaryEntry`) + validation + frontmatter bridge |
 | `bounded_store.py` | crash-safe store I/O, character-length / count, `is_over_overflow`, per-store lock, the guarded `forget` + `ForgetGuardError` / `StoreLockHeld` |
-| `emotional.py` | signed-weight clamp + decay + emotional keep-rank |
+| `diary.py` | signed-weight clamp + decay + diary keep-rank |
+| `diary_format.py` | the single dated-bullet serialize / parse / validate |
+| `check.py` | `tiger-memory check [--fix]` format gate + quarantine |
+| `migrate_emotional_to_diary.py` | one-off legacy `emotional.md` -> `diary.md` migration |
 | `skills.py` | `log1p(usage)` importance + skills keep-rank |
 | `ranking.py` | shared recency / date-math helpers |
 | `meditation.py` | the compaction engine: `keep_rank`, `MeditationLog`, `meditate` (merge → relevance/downgrade → compact → guarded-forget) |
 | `lifecycle.py` | extraction (`parse_extraction` / `extract_candidates` / `ingest_candidates`), the in-session staging (`plan_extraction`), fresh-start `rebuild`, `pin`, `team_mission_text` |
 | `import_legacy.py` | the one-off legacy import (§12): reader (`read_legacy`), persona-driven re-author (`reauthor`), backdated seeding scorer (`score_seed_candidates`), seed-writer + idempotency guards (`seed_entries` / `already_imported` / `mark_imported`), orchestrator (`import_legacy_run`) |
 | `sweep.py` | team-sweep gating + `meditate_all_stores` (post-ingest, over-overflow only) |
-| `briefing.py` | session-start assembly: must_remember + emotional view + skill index + unprocessed notice |
+| `briefing.py` | session-start assembly: must_remember + full diary + skill index + unprocessed notice |
 | `state.py` | the `tiger-memory state` JSON snapshot (`compute_state`): per-store count / chars / `max` / `over_overflow` — the programmatic hook to check a store's size vs its bound |
 | `store.py` | on-disk store layout (`Paths`) + crash-safe serialization helpers (`atomic_write`, `atomic_swap_dir`, `write_state` / `read_state`) used by the bounded stores and the briefing swap |
 | `cli.py` | `init` / `rebuild` / `pin` / `import-legacy` / `state` / `plan` / `ingest-extraction` / `ingest-staged` / `sweep-*` |
