@@ -147,25 +147,25 @@ def test_rebuild_swaps_over_existing(tmp_path: Path) -> None:
 # ----- emotional top-N ------------------------------------------------------
 
 
-def test_emotional_top_caps(tmp_path: Path) -> None:
-    cfg = _cfg(tmp_path, "briefing:\n  emotional_top: 2\n")
+def test_diary_loaded_whole_shows_all(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, "")
     store = Store(cfg.store.root)
     _seed(cfg, store, emo=[_emo("a", 1.0), _emo("b", 9.0), _emo("c", -5.0)])
     bf.rebuild_briefing(cfg, store)
     out = (store.paths.briefing / bf.DIARY_NAME).read_text()
-    # Only the two strongest (9.0, -5.0) shown; the 1.0 dropped.
-    assert "b" in out and "c" in out
-    assert out.count("- ") == 2
+    # The diary is loaded WHOLE (no top-N cap) — all three are shown.
+    assert "a" in out and "b" in out and "c" in out
+    assert out.count("- ") == 3
 
 
-def test_emotional_top_zero_shows_all(tmp_path: Path) -> None:
+def test_diary_render_shows_all(tmp_path: Path) -> None:
     entries = [_emo("a", 1.0), _emo("b", 2.0)]
-    out = bf._render_diary(entries, 0)
+    out = bf._render_diary(entries)
     assert out.count("- ") == 2
 
 
 def test_emotional_positive_sign_marker() -> None:
-    out = bf._render_diary([_emo("up", 4.0)], 0)
+    out = bf._render_diary([_emo("up", 4.0)])
     assert "(+4.0)" in out
 
 

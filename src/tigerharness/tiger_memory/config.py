@@ -117,11 +117,9 @@ class RebuildConfig:
 class BriefingConfig:
     """Session-start briefing assembly (bounded-store revamp, design §6).
 
-    ``emotional_top`` caps how many emotional entries the session-start
-    view shows (top-by-|weight|); ``0`` shows all.
+    The diary is loaded WHOLE at session start (forgetting, not a display cap,
+    keeps it bounded), so there is no top-N knob.
     """
-
-    emotional_top: int = 20
 
 
 @dataclass(frozen=True)
@@ -199,10 +197,16 @@ class DiaryDecayConfig:
 
 @dataclass(frozen=True)
 class DiaryStoreConfig:
-    """Bound + signed-weight cap + decay for the emotional log (design §4.3)."""
+    """Bound + signed-weight cap + decay for the diary store (design §4.3).
 
-    max_length: int = 12000
-    overflow_limit: int = 15000
+    The diary is loaded WHOLE each session, so it is bounded tighter than the
+    other length-based stores and kept small by forgetting (not a display cap):
+    ``max_length`` 4000 (the target forgetting compacts back below),
+    ``overflow_limit`` 6000 (the hysteresis trigger). The Operator's numbers.
+    """
+
+    max_length: int = 4000
+    overflow_limit: int = 6000
     weight_cap: float = 10.0
     decay: DiaryDecayConfig = field(default_factory=DiaryDecayConfig)
 
@@ -446,13 +450,7 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         ),
     )
 
-    briefing_raw = raw.get("briefing") or {}
-    emotional_top = int(briefing_raw.get("emotional_top", 20))
-    if emotional_top < 0:
-        raise ConfigError(
-            f"briefing.emotional_top must be ≥ 0; got {emotional_top}."
-        )
-    briefing = BriefingConfig(emotional_top=emotional_top)
+    briefing = BriefingConfig()
 
     prefilter_raw = raw.get("prefilter") or {}
     prefilter = PrefilterConfig(

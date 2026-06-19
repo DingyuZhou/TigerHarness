@@ -79,7 +79,7 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
 
         diary = bstore.load(STORE_DIARY)
         (tmp / DIARY_NAME).write_text(
-            _render_diary(diary, cfg.briefing.emotional_top),
+            _render_diary(diary),
             encoding="utf-8",
         )
 
@@ -187,17 +187,16 @@ def _render_must_remember(entries: list[MustRememberEntry]) -> str:
 # ----- emotional view (top-by-|weight|) -------------------------------------
 
 
-def _render_diary(entries: list[DiaryEntry], top: int) -> str:
-    """Emotional log, strongest feelings first (top-N by ``|weight|``).
+def _render_diary(entries: list[DiaryEntry]) -> str:
+    """Diary view, strongest feelings first (by ``|weight|``).
 
-    ``top == 0`` shows all. A signed weight: positive = liked/for, negative =
+    The diary is loaded WHOLE — every entry is shown (forgetting, not a display
+    cap, keeps it bounded). A signed weight: positive = liked/for, negative =
     disliked/against; magnitude is how strongly it is felt.
     """
     if not entries:
-        return "# Emotional log\n\n_(empty)_\n"
+        return "# Diary\n\n_(empty)_\n"
     ordered = sorted(entries, key=lambda e: abs(float(e.weight)), reverse=True)
-    if top > 0:
-        ordered = ordered[:top]
     lines = ["# Diary (strongest feelings first)", ""]
     for e in ordered:
         sign = "+" if e.weight >= 0 else ""

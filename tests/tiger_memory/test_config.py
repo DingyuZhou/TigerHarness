@@ -24,21 +24,9 @@ def test_loads_minimal(minimal_config_yaml: Path) -> None:
     assert cfg.budgets.max_prompt_content_chars == 120_000
     assert cfg.budgets.max_staged_content_chars == 300_000
     assert len(cfg.sources) == 1 and cfg.sources[0].kind == "claude_code"
-    # New session-start briefing defaults take effect.
-    assert cfg.briefing.emotional_top == 20
     # Extraction word budgets default.
     assert cfg.memory_extract.memo_words == 25
     assert cfg.memory_extract.skill_procedure_words == 120
-
-
-def test_briefing_emotional_top_override(tmp_path: Path) -> None:
-    cfg = load_config(_briefing_cfg(tmp_path, "briefing:\n  emotional_top: 5\n"))
-    assert cfg.briefing.emotional_top == 5
-
-
-def test_briefing_emotional_top_negative_raises(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="emotional_top"):
-        load_config(_briefing_cfg(tmp_path, "briefing:\n  emotional_top: -1\n"))
 
 
 def test_memory_extract_explicit_overrides(tmp_path: Path) -> None:
