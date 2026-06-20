@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from . import diary_format, fuzzy_store
+from . import diary_format, fuzzy_recompact, fuzzy_store
 from .config import Config
 from .diary_finalize import STATE_KEY, finalize_diary, forget_to_max
 from .store import Store
@@ -44,6 +44,9 @@ class RegenResult:
     forgotten_items: list[tuple[str, float, str]] = field(default_factory=list)
     #: chars in fuzzy.md after seeding the diary overflow (0 = nothing seeded).
     fuzzy_seeded_chars: int = 0
+    #: chars STILL dropped at the fuzzy bound after seeding/coarsening (P0/I1).
+    #: >0 means content was trimmed — the caller surfaces it, never silent.
+    fuzzy_trimmed_chars: int = 0
 
     @property
     def no_loss(self) -> bool:
@@ -51,26 +54,44 @@ class RegenResult:
         return self.bullets_generated == self.bullets_kept + self.bullets_forgotten
 
 
+_FUZZY_SEED_HEADER = "## Coarsened older diary (aged out at migration; meditation refines)"
+
+
 def _seed_fuzzy_from_overflow(
-    cfg: Config, store: Store, forgotten_items: list[tuple[str, float, str]]
-) -> int:
-    """Seed fuzzy.md with the diary bullets the 4000-char bound dropped (no hard
-    drop — the 4-store model). The overflow is appended to fuzzy.md (bounded by
-    ``save_fuzzy``); later meditations coarsen it via the summarizer. Deterministic
-    (no model call at migration time). Returns fuzzy.md's char length afterwards.
+    cfg: Config,
+    store: Store,
+    forgotten_items: list[tuple[str, float, str]],
+    *,
+    summarizer=None,
+) -> tuple[int, int]:
+    """Seed fuzzy.md with the diary bullets the bound dropped (P0/I1 + I2).
+
+    The overflow is written **newest-first** (I2) so the fuzzy bound's tail-trim
+    drops the OLDEST gist, keeping the recent gist. If the seed would exceed
+    ``fuzzy.max_length`` AND a *summarizer* is given, it is **coarsened** via
+    :func:`fuzzy_recompact.recompact_fuzzy` to fit, instead of a raw tail-trim
+    (I1). ``save_fuzzy`` still hard-bounds (defense): any residual drop is
+    RETURNED, never silent. Returns ``(fuzzy_chars, trimmed_chars)``.
     """
+    # newest-first: a subsequent tail-trim drops the oldest, not the newest.
+    items = sorted(forgotten_items, key=lambda x: x[0], reverse=True)
     bullets = [
-        diary_format.DiaryEntry(date=d, weight=w, text=t)
-        for (d, w, t) in forgotten_items
+        diary_format.DiaryEntry(date=d, weight=w, text=t) for (d, w, t) in items
     ]
-    seed = (
-        "## Coarsened older diary (aged out at migration; meditation refines)\n"
-        + diary_format.serialize(bullets)
+    body = "\n".join(
+        f"- {b.date} ({diary_format._format_weight(b.weight)}) {b.text}"
+        for b in bullets
     )
+    seed = f"{_FUZZY_SEED_HEADER}\n{body}\n"
     existing = fuzzy_store.load_fuzzy(store)
     blob = f"{existing}\n{seed}" if existing.strip() else seed
-    fuzzy_store.save_fuzzy(cfg, store, blob)
-    return len(fuzzy_store.load_fuzzy(store))
+
+    if len(blob) > cfg.memory.fuzzy.max_length and summarizer is not None:
+        # coarsen the overflow to fit rather than raw-trim it (no silent loss).
+        blob = fuzzy_recompact.recompact_fuzzy(summarizer, bullets, [], existing, cfg)
+
+    trimmed = fuzzy_store.save_fuzzy(cfg, store, blob)  # residual hard-bound drop
+    return len(fuzzy_store.load_fuzzy(store)), trimmed
 
 
 def regenerate_store(
@@ -81,6 +102,7 @@ def regenerate_store(
     cohort: str = "1",
     apply: bool = False,
     seed_fuzzy: bool = True,
+    summarizer=None,
 ) -> RegenResult:
     """Validate -> bound -> finalize a regenerated (or authored) diary.
 
@@ -143,8 +165,10 @@ def regenerate_store(
         if skip is None:
             res.applied = True
             if seed_fuzzy and res.forgotten_items:
-                res.fuzzy_seeded_chars = _seed_fuzzy_from_overflow(
-                    cfg, store, res.forgotten_items
+                res.fuzzy_seeded_chars, res.fuzzy_trimmed_chars = (
+                    _seed_fuzzy_from_overflow(
+                        cfg, store, res.forgotten_items, summarizer=summarizer
+                    )
                 )
             log.warning(
                 "regenerate(%s): APPLIED — %d generated -> %d kept (%d forgotten "
@@ -152,6 +176,13 @@ def regenerate_store(
                 res.persona, res.bullets_generated, res.bullets_kept,
                 res.bullets_forgotten, res.fuzzy_seeded_chars,
             )
+            if res.fuzzy_trimmed_chars:
+                # P0/I1: a residual bound trim is SURFACED loudly, never silent.
+                log.warning(
+                    "regenerate(%s): WARNING — fuzzy.md still over bound after "
+                    "seeding; %d char(s) of older gist TRIMMED (pass a summarizer "
+                    "to coarsen instead).", res.persona, res.fuzzy_trimmed_chars,
+                )
         else:
             res.skipped_reason = skip
             log.warning("regenerate(%s): SKIPPED — %s", res.persona, skip)

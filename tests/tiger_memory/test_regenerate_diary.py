@@ -25,7 +25,8 @@ VALID = (
 )
 
 
-def _store(tmp_path: Path, *, max_length: int = 4000, emo: bool = True) -> tuple[object, Store]:
+def _store(tmp_path: Path, *, max_length: int = 4000, emo: bool = True,
+           fuzzy_max: int = 4000) -> tuple[object, Store]:
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(dedent(f"""\
         agent:
@@ -45,6 +46,9 @@ def _store(tmp_path: Path, *, max_length: int = 4000, emo: bool = True) -> tuple
             max_length: {max_length}
             overflow_limit: {max_length + 2000}
             weight_cap: 10
+          fuzzy:
+            max_length: {fuzzy_max}
+            overflow_limit: {fuzzy_max + 2000}
     """))
     cfg = load_config(cfg_path)
     store = Store(cfg.store.root)
@@ -192,3 +196,56 @@ def test_seed_appends_to_existing_fuzzy(tmp_path: Path):
     res = rg.regenerate_store(cfg, store, VALID, apply=True)
     fuzzy = fuzzy_store.load_fuzzy(store)
     assert "earlier gist" in fuzzy and "Coarsened older diary" in fuzzy
+
+
+# ----- P0/I1 + I2: fuzzy seed coarsens (or surfaces the trim), newest-first ---
+
+from tigerharness.tiger_memory.summarizers.base import Summarizer  # noqa: E402
+
+# 3 dated bullets; a small diary bound keeps only the strongest (+9), forgetting
+# the two low-weight older ones -> they seed fuzzy.
+_OVERFLOW = (
+    "## 2026-06-10\n- (+1) oldest alpha note\n"
+    "## 2026-06-11\n- (+2) middle bravo note\n"
+    "## 2026-06-12\n- (+9) newest charlie note\n"
+)
+
+
+class _GistSummarizer(Summarizer):
+    name = "gist"
+    version = "v1"
+
+    def summarize(self, *, prompt: str, max_words: int) -> str:
+        return "## Fuzzy\n- coarse gist of the older notes\n"
+
+
+def test_seed_records_trim_when_no_summarizer(tmp_path: Path):
+    """P0: with no summarizer + overflow over the fuzzy bound, the residual trim
+    is RECORDED (surfaced), never silent."""
+    from tigerharness.tiger_memory import fuzzy_store
+    cfg, store = _store(tmp_path, max_length=45, fuzzy_max=120)
+    res = rg.regenerate_store(cfg, store, _OVERFLOW, apply=True)
+    assert res.applied and res.bullets_forgotten == 2
+    assert res.fuzzy_trimmed_chars > 0            # surfaced, not silent
+    assert len(fuzzy_store.load_fuzzy(store)) <= 120
+
+
+def test_seed_coarsens_with_summarizer_no_trim(tmp_path: Path):
+    """I1: with a summarizer, the overflow is coarsened to fit -> no trim."""
+    from tigerharness.tiger_memory import fuzzy_store
+    cfg, store = _store(tmp_path, max_length=45, fuzzy_max=120)
+    res = rg.regenerate_store(cfg, store, _OVERFLOW, apply=True,
+                              summarizer=_GistSummarizer())
+    assert res.applied and res.bullets_forgotten == 2
+    assert res.fuzzy_trimmed_chars == 0           # coarsened to fit, nothing dropped
+    assert "coarse gist" in fuzzy_store.load_fuzzy(store)
+
+
+def test_seed_newest_first_keeps_recent(tmp_path: Path):
+    """I2: when a trim is unavoidable it drops the OLDEST, keeping the recent gist."""
+    from tigerharness.tiger_memory import fuzzy_store
+    cfg, store = _store(tmp_path, max_length=45, fuzzy_max=120)
+    rg.regenerate_store(cfg, store, _OVERFLOW, apply=True)
+    fuzzy = fuzzy_store.load_fuzzy(store)
+    assert "bravo" in fuzzy        # the newer of the two forgotten survives
+    assert "alpha" not in fuzzy    # the oldest is the one trimmed
