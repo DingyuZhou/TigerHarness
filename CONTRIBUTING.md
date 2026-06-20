@@ -28,6 +28,12 @@ Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[too
 > run proves tests pass, not that coverage holds. CI runs the gated
 > form.
 
+> **Env-independent:** the suite is safe to run from inside a Slack
+> bridge session -- a top-level `tests/conftest.py` autouse fixture
+> scrubs the bridge-injected env vars (`TIGERHARNESS_SLACK_THREAD_TS`,
+> `TIGERHARNESS_BRIDGES_CONFIG`) before each test, so you get CI's clean
+> result without any manual `env -u ...` dance.
+
 ## Code review
 
 Every change is reviewed against the
