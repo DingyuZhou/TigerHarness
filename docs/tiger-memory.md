@@ -72,10 +72,20 @@ compact it back under `max` — preventing meditate-every-session thrash.
 On-disk, the three ENTRY stores are one markdown file each under the persona
 store's `journal/` dir (`skills.md`, `must_remember.md`, `diary.md`), each entry a
 YAML-frontmatter block + body. The **fuzzy** store (`fuzzy.md`) is free text, not
-an entry list — it is written ONLY by meditation (never by ingest / `import-legacy`,
-which seed the three entry stores). Don't hand-edit these — meditation owns
-pruning, and **forgetting never deletes**: aged items are coarsened into `fuzzy.md`
-(recoverable), not dropped.
+an entry list — it is written by meditation (steady state) and, one-off, by the
+legacy→4-store **migration** that seeds it from the diary overflow. Don't
+hand-edit these — meditation owns pruning, and **forgetting never deletes**: aged
+items are coarsened into `fuzzy.md` (recoverable), not dropped.
+
+The migration seed honours that same guarantee: the dropped diary overflow is
+ordered **newest-first** (so the fuzzy bound's tail-trim drops the *oldest* gist,
+not the most recent), and when the seed exceeds `fuzzy.max_length` and a summarizer
+is supplied it is **coarsened** to fit (`fuzzy_recompact`) rather than raw-trimmed.
+Any residual bound-trim is **never silent** — `regenerate_store` records the
+dropped-char count (`RegenResult.fuzzy_trimmed_chars`) and emits a per-persona
+`WARNING`, so an operator running the migration always sees a partial loss instead
+of discovering it later. (Run the migration with a summarizer to get coarsening;
+without one the seed is deterministic and any over-bound residual is surfaced.)
 
 ### Verify the 4-store model
 
