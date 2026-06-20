@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from . import diary_format
+from . import diary_format, fuzzy_store
 from .config import Config
 from .diary_finalize import STATE_KEY, finalize_diary, forget_to_max
 from .store import Store
@@ -42,11 +42,35 @@ class RegenResult:
     skipped_reason: str | None = None
     #: ``(date, weight, text)`` for each bullet the bound pass dropped.
     forgotten_items: list[tuple[str, float, str]] = field(default_factory=list)
+    #: chars in fuzzy.md after seeding the diary overflow (0 = nothing seeded).
+    fuzzy_seeded_chars: int = 0
 
     @property
     def no_loss(self) -> bool:
         """Every generated bullet is accounted for (kept or forgotten)."""
         return self.bullets_generated == self.bullets_kept + self.bullets_forgotten
+
+
+def _seed_fuzzy_from_overflow(
+    cfg: Config, store: Store, forgotten_items: list[tuple[str, float, str]]
+) -> int:
+    """Seed fuzzy.md with the diary bullets the 4000-char bound dropped (no hard
+    drop — the 4-store model). The overflow is appended to fuzzy.md (bounded by
+    ``save_fuzzy``); later meditations coarsen it via the summarizer. Deterministic
+    (no model call at migration time). Returns fuzzy.md's char length afterwards.
+    """
+    bullets = [
+        diary_format.DiaryEntry(date=d, weight=w, text=t)
+        for (d, w, t) in forgotten_items
+    ]
+    seed = (
+        "## Coarsened older diary (aged out at migration; meditation refines)\n"
+        + diary_format.serialize(bullets)
+    )
+    existing = fuzzy_store.load_fuzzy(store)
+    blob = f"{existing}\n{seed}" if existing.strip() else seed
+    fuzzy_store.save_fuzzy(cfg, store, blob)
+    return len(fuzzy_store.load_fuzzy(store))
 
 
 def regenerate_store(
@@ -56,6 +80,7 @@ def regenerate_store(
     *,
     cohort: str = "1",
     apply: bool = False,
+    seed_fuzzy: bool = True,
 ) -> RegenResult:
     """Validate -> bound -> finalize a regenerated (or authored) diary.
 
@@ -117,11 +142,15 @@ def regenerate_store(
         )
         if skip is None:
             res.applied = True
+            if seed_fuzzy and res.forgotten_items:
+                res.fuzzy_seeded_chars = _seed_fuzzy_from_overflow(
+                    cfg, store, res.forgotten_items
+                )
             log.warning(
-                "regenerate(%s): APPLIED — %d generated -> %d kept (%d forgotten); "
-                "emotional.md backed up to emotional.md.bak",
+                "regenerate(%s): APPLIED — %d generated -> %d kept (%d forgotten "
+                "-> fuzzy.md %d chars); emotional.md + diary.md backed up",
                 res.persona, res.bullets_generated, res.bullets_kept,
-                res.bullets_forgotten,
+                res.bullets_forgotten, res.fuzzy_seeded_chars,
             )
         else:
             res.skipped_reason = skip

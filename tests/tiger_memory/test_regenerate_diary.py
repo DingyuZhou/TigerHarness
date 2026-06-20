@@ -152,3 +152,43 @@ def test_no_loss_property_direct():
     assert r.no_loss
     r2 = rg.RegenResult("Y", bullets_generated=5, bullets_kept=3, bullets_forgotten=1)
     assert not r2.no_loss
+
+
+# ----- fuzzy-seed-from-overflow (4-store migration, Operator option A) ------
+
+def test_apply_seeds_fuzzy_from_overflow(tmp_path: Path):
+    from tigerharness.tiger_memory import fuzzy_store
+    cfg, store = _store(tmp_path, max_length=70)  # small -> overflow
+    res = rg.regenerate_store(cfg, store, VALID, apply=True)
+    assert res.applied and res.bullets_forgotten > 0
+    fuzzy = fuzzy_store.load_fuzzy(store)
+    assert "Coarsened older diary" in fuzzy
+    assert res.fuzzy_seeded_chars == len(fuzzy) > 0
+    # the dropped bullets are in fuzzy.md -> no hard drop.
+    forgotten_texts = [t for (_, _, t) in res.forgotten_items]
+    assert any(ft in fuzzy for ft in forgotten_texts)
+
+
+def test_apply_no_overflow_no_fuzzy_seed(tmp_path: Path):
+    from tigerharness.tiger_memory import fuzzy_store
+    cfg, store = _store(tmp_path, max_length=4000)  # fits -> nothing forgotten
+    res = rg.regenerate_store(cfg, store, VALID, apply=True)
+    assert res.applied and res.bullets_forgotten == 0
+    assert res.fuzzy_seeded_chars == 0 and fuzzy_store.load_fuzzy(store) == ""
+
+
+def test_seed_fuzzy_false_skips_seed(tmp_path: Path):
+    from tigerharness.tiger_memory import fuzzy_store
+    cfg, store = _store(tmp_path, max_length=70)
+    res = rg.regenerate_store(cfg, store, VALID, apply=True, seed_fuzzy=False)
+    assert res.applied and res.bullets_forgotten > 0
+    assert res.fuzzy_seeded_chars == 0 and fuzzy_store.load_fuzzy(store) == ""
+
+
+def test_seed_appends_to_existing_fuzzy(tmp_path: Path):
+    from tigerharness.tiger_memory import fuzzy_store
+    cfg, store = _store(tmp_path, max_length=70)
+    fuzzy_store.save_fuzzy(cfg, store, "## prior fuzzy\n- earlier gist\n")
+    res = rg.regenerate_store(cfg, store, VALID, apply=True)
+    fuzzy = fuzzy_store.load_fuzzy(store)
+    assert "earlier gist" in fuzzy and "Coarsened older diary" in fuzzy
