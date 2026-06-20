@@ -77,15 +77,20 @@ legacy→4-store **migration** that seeds it from the diary overflow. Don't
 hand-edit these — meditation owns pruning, and **forgetting never deletes**: aged
 items are coarsened into `fuzzy.md` (recoverable), not dropped.
 
-The migration seed honours that same guarantee: the dropped diary overflow is
-ordered **newest-first** (so the fuzzy bound's tail-trim drops the *oldest* gist,
-not the most recent), and when the seed exceeds `fuzzy.max_length` and a summarizer
-is supplied it is **coarsened** to fit (`fuzzy_recompact`) rather than raw-trimmed.
-Any residual bound-trim is **never silent** — `regenerate_store` records the
+The migration seed upholds the same *no-silent-loss* discipline. The dropped diary
+overflow is ordered **newest-first** (so the fuzzy bound's tail-trim drops the
+*oldest* gist, not the most recent). When the seed exceeds `fuzzy.max_length` and a
+summarizer is supplied it is **coarsened** to fit (`fuzzy_recompact`, the
+subscription-rail model call) — genuinely no-drop. The **default** (no summarizer)
+is deterministic: it seeds raw, and if the seed still over-runs the bound the
+residual IS trimmed — but **never silently**. `regenerate_store` records the
 dropped-char count (`RegenResult.fuzzy_trimmed_chars`) and emits a per-persona
-`WARNING`, so an operator running the migration always sees a partial loss instead
-of discovering it later. (Run the migration with a summarizer to get coarsening;
-without one the seed is deterministic and any over-bound residual is surfaced.)
+`WARNING`, so an operator always sees a partial loss at migration time instead of
+discovering it later; a trimmed residual is recoverable from the migration task's
+`regen` artifacts (it is gone from `fuzzy.md`). Net: with a summarizer the seed is
+no-drop; without one it is never-silent. Verify by reading the seed tests in
+`tests/tiger_memory/test_regenerate_diary.py`, or by running the migration and
+grepping the logs for `... TRIMMED`.
 
 ### Verify the 4-store model
 
@@ -97,8 +102,10 @@ tiger-memory --config <cfg> check          # exit 0 = green; --fix re-bounds fuz
 grep -rn owner_explicit src/tigerharness/tiger_memory   # only the legacy read-shim
 
 # 3. fuzzy converges + nothing is hard-dropped: the named tests
+#    (incl. the migration-seed no-silent-drop guarantee)
 uv run python -m pytest tests/tiger_memory/test_meditate_persona.py \
-    tests/tiger_memory/test_fuzzy_store.py
+    tests/tiger_memory/test_fuzzy_store.py \
+    tests/tiger_memory/test_regenerate_diary.py
 ```
 
 A store written before the `owner_explicit` -> `operator_explicit` rename still
