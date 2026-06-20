@@ -17,7 +17,7 @@ from tigerharness.tiger_memory.bounded_store import BoundedStore, StoreLockHeld
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
     KIND_DECISION,
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
     KIND_PREFERENCE,
     DiaryEntry,
     MustRememberEntry,
@@ -231,7 +231,9 @@ def test_merge_must_remember_bumps_importance(tmp_path: Path) -> None:
     assert log.forgotten == []
     survivors = bs.load("must_remember")
     assert len(survivors) == 1
-    assert survivors[0].importance == 2.0  # 1.0 + 1.0 bump
+    # reinforcement: two count-1 facts merge -> repeat_count 2, importance = 2.0.
+    assert survivors[0].repeat_count == 2
+    assert survivors[0].importance == 2.0
 
 
 # ----- relevance-check + downgrade BEFORE forget ----------------------------
@@ -239,14 +241,14 @@ def test_merge_must_remember_bumps_importance(tmp_path: Path) -> None:
 
 def test_relevance_downgrades_stale_owner_directive(tmp_path: Path) -> None:
     bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
-    stale = _mr(KIND_OWNER_EXPLICIT, "old retired feature directive xx", OLD)
+    stale = _mr(KIND_OPERATOR_EXPLICIT, "old retired feature directive xx", OLD)
     bs.save_atomic("must_remember", [stale])
     summ = ScriptedSummarizer(stale_texts=[stale.text])
     log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)
     assert stale.id in log.downgraded
     survivors = bs.load("must_remember")
     # Downgraded to a normal kind and then forgotten (it was the lowest-rank).
-    assert all(e.kind != KIND_OWNER_EXPLICIT for e in survivors)
+    assert all(e.kind != KIND_OPERATOR_EXPLICIT for e in survivors)
 
 
 def test_relevance_keeps_relevant_owner_then_terminal_overmax(
@@ -255,8 +257,8 @@ def test_relevance_keeps_relevant_owner_then_terminal_overmax(
     """A store of all still-relevant owner directives over max stays intact
     and emits the over-max warning (terminal nothing-safe-to-forget)."""
     bs = _make_store(tmp_path, mr_max=20, mr_overflow=30)
-    o1 = _mr(KIND_OWNER_EXPLICIT, "ship the revamp by friday hard")
-    o2 = _mr(KIND_OWNER_EXPLICIT, "never push to remote without approval")
+    o1 = _mr(KIND_OPERATOR_EXPLICIT, "ship the revamp by friday hard")
+    o2 = _mr(KIND_OPERATOR_EXPLICIT, "never push to remote without approval")
     bs.save_atomic("must_remember", [o1, o2])
     # No similar pairs, none stale -> nothing merges, nothing downgrades.
     summ = ScriptedSummarizer()
@@ -264,9 +266,9 @@ def test_relevance_keeps_relevant_owner_then_terminal_overmax(
     assert log.over_max is True
     assert log.forgotten == []
     survivors = bs.load("must_remember")
-    # Both still present, both still owner_explicit (nothing force-dropped).
+    # Both still present, both still operator_explicit (nothing force-dropped).
     assert len(survivors) == 2
-    assert all(e.kind == KIND_OWNER_EXPLICIT for e in survivors)
+    assert all(e.kind == KIND_OPERATOR_EXPLICIT for e in survivors)
 
 
 def test_ordering_relevance_before_forget_allows_downgraded_drop(
@@ -276,7 +278,7 @@ def test_ordering_relevance_before_forget_allows_downgraded_drop(
     without the forget-guard tripping — proves the ordering invariant."""
     bs = _make_store(tmp_path, mr_max=15, mr_overflow=25)
     keep = _mr(KIND_PREFERENCE, "keep me short", NOW, imp=5.0)
-    stale = _mr(KIND_OWNER_EXPLICIT, "stale directive to be dropped", OLD)
+    stale = _mr(KIND_OPERATOR_EXPLICIT, "stale directive to be dropped", OLD)
     bs.save_atomic("must_remember", [keep, stale])
     summ = ScriptedSummarizer(stale_texts=[stale.text])
     log = meditate("must_remember", "ctx", MISSION, summ, bs.cfg, bs)

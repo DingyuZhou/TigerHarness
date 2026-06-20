@@ -1,8 +1,8 @@
 # tiger-memory
 
 ## At a glance
-- **What:** per-persona persistent memory built on **three bounded,
-  self-pruning stores** — `skills`, `must_remember`, `diary` — with a
+- **What:** per-persona persistent memory built on **four bounded,
+  self-pruning stores** — `skills`, `must_remember`, `diary`, `fuzzy` — with a
   session-start briefing, in-persona extraction, and a meditation
   compaction engine (forgetting is first-class).
 - **When you need it:** configuring or inspecting a persona's memory. For the
@@ -14,7 +14,7 @@
   sweep + meditation prune it. Length is measured in **characters**, never
   tokens.
 
-Persistent memory management for Claude Code agents: three bounded stores,
+Persistent memory management for Claude Code agents: four bounded stores,
 a Python-rebuilt session-start briefing, and a meditation engine that
 merges, relevance-downgrades, compacts, and forgets so memory stays focused
 on what helps the team now.
@@ -55,7 +55,7 @@ Briefing (briefing.py): skill INDEX + full must_remember + full diary
 Agent reads briefing/ at session start
 ```
 
-## The three bounded stores
+## The four bounded stores
 
 Each store has a scalar, an ordering rule, and a **two-number bound**
 (`max` + `overflow_limit`). The two numbers give **hysteresis**: a store may
@@ -65,13 +65,34 @@ compact it back under `max` — preventing meditate-every-session thrash.
 | Store | Holds | Bound | Scalar / ordering |
 |---|---|---|---|
 | `skills` | learned, reusable lessons (name + trigger + procedure) | count (`max_count`) | `importance = log1p(usage_count)`; no time-decay; recency tie-break |
-| `must_remember` | external directives (`owner_explicit` / `preference` / `decision` / `incident`) | characters (`max_length`) | `importance`; `owner_explicit` protected until relevance-downgrade |
-| `diary` | the persona's dated, weighted work-log | characters (`max_length`) | dated bullets `- (±N) note`; signed `weight` in `[-10, +10]` decays from the bullet date; ranked by `|weight|`; **loaded whole** |
+| `must_remember` | external directives (`operator_explicit` / `preference` / `decision` / `incident`) | characters (`max_length`) | importance = **reinforcement repeat-count** (recurrence); `operator_explicit` / `decision` protected until relevance-downgrade |
+| `diary` | the persona's dated, weighted work-log | characters (`max_length`) | dated bullets `- (±N) note`; signed `weight` in `[-10, +10]` decays from the bullet date; ranked by `|weight|`; `fresh_days` window kept verbatim; **loaded whole** |
+| `fuzzy` | coarsened, grouped older memory aged out of diary + must_remember | characters (`max_length`) | FREE TEXT (no entry schema); re-summarised each meditation so it **converges**; **loaded whole** |
 
-On-disk, each store is one markdown file under the persona store's
-`journal/` dir (`skills.md`, `must_remember.md`, `diary.md`); each entry
-is a YAML-frontmatter block + body. Don't hand-edit these — meditation owns
-pruning, and forgetting has no safety net.
+On-disk, the three ENTRY stores are one markdown file each under the persona
+store's `journal/` dir (`skills.md`, `must_remember.md`, `diary.md`), each entry a
+YAML-frontmatter block + body. The **fuzzy** store (`fuzzy.md`) is free text, not
+an entry list — it is written ONLY by meditation (never by ingest / `import-legacy`,
+which seed the three entry stores). Don't hand-edit these — meditation owns
+pruning, and **forgetting never deletes**: aged items are coarsened into `fuzzy.md`
+(recoverable), not dropped.
+
+### Verify the 4-store model
+
+```bash
+# 1. all four stores valid + bounded (skills, must_remember, diary, fuzzy):
+tiger-memory --config <cfg> check          # exit 0 = green; --fix re-bounds fuzzy
+
+# 2. the operator rename is complete (no stray legacy kind):
+grep -rn owner_explicit src/tigerharness/tiger_memory   # only the legacy read-shim
+
+# 3. fuzzy converges + nothing is hard-dropped: the named tests
+uv run python -m pytest tests/tiger_memory/test_meditate_persona.py \
+    tests/tiger_memory/test_fuzzy_store.py
+```
+
+A store written before the `owner_explicit` -> `operator_explicit` rename still
+loads: `entries.normalize_kind` maps the legacy value on read (no silent loss).
 
 ## Key modules
 
@@ -90,7 +111,7 @@ pruning, and forgetting has no safety net.
 | `meditation.py` | the compaction engine (merge → relevance-downgrade → compact → guarded-forget) |
 | `lifecycle.py` | extraction, in-session staging, fresh-start `rebuild`, `pin`, charter mission sourcing |
 | `sweep.py` | team-sweep gating + post-ingest `meditate_all_stores` |
-| `briefing.py` | assemble the session-start briefing from the three stores |
+| `briefing.py` | assemble the session-start briefing from the four stores |
 | `sources/` | source adapters (claude_code, slack_thread, docs, journal_worklog) |
 | `summarizers/` | LLM summarization backends (anthropic, mock) — the only model call |
 | `state.py` | per-store JSON state snapshot (count / chars / max / over_overflow) |
@@ -125,7 +146,7 @@ summarizer:
   model: claude-opus-4-7
   prompts: default/v1
 
-# The three bounded stores (every key optional — these are the defaults).
+# The four bounded stores (every key optional — these are the defaults).
 memory:
   length_unit: characters        # CONFIRMED: characters, never tokens
   skills:
@@ -163,13 +184,13 @@ tiger-memory --config my-config.yaml init
 tiger-memory --config my-config.yaml rebuild
 
 # Pin a must_remember entry directly.
-# NOTE: --kind defaults to owner_explicit (importance 5.0) — the most
+# NOTE: --kind defaults to operator_explicit (importance 5.0) — the most
 # forget-protected kind. A bare `tiger-memory pin "..."` therefore writes an
-# owner_explicit directive; pass `--kind preference` for an ordinary note.
+# operator_explicit directive; pass `--kind preference` for an ordinary note.
 tiger-memory --config my-config.yaml pin "Operator prefers tabular diffs" --kind preference
-tiger-memory --config my-config.yaml pin "Never force-push main" --kind owner_explicit
+tiger-memory --config my-config.yaml pin "Never force-push main" --kind operator_explicit
 
-# JSON snapshot of the three stores (count / chars / max / over_overflow)
+# JSON snapshot of the four stores (count / chars / max / over_overflow)
 tiger-memory --config my-config.yaml state
 ```
 
@@ -184,9 +205,9 @@ verbs (`plan` / `ingest-extraction` / `ingest-staged`) are driven by the
 |---|---|
 | `init` | create the empty store + validate the config |
 | `rebuild` | fresh-start: drop the retired legacy surface (first run), regenerate the briefing |
-| `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `owner_explicit`** (importance 5.0, the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
+| `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `operator_explicit`** (importance 5.0, the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
 | `import-legacy [--mock] [--force]` | **one-off, idempotent** seed of the three stores from the old `must_memorize.md` pins + the daily/weekly/monthly rollups (reads/snapshots only — never deletes). MUST run **before** `rebuild` (which drops the legacy files). `--mock` uses the deterministic mock summarizer (no live model); `--force` re-seeds (drops prior `import-legacy` entries first) |
-| `state` | JSON snapshot of the three stores |
+| `state` | JSON snapshot of the four stores |
 | `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks) |
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
 | `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free) |
@@ -226,7 +247,7 @@ it (per store, under a per-store lock), strictly in order:
 
 1. **merge** near-duplicates — merging raises the survivor's scalar
    (importance / emotional magnitude), clamped;
-2. *(must_remember only)* **relevance-check** each `owner_explicit`
+2. *(must_remember only)* **relevance-check** each `operator_explicit`
    directive against the live charter Mission and **downgrade** stale ones to
    `decision` — this runs *before* any forget;
 3. **compact** verbose survivors (the summarizer rewrites a body shorter);
@@ -235,7 +256,7 @@ it (per store, under a per-store lock), strictly in order:
 
 Forgetting is irreversible and has no safety net, so the engine logs every
 mutation at INFO, defaults the LLM judgement to the **safe** answer on a
-garbled verdict, and **never** drops a still-relevant `owner_explicit`
+garbled verdict, and **never** drops a still-relevant `operator_explicit`
 directive (the forget-guard; if it cannot get under `max` without one, it
 leaves the store intact and warns). The full design and the ratified
 forget-guard semantics are in [DESIGN-memory.md](DESIGN-memory.md) §5.
@@ -248,7 +269,7 @@ malformed-input handling) is
 
 ## Session start (the briefing)
 
-`tiger-memory rebuild` assembles `briefing/` from the three stores:
+`tiger-memory rebuild` assembles `briefing/` from the four stores:
 
 - the **full must_remember** store (highest-importance first);
 - the **full diary** — loaded whole, strongest feelings first by `|weight|`

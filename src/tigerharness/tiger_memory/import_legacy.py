@@ -335,7 +335,7 @@ def seeds_perform_no_deletion(paths_before: Iterable, paths_after: Iterable) -> 
 #   the semantics against *now*) — importance is re-derived from usage + recency
 #   at the next meditation, exactly as Mitsui's seed-write contract expects.
 # - **must_remember** preserves the legacy ``kind`` straight from the table and
-#   maps the legacy importance/score onto the new ``importance`` (an owner
+#   maps the legacy importance/score onto the new ``importance`` (an operator
 #   directive starts elevated).
 #
 # The per-item SOURCE DATE seam (Akagi, round-1): each unscored input entry
@@ -396,7 +396,7 @@ def score_seed_candidates(
       ``importance = 0.0`` (NOT refreshed — derived at meditation), ``last_used``
       = source date.
     - **must_remember:** ``kind`` + ``importance`` preserved straight from the
-      re-authored row (an ``owner_explicit`` directive stays elevated).
+      re-authored row (an ``operator_explicit`` directive stays elevated).
 
     *now* defaults to :func:`state.iso_now`. *source_dates* (optional) is a map
     from entry ``id`` to an ISO source date overriding the entry's own

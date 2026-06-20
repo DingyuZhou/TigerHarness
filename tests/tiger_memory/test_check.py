@@ -199,3 +199,34 @@ def test_check_frontmatter_blank_trailing_block_skipped(bstore: BoundedStore):
     assert skills.problems == ["skills not in canonical format"]
     chk.check_all(bstore.cfg, bstore.store, fix=True)
     assert chk.check_all(bstore.cfg, bstore.store).ok
+
+
+# ----- fuzzy store (4-store model, b1-dev-3) --------------------------------
+
+def test_check_fuzzy_empty_ok(bstore: "BoundedStore") -> None:
+    r = chk.check_store(bstore, "fuzzy", fix=False)
+    assert r.ok and r.valid == 0
+
+
+def test_check_fuzzy_under_bound_ok(bstore: "BoundedStore") -> None:
+    from tigerharness.tiger_memory import fuzzy_store
+    fuzzy_store.save_fuzzy(bstore.cfg, bstore.store, "## Fuzzy\n- gist\n")
+    r = chk.check_store(bstore, "fuzzy", fix=False)
+    assert r.ok and r.valid == 1
+
+
+def test_check_fuzzy_over_overflow_flagged_and_fixed(bstore: "BoundedStore") -> None:
+    from tigerharness.tiger_memory import fuzzy_store
+    bstore.store.paths.journal.mkdir(parents=True, exist_ok=True)
+    fuzzy_store.fuzzy_path(bstore.store).write_text("x" * 6001)  # >= overflow 6000
+    r = chk.check_store(bstore, "fuzzy", fix=False)
+    assert not r.ok and "overflow_limit" in r.problems[0]
+    r2 = chk.check_store(bstore, "fuzzy", fix=True)
+    assert r2.repaired
+    assert len(fuzzy_store.load_fuzzy(bstore.store)) <= bstore.memory.fuzzy.max_length
+
+
+def test_check_all_includes_fuzzy(bstore: "BoundedStore") -> None:
+    rep = chk.check_all(bstore.cfg, bstore.store)
+    assert len(rep.stores) == 4
+    assert any(s.store_name == "fuzzy" for s in rep.stores)

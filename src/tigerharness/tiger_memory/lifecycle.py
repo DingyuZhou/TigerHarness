@@ -37,7 +37,7 @@ from typing import Iterable
 from .bounded_store import BoundedStore
 from .config import Config
 from .entries import (
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
     STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
@@ -632,7 +632,7 @@ def pin(cfg: Config, store: Store, *, memo: str, kind: str) -> int:
     """``tiger-memory pin`` — write a must_remember entry directly (design §3).
 
     Reframed from the old must-memorize table: a pin is now one
-    :class:`MustRememberEntry`. ``owner_explicit`` pins start elevated (the
+    :class:`MustRememberEntry`. ``operator_explicit`` pins start elevated (the
     forget-guard protects them until meditation's relevance-check). Pinning
     does not run meditation; the next sweep compacts if the store overflows.
     """
@@ -643,7 +643,7 @@ def pin(cfg: Config, store: Store, *, memo: str, kind: str) -> int:
     now = iso_now()
     bstore = BoundedStore(cfg, store)
     entries = bstore.load(STORE_MUST_REMEMBER)
-    importance = 5.0 if kind == KIND_OWNER_EXPLICIT else 1.0
+    importance = 5.0 if kind == KIND_OPERATOR_EXPLICIT else 1.0
     entries.append(
         MustRememberEntry(
             text=memo, created_at=now, last_used=now, source="pin",

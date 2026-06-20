@@ -7,7 +7,7 @@ with a YAML frontmatter carrying the structured fields:
 - **skills** (§4.1): a learned, invokable lesson — ``name``, ``trigger``,
   ``procedure``, ``usage_count``, ``importance``.
 - **must_remember** (§4.2): an external directive — ``kind``
-  (``owner_explicit`` / ``preference`` / ``decision`` / ``incident``),
+  (``operator_explicit`` / ``preference`` / ``decision`` / ``incident``),
   ``importance``.
 - **emotional** (§4.3): a persona reaction — a signed ``weight`` in
   ``[-weight_cap, +weight_cap]`` and a ``reaction`` string.
@@ -44,20 +44,42 @@ class EntryError(ValueError):
 STORE_SKILLS = "skills"
 STORE_MUST_REMEMBER = "must_remember"
 STORE_DIARY = "diary"
+#: The three ENTRY-based stores (typed entries; driven by BoundedStore). The
+#: fuzzy store is deliberately NOT here — it is free-text, not an entry list.
 STORE_NAMES = (STORE_SKILLS, STORE_MUST_REMEMBER, STORE_DIARY)
 
-# must_remember kinds (design §4.2). ``owner_explicit`` is the elevated
+#: The NEW 4th store (4-store model): coarsened, grouped free-text aged out of
+#: diary + must_remember; length-bounded; loaded whole at session start. Handled
+#: by :mod:`fuzzy_store` (not the entry machinery).
+STORE_FUZZY = "fuzzy"
+#: All four stores in session-start load order (skills, must_remember, diary,
+#: fuzzy) — for the briefing view and the format-check gate.
+ALL_STORE_NAMES = (*STORE_NAMES, STORE_FUZZY)
+
+# must_remember kinds (design §4.2). ``operator_explicit`` is the elevated
 # directive the forget-guard protects until the relevance-check runs (§5).
-KIND_OWNER_EXPLICIT = "owner_explicit"
+KIND_OPERATOR_EXPLICIT = "operator_explicit"
 KIND_PREFERENCE = "preference"
 KIND_DECISION = "decision"
 KIND_INCIDENT = "incident"
 VALID_KINDS = (
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
     KIND_PREFERENCE,
     KIND_DECISION,
     KIND_INCIDENT,
 )
+
+#: Legacy must_remember ``kind`` values mapped to their current names on READ.
+#: ``owner_explicit`` was renamed to ``operator_explicit`` (Operator-mandated);
+#: stores written before the rename still carry the old value, so we normalize
+#: it at load time — otherwise those elevated directives would fail validation
+#: and be silently dropped (no silent loss). Write side always uses the new name.
+_LEGACY_KIND_ALIASES = {"owner_explicit": KIND_OPERATOR_EXPLICIT}
+
+
+def normalize_kind(kind: str) -> str:
+    """Map a legacy must_remember ``kind`` value to its current name (read-side)."""
+    return _LEGACY_KIND_ALIASES.get(kind, kind)
 
 
 def new_id() -> str:
@@ -178,13 +200,18 @@ class SkillEntry(BaseEntry):
 class MustRememberEntry(BaseEntry):
     """An external directive (design §4.2).
 
-    ``kind`` is one of ``VALID_KINDS``. ``owner_explicit`` directives start
+    ``kind`` is one of ``VALID_KINDS``. ``operator_explicit`` directives start
     elevated; meditation's relevance-check may downgrade a stale one to a
     normal kind (``decision``), after which it rejoins the decay pool (§4.2).
     """
 
     kind: str = KIND_PREFERENCE
     importance: float = 0.0
+    #: Reinforcement count — how many times this fact has recurred across
+    #: sessions (the 4-store importance signal, brief §store roster). Starts at
+    #: 1; the meditation merge increments it (and derives ``importance`` from it)
+    #: so a repeated directive ranks higher, not lower.
+    repeat_count: int = 1
 
     def __post_init__(self) -> None:
         self.store_name = STORE_MUST_REMEMBER
@@ -200,10 +227,18 @@ class MustRememberEntry(BaseEntry):
             self.importance, (int, float)
         ):
             raise EntryError("must_remember.importance must be a number.")
+        if isinstance(self.repeat_count, bool) or not isinstance(
+            self.repeat_count, int
+        ) or self.repeat_count < 1:
+            raise EntryError("must_remember.repeat_count must be an int >= 1.")
 
     def frontmatter(self) -> dict[str, Any]:
         fm = super().frontmatter()
-        fm.update({"kind": self.kind, "importance": float(self.importance)})
+        fm.update({
+            "kind": self.kind,
+            "importance": float(self.importance),
+            "repeat_count": self.repeat_count,
+        })
         return fm
 
 
@@ -323,9 +358,12 @@ def entry_from_frontmatter(
         )
     if cls is MustRememberEntry:
         return MustRememberEntry(
-            kind=str(fm.get("kind", KIND_PREFERENCE)),
+            kind=normalize_kind(str(fm.get("kind", KIND_PREFERENCE))),
             importance=_coerce_float(
                 fm.get("importance", 0.0), "must_remember.importance"
+            ),
+            repeat_count=_coerce_int(
+                fm.get("repeat_count", 1), "must_remember.repeat_count"
             ),
             **base_kwargs,
         )

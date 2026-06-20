@@ -77,7 +77,7 @@ def test_rebuild_assembles_all_files(tmp_path: Path) -> None:
     _seed(
         cfg, store,
         skills=[_skill("A", imp=2.0), _skill("B", imp=5.0)],
-        must=[_must("never push", "owner_explicit", imp=5.0), _must("use uv")],
+        must=[_must("never push", "operator_explicit", imp=5.0), _must("use uv")],
         emo=[_emo("good", 3.0), _emo("bad", -8.0)],
     )
     bf.rebuild_briefing(cfg, store)
@@ -96,7 +96,7 @@ def test_rebuild_assembles_all_files(tmp_path: Path) -> None:
     assert emo.index("bad") < emo.index("good")
     # must_remember shows kind + importance.
     mr = (b / bf.MUST_REMEMBER_NAME).read_text()
-    assert "owner_explicit" in mr and "never push" in mr
+    assert "operator_explicit" in mr and "never push" in mr
 
 
 def test_rebuild_empty_stores(tmp_path: Path) -> None:
@@ -248,3 +248,34 @@ def test_manifest_counts(tmp_path: Path) -> None:
     assert "must_remember: 2 entries" in m
     assert "diary: 1 entries" in m
     assert "skills: 1 indexed" in m
+
+
+# ----- fuzzy store (4-store model, b1-dev-1/Miyagi) -------------------------
+
+def test_rebuild_writes_fuzzy_and_manifest(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory import fuzzy_store
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    fuzzy_store.save_fuzzy(cfg, store, "## Fuzzy\n- old gist grouped\n")
+    bf.rebuild_briefing(cfg, store)
+    b = store.paths.briefing
+    assert (b / bf.FUZZY_NAME).exists()
+    assert "old gist grouped" in (b / bf.FUZZY_NAME).read_text()
+    assert "fuzzy:" in (b / bf.MANIFEST_NAME).read_text()
+    assert bf.FUZZY_NAME in (b / bf.MANIFEST_NAME).read_text()
+
+
+def test_rebuild_empty_fuzzy(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    bf.rebuild_briefing(cfg, store)
+    assert "_(empty)_" in (store.paths.briefing / bf.FUZZY_NAME).read_text()
+
+
+def test_render_fuzzy_empty_and_nonempty() -> None:
+    assert "_(empty)_" in bf._render_fuzzy("")
+    assert "_(empty)_" in bf._render_fuzzy("   \n")
+    out = bf._render_fuzzy("- coarsened note")
+    assert "coarsened note" in out and out.startswith("# Fuzzy memory")

@@ -101,10 +101,10 @@ def test_save_load_roundtrip_all_stores(bounded: BoundedStore) -> None:
     got = bounded.load("skills")
     assert len(got) == 1 and got[0].name == "Alpha" and got[0].id == s.id
 
-    m1, m2 = _mr("owner_explicit", "ship friday"), _mr("preference", "tabs")
+    m1, m2 = _mr("operator_explicit", "ship friday"), _mr("preference", "tabs")
     bounded.save_atomic("must_remember", [m1, m2])
     gm = bounded.load("must_remember")
-    assert [e.kind for e in gm] == ["owner_explicit", "preference"]
+    assert [e.kind for e in gm] == ["operator_explicit", "preference"]
     assert [e.id for e in gm] == [m1.id, m2.id]
 
     e1 = _emo(-4.0, "annoyed")
@@ -319,7 +319,7 @@ def test_forget_drops_normal_entries(bounded: BoundedStore) -> None:
 def test_forget_guard_blocks_unchecked_owner_directive(
     bounded: BoundedStore,
 ) -> None:
-    owner = _mr("owner_explicit", "ship friday")
+    owner = _mr("operator_explicit", "ship friday")
     with pytest.raises(ForgetGuardError, match="relevance-check"):
         bounded.forget("must_remember", [owner], [owner.id])
 
@@ -327,7 +327,7 @@ def test_forget_guard_blocks_unchecked_owner_directive(
 def test_forget_allows_owner_directive_after_relevance_check(
     bounded: BoundedStore,
 ) -> None:
-    owner = _mr("owner_explicit", "ship friday")
+    owner = _mr("operator_explicit", "ship friday")
     survivors = bounded.forget(
         "must_remember", [owner], [owner.id],
         relevance_checked_ids=[owner.id],
@@ -352,7 +352,7 @@ def test_forget_guard_only_applies_to_must_remember(
 def test_forget_preserves_owner_when_other_dropped(
     bounded: BoundedStore,
 ) -> None:
-    owner = _mr("owner_explicit", "keep me")
+    owner = _mr("operator_explicit", "keep me")
     pref = _mr("preference", "drop me")
     survivors = bounded.forget("must_remember", [owner, pref], [pref.id])
     assert [e.id for e in survivors] == [owner.id]

@@ -17,7 +17,7 @@ Conversation transcript:
 
 **Large transcripts:** this may be long and span more than one read
 window. Read it in FULL before extracting — page through to the end. No
-owner-explicit directive, hard-won lesson, or strong reaction should be
+operator-explicit directive, hard-won lesson, or strong reaction should be
 lost to length.
 
 **Ignore memory boilerplate.** If the session includes you reading or
@@ -58,11 +58,11 @@ Requirements from outside that make the work land better. One block per
 item, blank line between:
 
 ```
-KIND: <owner_explicit | preference | decision | incident>
+KIND: <operator_explicit | preference | decision | incident>
 MEMO: <= {memo_max_words} words; one sentence; specific>
 ```
 
-- **owner_explicit**: the owner said "remember" / "never" / "always" /
+- **operator_explicit**: the owner said "remember" / "never" / "always" /
   "don't forget" (quote-faithful is best).
 - **preference**: a stylistic / process / tooling preference.
 - **decision**: a factual / architectural / strategic decision.
@@ -71,13 +71,17 @@ MEMO: <= {memo_max_words} words; one sentence; specific>
 If none, write exactly `NONE` under the marker.
 
 ### @@DIARY@@ — your diary (0 to 3)
-A short, dated diary note, as {agent_name}: what you did / why / learned /
-could-do-better, with how it felt folded into the words and the sign of the
-weight. One block per note, blank line between:
+A short, dated diary note, as {agent_name}. Write a note for each substantive
+thing you did — **including neutral, low-charge work (weight 0)**; do NOT skip a
+note just because it was not emotionally strong (forgetting is a meditation
+concern, never a write-time filter). Each note carries, concisely: **what I did**,
+**why this weight** (the reasoning for the rating — this is what deepens your
+personality), and **what I learned / could do better** next time if applicable.
+One block per note, blank line between:
 
 ```
-WEIGHT: <signed number in [-{weight_cap}, +{weight_cap}]; + = liked/for, - = disliked/against>
-TEXT: <= {reaction_max_words} words; what happened and your reaction to it>
+WEIGHT: <signed number in [-{weight_cap}, +{weight_cap}]; + = liked/for, - = disliked/against, 0 = neutral>
+TEXT: <= {reaction_max_words} words; what I did + why this weight + what I learned / could do better>
 ```
 
 If none, write exactly `NONE` under the marker.

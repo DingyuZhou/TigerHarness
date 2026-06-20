@@ -5,10 +5,10 @@ One engine, run per store, that turns "over the overflow limit" back into
 
   1. **merge** duplicate / near-duplicate entries — merging RAISES the
      survivor's scalar (importance, or emotional magnitude), clamped;
-  2. *(must_remember only)* **relevance-check** each ``owner_explicit``
+  2. *(must_remember only)* **relevance-check** each ``operator_explicit``
      directive against the live ``mission_text`` and **downgrade** stale ones
      to a normal kind — this runs BEFORE any forget so Mitsui's forget-guard
-     never trips on an un-relevance-checked owner directive;
+     never trips on an un-relevance-checked operator directive;
   3. **compact** verbose survivors (summarizer rewrites the body shorter);
   4. **forget** the lowest-keep-ranked entries until length/count < ``max``,
      via Mitsui's guarded :meth:`BoundedStore.forget`.
@@ -16,7 +16,7 @@ One engine, run per store, that turns "over the overflow limit" back into
 Invariants (design §5; plan §4):
 
 - **Ordered.** Steps run 1→4. The relevance-check (step 2) always precedes
-  any forget so a still-relevant owner directive is never dropped.
+  any forget so a still-relevant operator directive is never dropped.
 - **Idempotent.** A store already under ``max`` is a no-op (no summarizer
   calls, empty log).
 - **Hysteresis.** The *caller* fires meditation only at/above
@@ -24,7 +24,7 @@ Invariants (design §5; plan §4):
   compacts back below ``max`` and then stops.
 - **Terminal "nothing safe to forget"** (plan §4 Kogure R1#1). If, after
   merge + compact, the store is still over ``max`` and the only entries left
-  to drop are still-relevant ``owner_explicit`` directives, meditation LOGS
+  to drop are still-relevant ``operator_explicit`` directives, meditation LOGS
   an over-max warning and LEAVES the store intact — it never force-drops to
   hit the number.
 
@@ -39,12 +39,14 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from .bounded_store import BoundedStore, ForgetGuardError
+from . import fuzz_select, fuzzy_recompact, fuzzy_store
+from .bounded_store import BoundedStore, ForgetGuardError, StoreLockHeld
 from .config import Config
 from .diary import clamp_weight, diary_keep_rank
 from .entries import (
     KIND_DECISION,
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
+    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
     BaseEntry,
@@ -68,12 +70,12 @@ class MeditationLog:
     """A record of what one meditation pass did to one store (design §5).
 
     Every list holds entry ids. ``merged`` maps each *dropped* duplicate's id
-    to the survivor it folded into; ``downgraded`` lists owner directives
+    to the survivor it folded into; ``downgraded`` lists operator directives
     relevance-checked-and-downgraded to normal; ``compacted`` lists survivors
     whose body the summarizer shortened; ``forgotten`` lists ids dropped to
     get under ``max``. ``over_max`` is the terminal warning flag (plan §4):
     True iff the pass finished still over ``max`` because the only remaining
-    drops would be still-relevant owner directives.
+    drops would be still-relevant operator directives.
     """
 
     store_name: str
@@ -218,13 +220,13 @@ def _might_be_similar(a: BaseEntry, b: BaseEntry) -> bool:
 def _judge_stale(
     summarizer: Summarizer, entry: MustRememberEntry, mission_text: str
 ) -> bool:
-    """Is this owner directive stale vs the live mission? (default: NO).
+    """Is this operator directive stale vs the live mission? (default: NO).
 
     Default NO = "still relevant": an unparseable judgement keeps the
     directive elevated rather than downgrading-then-forgetting it.
     """
     prompt = (
-        "An owner directive is STALE if it was tied to a feature/goal the "
+        "An operator directive is STALE if it was tied to a feature/goal the "
         "team no longer pursues under the current mission. Is this directive "
         "stale? Answer with a single word: YES (stale) or NO (still "
         "relevant).\n\n"
@@ -295,7 +297,7 @@ def meditate(
     caller-supplied summarizer wiring; it is accepted here to keep the seam
     end-to-end even though the ranking/ordering logic does not branch on it.
     ``mission_text`` is the live team goal (Miyagi sources it from
-    ``charter/README.md``) against which owner directives are relevance-checked.
+    ``charter/README.md``) against which operator directives are relevance-checked.
     """
     del persona_ctx  # context is carried by the summarizer backend wiring.
     now = iso_now()
@@ -409,8 +411,11 @@ def _absorb(target: BaseEntry, dropped: BaseEntry, cfg: Config) -> None:
     elif isinstance(target, SkillEntry):
         _absorb_skill(target, dropped, cfg)
     else:  # MustRememberEntry
-        # A repeated directive matters more: bump importance by 1.0.
-        target.importance = float(target.importance) + 1.0
+        # A repeated directive matters more: accumulate the reinforcement count
+        # (the recurrence signal) and derive importance from it, so a fact seen
+        # N times ranks above a one-off (brief §store roster).
+        target.repeat_count += dropped.repeat_count
+        target.importance = float(target.repeat_count)
 
 
 def _absorb_diary(
@@ -445,22 +450,22 @@ def _relevance_pass(
     log_rec: MeditationLog,
     relevance_checked: set[str],
 ) -> list[BaseEntry]:
-    """Relevance-check every owner directive; downgrade stale ones to normal.
+    """Relevance-check every operator directive; downgrade stale ones to normal.
 
     A directive judged **stale** vs the mission is downgraded to ``decision``
     (a normal kind) and its id added to *relevance_checked* — after which it
     rejoins the ordinary forget pool and the forget-guard will permit dropping
     it (design §4.2). A directive judged **still relevant** is left
-    ``owner_explicit`` and deliberately NOT added: the forget-guard then
+    ``operator_explicit`` and deliberately NOT added: the forget-guard then
     refuses to drop it, which is exactly the terminal "never drop a
-    still-relevant owner directive" invariant (design §5; plan §4). So
+    still-relevant operator directive" invariant (design §5; plan §4). So
     *relevance_checked* ends up holding precisely the downgraded ids — the
-    only owner directives this cycle licensed for forgetting.
+    only operator directives this cycle licensed for forgetting.
     """
     for entry in entries:
         if (
             isinstance(entry, MustRememberEntry)
-            and entry.kind == KIND_OWNER_EXPLICIT
+            and entry.kind == KIND_OPERATOR_EXPLICIT
             and _judge_stale(summarizer, entry, mission_text)
         ):
             entry.kind = KIND_DECISION
@@ -519,7 +524,7 @@ def _forget_pass(
     """Drop the lowest-keep-ranked entries until under ``max`` (guarded).
 
     Forget order = keep-rank ascending (lowest value first). A candidate that
-    Mitsui's forget-guard refuses (a still-relevant owner directive not in
+    Mitsui's forget-guard refuses (a still-relevant operator directive not in
     *relevance_checked*) is SKIPPED, not forced — we move to the next-lowest.
     If the store cannot get under ``max`` without dropping a protected
     directive, we stop and set the terminal ``over_max`` warning (plan §4):
@@ -540,7 +545,7 @@ def _forget_pass(
                 relevance_checked_ids=relevance_checked,
             )
         except ForgetGuardError:
-            # Protected owner directive (not relevance-checked this cycle):
+            # Protected operator directive (not relevance-checked this cycle):
             # skip it, do not force-drop, move to the next-lowest candidate.
             continue
         entries = survivors
@@ -548,13 +553,108 @@ def _forget_pass(
 
     if _over_max(store, store_name, entries):
         # Terminal: still over max, but the only remaining drops are protected
-        # owner directives. Leave the store intact, warn, do not force-drop.
+        # operator directives. Leave the store intact, warn, do not force-drop.
         log_rec.over_max = True
         log.warning(
             "meditation: store %r still over max after merge+compact "
-            "(%d entries remain, all still-relevant owner directives); "
+            "(%d entries remain, all still-relevant operator directives); "
             "leaving intact (design §5 nothing-safe-to-forget).",
             store_name,
             len(entries),
         )
     return entries
+
+
+# ----- 4-store persona meditation (brief §meditation pipeline) --------------
+
+
+@dataclass
+class PersonaMeditationLog:
+    """Outcome of one 4-store persona meditation cycle (audit record)."""
+
+    diary: MeditationLog
+    must_remember: MeditationLog
+    # The TEXT of each item routed into fuzzy this cycle. Text (not id) because
+    # the compact diary format does not persist ids — text is the stable,
+    # auditable key, and it is what the no-hard-drop invariant checks against.
+    fuzzed_diary: list[str] = field(default_factory=list)
+    fuzzed_mr: list[str] = field(default_factory=list)
+    fuzzy_dropped: int = 0                                   # chars trimmed on save
+    skipped_locked: bool = False
+
+
+def meditate_persona(
+    persona_ctx: str,
+    mission_text: str,
+    summarizer: Summarizer,
+    cfg: Config,
+    store: BoundedStore,
+) -> PersonaMeditationLog:
+    """Run the 4-store meditation for one persona (brief §meditation pipeline).
+
+    Ordered: merge -> relevance-downgrade (must_remember) -> compact -> select
+    fuzz candidates (diary + must_remember) -> re-compact aged items + the
+    existing fuzzy.md into fuzzy.md -> persist the kept sharp stores + fuzzy.
+
+    THE CRUX (plan §7, no silent loss): nothing is hard-dropped. The only items
+    that leave a sharp store are the ones routed into fuzzy.md (re-compacted,
+    recoverable). Diary fresh-window items are always kept. Skills are unchanged
+    here (count-bounded; they keep their own :func:`meditate` and do not fuzz).
+
+    Holds the diary + must_remember store locks for the whole cycle (fuzzy.md is
+    written under them; only meditation writes it). If a live session holds
+    either, backs off (``skipped_locked=True``) rather than racing a meditation.
+    """
+    del persona_ctx  # carried by the summarizer backend wiring.
+    now = iso_now()
+    diary_log = MeditationLog(store_name=STORE_DIARY)
+    mr_log = MeditationLog(store_name=STORE_MUST_REMEMBER)
+    result = PersonaMeditationLog(diary=diary_log, must_remember=mr_log)
+
+    try:
+        with store.store_lock(STORE_DIARY), store.store_lock(STORE_MUST_REMEMBER):
+            diary = list(store.load(STORE_DIARY))
+            mr = list(store.load(STORE_MUST_REMEMBER))
+            existing_fuzzy = fuzzy_store.load_fuzzy(store.store)
+
+            # 1-3 (diary): merge near-dups, then compact verbose survivors.
+            diary = _merge_pass(diary, summarizer, cfg, diary_log)
+            diary = _compact_pass(diary, store, STORE_DIARY, summarizer, diary_log)
+
+            # 1-3 (must_remember): merge, relevance-downgrade stale operator
+            # directives, then compact.
+            mr = _merge_pass(mr, summarizer, cfg, mr_log)
+            downgraded: set[str] = set()
+            mr = _relevance_pass(mr, summarizer, mission_text, mr_log, downgraded)
+            mr = _compact_pass(mr, store, STORE_MUST_REMEMBER, summarizer, mr_log)
+
+            # 4: select fuzz candidates (diary fresh-window protected; mr
+            # downgraded always fuzz).
+            kept_diary, fuzzed_diary = fuzz_select.select_diary_fuzz(diary, now, cfg)
+            kept_mr, fuzzed_mr = fuzz_select.select_mr_fuzz(mr, downgraded, now, cfg)
+
+            # 5: re-compact aged items + existing fuzzy into fuzzy.md.
+            new_fuzzy = fuzzy_recompact.recompact_fuzzy(
+                summarizer, fuzzed_diary, fuzzed_mr, existing_fuzzy, cfg
+            )
+
+            # 6: persist. The ONLY items leaving a sharp store are the fuzzed
+            # ones (now captured in fuzzy) -> NO hard drop (plan §7 invariant).
+            store.save_atomic(STORE_DIARY, kept_diary)
+            store.save_atomic(STORE_MUST_REMEMBER, kept_mr)
+            result.fuzzy_dropped = fuzzy_store.save_fuzzy(cfg, store.store, new_fuzzy)
+            result.fuzzed_diary = [e.text for e in fuzzed_diary]
+            result.fuzzed_mr = [e.text for e in fuzzed_mr]
+            log.info(
+                "meditate_persona(%s): diary kept=%d fuzzed=%d | mr kept=%d "
+                "fuzzed=%d | fuzzy trimmed=%d",
+                cfg.agent.name, len(kept_diary), len(fuzzed_diary),
+                len(kept_mr), len(fuzzed_mr), result.fuzzy_dropped,
+            )
+    except StoreLockHeld:
+        result.skipped_locked = True
+        log.warning(
+            "meditate_persona(%s): a sharp store is locked by a live session; "
+            "backing off (retry next cycle).", cfg.agent.name,
+        )
+    return result

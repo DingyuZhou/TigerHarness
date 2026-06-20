@@ -56,6 +56,7 @@ NO_LOGGER_BY_AUDIT = {
     "tigerharness.tiger_memory",          # re-exports
     "tigerharness.tiger_memory.diary",        # pure signed-weight scoring
     "tigerharness.tiger_memory.diary_format", # pure dated-bullet serialize/parse
+    "tigerharness.tiger_memory.fuzz_select",  # pure fuzz-candidate selection
     "tigerharness.tiger_memory.frontmatter",  # pure parser/writer
     "tigerharness.tiger_memory.metrics",      # pure counters
     "tigerharness.tiger_memory.ranking",      # pure recency/date math

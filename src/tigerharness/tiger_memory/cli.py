@@ -73,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     p_pin.add_argument("memo", help="Memo text.")
     p_pin.add_argument(
         "--kind",
-        choices=["owner_explicit", "preference", "decision", "incident"],
-        default="owner_explicit",
+        choices=["operator_explicit", "preference", "decision", "incident"],
+        default="operator_explicit",
     )
 
     p_imp = sub.add_parser(

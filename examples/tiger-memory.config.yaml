@@ -1,6 +1,6 @@
 # tiger-memory configuration
 # Full docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
-# Design (the three bounded stores + meditation):
+# Design (the four bounded stores + meditation):
 #   https://github.com/DingyuZhou/TigerHarness/blob/main/docs/DESIGN-memory.md
 
 agent:
@@ -8,7 +8,7 @@ agent:
   role: "A research assistant specializing in technical topics."
 
 store:
-  # Where to persist the memory store (the three bounded stores +
+  # Where to persist the memory store (the four bounded stores +
   # briefing live under journal/ here). Auto-appends the agent slug.
   root: ~/.local/share/tiger-memory/researcher
 
@@ -43,7 +43,7 @@ budgets:
   # beyond this is clipped, as a last resort.
   max_staged_content_chars: 300000
 
-# memory: the three bounded stores (design §4) + signed-weight decay.
+# memory: the four bounded stores (design §4) + signed-weight decay.
 # Every key is optional — these are the package defaults (design §7); set
 # only the ones you want to tune. length_unit is CONFIRMED final
 # (characters, never tokens — tokenization is vendor-specific and rejected
@@ -62,8 +62,12 @@ memory:
     max_length: 4000
     overflow_limit: 6000
     weight_cap: 10         # hard cap: |weight| <= 10
+    fresh_days: 7          # recents (<= N days) kept verbatim, never fuzzed
     decay:
       magnitude_per_day: 0.1   # how fast |weight| shrinks toward 0
+  fuzzy:                   # NEW 4th store: coarsened, grouped older memory
+    max_length: 4000       # aged-out diary + must_remember items, re-summarised
+    overflow_limit: 6000   # each meditation so it CONVERGES (never grows)
 
 # memory_extract: per-section word budgets for the extraction prompt
 # (optional; defaults shown). max_output_words caps the whole bundle.

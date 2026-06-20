@@ -33,16 +33,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import diary_format, frontmatter
-from .bounded_store import BoundedStore, StoreLockHeld, _split_blocks
-from .entries import STORE_DIARY
+from .bounded_store import _split_blocks
 from .config import Config
 from .diary import clamp_weight
+from .diary_finalize import STATE_KEY, finalize_diary, forget_to_max
 from .store import Store
 
 log = logging.getLogger("tigerharness.tiger_memory.migrate_emotional_to_diary")
 
-#: ``.state.json`` key marking a completed diary migration (idempotency guard).
-STATE_KEY = "diary_migrated"
+# STATE_KEY / forget_to_max / finalize_diary now live in diary_finalize (shared
+# with regenerate_diary — one destructive write path). Re-exported via import so
+# ``migrate_emotional_to_diary.STATE_KEY`` keeps working for callers/tests.
 
 
 @dataclass
@@ -92,24 +93,6 @@ def _legacy_bullets(text: str, cfg: Config) -> tuple[int, list[diary_format.Diar
     return source_blocks, bullets
 
 
-def _forget_to_max(
-    bullets: list[diary_format.DiaryEntry], max_length: int
-) -> tuple[list[diary_format.DiaryEntry], int]:
-    """Keep the highest-ranked bullets whose serialized length <= *max_length*.
-
-    Ranks by ``|weight|`` then date (newest) — the retention guarantee: strong
-    feelings survive. Returns ``(kept, forgotten_count)``.
-    """
-    if len(diary_format.serialize(bullets)) <= max_length:
-        return bullets, 0
-    ranked = sorted(bullets, key=lambda b: (abs(b.weight), b.date), reverse=True)
-    kept: list[diary_format.DiaryEntry] = []
-    for b in ranked:
-        if len(diary_format.serialize(kept + [b])) <= max_length:
-            kept.append(b)
-    return kept, len(bullets) - len(kept)
-
-
 def migrate_store(cfg: Config, store: Store, *, apply: bool = False) -> MigrationResult:
     """Migrate one persona's emotional store to the diary format.
 
@@ -128,7 +111,7 @@ def migrate_store(cfg: Config, store: Store, *, apply: bool = False) -> Migratio
     text = emo_path.read_bytes().decode("utf-8", errors="replace")
     res.source_blocks, bullets = _legacy_bullets(text, cfg)
     res.converted = len(bullets)
-    kept, res.forgotten = _forget_to_max(bullets, cfg.memory.diary.max_length)
+    kept, res.forgotten = forget_to_max(bullets, cfg.memory.diary.max_length)
     res.kept = len(kept)
 
     serialized = diary_format.serialize(kept)
@@ -137,28 +120,23 @@ def migrate_store(cfg: Config, store: Store, *, apply: bool = False) -> Migratio
         raise ValueError(f"migration produced an invalid diary: {errs[0]}")
 
     if apply:
-        # plan §6: never migrate a store a live sweep is meditating — take the
-        # per-store lock and REFUSE (no-op) if a live session holds it, so the
-        # destructive write can't race a concurrent meditation.
-        try:
-            with BoundedStore(cfg, store).store_lock(STORE_DIARY):
-                store.paths.journal.mkdir(parents=True, exist_ok=True)
-                emo_path.rename(emo_path.with_suffix(".md.bak"))
-                store.atomic_write(store.paths.journal / "diary.md", serialized)
-                state = store.read_state() or {}
-                state[STATE_KEY] = {"converted": res.converted, "kept": res.kept,
-                                    "forgotten": res.forgotten}
-                store.write_state(state)
-                res.applied = True
-                log.warning(
-                    "migrate(%s): APPLIED — %d source -> %d kept (%d forgotten "
-                    "over max); emotional.md backed up to emotional.md.bak",
-                    res.persona, res.source_blocks, res.kept, res.forgotten,
-                )
-        except StoreLockHeld:
-            res.skipped_reason = "diary store locked by a live session"
+        # plan §6: the destructive write goes through the shared, lock-guarded
+        # finalize so it can't race a concurrent meditation.
+        skip = finalize_diary(
+            cfg, store, serialized,
+            state_extra={"converted": res.converted, "kept": res.kept,
+                         "forgotten": res.forgotten},
+        )
+        if skip is None:
+            res.applied = True
             log.warning(
-                "migrate(%s): SKIPPED — diary store locked (sweep in progress); "
-                "re-run when idle", res.persona,
+                "migrate(%s): APPLIED — %d source -> %d kept (%d forgotten over "
+                "max); emotional.md backed up to emotional.md.bak",
+                res.persona, res.source_blocks, res.kept, res.forgotten,
+            )
+        else:
+            res.skipped_reason = skip
+            log.warning(
+                "migrate(%s): SKIPPED — %s; re-run when idle", res.persona, skip,
             )
     return res

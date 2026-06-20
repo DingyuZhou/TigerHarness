@@ -10,7 +10,7 @@ on. It owns, for the three bounded stores (``skills`` / ``must_remember`` /
   and ``is_over_overflow`` (the hysteresis trigger, design §4);
 - **concurrency** — ``store_lock(store_name)``: a per-store file lock so two
   sessions cannot meditate the same store at once (design §5 invariant);
-- **the forget-guard** — ``forget()`` REFUSES to drop an ``owner_explicit``
+- **the forget-guard** — ``forget()`` REFUSES to drop an ``operator_explicit``
   must-remember entry that has not yet passed this cycle's relevance-check
   (design §5 invariant; the no-safety-net correctness anchor, plan §2.4).
 
@@ -42,7 +42,7 @@ from typing import Iterable, Iterator, Sequence
 from . import diary_format, frontmatter
 from .config import Config
 from .entries import (
-    KIND_OWNER_EXPLICIT,
+    KIND_OPERATOR_EXPLICIT,
     STORE_DIARY,
     STORE_NAMES,
     STORE_SKILLS,
@@ -70,10 +70,10 @@ _ENTRY_SEP = "<!-- tiger-memory-entry -->"
 class ForgetGuardError(RuntimeError):
     """Raised when ``forget()`` is asked to drop a still-protected directive.
 
-    The no-safety-net anchor (design §5): an ``owner_explicit`` must-remember
+    The no-safety-net anchor (design §5): an ``operator_explicit`` must-remember
     entry MUST pass this meditation cycle's relevance-check before it can be
     forgotten. Asking to drop one that has not is a correctness bug in the
-    caller, so we raise loudly rather than silently lose an owner directive.
+    caller, so we raise loudly rather than silently lose an operator directive.
     """
 
 
@@ -360,12 +360,12 @@ class BoundedStore:
         *,
         relevance_checked_ids: Iterable[str] = (),
     ) -> list[BaseEntry]:
-        """Return *entries* minus *drop_ids*, guarding owner directives.
+        """Return *entries* minus *drop_ids*, guarding operator directives.
 
-        The no-safety-net invariant (design §5): an ``owner_explicit``
+        The no-safety-net invariant (design §5): an ``operator_explicit``
         must-remember entry may be forgotten ONLY after it has passed this
         meditation cycle's relevance-check — i.e. its id is in
-        *relevance_checked_ids*. Asking to drop a still-protected owner
+        *relevance_checked_ids*. Asking to drop a still-protected operator
         directive raises :class:`ForgetGuardError` rather than losing it.
 
         ``drop_ids`` referencing entries not present is a no-op for those
@@ -381,11 +381,11 @@ class BoundedStore:
             if (
                 store_name == "must_remember"
                 and isinstance(entry, MustRememberEntry)
-                and entry.kind == KIND_OWNER_EXPLICIT
+                and entry.kind == KIND_OPERATOR_EXPLICIT
                 and did not in checked
             ):
                 raise ForgetGuardError(
-                    f"refusing to forget owner_explicit directive {did!r}: "
+                    f"refusing to forget operator_explicit directive {did!r}: "
                     "it has not passed this cycle's relevance-check "
                     "(design §5 forget-order invariant)."
                 )

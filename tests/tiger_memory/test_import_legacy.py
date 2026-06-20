@@ -103,7 +103,7 @@ def _skill(src=IMPORT_SOURCE, name="run the suite"):
 def _mr(src=IMPORT_SOURCE):
     return MustRememberEntry(
         text="never push without approval", created_at=SRC, last_used=SRC,
-        source=src, kind="owner_explicit", importance=5.0,
+        source=src, kind="operator_explicit", importance=5.0,
     )
 
 
@@ -247,7 +247,7 @@ def _raw_skill(src=SRC, usage=5, name="run the suite"):
     )
 
 
-def _raw_mr(src=SRC, kind="owner_explicit", importance=5.0):
+def _raw_mr(src=SRC, kind="operator_explicit", importance=5.0):
     return MustRememberEntry(
         text="never push without approval", created_at=src, last_used=src,
         source="reauthor", kind=kind, importance=importance,
@@ -350,11 +350,11 @@ def test_score_skill_backdated_lastused_and_low_usage(tmp_path: Path) -> None:
 def test_score_must_remember_preserves_kind_and_importance(tmp_path: Path) -> None:
     cfg = _load_cfg(tmp_path)
     out = score_seed_candidates(
-        _raw(must=[_raw_mr(kind="owner_explicit", importance=5.0)]),
+        _raw(must=[_raw_mr(kind="operator_explicit", importance=5.0)]),
         cfg=cfg, now=NOW,
     )
     m = out.must_remember[0]
-    assert m.kind == "owner_explicit"  # preserved straight from the table
+    assert m.kind == "operator_explicit"  # preserved straight from the table
     assert m.importance == 5.0  # elevated, mapped as-is
     assert m.created_at == SRC and m.last_used == SRC
     # a non-elevated kind maps its (lower) score straight through too.
@@ -371,7 +371,7 @@ def test_score_source_dates_override_map(tmp_path: Path) -> None:
     # is empty on the raw input, the override map supplies the source date.
     raw_mr = MustRememberEntry(
         text="owner said X", created_at="", last_used="", source="reauthor",
-        kind="owner_explicit", importance=5.0, id="row-1",
+        kind="operator_explicit", importance=5.0, id="row-1",
     )
     out = score_seed_candidates(
         _raw(must=[raw_mr]), cfg=cfg, now=NOW, source_dates={"row-1": SRC}
@@ -471,7 +471,7 @@ def _write_must_memorize(store: Store) -> None:
 
             | Score | Kind | Last bump | Source | Memo |
             |------:|------|-----------|--------|------|
-            |     5 | owner_explicit | 2026-06-16 | extract | Always run uv run pytest --cov. |
+            |     5 | operator_explicit | 2026-06-16 | extract | Always run uv run pytest --cov. |
             |     1 | decision | 2026-06-11 | extract | Lean is the goal; bare is the failure mode. |
             | bad   | decision | 2026-06-11 | extract | Unparseable score row -> skipped. |
             |     2 | bogus_kind | 2026-06-11 | extract | Unknown kind row -> skipped. |
@@ -530,13 +530,13 @@ def test_read_legacy_parses_pins(tmp_path: Path) -> None:
     store, _bstore = _make_store(tmp_path)
     _write_must_memorize(store)
     src = read_legacy(store)
-    # 4 valid rows kept (owner_explicit, decision, preference, incident); the
+    # 4 valid rows kept (operator_explicit, decision, preference, incident); the
     # unparseable score, the bogus kind, the short ``| only | two |`` row, and
     # the header/separator rows are all dropped.
     assert len(src.pins) == 4
     by_kind = {p.kind: p for p in src.pins}
-    assert by_kind["owner_explicit"].score == 5.0
-    assert by_kind["owner_explicit"].source_date == "2026-06-16T00:00:00Z"
+    assert by_kind["operator_explicit"].score == 5.0
+    assert by_kind["operator_explicit"].source_date == "2026-06-16T00:00:00Z"
     assert by_kind["decision"].memo.startswith("Lean is the goal")
     # the date-less preference row falls back to the file mtime (a full ISO ts).
     assert by_kind["preference"].source_date.endswith("Z")
@@ -584,10 +584,10 @@ def test_reauthor_pins_pass_through_mechanically(tmp_path: Path) -> None:
     out = reauthor(cfg, MockSummarizer(), src)
     assert len(out.must_remember) == len(src.pins) == 4
     assert {m.kind for m in out.must_remember} == {
-        "owner_explicit", "decision", "preference", "incident"
+        "operator_explicit", "decision", "preference", "incident"
     }
     # each pin carries its source date in created_at for the scorer to backdate.
-    oe = next(m for m in out.must_remember if m.kind == "owner_explicit")
+    oe = next(m for m in out.must_remember if m.kind == "operator_explicit")
     assert oe.created_at == "2026-06-16T00:00:00Z"
 
 
@@ -697,7 +697,7 @@ def test_import_legacy_run_force_preserves_live_memory(tmp_path: Path) -> None:
     # a live (non-import) pin must survive a forced re-seed purge.
     live = MustRememberEntry(
         text="live pin keep me", created_at=NOW, last_used=NOW, source="pin",
-        kind="owner_explicit", importance=5.0,
+        kind="operator_explicit", importance=5.0,
     )
     bstore.save_atomic("must_remember", bstore.load("must_remember") + [live])
     import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW, force=True)
@@ -912,7 +912,7 @@ def test_qa_whitespace_only_memo_dropped_not_crashing(tmp_path: Path) -> None:
             """\
             | Score | Kind | Last bump | Source | Memo |
             |------:|------|-----------|--------|------|
-            | 5 | owner_explicit | 2026-06-16 | extract |    |
+            | 5 | operator_explicit | 2026-06-16 | extract |    |
             | 1 | decision | 2026-06-11 | extract | Good memo survives. |
             """
         ),
@@ -1053,7 +1053,7 @@ def test_qa_dated_row_does_not_silently_use_now(tmp_path: Path) -> None:
             """\
             | Score | Kind | Last bump | Source | Memo |
             |------:|------|-----------|--------|------|
-            | 5 | owner_explicit | 2025-03-04 | extract | Real date honored. |
+            | 5 | operator_explicit | 2025-03-04 | extract | Real date honored. |
             """
         ),
         encoding="utf-8",
@@ -1072,7 +1072,7 @@ def test_qa_garbage_nonISO_date_falls_back_not_passthrough(tmp_path: Path) -> No
             """\
             | Score | Kind | Last bump | Source | Memo |
             |------:|------|-----------|--------|------|
-            | 5 | owner_explicit | yesterday | extract | Garbage date. |
+            | 5 | operator_explicit | yesterday | extract | Garbage date. |
             """
         ),
         encoding="utf-8",
@@ -1130,7 +1130,7 @@ def test_qa_force_purges_only_import_legacy_entries(tmp_path: Path) -> None:
         "must_remember",
         bstore.load("must_remember")
         + [MustRememberEntry(text="live directive", created_at=NOW, last_used=NOW,
-                             source="pin", kind="owner_explicit", importance=5.0)],
+                             source="pin", kind="operator_explicit", importance=5.0)],
     )
     import_legacy_run(cfg, store, summarizer=_BundleSummarizer(), now=NOW, force=True)
     # the live entry in every store survived; import-legacy entries were replaced.
