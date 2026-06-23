@@ -60,6 +60,8 @@ NO_LOGGER_BY_AUDIT = {
     "tigerharness.tiger_memory.frontmatter",  # pure parser/writer
     "tigerharness.tiger_memory.metrics",      # pure counters
     "tigerharness.tiger_memory.ranking",      # pure recency/date math
+    "tigerharness.tiger_memory.reinforce",    # pure reinforcement math; the
+                                              # outcome is logged by evocation
     "tigerharness.tiger_memory.skills",       # pure skill-importance scoring
     "tigerharness.tiger_memory.sources",      # re-exports
     "tigerharness.tiger_memory.sources.base",  # ABC surface
