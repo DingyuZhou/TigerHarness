@@ -19,6 +19,7 @@ from .config import Config
 from .lifecycle import ingest_candidates, parse_extraction
 from .state import iso_now
 from .store import Store
+from .summarizers.base import Summarizer
 
 log = logging.getLogger("tigerharness.tiger_memory.executor")
 
@@ -43,6 +44,7 @@ def ingest_extraction(
     source: str,
     bundle_text: str,
     now: str | None = None,
+    summarizer: Summarizer | None = None,
 ) -> IngestResult:
     """Parse an extraction bundle and merge its candidates into the stores.
 
@@ -58,7 +60,11 @@ def ingest_extraction(
     log.info("ingest-extraction: merging bundle for %s", conversation_uuid)
     now = now or iso_now()
     candidates = parse_extraction(bundle_text, now=now, source=source)
-    added = ingest_candidates(BoundedStore(cfg, store), cfg, candidates, now=now)
+    bstore = BoundedStore(cfg, store)
+    added = ingest_candidates(bstore, cfg, candidates, now=now)
+    if summarizer is not None and cfg.memory.diary.evocation_enabled:
+        from .evocation import evoke_and_reinforce
+        evoke_and_reinforce(bstore, cfg, candidates, summarizer, now=now)
     from .entries import STORE_DIARY, STORE_MUST_REMEMBER, STORE_SKILLS
     return IngestResult(
         conversation_uuid=conversation_uuid,
