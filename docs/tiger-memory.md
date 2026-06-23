@@ -111,6 +111,51 @@ uv run python -m pytest tests/tiger_memory/test_meditate_persona.py \
 A store written before the `owner_explicit` -> `operator_explicit` rename still
 loads: `entries.normalize_kind` maps the legacy value on read (no silent loss).
 
+## Associative reinforcement (the recall-graph seed)
+
+When a finished session produces a new **diary** note, the system can judge
+whether that note *evokes* (联想 — "calls to mind") **0, 1, or at most 2**
+existing memories — in any of the three sharp stores — and **reinforce** each
+evoked old item so it is less likely to be forgotten, the way human memory
+strengthens on associative recall. A **concise recall reference** to the evoked
+item(s) is appended to the new note's text — a minimal, human-findable pointer
+(`… ↪ recalls: skill "…"; diary 2026-06-19 "…"`), the seed of a memory-recall
+graph. It is *not* a structured graph field and adds *no* id/schema/format change
+to the compact diary store.
+
+How an evoked item is reinforced:
+
+| Evoked store | Reinforcement |
+|---|---|
+| `diary` | weight magnitude **+1 toward its existing sign**, clamped to `weight_cap` (a hub bullet saturates at ±cap), AND `last_used` reset to the evoking event's time — re-dating the bullet so its recency is restored |
+| `must_remember` | `repeat_count += 1` (importance = repeat-count) |
+| `skills` | `usage_count += 1` (importance re-derived, log-shaped — diminishing returns) |
+
+The new note itself is **never** reinforced (no self-bump); only the old items it
+evokes. The judgment is **one batched summarizer call per ingest** (all of that
+ingest's new diary notes against the current stores as candidate context),
+hooked between ingest and meditation — separate from meditation's merge (which
+collapses near-duplicates; evocation keeps both and strengthens the old one).
+Pure mutations live in `reinforce.py`; the pass + prompt/parse in `evocation.py`.
+
+**Enabling it (a rail decision).** The pass is gated by
+`memory.diary.evocation_enabled` (**default `false`**). Turning it on adds a
+model call at ingest, so it is a deliberate, per-deployment choice: in the
+in-process path (`extract_and_ingest`) it uses the session's summarizer; for the
+staged production sweep, a summarizer must be threaded into `ingest_extraction`
+(today `ingest-staged` is non-AI glue, so wiring the call there is the explicit
+step that opts that path onto a model rail). With the flag off, ingest behaves
+exactly as before.
+
+The diary store's size was raised to `max_length` **6000** / `overflow_limit`
+**8000** (from 4000/6000) alongside this feature, to give the references and
+reinforced recency room before forgetting fires.
+
+> Known limitation: a brand-new note byte-identical in text **and** weight **and**
+> day to a pre-existing bullet can be mis-partitioned (the pass keys new-vs-old by
+> that signature, since diary bullets have no id). The effect is benign
+> misattribution, never a crash, and is vanishingly rare for free-text notes.
+
 ## Key modules
 
 | Module | Purpose |
@@ -126,6 +171,8 @@ loads: `entries.normalize_kind` maps the legacy value on read (no silent loss).
 | `migrate_emotional_to_diary.py` | the one-off legacy -> diary migration |
 | `skills.py` | usage-based skill importance + skills keep-rank |
 | `meditation.py` | the compaction engine (merge → relevance-downgrade → compact → guarded-forget) |
+| `reinforce.py` | pure associative-reinforcement mutations + the concise recall-reference builder |
+| `evocation.py` | the batched evocation pass (gated): judge what each new diary note recalls, reinforce it, append the reference |
 | `lifecycle.py` | extraction, in-session staging, fresh-start `rebuild`, `pin`, charter mission sourcing |
 | `sweep.py` | team-sweep gating + post-ingest `meditate_all_stores` |
 | `briefing.py` | assemble the session-start briefing from the four stores |
