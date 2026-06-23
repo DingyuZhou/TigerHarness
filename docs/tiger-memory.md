@@ -156,6 +156,23 @@ reinforced recency room before forgetting fires.
 > that signature, since diary bullets have no id). The effect is benign
 > misattribution, never a crash, and is vanishingly rare for free-text notes.
 
+**Turning it on, concretely.** (1) Set `memory.diary.evocation_enabled: true`
+(per-persona, or once in the team defaults so all personas inherit it). (2) Make a
+summarizer reach the ingest path: the in-process path (`extract_and_ingest`)
+already runs the pass when the flag is on; the **staged** production path
+(`ingest-staged` → `ingest_extraction`) only runs it when a built summarizer is
+passed in — wiring that call is the explicit opt-in that moves staged ingest onto
+a model rail. With the flag off (default), neither path calls the model.
+
+**Verifying.** The behaviour is unit-pinned in `tests/tiger_memory/test_reinforce.py`
+(the mutations + reference), `test_evocation.py` (the batched pass + every
+error/clamp branch), `test_evocation_wiring.py` (both drivers, flag on/off), and
+`test_b2_evocation_qa.py` (the reference survives the format gate; counts stay
+bounded). `tiger-memory check` stays exit-0 across all four stores (the diary
+format is unchanged). Because the feature is default-off, a verifier sees **no**
+change until they enable the flag and supply a summarizer (the real backend, or a
+deterministic stub in tests).
+
 ## Key modules
 
 | Module | Purpose |
