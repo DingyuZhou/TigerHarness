@@ -190,12 +190,38 @@ in **characters**, never tokens (§8).
   emotional weight = harder to forget").
 - **Loaded WHOLE at session start** — there is no top-N display cap; the store
   is kept loadable by *forgetting*, not by a view limit. Bounds are tighter
-  than the frontmatter stores for that reason: `max_length` 4000,
-  `overflow_limit` 6000 chars.
+  than the frontmatter stores for that reason: `max_length` 6000,
+  `overflow_limit` 8000 chars (raised from 4000/6000 alongside associative
+  reinforcement, §4.4, to give recall references + reinforced recency room).
 - **Length-based** bound: `max_length` + `overflow_limit`. On overflow,
   meditation merges similar items (merging bumps magnitude toward the
   stronger feeling, clamped), then compacts/forgets the lowest-magnitude /
   oldest items until length < `max_length`.
+
+### 4.4 Associative reinforcement — the recall-graph seed
+
+A new diary note can *evoke* (联想) 0–2 existing memories across the three sharp
+stores; each evoked **old** item is reinforced (the new note is never bumped — no
+self-bump), and a concise recall reference to the evoked item(s) is appended to
+the new note's text. The reference is a minimal human-findable pointer
+(`↪ recalls: …`), deliberately **not** a structured graph field — so the compact,
+id-less `diary_format` is unchanged (no schema/id/migration). It is the seed of a
+memory-recall graph the operator asked for ("refer to other memory items … like a
+recall graph sometimes").
+
+- **Diary reinforcement = weight + recency:** magnitude +1 toward the bullet's
+  existing sign, clamped to `weight_cap` (a hub saturates, no runaway), AND
+  `last_used` reset to the evoking time (re-dates the bullet — recency restored).
+- **Count stores = count:** must_remember `repeat_count += 1`; skills
+  `usage_count += 1` (log-shaped importance, diminishing returns). Both mirror
+  the meditation merge survivor-bump, so reinforcement and merge agree.
+- **One model touch point, batched, separate from merge:** one summarizer call
+  per ingest judges all that ingest's new diary notes against the current stores;
+  it runs between ingest and meditation. Merge collapses near-duplicates;
+  evocation keeps both and strengthens the old one.
+- **Gated (`memory.diary.evocation_enabled`, default false):** enabling it adds a
+  model call at ingest — a deliberate rail decision. Off ⇒ behaviour unchanged.
+  Code: pure mutations + reference in `reinforce.py`; the pass in `evocation.py`.
 
 ## 5. Meditation — the compaction engine
 

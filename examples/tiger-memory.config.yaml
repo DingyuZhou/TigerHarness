@@ -59,10 +59,14 @@ memory:
     max_length: 8000
     overflow_limit: 10000
   diary:                   # length-bounded chars; loaded whole, dated bullets
-    max_length: 4000
-    overflow_limit: 6000
+    max_length: 6000       # raised from 4000 w/ associative reinforcement (2026-06-22)
+    overflow_limit: 8000   # raised from 6000 (hysteresis trigger)
     weight_cap: 10         # hard cap: |weight| <= 10
     fresh_days: 7          # recents (<= N days) kept verbatim, never fuzzed
+    evocation_enabled: false  # opt-in: when true, ingest runs the batched
+                              # evocation pass (a model call) -- reinforce what
+                              # each new diary note recalls + append a concise
+                              # recall reference. Off by default (rail choice).
     decay:
       magnitude_per_day: 0.1   # how fast |weight| shrinks toward 0
   fuzzy:                   # NEW 4th store: coarsened, grouped older memory

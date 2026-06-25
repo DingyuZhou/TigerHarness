@@ -201,17 +201,24 @@ class DiaryStoreConfig:
 
     The diary is loaded WHOLE each session, so it is bounded tighter than the
     other length-based stores and kept small by forgetting (not a display cap):
-    ``max_length`` 4000 (the target forgetting compacts back below),
-    ``overflow_limit`` 6000 (the hysteresis trigger). The Operator's numbers.
+    ``max_length`` 6000 (the target forgetting compacts back below),
+    ``overflow_limit`` 8000 (the hysteresis trigger). The Operator's numbers
+    (raised from 4000/6000 alongside associative reinforcement, 2026-06-22).
     """
 
-    max_length: int = 4000
-    overflow_limit: int = 6000
+    max_length: int = 6000
+    overflow_limit: int = 8000
     weight_cap: float = 10.0
     #: Recency window (days): diary items dated within ``fresh_days`` of "now"
     #: are kept verbatim by meditation (never fuzzed), regardless of weight —
     #: incl. 0-weight (the 4-store model, brief §A.2). Default 7.
     fresh_days: int = 7
+    #: Associative reinforcement (2026-06-22). When True, ingest runs the
+    #: evocation pass: one batched summarizer call judges what each new diary
+    #: note recalls, reinforces those old items, and appends a concise recall
+    #: reference. Default False: enabling it adds a model call at ingest, so it
+    #: is a deliberate, per-deployment (subscription-rail) opt-in.
+    evocation_enabled: bool = False
     decay: DiaryDecayConfig = field(default_factory=DiaryDecayConfig)
 
 
@@ -540,6 +547,17 @@ def _cfg_float(value: Any, field: str) -> float:
         raise ConfigError(f"{field} must be a number; got {value!r}.") from None
 
 
+def _cfg_bool(value: Any, field: str) -> bool:
+    """Coerce a YAML bool; a non-bool raises the contracted ``ConfigError``.
+
+    Strict (no ``"true"``/``1`` truthiness) so a typo can't silently flip a
+    feature gate on or off.
+    """
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"{field} must be true or false; got {value!r}.")
+
+
 def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     """Parse + validate the ``memory:`` block (design §7).
 
@@ -588,16 +606,20 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     decay_raw = el_raw.get("decay") or {}
     diary = DiaryStoreConfig(
         max_length=_cfg_int(
-            el_raw.get("max_length", 4000), "memory.diary.max_length"
+            el_raw.get("max_length", 6000), "memory.diary.max_length"
         ),
         overflow_limit=_cfg_int(
-            el_raw.get("overflow_limit", 6000), "memory.diary.overflow_limit"
+            el_raw.get("overflow_limit", 8000), "memory.diary.overflow_limit"
         ),
         weight_cap=_cfg_float(
             el_raw.get("weight_cap", 10.0), "memory.diary.weight_cap"
         ),
         fresh_days=_cfg_int(
             el_raw.get("fresh_days", 7), "memory.diary.fresh_days"
+        ),
+        evocation_enabled=_cfg_bool(
+            el_raw.get("evocation_enabled", False),
+            "memory.diary.evocation_enabled",
         ),
         decay=DiaryDecayConfig(
             magnitude_per_day=_cfg_float(

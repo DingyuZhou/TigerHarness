@@ -334,10 +334,21 @@ def extract_and_ingest(
     *,
     now: str | None = None,
 ) -> dict[str, int]:
-    """In-process extract → ingest for one finished session (mock-backed in CI)."""
+    """In-process extract → ingest for one finished session (mock-backed in CI).
+
+    When ``memory.diary.evocation_enabled`` is set, runs the associative-evocation
+    pass after ingest (one batched summarizer call): reinforce the old items each
+    new diary note recalls and append a concise recall reference. Default off, so
+    this is a no-op unless deliberately enabled (the model call is a rail choice).
+    """
     now = now or iso_now()
     candidates = extract_candidates(cfg, summarizer, rec, now=now)
-    return ingest_candidates(BoundedStore(cfg, store), cfg, candidates, now=now)
+    bstore = BoundedStore(cfg, store)
+    added = ingest_candidates(bstore, cfg, candidates, now=now)
+    if cfg.memory.diary.evocation_enabled:
+        from .evocation import evoke_and_reinforce
+        evoke_and_reinforce(bstore, cfg, candidates, summarizer, now=now)
+    return added
 
 
 # ----- discovery + idle decision --------------------------------------------
