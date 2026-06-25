@@ -77,3 +77,20 @@ def test_journal_dispatch():
 def test_journal_alias():
     with pytest.raises(SystemExit):
         main(["j"])
+
+
+def test_autodrive_dispatch(tmp_path):
+    """`tigerharness autodrive status` routes to the autodrive sub-CLI."""
+    ret = main(["autodrive", "status", "--journal-dir", str(tmp_path / "j")])
+    assert ret == 0
+
+
+def test_autodrive_alias(tmp_path):
+    ret = main(["ad", "status", "--journal-dir", str(tmp_path / "j")])
+    assert ret == 0
+
+
+def test_autodrive_help_listed(capsys):
+    main(["--help"])
+    out = capsys.readouterr().out
+    assert "autodrive (ad)" in out

@@ -21,6 +21,7 @@ plain `claude -p` subprocess.
 | Run a multi-persona **workflow** (compile + graph walk) | [journal-workflow-mode.md](journal-workflow-mode.md) |
 | Know how a crashed/idle task resumes | [journal-instant-resume.md](journal-instant-resume.md) |
 | Schedule from Slack **cheaply**, or understand rails/billing + `status.json` | [subscription-backend.md](subscription-backend.md) |
+| Drive the journal queue automatically on a timer (the sanctioned exception) | [autodrive.md](autodrive.md) |
 | Understand per-persona memory from journal work (the worklog rail) | [per-persona-journal-memory.md](per-persona-journal-memory.md) |
 | Set up / operate the Slack bridge (1..N lanes) | [slack-bridge.md](slack-bridge.md) |
 | Use tiger-memory (the three bounded stores, CLI, config) | [tiger-memory.md](tiger-memory.md) |
@@ -67,11 +68,14 @@ plain `claude -p` subprocess.
   read at session start. A team-wide sweep protocol keeps a roster fresh on
   the subscription rail under a lease, watermark, and per-wake cap. Design:
   [DESIGN-memory.md](DESIGN-memory.md).
-- **Team tooling.** `tigerharness init` scaffolds a team and installs five
-  bundled Claude Code skills (drive-journal, journal-new, slack-notify,
-  workflow-append-steps, tigerharness-basics), hash-aware so hand-edited
-  skills are never overwritten; `dismiss` tears down. `agent_sdk` is a typed,
-  backend-agnostic API over the `claude -p` and Claude Agent SDK runtimes.
+- **Team tooling.** `tigerharness init` scaffolds a team and installs six
+  bundled Claude Code skills (drive-journal, journal-new, journal-autodrive,
+  slack-notify, workflow-append-steps, tigerharness-basics), hash-aware so
+  hand-edited skills are never overwritten; `dismiss` tears down. `agent_sdk`
+  is a typed, backend-agnostic API over the `claude -p` and Claude Agent SDK
+  runtimes. `autodrive` periodically drives the journal queue via that SDK
+  (the Operator-authorized exception to the human-only drive rule —
+  [autodrive.md](autodrive.md)).
 - **Logs.** Every CLI reads `TIGERHARNESS_LOG_LEVEL` (default WARNING) via one
   helper; one named logger per module; `tests/test_logging_audit.py` enforces
   coverage.

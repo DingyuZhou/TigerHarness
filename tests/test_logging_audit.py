@@ -27,6 +27,7 @@ NO_LOGGER_BY_AUDIT = {
     "tigerharness",                       # package __init__ (metadata only)
     "tigerharness._logging",              # the bootstrap itself
     "tigerharness.agent_sdk",             # re-exports
+    "tigerharness.autodrive",             # re-exports
     "tigerharness.agent_sdk.errors",      # exception hierarchy
     "tigerharness.agent_sdk.types",       # dataclass/Protocol surface
     "tigerharness.agent_sdk.backends",    # re-exports
