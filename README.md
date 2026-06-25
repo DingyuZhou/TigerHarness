@@ -17,7 +17,7 @@ integration, and persistent memory management.
 | `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: the `claude -p` subprocess backend and Anthropic's `claude-agent-sdk` backend, with a shared typed event/retry/error model. |
 | `tigerharness.journal` | **File-based subscription backend.** Routes agent work through the interactive Claude Code app so it counts against a monthly subscription instead of token-billed API. Single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`) compiled in-session by a drafter/two-critic loop over mechanical validators, then walked through gates that enforce step order and write persona-stamped worklog notes (the per-persona memory rail). Crash-safe by lease: tasks classify idle/busy/crashed and a fresh session resumes a crashed walk at the same step. Team-pinned scheduling: every task records the journal root it was scheduled into (provenance), scheduling verbs refuse to fall back silently to the per-user journal, and the sweep flags misplaced tasks. A `deferred/` inbox makes Slack-side scheduling cheap: `journal defer` parks the conversation verbatim; `journal materialize` (inside a drive) turns it into a real task. 19 CLI verbs under `journal`. See [docs/journal.md](docs/journal.md), [docs/journal-workflow-mode.md](docs/journal-workflow-mode.md), [docs/journal-instant-resume.md](docs/journal-instant-resume.md). |
 | `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to a `claude -p` backend and posts replies back to the thread. |
-| `tigerharness.tiger_memory` | Persistent agent memory: archive, journal, briefing with lazy rebuild, kind-decay must-memorize, and drill-down. Includes the team-wide sweep protocol (`sweep-plan`/`sweep-done`/`sweep-complete`/`sweep-release` under a lease, watermark, and per-wake cap) and subscription-rail staging (`plan`, `ingest-summary`) so summarization bills to the subscription. See [docs/tiger-memory.md](docs/tiger-memory.md), [docs/tiger-memory-sweep-protocol.md](docs/tiger-memory-sweep-protocol.md). |
+| `tigerharness.tiger_memory` | Persistent **bounded** agent memory: four self-pruning stores (skills/must_remember/diary/fuzzy) projected into a session-start briefing, with forgetting via meditation. Includes the team-wide sweep protocol (`sweep-plan`/`sweep-done`/`sweep-complete`/`sweep-release` under a lease, watermark, and per-wake cap) and subscription-rail staging (`plan`, `ingest-extraction`/`ingest-staged`) so memory extraction bills to the subscription. See [docs/tiger-memory.md](docs/tiger-memory.md), [docs/tiger-memory-sweep-protocol.md](docs/tiger-memory-sweep-protocol.md). |
 
 ## Bundled Claude Code skills
 
@@ -80,9 +80,7 @@ you don't use:
 | *(none)* | — | `init` scaffolder, `dismiss` teardown, the `journal` subscription backend |
 | `[anthropic]` | `claude-agent-sdk` | The official Claude Agent SDK backend (`anthropic_sdk`) |
 | `[slack]` | `slack-bolt`, `aiohttp`, `python-dotenv` | `slack-bridge` (Slack Socket Mode DM bridge) |
-| `[memory]` | `pyyaml` | `tiger-memory` (per-persona persistent memory; substring search only) |
-| `[memory-rag]` | `pyyaml`, `fastembed`, `sqlite-vec` | `tiger-memory` with semantic search via local embeddings (free, ~50 MB model download on first use) |
-| `[memory-rag-openai]` | `pyyaml`, `openai`, `sqlite-vec` | `tiger-memory` with semantic search via OpenAI embeddings (API key needed, no model download) |
+| `[memory]` | `pyyaml` | `tiger-memory` (per-persona persistent memory) |
 | `[all]` | union of everything above | Everything works out of the box |
 
 Pick the union that matches what you'll use, e.g.
@@ -331,10 +329,6 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
 ### `tigerharness init`
 
 - **Auto-init of the tiger-memory store fails intermittently** with `CalledProcessError` during `tigerharness init`'s last step. Running `tigerharness tiger-memory --config <path> init` by hand afterward always succeeds, suggesting environment propagation in the `sys.executable -m tigerharness ...` subprocess is the moving part. A direct in-process call would remove it.
-
-### Tiger-memory
-
-- **The RAG index is portable and shareable.** `.embeddings.db` stores archive paths *relative* to the store root, so a committed index works after a clone/move on another machine with no rebuild — as long as the same embedder is used. It is tracked in git on purpose. A legacy absolute-path index or an embedder-dim change rebuilds itself once automatically (logged at WARNING). The binary index is not mergeable, so concurrent re-embeds on different machines conflict at the file level — re-run a search to rebuild. See `docs/tiger-memory.md` → "Portable, shared RAG index".
 
 ## License
 
