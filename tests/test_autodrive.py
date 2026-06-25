@@ -7,6 +7,7 @@ so this suite never spawns a real subprocess or sends a real signal.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -156,6 +157,36 @@ def test_record_tick_missing_file_noop(tmp_path):
     assert not p.exists()
 
 
+def test_record_tick_in_flight_optional(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    # Omitting in_flight leaves the field unwritten...
+    runner.record_tick(p, tick_count=1, at="t")
+    assert "in_flight" not in runner.read_state(p)
+    # ...passing it refreshes the live gauge.
+    runner.record_tick(p, tick_count=2, at="t2", in_flight=4)
+    assert runner.read_state(p)["in_flight"] == 4
+
+
+def test_record_fire_updates_and_preserves(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 7, "fire_count": 0})
+    runner.record_fire(
+        p, fire_count=3, at="2026-06-25T00:00:00Z", in_flight=2
+    )
+    st = runner.read_state(p)
+    assert st["pid"] == 7  # preserved
+    assert st["fire_count"] == 3
+    assert st["last_fire_at"] == "2026-06-25T00:00:00Z"
+    assert st["in_flight"] == 2
+
+
+def test_record_fire_missing_file_noop(tmp_path):
+    p = tmp_path / "gone.json"
+    runner.record_fire(p, fire_count=1, at="t", in_flight=1)  # silent
+    assert not p.exists()
+
+
 # --------------------------------------------------------------------------
 # process liveness
 # --------------------------------------------------------------------------
@@ -280,21 +311,113 @@ async def test_run_loop_max_ticks(tmp_path):
 async def test_run_loop_should_stop(tmp_path):
     p = tmp_path / "s.json"
     runner.write_state(p, {"pid": 1})
-    state = {"n": 0}
+    ran = {"n": 0}
 
     async def fake_drive(cfg, *, backend=None):
-        state["n"] += 1
+        ran["n"] += 1
         return _FakeResult()
 
     async def fake_sleep(secs):
         pass
 
-    # Stop after the first drive completes.
+    # Cooperative stop: the post-fire check sees fire_count advanced by
+    # record_fire and breaks. (In the fire-and-forget model the drive runs
+    # at the final drain, so a stop condition keyed on drive side-effects
+    # would never trip -- it must key on loop progress instead.)
+    def should_stop():
+        st = runner.read_state(p)
+        return bool(st and st.get("fire_count", 0) >= 1)
+
     n = await runner.run_loop(
         _cfg(), p, run_drive=fake_drive, sleep=fake_sleep,
-        should_stop=lambda: state["n"] >= 1, now=lambda: "T",
+        should_stop=should_stop, now=lambda: "T",
     )
     assert n == 1
+    # The one fired drive is drained on exit, so it did run.
+    assert ran["n"] == 1
+    assert runner.read_state(p)["tick_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_loop_overlap_no_cap(tmp_path):
+    """Two drives are in flight at once (no concurrency cap): the loop
+    fires the second before the first finishes."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    gate = asyncio.Event()
+    active = 0
+    peak = 0
+
+    async def slow_drive(cfg, *, backend=None):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active >= 2:
+            gate.set()  # self-release once overlap is proven (no deadlock)
+        await gate.wait()
+        active -= 1
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0)  # yield so the just-fired drive can start
+
+    n = await runner.run_loop(
+        _cfg(), p, max_ticks=2, run_drive=slow_drive, sleep=fake_sleep,
+        now=lambda: "T",
+    )
+    assert n == 2
+    assert peak == 2  # both drives ran concurrently
+    assert runner.read_state(p)["tick_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_loop_reaps_completed_drive_midloop(tmp_path):
+    """A drive that finishes between fires is reaped mid-loop (not just at
+    the final drain), so the in-flight gauge and completion count stay live."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    fires = []
+
+    async def fake_drive(cfg, *, backend=None):
+        fires.append(1)
+        return _FakeResult(stop_reason="end_turn", cost_usd=0.2)
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0)  # let the in-flight drive complete
+
+    n = await runner.run_loop(
+        _cfg(), p, max_ticks=2, run_drive=fake_drive, sleep=fake_sleep,
+        now=lambda: "T",
+    )
+    assert n == 2
+    assert len(fires) == 2
+    st = runner.read_state(p)
+    assert st["tick_count"] == 2
+    assert st["last_stop_reason"] == "end_turn"
+    assert st["in_flight"] == 0  # all drained
+
+
+@pytest.mark.asyncio
+async def test_run_loop_reaps_errored_drive_midloop(tmp_path):
+    """A drive that raises between fires is reaped mid-loop and recorded as
+    an error, and the loop keeps firing (one bad drive is not fatal)."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+
+    async def boom(cfg, *, backend=None):
+        raise RuntimeError("kaboom")
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0)  # let the in-flight drive raise
+
+    n = await runner.run_loop(
+        _cfg(), p, max_ticks=2, run_drive=boom, sleep=fake_sleep,
+        now=lambda: "T",
+    )
+    assert n == 2  # kept firing despite the first drive's error
+    st = runner.read_state(p)
+    assert st["tick_count"] == 2
+    assert "kaboom" in st["last_error"]
 
 
 @pytest.mark.asyncio
@@ -437,6 +560,11 @@ def test_cmd_start_happy(tmp_path, capsys):
     assert st["interval_seconds"] == 600.0
     assert st["max_budget_usd"] == 5.0
     assert st["cwd"] == str(tmp_path)
+    # fresh state initializes both the fire and completion gauges
+    assert st["fire_count"] == 0
+    assert st["last_fire_at"] is None
+    assert st["in_flight"] == 0
+    assert st["tick_count"] == 0
     # the spawned drive is pinned to exactly this journal
     assert spawned["env"]["TIGERHARNESS_JOURNAL_DIR"] == str(jr)
     assert spawned["cwd"] == str(tmp_path)
@@ -516,7 +644,9 @@ def test_cmd_status_running(tmp_path, capsys):
         {
             "pid": os.getpid(), "interval_seconds": 600, "backend": "claude_p",
             "driver": "Anzai", "max_budget_usd": 5.0,
-            "started_at": "T0", "last_tick_at": "T1", "tick_count": 2,
+            "started_at": "T0",
+            "fire_count": 3, "last_fire_at": "T2", "in_flight": 1,
+            "last_tick_at": "T1", "tick_count": 2,
             "last_stop_reason": "end_turn", "last_error": "boom",
         },
     )
@@ -524,6 +654,11 @@ def test_cmd_status_running(tmp_path, capsys):
     assert cli.cmd_status(args) == 0
     out = capsys.readouterr().out
     assert "running" in out
+    assert "fire_count:   3 (drives launched)" in out
+    assert "last_fire_at: T2" in out
+    assert "in_flight:    1 (running now)" in out
+    assert "done_count:   2 (drives completed)" in out
+    assert "last_done_at: T1" in out
     assert "last_stop:    end_turn" in out
     assert "last_error:   boom" in out
 

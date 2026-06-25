@@ -175,8 +175,11 @@ def cmd_start(
         **config_to_dict(cfg),
         "pid": None,
         "started_at": now(),
-        "last_tick_at": None,
+        "fire_count": 0,
+        "last_fire_at": None,
+        "in_flight": 0,
         "tick_count": 0,
+        "last_tick_at": None,
         "stop_requested": False,
         "last_stop_reason": None,
         "last_cost_usd": None,
@@ -199,8 +202,8 @@ def cmd_start(
     )
 
     print(
-        f"autodrive started (pid {pid}) -- driving every "
-        f"{int(interval)}s via backend {cfg.backend!r}, "
+        f"autodrive started (pid {pid}) -- firing a drive every "
+        f"{int(interval)}s (overlap allowed) via backend {cfg.backend!r}, "
         f"driver {driver or '(none)'}."
     )
     print(f"  state: {sfile}")
@@ -231,8 +234,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  driver:       {state.get('driver') or '(none)'}")
     print(f"  max_budget:   {state.get('max_budget_usd')}")
     print(f"  started_at:   {state.get('started_at')}")
-    print(f"  last_tick_at: {state.get('last_tick_at') or '(none yet)'}")
-    print(f"  tick_count:   {state.get('tick_count', 0)}")
+    print(f"  fire_count:   {state.get('fire_count', 0)} (drives launched)")
+    print(f"  last_fire_at: {state.get('last_fire_at') or '(none yet)'}")
+    print(f"  in_flight:    {state.get('in_flight', 0)} (running now)")
+    print(f"  done_count:   {state.get('tick_count', 0)} (drives completed)")
+    print(f"  last_done_at: {state.get('last_tick_at') or '(none yet)'}")
     if state.get("last_stop_reason"):
         print(f"  last_stop:    {state.get('last_stop_reason')}")
     if state.get("last_error"):

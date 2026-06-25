@@ -1,10 +1,11 @@
 # autodrive
 
 ## At a glance
-- **What:** `tigerharness autodrive` — a small detached daemon that runs
-  **"drive the journal"** on a fixed interval via the backend-agnostic
-  [agent SDK](agent_sdk.md) (default backend `claude -p`). Drive, then sleep,
-  no overlap. **Not** built on Claude Code's `/loop`.
+- **What:** `tigerharness autodrive` — a small detached daemon that fires
+  **"drive the journal"** on a fixed cadence via the backend-agnostic
+  [agent SDK](agent_sdk.md) (default backend `claude -p`). Fire every N
+  seconds and do **not** wait — overlap is allowed; each fire is a fresh,
+  context-clean session. **Not** built on Claude Code's `/loop`.
 - **When you need it:** the Operator wants the journal queue worked
   automatically — "drive the journal every 10 minutes", "keep the queue
   moving" — without a human re-invoking `drive-journal` each time.
@@ -34,13 +35,28 @@ still on the subscription.
 
 ### Loop shape
 
-**Drive, then sleep — no overlap.** Each tick spawns one backend run with the
-self-contained drive prompt, waits for it to finish, records the result, then
-sleeps the interval. A drive that hits its budget cap or context ceiling
-returns a non-terminal `stop_reason`; the journal task simply stays
-`in_progress`/idle and the next tick resumes it — truncation is safe because
-the journal's session model is resumable. A tick that raises is logged and the
-loop keeps running; one bad tick never takes the daemon down.
+**Fire on a fixed cadence — do not wait (overlap allowed).** Every `interval`
+seconds the loop launches a fresh drive and immediately goes back to waiting
+for the next tick; it does **not** block on the drive finishing, so a slow
+drive and the next fire can run at the same time. Each fire is a **brand-new
+agent session** (no `--resume`), which keeps every drive's context clean and
+compact.
+
+This is safe and self-limiting because the journal coordinates through its
+claim compare-and-set lease: a redundant overlapping fire sweeps, finds the
+active task **busy**, and exits cheaply, while genuinely parallel work (several
+actionable tasks) gets picked up across fires. There is deliberately **no
+concurrency cap** — the busy-lease no-op makes a pile-up of redundant fires
+cheap, and each drive is still bounded by its own `--max-budget`. **Mind the
+multiplier, though:** N concurrent drives can spend up to N × the per-drive cap
+within one interval, so size `--interval` and `--max-budget` together.
+
+A drive that hits its budget cap or context ceiling returns a non-terminal
+`stop_reason`; the journal task simply stays `in_progress`/idle and a later
+fire resumes it — truncation is safe because the journal's session model is
+resumable. A drive that raises is logged as `last_error` and the loop keeps
+firing; one bad drive never takes the daemon down. On `stop`, any still-running
+drives are drained so their results are recorded before the daemon exits.
 
 ### Commands
 
@@ -56,7 +72,7 @@ tigerharness autodrive stop
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--interval` | `600` (10 min) | Seconds between drives. **Floor 60** — a single drive already takes minutes. |
+| `--interval` | `600` (10 min) | Seconds between *fires* (cadence, not spacing — the loop does not wait for a drive to finish). **Floor 60** — keeps a typo from piling up dozens of concurrent drives. |
 | `--driver` | team `default_persona` | Persona the work is attributed to (worklogs land in its memory store). |
 | `--max-budget` | none | Per-drive USD cap, passed to the backend. **Strongly advised** — your protection for the day billing changes. |
 | `--backend` | `claude_p` | agent SDK backend name. **Vendor-agnostic caveat:** only an *agentic CLI* backend can actually invoke skills and drive; a raw chat-completion backend cannot. |
@@ -91,7 +107,7 @@ and clears the state file.
 
 | Path | What |
 |---|---|
-| `<journal>/.autodrive.json` | State: pid, interval, backend, driver, max_budget, started_at, last_tick_at, tick_count, last_stop_reason / last_error. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. |
+| `<journal>/.autodrive.json` | State: pid, interval, backend, driver, max_budget, started_at, plus two gauges — **launched** (`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`, `last_tick_at`, `last_stop_reason` / `last_error`). With overlap the two diverge while drives are in flight. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. |
 | `<journal>/.autodrive.log` | Appended stdout/stderr of the detached `_loop` process. |
 
 ### Skill

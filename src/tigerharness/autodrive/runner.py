@@ -18,11 +18,25 @@ billing, an unattended autodrive bills real dollars on every tick --
 that is what ``max_budget_usd`` and the ``autodrive stop`` off-switch
 guard against. Keep those guardrails loud.
 
-Loop shape: **drive, then sleep** (no overlap). A drive that hits its
-budget cap or context ceiling returns a non-terminal ``stop_reason``; the
-journal task simply stays ``in_progress``/idle and the next tick resumes
-it -- truncation is safe because the journal's session model is
-resumable.
+Loop shape: **fire on a fixed cadence, do NOT wait** (overlap allowed).
+Every ``interval`` seconds the loop launches a fresh drive and immediately
+goes back to waiting for the next tick -- it does not block on the drive
+finishing, so a slow drive and the next fire can run concurrently. This is
+safe and self-limiting because the journal coordinates through its claim
+compare-and-set lease: a redundant overlapping fire sweeps, finds the
+active task **busy**, and exits cheaply, while genuinely parallel work
+(multiple actionable tasks) is picked up by different fires. Each fire is
+also a brand-new agent session (no ``--resume``), so context stays clean
+and compact every time. A drive that hits its budget cap or context
+ceiling returns a non-terminal ``stop_reason``; the journal task simply
+stays ``in_progress``/idle and a later fire resumes it -- truncation is
+safe because the journal's session model is resumable.
+
+There is deliberately **no concurrency cap**: the busy-lease no-op makes a
+pile-up of redundant fires cheap, and each individual drive is still
+bounded by its own ``max_budget_usd``. (Note the multiplier, though: N
+concurrent drives can spend up to N x the per-drive cap within one
+interval.)
 """
 
 from __future__ import annotations
@@ -41,9 +55,10 @@ log = logging.getLogger(__name__)
 
 # ----- constants -----
 
-#: Minimum allowed interval. A single drive already takes minutes and the
-#: loop never overlaps drives, so a floor mainly stops a typo (``--interval
-#: 1``) from hammering the backend the instant a drive returns.
+#: Minimum allowed interval. A single drive already takes minutes, so a
+#: floor mainly stops a typo (``--interval 1``) from firing a fresh drive
+#: every second and piling up dozens of concurrent backends. Overlap is
+#: allowed by design, but the floor keeps the pile-up rate sane.
 MIN_INTERVAL_SECONDS = 60.0
 
 #: Default per-tick prompt is built from :func:`default_prompt`; the
@@ -203,12 +218,17 @@ def record_tick(
     stop_reason: str | None = None,
     cost_usd: float | None = None,
     error: str | None = None,
+    in_flight: int | None = None,
 ) -> None:
-    """Read-modify-write the live progress fields after a drive.
+    """Read-modify-write the live progress fields after a drive *completes*.
 
-    Read-modify-write (not overwrite) so the pid + static config the
-    parent wrote survive each tick update. If the file vanished (a
-    concurrent ``stop``), there is nothing to update -- skip silently.
+    ``tick_count`` counts *completed* drives (a fire that has returned or
+    raised), distinct from ``fire_count`` (drives *launched*); with overlap
+    the two diverge while drives are in flight. Read-modify-write (not
+    overwrite) so the pid + static config the parent wrote survive each
+    update. If the file vanished (a concurrent ``stop``), there is nothing
+    to update -- skip silently. ``in_flight`` is only written when given so
+    a completion update can refresh the live in-flight gauge.
     """
     state = read_state(path)
     if state is None:
@@ -218,6 +238,28 @@ def record_tick(
     state["last_stop_reason"] = stop_reason
     state["last_cost_usd"] = cost_usd
     state["last_error"] = error
+    if in_flight is not None:
+        state["in_flight"] = in_flight
+    write_state(path, state)
+
+
+def record_fire(
+    path: Path, *, fire_count: int, at: str, in_flight: int
+) -> None:
+    """Read-modify-write the live progress fields when a drive is *launched*.
+
+    Separate from :func:`record_tick` because in the fixed-cadence/overlap
+    model a fire and its completion are distinct events: ``fire_count`` and
+    ``last_fire_at`` advance the instant a drive starts, while
+    ``tick_count``/``last_tick_at`` only move when one finishes. ``in_flight``
+    is the live count of drives currently running. Skips silently if the
+    state file vanished (a concurrent ``stop``)."""
+    state = read_state(path)
+    if state is None:
+        return
+    state["fire_count"] = fire_count
+    state["last_fire_at"] = at
+    state["in_flight"] = in_flight
     write_state(path, state)
 
 
@@ -302,52 +344,104 @@ async def run_loop(
     now: Callable[[], str] = utcnow_iso,
     run_drive: DriveFn = run_one_drive,
 ) -> int:
-    """Drive-then-sleep until stopped. Returns the number of drives run.
+    """Fire a fresh drive on a fixed cadence; never wait for it. Returns
+    the number of drives *launched*.
 
-    Stops when ``should_stop()`` is true, or after ``max_ticks`` drives
+    Each iteration launches a drive (fire-and-forget via
+    ``asyncio.create_task``), records the fire, then sleeps one interval --
+    it does **not** block on the drive finishing, so a slow drive overlaps
+    the next fire. There is no concurrency cap: the journal's busy-lease
+    makes a redundant overlapping fire a cheap no-op, and each drive is
+    still bounded by its own ``max_budget_usd``.
+
+    Stops when ``should_stop()`` is true, or after ``max_ticks`` fires
     (both injectable for tests; in production neither is set and the loop
-    runs until the process is killed by ``autodrive stop``).
+    runs until the process is killed by ``autodrive stop``). On exit it
+    drains any still-running drives so their results/errors are recorded.
 
     A drive that raises is recorded as ``last_error`` and the loop
-    continues -- one bad tick must not take the daemon down; the next
-    interval tries again.
+    continues -- one bad drive must not take the daemon down.
     """
-    n = 0
+    launched = 0
+    completed = 0
+    in_flight: list[asyncio.Task[Any]] = []
+
+    def _record_completion(outcome: Any, *, is_error: bool) -> None:
+        nonlocal completed
+        completed += 1
+        if is_error:
+            log.warning("autodrive drive failed: %s", outcome)
+            record_tick(
+                state_file,
+                tick_count=completed,
+                at=now(),
+                error=f"{type(outcome).__name__}: {outcome}",
+                in_flight=len(in_flight),
+            )
+        else:
+            stop_reason = getattr(outcome, "stop_reason", None)
+            record_tick(
+                state_file,
+                tick_count=completed,
+                at=now(),
+                stop_reason=stop_reason,
+                cost_usd=getattr(outcome, "cost_usd", None),
+                in_flight=len(in_flight),
+            )
+            log.info(
+                "autodrive drive %d done (stop_reason=%s)",
+                completed, stop_reason,
+            )
+
+    def _reap_done() -> None:
+        """Account for any drives that finished since the last pass. Done
+        before each fire so the in-flight gauge and completion records stay
+        fresh without waiting for the final drain."""
+        for task in [t for t in in_flight if t.done()]:
+            in_flight.remove(task)
+            exc = task.exception()
+            if exc is not None:
+                _record_completion(exc, is_error=True)
+            else:
+                _record_completion(task.result(), is_error=False)
+
     while True:
-        if max_ticks is not None and n >= max_ticks:
+        _reap_done()
+        if max_ticks is not None and launched >= max_ticks:
             break
         if should_stop is not None and should_stop():
             break
 
-        try:
-            result = await run_drive(cfg, backend=backend)
-            n += 1
-            stop_reason = getattr(result, "stop_reason", None)
-            record_tick(
-                state_file,
-                tick_count=n,
-                at=now(),
-                stop_reason=stop_reason,
-                cost_usd=getattr(result, "cost_usd", None),
-                error=None,
-            )
-            log.info("autodrive tick %d done (stop_reason=%s)", n, stop_reason)
-        except Exception as exc:  # keep the daemon alive across failures
-            n += 1
-            log.warning("autodrive tick %d failed: %s", n, exc, exc_info=True)
-            record_tick(
-                state_file,
-                tick_count=n,
-                at=now(),
-                error=f"{type(exc).__name__}: {exc}",
-            )
+        launched += 1
+        task = asyncio.create_task(run_drive(cfg, backend=backend))
+        in_flight.append(task)
+        record_fire(
+            state_file,
+            fire_count=launched,
+            at=now(),
+            in_flight=len(in_flight),
+        )
+        log.info("autodrive fire %d launched", launched)
 
-        if max_ticks is not None and n >= max_ticks:
+        if max_ticks is not None and launched >= max_ticks:
             break
         if should_stop is not None and should_stop():
             break
         await sleep(cfg.interval_seconds)
-    return n
+
+    # Drain: wait for every still-running drive so its result is recorded
+    # before the daemon exits. Errors are captured (not raised) so one bad
+    # drive cannot mask the others.
+    pending = list(in_flight)
+    in_flight.clear()
+    if pending:
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for res in results:
+            if isinstance(res, BaseException):
+                _record_completion(res, is_error=True)
+            else:
+                _record_completion(res, is_error=False)
+    return launched
 
 
 def clamp_interval(interval: float) -> float:

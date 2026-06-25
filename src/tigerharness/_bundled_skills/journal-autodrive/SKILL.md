@@ -5,11 +5,13 @@ description: Start, check, or stop a background process that drives the journal 
 
 # journal-autodrive
 
-A small daemon that runs **"drive the journal"** on a timer. It spawns an
-agentic backend (default `claude -p`) per tick with a self-contained,
-Operator-authorized drive prompt, waits the interval, and repeats --
-**drive, then sleep, no overlap**. It is **not** built on Claude Code's
-`/loop`; it is a plain detached OS process you can `stop` any time.
+A small daemon that **fires "drive the journal" on a fixed cadence**. Every
+`interval` seconds it spawns an agentic backend (default `claude -p`) with a
+self-contained, Operator-authorized drive prompt and immediately goes back to
+waiting -- it does **not** wait for the drive to finish, so **overlap is
+allowed** and each fire is a **fresh, context-clean session**. It is **not**
+built on Claude Code's `/loop`; it is a plain detached OS process you can
+`stop` any time.
 
 ## Read this before you start one (safety)
 
@@ -17,13 +19,19 @@ The journal is a **human-triggered** subscription backend -- "no
 programmatic driver by design". This is the deliberate, **Operator-
 authorized** exception, and it is **only safe while `claude -p` bills the
 Claude subscription** rather than API tokens. If that billing flips, an
-unattended autodrive spends real dollars on **every tick**. Guardrails:
+unattended autodrive spends real dollars on **every fire**. Guardrails:
 
 - **`--max-budget <usd>`** caps each drive's reported cost. Strongly
-  advised; it is your protection for the day billing changes.
+  advised; it is your protection for the day billing changes. **Note the
+  multiplier:** because fires overlap, up to N concurrent drives can each
+  spend the cap within one interval -- size `--interval` and `--max-budget`
+  together.
 - **`tigerharness autodrive stop`** is the off-switch. Use it.
-- The interval has a **60s floor**; a single drive already takes minutes.
-- Only **one** autodrive runs per journal (a second `start` is refused).
+- The interval has a **60s floor**; it keeps a typo from piling up dozens of
+  concurrent drives.
+- Only **one** autodrive daemon runs per journal (a second `start` is
+  refused). There is no cap on *concurrent drives* -- the journal's busy
+  lease makes a redundant overlapping fire a cheap no-op.
 
 If the user asks for this and you are unsure billing is still on the
 subscription, **say so** before starting it.
@@ -37,7 +45,8 @@ Start (the common request -- "drive every 10 minutes"):
     tigerharness autodrive start --interval 600 --driver <persona> \
         --max-budget 5
 
-- `--interval` seconds between drives (default 600 = 10 min; floor 60).
+- `--interval` seconds between *fires* (cadence, not spacing -- the loop
+  does not wait for a drive to finish; default 600 = 10 min; floor 60).
 - `--driver` persona the work is attributed to (defaults to the team's
   `default_persona`). Pass it so worklogs land in the right memory store.
 - `--max-budget` per-drive USD cap (advised; see safety note).
@@ -65,20 +74,25 @@ Stop:
 - A bare "keep the queue moving automatically" -> `start` at the default
   10-minute interval; mention the `stop` command and the budget cap.
 
-## What it does each tick
+## What it does each fire
 
-Spawns the backend in the team root with a prompt that **explicitly lifts**
-the "never drive from claude -p / cron / API" boundary for this sanctioned
-process, then drives via the **drive-journal** skill (sweep -> claim one
-actionable task with `--driver <persona> --allow-api-drive` -> work it ->
-cascade). A drive that hits its budget cap or context ceiling just leaves
-the task `in_progress`/idle; the next tick resumes it -- truncation is
-safe because the journal's session model is resumable. A tick that errors
-is logged to `<journal>/.autodrive.log` and the loop continues.
+Spawns the backend in the team root (in a **fresh session**, no `--resume`)
+with a prompt that **explicitly lifts** the "never drive from claude -p /
+cron / API" boundary for this sanctioned process, then drives via the
+**drive-journal** skill (sweep -> claim one actionable task with `--driver
+<persona> --allow-api-drive` -> work it -> cascade). The loop does not wait
+for the drive: it records the launch and returns to the cadence, so a slow
+drive overlaps the next fire. The journal's busy lease keeps redundant
+overlapping fires cheap (they sweep, find the active task busy, and exit). A
+drive that hits its budget cap or context ceiling just leaves the task
+`in_progress`/idle; a later fire resumes it -- truncation is safe because the
+journal's session model is resumable. A drive that errors is logged to
+`<journal>/.autodrive.log` and the loop keeps firing.
 
-State lives in `<journal>/.autodrive.json` (pid, interval, tick count,
-last tick time, last stop reason / error); `status` reads it, `stop`
-clears it.
+State lives in `<journal>/.autodrive.json` with two gauges -- **launched**
+(`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`,
+`last_tick_at`, last stop reason / error); `status` reads it, `stop` clears
+it.
 
 ## If you get confused
 
