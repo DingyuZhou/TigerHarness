@@ -63,18 +63,21 @@ src/tigerharness/
         downloader.py        File attachment download
         notify.py            Outbound DM/file CLI
         persistence.py       Thread -> session mapping
-    tiger_memory/            Persistent memory management
-        cli.py               CLI (init, bootstrap, rebuild, pin, resummarize, drill, tree, raw, search, state)
-        config.py            YAML config loader
-        lifecycle.py         Bootstrap / rebuild / resummarize engine
-        briefing.py          Layered briefing rebuild
-        drill.py             Read commands (drill, tree, raw, search)
-        store.py             On-disk store + atomic write + locking
-        must_memorize.py     Scored memo table with decay
-        rag.py               Embedding-based semantic search
-        embedders.py         Pluggable embedding backends
+    tiger_memory/            Persistent bounded memory (4 self-pruning stores)
+        cli.py               CLI (init, rebuild, pin, plan, ingest-*, sweep-*, check, state)
+        config.py            YAML config loader + validation
+        lifecycle.py         Extraction -> ingest core + fresh-start rebuild
+        bounded_store.py     Bounded-store engine + forget guard
+        entries.py           Entry schemas (skill / must_remember / diary)
+        briefing.py          Session-start briefing assembly
+        meditation.py        Compaction / forgetting engine
+        diary_format.py      Diary on-disk format (dated signed-weight bullets)
+        fuzzy_store.py       Free-text coarsened 4th store
+        sweep.py             Team-sweep gating + meditation orchestration
+        check.py             Store-format validation gate
+        store.py             On-disk layout + atomic write + locking
         frontmatter.py       YAML frontmatter parser/writer
-        sources/             Source adapters (claude_code, docs)
+        sources/             Source adapters (claude_code, journal_worklog, docs)
         summarizers/         Summarizer backends (anthropic, mock)
         templates/           Briefing README template
     journal/                 File-based subscription backend (kind=task + kind=workflow)
