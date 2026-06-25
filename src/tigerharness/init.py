@@ -150,6 +150,7 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
     "drive-journal": "d0b1f3704b12a3642211408fd2d2f9ed9dc1b555c856ca1acd2ceb02b5201666",
+    "journal-autodrive": "5271f7d54ad66c2c9c1d4449305d01dff682531def965b3260ddaa4221fac0c3",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
     "sweep-memory": "f00bcf6f6420935269dce6006f475c98312fe72e6826abc86823c9edf3a7af33",

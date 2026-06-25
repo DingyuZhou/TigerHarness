@@ -35,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     elif cmd in ("journal", "j"):
         from .journal.cli import main as journal_main
         return journal_main(rest)
+    elif cmd in ("autodrive", "ad"):
+        from .autodrive.cli import main as autodrive_main
+        return autodrive_main(rest)
     elif cmd in ("slack-bridge", "slack_bridge", "sb"):
         # Sub-dispatch:
         #   slack-bridge gen-service ...  -> render a systemd user unit
@@ -62,6 +65,7 @@ def _usage() -> None:
     print("  tiger-memory (tm)  Persistent memory management")
     print("  slack-bridge (sb)  Slack notify CLI")
     print("  journal (j)        File-based subscription backend (Phase 1)")
+    print("  autodrive (ad)     Periodically drive the journal (agent SDK)")
     print()
     print("Usage: tigerharness <sub-command> [args...]")
 

@@ -16,14 +16,16 @@ integration, and persistent memory management.
 |---|---|
 | `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: the `claude -p` subprocess backend and Anthropic's `claude-agent-sdk` backend, with a shared typed event/retry/error model. |
 | `tigerharness.journal` | **File-based subscription backend.** Routes agent work through the interactive Claude Code app so it counts against a monthly subscription instead of token-billed API. Single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`) compiled in-session by a drafter/two-critic loop over mechanical validators, then walked through gates that enforce step order and write persona-stamped worklog notes (the per-persona memory rail). Crash-safe by lease: tasks classify idle/busy/crashed and a fresh session resumes a crashed walk at the same step. Team-pinned scheduling: every task records the journal root it was scheduled into (provenance), scheduling verbs refuse to fall back silently to the per-user journal, and the sweep flags misplaced tasks. A `deferred/` inbox makes Slack-side scheduling cheap: `journal defer` parks the conversation verbatim; `journal materialize` (inside a drive) turns it into a real task. 19 CLI verbs under `journal`. See [docs/journal.md](docs/journal.md), [docs/journal-workflow-mode.md](docs/journal-workflow-mode.md), [docs/journal-instant-resume.md](docs/journal-instant-resume.md). |
+| `tigerharness.autodrive` | **Periodic journal driver** (the Operator-authorized exception to the human-only drive rule). A detached daemon fires "drive the journal" on a fixed cadence via the backend-agnostic `agent_sdk` (default `claude -p`) — fire every N seconds without waiting, so drives may overlap; each fire is a fresh, context-clean session; not built on `/loop`. Overlap is safe and self-limiting because the journal's busy lease makes a redundant fire a cheap no-op. Only safe while `claude -p` bills the subscription, so it ships with a `--max-budget` cap (mind the N×-concurrent multiplier), a 60s interval floor, single-instance daemon, and an `autodrive stop` off-switch. See [docs/autodrive.md](docs/autodrive.md). |
 | `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to a `claude -p` backend and posts replies back to the thread. |
 | `tigerharness.tiger_memory` | Persistent **bounded** agent memory: four self-pruning stores (skills/must_remember/diary/fuzzy) projected into a session-start briefing, with forgetting via meditation. Includes the team-wide sweep protocol (`sweep-plan`/`sweep-done`/`sweep-complete`/`sweep-release` under a lease, watermark, and per-wake cap) and subscription-rail staging (`plan`, `ingest-extraction`/`ingest-staged`) so memory extraction bills to the subscription. See [docs/tiger-memory.md](docs/tiger-memory.md), [docs/tiger-memory-sweep-protocol.md](docs/tiger-memory-sweep-protocol.md). |
 
 ## Bundled Claude Code skills
 
-`tigerharness init` installs five Claude Code skills into a new
+`tigerharness init` installs six Claude Code skills into a new
 team's `.claude/skills/`: `drive-journal` (the subscription drive
-loop), `journal-new` (task/workflow scaffolding), `slack-notify`
+loop), `journal-new` (task/workflow scaffolding), `journal-autodrive`
+(start/stop the periodic journal driver), `slack-notify`
 (proactive Slack messages), `workflow-append-steps` (runtime
 graph extension), and `tigerharness-basics` (how to operate the team
 itself: the CLI, the file layout, recruiting personas, creating
@@ -120,8 +122,8 @@ tigers/
 ├── .claude/
 │   ├── settings.json             # wires TIGERHARNESS_PERSONAS_CONFIG
 │   └── skills/                   # bundled skills (drive-journal, journal-new,
-│                                 #   slack-notify, workflow-append-steps,
-│                                 #   tigerharness-basics)
+│                                 #   journal-autodrive, slack-notify,
+│                                 #   workflow-append-steps, tigerharness-basics)
 ├── configs/
 │   ├── personas.yaml              # team registry (auto-updated)
 │   └── .env                       # Slack tokens (gitignored)
