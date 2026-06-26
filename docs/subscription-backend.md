@@ -201,13 +201,16 @@ lexicographic.
 
 The `active/` and `done/` split is what keeps the journal lean: the
 driver only ever reads `active/`, so archiving finished tasks bounds
-how much it has to scan and re-read.
+how much it has to scan and re-read. A third tray, `needs_input/`, holds
+tasks **parked** on an Operator question — out of the actionable queue
+until the Operator answers (see
+[`journal-operator-questions.md`](journal-operator-questions.md)).
 
 `journal/` is a **runtime artifact**, not git-tracked source (the same
 treatment `task_journal/` and `workflow_journal/` get). `OPERATING.md`
 is the one exception — it is the committed protocol. The team
-`.gitignore` should exclude `journal/active/` and `journal/done/` but
-keep `journal/OPERATING.md`.
+`.gitignore` should exclude `journal/active/`, `journal/done/` and
+`journal/needs_input/` but keep `journal/OPERATING.md`.
 
 ## status.json — the heart
 
@@ -233,7 +236,7 @@ keep `journal/OPERATING.md`.
 | `title` | string, required | scaffolder | Human label. Source: `--title` arg, else first H1 of the PRD, else `"task"`. |
 | `kind` | enum: `"task"` (Phase 1) or `"workflow"` (Phase 1.5+) | scaffolder | Phase 1 ships `task`; Phase 1.5 added `workflow` -- see [`journal-workflow-mode.md`](journal-workflow-mode.md). |
 | `persona` | string, required for `kind=task` | scaffolder | The persona this task is assigned to (must exist in the team's persona registry). |
-| `state` | enum: `pending` / `in_progress` / `blocked` / `done` | driver / sweep | See state-transition table below. |
+| `state` | enum: `pending` / `in_progress` / `blocked` / `needs_input` / `done` | driver / sweep | See state-transition table below. `needs_input` = parked on an Operator question; lives in the `needs_input/` tray, never actionable until answered (see [`journal-operator-questions.md`](journal-operator-questions.md)). |
 | `sessions` / `max_sessions` | int / int (default `3` task / `10` workflow) | driver / scaffolder | How many `drive-journal` invocations the task has consumed, and a soft ceiling. Each invocation counts as one session regardless of how much work happens inside it. When `sessions >= max_sessions` the budget is spent: the driver marks the task `done` if complete, else `blocked` (raise the cap or close it). `journal claim` self-heals an at-cap task by blocking it rather than running past the cap. |
 | `created_at` | ISO 8601 UTC | scaffolder | Set once at creation, never updated. Used by the sweep summary for the "age" display. |
 | `updated_at` | ISO 8601 UTC | driver | **Heartbeat.** Bumped on every `progress.md` append (OPERATING.md requires ≤10 min between appends during active work). Consulted **only** to tell a *busy* attached task from a *crashed* one: an `in_progress` task whose `session_ref` is set shows up **crashed** once `updated_at` is older than `stuck_timeout` (default 1800s = 30 min). A *detached* task (`session_ref=null`) is **idle** regardless of heartbeat age. See [`journal-instant-resume.md`](journal-instant-resume.md). |
@@ -273,6 +276,8 @@ bookkeeping or human-facing labels.
 | `in_progress` | `in_progress` | driver | mid-task progress (clean stop, max_sessions not hit) | `updated_at` bumped, `next_action` rewritten. **No** `sessions` change -- the counter was already incremented on pickup |
 | `in_progress` | `done` | driver | task complete per acceptance criteria | `state=done`, `next_action` cleared, sweep will archive on next invocation |
 | `in_progress` | `blocked` | driver | real blocker (need human / another agent / external input) OR `sessions >= max_sessions` | `state=blocked`, `next_action` names the blocker |
+| `in_progress` | `needs_input` | driver | an Operator decision the driver cannot make itself; **park instead of stalling the turn** | `journal release --state needs_input --question <file>` appends to `questions.md`, detaches, and moves `active/<id>/` → `needs_input/<id>/`. See [`journal-operator-questions.md`](journal-operator-questions.md) |
+| `needs_input` | `in_progress` | Operator | the Operator answered in `questions.md` and reopened the task | `journal answer <id>` flips to `in_progress` detached (= idle, resumes immediately), stamps `next_action`, and moves `needs_input/<id>/` → `active/<id>/` |
 | `blocked` | `in_progress` | human | manual edit of `status.json` to clear the blocker | `next_action` rewritten by the human to point the next session at the resolution |
 
 Phase 1 deliberately does **not** model a `failed` terminal state.

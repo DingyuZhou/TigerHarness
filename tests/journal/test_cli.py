@@ -1204,6 +1204,168 @@ class TestCmdClaimRelease:
         assert "TIGERHARNESS_JOURNAL_STUCK_TIMEOUT" in capsys.readouterr().err
 
 
+class TestNeedsInputParkAndAnswer:
+    """``release --state needs_input`` parks a task to the needs_input/
+    tray with a questions.md Q block; ``answer`` re-enters it to active/
+    as in_progress (idle). See docs/journal-operator-questions.md."""
+
+    def _question(self, tmp_path, text="**Question:** which cache?\n"):
+        q = tmp_path / "q.md"
+        q.write_text(text)
+        return str(q)
+
+    def test_park_moves_to_tray_and_writes_questions(self, tmp_path, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "needs_input",
+                   "--question", self._question(tmp_path)])
+        assert rc == 0
+        # Moved out of active/ into needs_input/.
+        assert not paths.task_dir("t1").exists()
+        assert paths.needs_input_dir("t1").is_dir()
+        s = Status.from_json(
+            (paths.needs_input_dir("t1") / "status.json").read_text()
+        )
+        assert s.state is State.NEEDS_INPUT
+        assert s.session_ref is None  # detached
+        q = (paths.needs_input_dir("t1") / "questions.md").read_text()
+        assert "# Operator questions -- t1" in q
+        assert "## Q1" in q
+        assert "**Status:** OPEN" in q
+        assert "which cache?" in q
+        assert "journal answer t1" in q
+
+    def test_park_asker_defaults_to_persona_else_driver(
+        self, tmp_path, journal_dir,
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok",
+              persona="Mitsui")
+        # No --driver -> asker falls back to the assigned persona.
+        main(["--journal-dir", str(journal_dir), "release", "t1",
+              "--state", "needs_input", "--question", self._question(tmp_path)])
+        q = (paths.needs_input_dir("t1") / "questions.md").read_text()
+        assert "asked by Mitsui" in q
+
+    def test_park_uses_driver_as_asker(self, tmp_path, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        main(["--journal-dir", str(journal_dir), "release", "t1",
+              "--state", "needs_input", "--driver", "Anzai",
+              "--question", self._question(tmp_path)])
+        q = (paths.needs_input_dir("t1") / "questions.md").read_text()
+        assert "asked by Anzai" in q
+
+    def test_park_requires_question(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "needs_input"])
+        assert rc == 1
+        assert "question is the ticket" in capsys.readouterr().err
+        # No mutation, no move: still active + in_progress.
+        assert paths.task_dir("t1").is_dir()
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+
+    def test_park_empty_question_refused(self, tmp_path, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "needs_input",
+                   "--question", self._question(tmp_path, "   \n")])
+        assert rc == 1
+        assert "empty" in capsys.readouterr().err
+        assert paths.task_dir("t1").is_dir()  # untouched
+
+    def test_park_unreadable_question_refused(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "needs_input",
+                   "--question", str(journal_dir / "nope.md")])
+        assert rc == 1
+        assert "cannot read" in capsys.readouterr().err
+
+    def test_answer_reactivates_to_idle_in_progress(self, tmp_path, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        main(["--journal-dir", str(journal_dir), "release", "t1",
+              "--state", "needs_input", "--question", self._question(tmp_path)])
+        rc = main(["--journal-dir", str(journal_dir), "answer", "t1"])
+        assert rc == 0
+        assert paths.task_dir("t1").is_dir()           # back in active/
+        assert not paths.needs_input_dir("t1").exists()  # gone from tray
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+        assert s.session_ref is None  # idle, instantly resumable
+        assert "read questions.md" in s.next_action
+
+    def test_answer_with_note_overrides_next_action(self, tmp_path, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        main(["--journal-dir", str(journal_dir), "release", "t1",
+              "--state", "needs_input", "--question", self._question(tmp_path)])
+        main(["--journal-dir", str(journal_dir), "answer", "t1",
+              "--note", "use redis LRU"])
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.next_action == "use redis LRU"
+
+    def test_answer_unknown_task_errors(self, journal_dir, capsys):
+        rc = main(["--journal-dir", str(journal_dir), "answer", "nope"])
+        assert rc == 1
+        assert "no parked task" in capsys.readouterr().err
+
+    def test_answer_wrong_state_refused(self, journal_dir, capsys):
+        # A dir in the tray whose state is NOT needs_input is refused.
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        paths.needs_input_dir("t1").mkdir(parents=True)
+        s = Status(
+            id="t1", title="T", kind="task", persona="P",
+            state=State.IN_PROGRESS, sessions=1, max_sessions=5,
+            created_at="2026-06-02T08:00:00Z",
+            updated_at="2026-06-02T08:00:00Z",
+        )
+        (paths.needs_input_dir("t1") / "status.json").write_text(s.to_json())
+        rc = main(["--journal-dir", str(journal_dir), "answer", "t1"])
+        assert rc == 1
+        assert "refusing to answer" in capsys.readouterr().err
+
+    def test_answer_active_collision_refused(self, tmp_path, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        main(["--journal-dir", str(journal_dir), "release", "t1",
+              "--state", "needs_input", "--question", self._question(tmp_path)])
+        # A same-id dir reappears in active/ -> reactivate must refuse.
+        (paths.active / "t1").mkdir()
+        rc = main(["--journal-dir", str(journal_dir), "answer", "t1"])
+        assert rc == 1
+        assert "already exists" in capsys.readouterr().err
+        # Parked status untouched (still needs_input in the tray).
+        s = Status.from_json(
+            (paths.needs_input_dir("t1") / "status.json").read_text()
+        )
+        assert s.state is State.NEEDS_INPUT
+
+    def test_questions_md_numbers_across_parks(self, tmp_path, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        main(["--journal-dir", str(journal_dir), "release", "t1",
+              "--state", "needs_input",
+              "--question", self._question(tmp_path, "first ask\n")])
+        main(["--journal-dir", str(journal_dir), "answer", "t1"])
+        # Park a second time -> Q2 appends, header not duplicated.
+        main(["--journal-dir", str(journal_dir), "release", "t1",
+              "--state", "needs_input",
+              "--question", self._question(tmp_path, "second ask\n")])
+        q = (paths.needs_input_dir("t1") / "questions.md").read_text()
+        assert "## Q1" in q and "## Q2" in q
+        assert q.count("# Operator questions -- t1") == 1
+        assert "first ask" in q and "second ask" in q
+
+
 # ---------------------------------------------------------------------------
 # Phase 1b: per-persona worklog side-effects on claim / release
 # ---------------------------------------------------------------------------

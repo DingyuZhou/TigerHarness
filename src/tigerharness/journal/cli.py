@@ -720,6 +720,130 @@ def _write_task_work_entry(
     return 0
 
 
+def _read_question_or_refuse(question_path: str | None) -> tuple[str | None, int]:
+    """Read the driver's question note from ``--question``, returning
+    ``(text, 0)`` on success or ``(None, 1)`` on refusal. The question is
+    the ticket to park: a missing, unreadable, or empty note refuses the
+    needs_input transition (no state change, no move) -- symmetric with
+    the ``--output`` done-note gate."""
+    if not question_path:
+        print(
+            "error: --question <file> is required to park a task as "
+            "needs_input (the question is the ticket). Refusing to park.",
+            file=sys.stderr,
+        )
+        return None, 1
+    try:
+        text = Path(question_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"error: cannot read --question {question_path!r}: {exc}. "
+            f"Refusing to park.",
+            file=sys.stderr,
+        )
+        return None, 1
+    if not text.strip():
+        log.warning(
+            "release park gate refused: empty question at %s "
+            "(the question is the ticket)", question_path,
+        )
+        print(
+            f"error: --question {question_path!r} is empty; the question "
+            f"cannot be blank. Refusing to park.",
+            file=sys.stderr,
+        )
+        return None, 1
+    return text, 0
+
+
+def _append_question_block(
+    paths: JournalPaths, status: Status, asker: str, question_text: str,
+) -> None:
+    """Append a formatted Q block to the task's ``questions.md`` (in
+    ``active/``, before the park move). Creates the file with a header if
+    absent; numbers the question by counting existing ``## Q`` headers.
+    The CLI owns the envelope (number, timestamp, asker, OPEN status,
+    Answer scaffold) so the format stays consistent; the driver's
+    ``--question`` note is the body."""
+    qpath = paths.task_dir(status.id) / "questions.md"
+    existing = ""
+    if qpath.is_file():
+        existing = qpath.read_text(encoding="utf-8")
+    n = sum(
+        1 for line in existing.splitlines() if line.startswith("## Q")
+    ) + 1
+    head = "" if existing else f"# Operator questions -- {status.id}\n\n"
+    ts = _utcnow_iso()
+    block = (
+        f"## Q{n} - {ts} - asked by {asker}\n"
+        f"**Status:** OPEN\n\n"
+        f"{question_text.strip()}\n\n"
+        f"**Answer:**\n"
+        f"> _(Operator: write your answer below, then run\n"
+        f"> `tigerharness journal answer {status.id}`)_\n\n"
+        f"---\n"
+    )
+    # head is "" when the file already exists, so this is append-safe.
+    _write_atomic(qpath, existing + head + block)
+
+
+def cmd_answer(args: argparse.Namespace) -> int:
+    """Re-enter a task parked in ``needs_input/`` after the Operator has
+    answered (the inverse of ``release --state needs_input``).
+
+    Reads ``status.json`` from the ``needs_input/`` tray, requires
+    ``state=needs_input``, flips it to ``in_progress`` detached (=> idle,
+    instantly resumable), stamps ``next_action`` (a ``--note`` override or
+    the default ``read questions.md`` pointer), and moves the task back to
+    ``active/``. Refuses if the task is not parked, is in the wrong state,
+    or an ``active/<id>`` already exists."""
+    paths = _paths_from_args(args)
+    task_id = args.task_id
+    try:
+        status = Status.from_json(
+            (paths.needs_input_dir(task_id) / "status.json")
+            .read_text(encoding="utf-8")
+        )
+    except (JournalModelError, OSError, JournalPathError) as exc:
+        print(
+            f"error: no parked task {task_id!r} in needs_input/: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if status.state is not State.NEEDS_INPUT:
+        print(
+            f"error: task {task_id!r} is in needs_input/ but "
+            f"state={status.state.value}; refusing to answer.",
+            file=sys.stderr,
+        )
+        return 1
+    if paths.task_dir(task_id).exists():
+        print(
+            f"error: active/{task_id} already exists; refusing to "
+            f"reactivate (would overwrite).",
+            file=sys.stderr,
+        )
+        return 1
+    status.state = State.IN_PROGRESS
+    status.session_ref = None  # detach -> idle, resumable immediately
+    status.next_action = (
+        args.note if args.note
+        else "Operator answered -- read questions.md and continue"
+    )
+    status.updated_at = _utcnow_iso()
+    # Write the updated status into the tray, THEN move the dir to active/.
+    _write_atomic(
+        paths.needs_input_dir(task_id) / "status.json", status.to_json(),
+    )
+    paths.reactivate(task_id)
+    log.info("answered %s: needs_input/ -> active/ (in_progress idle)", task_id)
+    print(
+        f"Answered {task_id}: moved needs_input/ -> active/ "
+        f"(state=in_progress, idle). The next drive resumes it."
+    )
+    return 0
+
+
 def cmd_claim(args: argparse.Namespace) -> int:
     """Atomically claim a task for this session (the pickup).
 
@@ -970,12 +1094,44 @@ def cmd_release(args: argparse.Namespace) -> int:
         if rc != 0:
             return rc
 
+    # Park gate (needs_input): the question is the ticket. Validate the
+    # --question note BEFORE any state mutation so a missing / empty note
+    # leaves the task in_progress and resumable (no half-park).
+    question_text: str | None = None
+    if new_state is State.NEEDS_INPUT:
+        question_text, rc = _read_question_or_refuse(
+            getattr(args, "question", None)
+        )
+        if rc != 0:
+            return rc
+
     status.state = new_state
     status.session_ref = None  # detach -> instantly resumable if still in_progress
     if args.next_action is not None:
         status.next_action = args.next_action
     status.updated_at = _utcnow_iso()
     _write_status_atomic(paths, status)
+
+    if new_state is State.NEEDS_INPUT:
+        # Append the Q block to questions.md (still in active/), THEN move
+        # active/<id>/ -> needs_input/<id>/ eagerly: the park's whole point
+        # is to be seen now (ls journal/needs_input/), unlike done's lazy
+        # sweep-archival.
+        asker = getattr(args, "driver", None) or status.persona or "driver"
+        _append_question_block(paths, status, asker, question_text or "")
+        paths.park(status.id)
+        log.info(
+            "parked %s -> needs_input/ (awaiting Operator answer)", status.id
+        )
+        print(
+            f"Parked {status.id} to needs_input/ (state=needs_input). "
+            f"ACTION: notify the Operator now -- a Slack notification is "
+            f"MANDATORY when Slack is configured; the needs_input/ tray is "
+            f"the fallback signal otherwise. The Operator answers in "
+            f"questions.md, then runs "
+            f"`tigerharness journal answer {status.id}`."
+        )
+        return 0
 
     log.info("released %s state=%s detached", status.id, new_state.value)
     print(f"Released {status.id} (state={new_state.value}, detached)")
@@ -1765,9 +1921,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rl.add_argument("task_id")
     rl.add_argument(
-        "--state", choices=["in_progress", "done", "blocked"],
+        "--state",
+        choices=["in_progress", "done", "blocked", "needs_input"],
         default="in_progress",
-        help="Exit state. Default in_progress (clean stop; resumable now).",
+        help=(
+            "Exit state. Default in_progress (clean stop; resumable now). "
+            "needs_input parks the task (requires --question): it moves to "
+            "the needs_input/ tray to await an Operator answer."
+        ),
+    )
+    rl.add_argument(
+        "--question", default=None,
+        help=(
+            "Path to the question note (markdown) for the Operator. "
+            "Required to park a task as needs_input: the question is the "
+            "ticket. Appended as a Q block to the task's questions.md."
+        ),
     )
     rl.add_argument("--next-action", default=None)
     rl.add_argument(
@@ -1792,6 +1961,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     rl.set_defaults(func=cmd_release)
+
+    an = sub.add_parser(
+        "answer",
+        help=(
+            "Re-enter a task parked in needs_input/ after the Operator "
+            "answered: move it back to active/ as in_progress (idle) so the "
+            "next drive resumes it. The inverse of "
+            "`release --state needs_input`."
+        ),
+    )
+    an.add_argument("task_id")
+    an.add_argument(
+        "--note", default=None,
+        help=(
+            "Optional next_action note for the resuming driver. Defaults to "
+            "a 'read questions.md and continue' pointer."
+        ),
+    )
+    an.set_defaults(func=cmd_answer)
 
     sd = sub.add_parser(
         "step-done",

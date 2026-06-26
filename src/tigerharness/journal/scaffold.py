@@ -87,6 +87,10 @@ _PRIOR_OPERATING_HASHES = {
     # ... and the compaction-redesign render covers any journal
     # refreshed from that branch before the merge.
     "b8d70e4c009cda4a6ebe1201a456bd051c6e425ed058840e4dd97ecbc78bd3e5",
+    # pre-needs_input render (origin/main before the parking-on-an-
+    # Operator-question feature added the needs_input state + tray and
+    # the "Parking on an Operator question" protocol section).
+    "f34f4366a168c56730aa4dac76f3b68b11e3f15b83e50679bc5673f7a7f9d775",
 }
 
 

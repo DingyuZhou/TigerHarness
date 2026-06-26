@@ -358,3 +358,92 @@ class TestSweep:
         # digit (1 of 143052) < letter (a of add-...).
         assert [s.id for s in result.pending] == sorted([legacy, new])
         assert [s.id for s in result.pending] == [new, legacy]
+
+
+# ---------------------------------------------------------------------------
+# needs_input -- the parked-question tray
+# ---------------------------------------------------------------------------
+
+def _write_needs_input(
+    paths: JournalPaths,
+    task_id: str,
+    *,
+    updated_at: str = "2026-06-26T08:00:00Z",
+) -> None:
+    """Seed one status.json on disk in needs_input/<task_id>/ (the
+    parked tray). A parked task is state=needs_input, detached."""
+    paths.ensure()
+    paths.needs_input_dir(task_id).mkdir(exist_ok=True)
+    s = Status(
+        id=task_id,
+        title=f"Task {task_id}",
+        kind="task",
+        persona="P",
+        state=State.NEEDS_INPUT,
+        sessions=1,
+        max_sessions=5,
+        created_at="2026-06-26T08:00:00Z",
+        updated_at=updated_at,
+        next_action="",
+        session_ref=None,
+    )
+    (paths.needs_input_dir(task_id) / "status.json").write_text(s.to_json())
+
+
+class TestSweepNeedsInput:
+    @pytest.fixture
+    def paths(self, tmp_path):
+        return JournalPaths(root=tmp_path).ensure()
+
+    def test_tray_task_surfaced_but_not_actionable(self, paths):
+        # A parked task in the needs_input/ tray is surfaced for
+        # visibility but is NEVER actionable (the Operator reopens it).
+        _write_needs_input(paths, "parked-1")
+        result = sweep(paths, stuck_timeout_sec=300, now="2026-06-26T09:00:00Z")
+        assert [s.id for s in result.needs_input] == ["parked-1"]
+        assert result.actionable() == []
+        assert result.has_actionable() is False
+
+    def test_tray_malformed_surfaced(self, paths):
+        # A malformed status.json in the tray is reported like any other
+        # malformed entry -- it does not abort the sweep.
+        paths.needs_input_dir("bad").mkdir()
+        (paths.needs_input_dir("bad") / "status.json").write_text("{not json")
+        result = sweep(paths, stuck_timeout_sec=300, now="2026-06-26T09:00:00Z")
+        assert [m.task_id for m in result.malformed] == ["bad"]
+        assert result.needs_input == []
+
+    def test_active_needs_input_defensive_branch(self, paths):
+        # A needs_input status found in active/ (e.g. a hand-moved dir)
+        # is surfaced as needs_input rather than falling through to the
+        # in_progress classifier.
+        (paths.active / "stray").mkdir()
+        s = Status(
+            id="stray", title="Stray", kind="task", persona="P",
+            state=State.NEEDS_INPUT, sessions=1, max_sessions=5,
+            created_at="2026-06-26T08:00:00Z",
+            updated_at="2026-06-26T08:00:00Z",
+            next_action="", session_ref=None,
+        )
+        paths.status_json("stray").write_text(s.to_json())
+        result = sweep(paths, stuck_timeout_sec=300, now="2026-06-26T09:00:00Z")
+        assert [s.id for s in result.needs_input] == ["stray"]
+        assert result.in_progress_idle == []
+        assert result.in_progress_busy == []
+        assert result.in_progress_crashed == []
+
+    def test_to_summary_includes_needs_input_count(self, paths):
+        _write_needs_input(paths, "parked-1")
+        _write_needs_input(paths, "parked-2")
+        result = sweep(paths, stuck_timeout_sec=300, now="2026-06-26T09:00:00Z")
+        assert "2 needs-input" in result.to_summary()
+
+    def test_tray_coexists_with_active_queue(self, paths):
+        # A parked task and an actionable pending task coexist: pending
+        # is actionable, the parked one is only surfaced.
+        _write_status(paths, "p1", state=State.PENDING)
+        _write_needs_input(paths, "parked-1")
+        result = sweep(paths, stuck_timeout_sec=300, now="2026-06-26T09:00:00Z")
+        assert [s.id for s in result.pending] == ["p1"]
+        assert [s.id for s in result.needs_input] == ["parked-1"]
+        assert [s.id for s in result.actionable()] == ["p1"]

@@ -91,6 +91,11 @@ class SweepResult:
     - ``in_progress_crashed``: ``in_progress`` + a session attached + a
       *stale* heartbeat -- the owner went silent; reclaimable (rescue).
     - ``blocked``: needs human attention.
+    - ``needs_input``: parked tasks awaiting an Operator answer. These
+      live in the ``needs_input/`` tray (not ``active/``), so they are
+      surfaced for visibility but are never actionable -- the Operator
+      reopens them with ``journal answer``. See
+      ``docs/journal-operator-questions.md``.
     - ``malformed``: task directories whose ``status.json`` failed to
       parse (the sweep does not bail; the driver decides what to do).
     """
@@ -101,6 +106,7 @@ class SweepResult:
     in_progress_busy: list[Status] = field(default_factory=list)
     in_progress_crashed: list[Status] = field(default_factory=list)
     blocked: list[Status] = field(default_factory=list)
+    needs_input: list[Status] = field(default_factory=list)
     malformed: list[MalformedEntry] = field(default_factory=list)
     # T8 scheduler counts (populated before classification).
     schedule_materialized: list[str] = field(default_factory=list)
@@ -150,6 +156,7 @@ class SweepResult:
             f"{len(self.in_progress_busy)} busy",
             f"{len(self.in_progress_crashed)} crashed",
             f"{len(self.blocked)} blocked",
+            f"{len(self.needs_input)} needs-input",
         ]
         if self.archived:
             parts.append(f"archived {len(self.archived)} done")
@@ -236,6 +243,14 @@ def sweep(
             result.blocked.append(status)
             continue
 
+        if status.state is State.NEEDS_INPUT:
+            # Defensive: a parked task normally lives in the needs_input/
+            # tray (scanned below), not active/. If one is found here
+            # (e.g. a hand-moved dir), surface it as needs_input rather
+            # than letting it fall through to the in_progress classifier.
+            result.needs_input.append(status)
+            continue
+
         if status.state is State.PENDING:
             result.pending.append(status)
             continue
@@ -273,5 +288,20 @@ def sweep(
             raise JournalModelError(
                 f"unexpected in_progress_class {klass!r} for task {task_id!r}"
             )
+
+    # Scan the needs_input/ tray (parked tasks awaiting an Operator
+    # answer). They are out of the active queue -- surfaced for
+    # visibility, never actionable. A malformed status here is reported
+    # like any other malformed entry rather than aborting the sweep.
+    for task_id in paths.list_needs_input_ids():
+        status_path = paths.needs_input_dir(task_id) / "status.json"
+        try:
+            status = Status.from_json(status_path.read_text())
+        except (JournalModelError, OSError) as exc:
+            result.malformed.append(
+                MalformedEntry(task_id=task_id, error=str(exc))
+            )
+            continue
+        result.needs_input.append(status)
 
     return result

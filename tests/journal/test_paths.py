@@ -205,3 +205,99 @@ class TestArchive:
         with pytest.raises(JournalPathError) as exc:
             p.archive(tid)
         assert "already exists" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# needs_input tray: property, ensure, listing, park / reactivate
+# ---------------------------------------------------------------------------
+
+class TestNeedsInputTray:
+    def test_needs_input_property_under_root(self, tmp_path):
+        p = JournalPaths(root=tmp_path / "j")
+        assert p.needs_input == tmp_path / "j" / "needs_input"
+
+    def test_ensure_creates_needs_input(self, tmp_path):
+        p = JournalPaths(root=tmp_path / "j").ensure()
+        assert (tmp_path / "j" / "needs_input").is_dir()
+
+    def test_needs_input_dir_unsafe_id_raises(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        with pytest.raises(JournalPathError):
+            p.needs_input_dir("..")
+
+    def test_needs_input_dir_happy(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        tid = "20260602-x-11111111"
+        assert p.needs_input_dir(tid) == p.needs_input / tid
+
+    def test_list_needs_input_ids_sorted_safe_only(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        valid = ["20260602-a-11111111", "20260602-b-22222222"]
+        for tid in valid:
+            (p.needs_input / tid).mkdir()
+            (p.needs_input / tid / "status.json").write_text("{}")
+        (p.needs_input / "20260602-c-33333333").mkdir()  # no status.json
+        (p.needs_input / ".hidden").mkdir()              # unsafe id
+        (p.needs_input / "stray.txt").write_text("hi")   # not a dir
+        assert p.list_needs_input_ids() == sorted(valid)
+
+    def test_list_needs_input_ids_when_missing(self, tmp_path):
+        p = JournalPaths(root=tmp_path)  # no needs_input/ yet
+        assert p.list_needs_input_ids() == []
+
+    def test_park_happy_path(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        tid = "20260602-x-11111111"
+        (p.active / tid).mkdir()
+        (p.active / tid / "status.json").write_text("{}")
+        new_path = p.park(tid)
+        assert new_path == p.needs_input / tid
+        assert (p.needs_input / tid / "status.json").is_file()
+        assert not (p.active / tid).exists()
+
+    def test_park_rejects_unsafe_id(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        with pytest.raises(JournalPathError):
+            p.park("..")
+
+    def test_park_rejects_missing_source(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        with pytest.raises(JournalPathError) as exc:
+            p.park("20260602-nope-12345678")
+        assert "not in active" in str(exc.value)
+
+    def test_park_refuses_overwrite_existing_tray(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        tid = "20260602-x-11111111"
+        (p.active / tid).mkdir()
+        (p.active / tid / "status.json").write_text("{}")
+        (p.needs_input / tid).mkdir(parents=True)
+        with pytest.raises(JournalPathError) as exc:
+            p.park(tid)
+        assert "already exists" in str(exc.value)
+
+    def test_reactivate_happy_path(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        tid = "20260602-x-11111111"
+        (p.needs_input / tid).mkdir()
+        (p.needs_input / tid / "status.json").write_text("{}")
+        new_path = p.reactivate(tid)
+        assert new_path == p.active / tid
+        assert (p.active / tid / "status.json").is_file()
+        assert not (p.needs_input / tid).exists()
+
+    def test_reactivate_rejects_missing_source(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        with pytest.raises(JournalPathError) as exc:
+            p.reactivate("20260602-nope-12345678")
+        assert "not in needs_input" in str(exc.value)
+
+    def test_reactivate_refuses_overwrite_existing_active(self, tmp_path):
+        p = JournalPaths(root=tmp_path).ensure()
+        tid = "20260602-x-11111111"
+        (p.needs_input / tid).mkdir()
+        (p.needs_input / tid / "status.json").write_text("{}")
+        (p.active / tid).mkdir(parents=True)
+        with pytest.raises(JournalPathError) as exc:
+            p.reactivate(tid)
+        assert "already exists" in str(exc.value)

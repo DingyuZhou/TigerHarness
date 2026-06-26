@@ -89,6 +89,10 @@ Driver (`drive-journal` skill, interactive session)
       compile_critique.md     # post-compile: full critic transcript
   done/
     <task-id>/                # finished tasks moved here by the next drive-journal sweep
+  needs_input/
+    <task-id>/                # tasks PARKED on an Operator question (questions.md);
+                              # out of the actionable queue until `journal answer <id>`
+                              # moves them back to active/. See journal-operator-questions.md
 ```
 
 Task-id format: `<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>`.
