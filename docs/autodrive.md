@@ -58,6 +58,17 @@ resumable. A drive that raises is logged as `last_error` and the loop keeps
 firing; one bad drive never takes the daemon down. On `stop`, any still-running
 drives are drained so their results are recorded before the daemon exits.
 
+### Notifications (heartbeat on fire, summary on done)
+
+By default the daemon posts a **heartbeat to Slack on every fire**, then
+**threads the real drive status + summary** under that heartbeat once the fire
+finishes — the steady rhythm of heartbeats is the health signal (its absence
+tells you the daemon died), and the threaded reply is the substance. The push
+is **model-free** (a plain Slack POST, never a spawned agent), it **never
+breaks a drive** (every failure is swallowed + logged), and it is **mutable**
+(`--notify none`). When muted, `autodrive status` is the always-available
+pull-based health check. Full design: [autodrive-notifications.md](autodrive-notifications.md).
+
 ### Commands
 
 Run from the **team root**, so the team's own journal is the target.
@@ -80,10 +91,13 @@ tigerharness autodrive stop
 | `--permission-mode` | `bypassPermissions` | Unattended permission mode (the daemon must never stall on a prompt). |
 | `--prompt` | built-in | Override the built-in "drive the journal" instruction. |
 | `--journal-dir` | env / cwd-as-team / XDG | Journal root to manage. |
+| `--notify` | `slack` | Daemon-level notifications: `slack` posts a heartbeat per fire + a threaded status/summary on completion; `none` mutes. See [autodrive-notifications.md](autodrive-notifications.md). |
+| `--notify-channel` | operator DM | Slack channel id for daemon events. Resolution: flag > env `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` > DM. |
 
-Guardrails baked in: the 60s interval floor, single-instance (a second `start`
-is refused while one runs), the cooperative `stop` off-switch, and the
-optional `--max-budget` cap.
+Guardrails baked in: the 60s interval floor, **one autodrive per team** (the
+single-instance lock is team-canonical — a second `start` anywhere in the same
+team is refused, even with a different `--journal-dir`), the cooperative `stop`
+off-switch, and the optional `--max-budget` cap.
 
 ### How it runs
 
@@ -107,8 +121,8 @@ and clears the state file.
 
 | Path | What |
 |---|---|
-| `<journal>/.autodrive.json` | State: pid, interval, backend, driver, max_budget, started_at, plus two gauges — **launched** (`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`, `last_tick_at`, `last_stop_reason` / `last_error`). With overlap the two diverge while drives are in flight. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. |
-| `<journal>/.autodrive.log` | Appended stdout/stderr of the detached `_loop` process. |
+| `<team>/journal/.autodrive.json` | State **and the team-canonical lock**: pid, interval, backend, driver, max_budget, notify config, started_at, plus two gauges — **launched** (`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`, `last_tick_at`, `last_stop_reason` / `last_error`). With overlap the two diverge while drives are in flight. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. Anchored to the team's canonical journal regardless of `--journal-dir`, so the one-per-team guard holds (a personal, non-team journal keeps the lock under its own root). |
+| `<team>/journal/.autodrive.log` | Appended stdout/stderr of the detached `_loop` process. |
 
 ### Skill
 
@@ -119,6 +133,8 @@ driving itself still routes through the `drive-journal` skill inside each tick.
 
 ## Related
 
+- [autodrive-notifications.md](autodrive-notifications.md) — the heartbeat +
+  threaded-summary notification model, config, and the mute/pull fallback.
 - [subscription-backend.md](subscription-backend.md) — the "no programmatic
   driver" rule autodrive deliberately, and narrowly, breaks.
 - [agent_sdk.md](agent_sdk.md) — the backend-agnostic runtime each tick spawns.

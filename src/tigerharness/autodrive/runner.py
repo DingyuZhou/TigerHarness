@@ -50,6 +50,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .notifier import Notifier, NullNotifier
+
 log = logging.getLogger(__name__)
 
 
@@ -66,6 +68,15 @@ MIN_INTERVAL_SECONDS = 60.0
 #: runs unattended and must never stall on a permission prompt.
 DEFAULT_PERMISSION_MODE = "bypassPermissions"
 DEFAULT_BACKEND = "claude_p"
+
+#: Notification backend. ``"slack"`` posts a heartbeat per fire + a threaded
+#: status/summary on completion; ``"none"`` mutes (the loop runs unchanged,
+#: only the posting is suppressed). See ``docs/autodrive-notifications.md``.
+DEFAULT_NOTIFY = "slack"
+
+#: Slack messages have generous limits, but a drive's closing summary can be
+#: long; cap it so a heartbeat thread stays skimmable.
+SUMMARY_MAX_CHARS = 600
 
 
 # ----- config -----
@@ -87,6 +98,12 @@ class AutodriveConfig:
     permission_mode: str
     prompt: str
     cwd: str
+    # Notification config (defaulted so older state files / call sites that
+    # predate notifications deserialize cleanly). ``notify`` is "slack" or
+    # "none"; ``notify_channel`` is a Slack channel id, or None for the
+    # operator DM.
+    notify: str = DEFAULT_NOTIFY
+    notify_channel: str | None = None
 
 
 def default_prompt(driver: str | None) -> str:
@@ -130,6 +147,8 @@ def config_to_dict(cfg: AutodriveConfig) -> dict[str, Any]:
         "permission_mode": cfg.permission_mode,
         "prompt": cfg.prompt,
         "cwd": cfg.cwd,
+        "notify": cfg.notify,
+        "notify_channel": cfg.notify_channel,
     }
 
 
@@ -144,6 +163,8 @@ def config_from_state(state: dict[str, Any]) -> AutodriveConfig:
         permission_mode=state.get("permission_mode", DEFAULT_PERMISSION_MODE),
         prompt=state["prompt"],
         cwd=state.get("cwd", "."),
+        notify=state.get("notify", DEFAULT_NOTIFY),
+        notify_channel=state.get("notify_channel"),
     )
 
 
@@ -328,9 +349,56 @@ async def run_one_drive(
     return await backend.run(agent_cfg, cfg.prompt)
 
 
+# ----- notification text builders -----
+
+def heartbeat_text(fire_no: int, at: str, in_flight: int) -> str:
+    """The fire heartbeat (parent message): a fixed-shape pulse whose rhythm
+    is the health signal. Detail rides in the threaded completion reply."""
+    return (
+        f"autodrive heartbeat - fire #{fire_no} launched {at} "
+        f"(in-flight {in_flight})"
+    )
+
+
+def _truncate_summary(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " [...]"
+
+
+def completion_text(fire_no: int, outcome: Any) -> str:
+    """The threaded reply for a drive that *returned*: stop reason, cost, and
+    the drive's own closing summary (``final_output``) if it produced one."""
+    stop = getattr(outcome, "stop_reason", None)
+    cost = getattr(outcome, "cost_usd", None)
+    summary = getattr(outcome, "final_output", None)
+    head = f"fire #{fire_no} done: stop_reason={stop}"
+    if cost is not None:
+        head += f"  cost=${cost:.2f}"
+    if summary:
+        return f"{head}\n{_truncate_summary(str(summary))}"
+    return head
+
+
+def error_text(fire_no: int, exc: Any) -> str:
+    """The threaded reply for a drive that *raised*."""
+    return f"fire #{fire_no} FAILED: {type(exc).__name__}: {exc}"
+
+
 DriveFn = Callable[..., Awaitable[Any]]
 SleepFn = Callable[[float], Awaitable[Any]]
 StopFn = Callable[[], bool]
+
+
+@dataclass
+class _Fire:
+    """One launched drive plus its notification thread handle. The loop holds
+    these so each completion threads its status under the right heartbeat."""
+
+    task: "asyncio.Task[Any]"
+    thread: str | None
+    fire_no: int
 
 
 async def run_loop(
@@ -343,30 +411,58 @@ async def run_loop(
     should_stop: StopFn | None = None,
     now: Callable[[], str] = utcnow_iso,
     run_drive: DriveFn = run_one_drive,
+    notifier: Notifier | None = None,
 ) -> int:
     """Fire a fresh drive on a fixed cadence; never wait for it. Returns
     the number of drives *launched*.
 
-    Each iteration launches a drive (fire-and-forget via
-    ``asyncio.create_task``), records the fire, then sleeps one interval --
-    it does **not** block on the drive finishing, so a slow drive overlaps
-    the next fire. There is no concurrency cap: the journal's busy-lease
-    makes a redundant overlapping fire a cheap no-op, and each drive is
-    still bounded by its own ``max_budget_usd``.
+    Each iteration posts a heartbeat (the parent message), launches a drive
+    (fire-and-forget via ``asyncio.create_task``), records the fire, then
+    sleeps one interval -- it does **not** block on the drive finishing, so a
+    slow drive overlaps the next fire. When a drive completes, its status +
+    summary is threaded under that fire's heartbeat. There is no concurrency
+    cap: the journal's busy-lease makes a redundant overlapping fire a cheap
+    no-op, and each drive is still bounded by its own ``max_budget_usd``.
 
     Stops when ``should_stop()`` is true, or after ``max_ticks`` fires
     (both injectable for tests; in production neither is set and the loop
     runs until the process is killed by ``autodrive stop``). On exit it
-    drains any still-running drives so their results/errors are recorded.
+    drains any still-running drives so their results/errors are recorded and
+    notified, then flushes pending notification posts.
 
     A drive that raises is recorded as ``last_error`` and the loop
-    continues -- one bad drive must not take the daemon down.
+    continues -- one bad drive must not take the daemon down. Notifications
+    run via ``asyncio.to_thread`` and never raise (the notifier swallows its
+    own errors), so a slow or failing Slack post never stalls or crashes the
+    loop.
     """
+    if notifier is None:
+        notifier = NullNotifier()
+
     launched = 0
     completed = 0
-    in_flight: list[asyncio.Task[Any]] = []
+    in_flight: list[_Fire] = []
+    notif_tasks: list[asyncio.Task[Any]] = []
 
-    def _record_completion(outcome: Any, *, is_error: bool) -> None:
+    def _schedule_update(thread: str | None, text: str) -> None:
+        notif_tasks.append(
+            asyncio.create_task(asyncio.to_thread(notifier.update, thread, text))
+        )
+
+    def _prune_notifs() -> None:
+        """Drop completed notification tasks so the list cannot grow
+        unbounded over a long-running daemon (otherwise one update task per
+        completed drive accumulates forever). Each task wraps a notifier call
+        that swallows its own errors; we still retrieve any result so asyncio
+        does not warn about an un-retrieved task."""
+        for t in [t for t in notif_tasks if t.done()]:
+            notif_tasks.remove(t)
+            try:
+                t.exception()  # retrieve; the wrapped call never raises
+            except asyncio.CancelledError:  # pragma: no cover - never cancelled
+                pass
+
+    def _record_completion(fire: _Fire, outcome: Any, *, is_error: bool) -> None:
         nonlocal completed
         completed += 1
         if is_error:
@@ -378,6 +474,7 @@ async def run_loop(
                 error=f"{type(outcome).__name__}: {outcome}",
                 in_flight=len(in_flight),
             )
+            _schedule_update(fire.thread, error_text(fire.fire_no, outcome))
         else:
             stop_reason = getattr(outcome, "stop_reason", None)
             record_tick(
@@ -392,29 +489,40 @@ async def run_loop(
                 "autodrive drive %d done (stop_reason=%s)",
                 completed, stop_reason,
             )
+            _schedule_update(
+                fire.thread, completion_text(fire.fire_no, outcome)
+            )
 
     def _reap_done() -> None:
         """Account for any drives that finished since the last pass. Done
         before each fire so the in-flight gauge and completion records stay
         fresh without waiting for the final drain."""
-        for task in [t for t in in_flight if t.done()]:
-            in_flight.remove(task)
-            exc = task.exception()
+        for fire in [f for f in in_flight if f.task.done()]:
+            in_flight.remove(fire)
+            exc = fire.task.exception()
             if exc is not None:
-                _record_completion(exc, is_error=True)
+                _record_completion(fire, exc, is_error=True)
             else:
-                _record_completion(task.result(), is_error=False)
+                _record_completion(fire, fire.task.result(), is_error=False)
 
     while True:
         _reap_done()
+        _prune_notifs()
         if max_ticks is not None and launched >= max_ticks:
             break
         if should_stop is not None and should_stop():
             break
 
         launched += 1
+        # Post the heartbeat first so its `ts` is the thread handle the
+        # completion update replies under. to_thread keeps a slow Slack POST
+        # off the event loop; the notifier never raises.
+        thread = await asyncio.to_thread(
+            notifier.heartbeat,
+            heartbeat_text(launched, now(), len(in_flight) + 1),
+        )
         task = asyncio.create_task(run_drive(cfg, backend=backend))
-        in_flight.append(task)
+        in_flight.append(_Fire(task=task, thread=thread, fire_no=launched))
         record_fire(
             state_file,
             fire_count=launched,
@@ -435,12 +543,19 @@ async def run_loop(
     pending = list(in_flight)
     in_flight.clear()
     if pending:
-        results = await asyncio.gather(*pending, return_exceptions=True)
-        for res in results:
+        results = await asyncio.gather(
+            *(f.task for f in pending), return_exceptions=True
+        )
+        for fire, res in zip(pending, results):
             if isinstance(res, BaseException):
-                _record_completion(res, is_error=True)
+                _record_completion(fire, res, is_error=True)
             else:
-                _record_completion(res, is_error=False)
+                _record_completion(fire, res, is_error=False)
+
+    # Flush any pending notification posts before returning, so a stop never
+    # drops an in-flight drive's final status. Errors are swallowed.
+    if notif_tasks:
+        await asyncio.gather(*notif_tasks, return_exceptions=True)
     return launched
 
 

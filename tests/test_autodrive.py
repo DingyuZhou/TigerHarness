@@ -14,6 +14,11 @@ import os
 import pytest
 
 from tigerharness.autodrive import cli, runner
+from tigerharness.autodrive.notifier import (
+    NullNotifier,
+    SlackChannelNotifier,
+    build_notifier,
+)
 from tigerharness.autodrive.runner import AutodriveConfig
 
 
@@ -37,9 +42,29 @@ def _cfg(**over) -> AutodriveConfig:
 
 
 class _FakeResult:
-    def __init__(self, stop_reason="end_turn", cost_usd=0.0):
+    def __init__(self, stop_reason="end_turn", cost_usd=0.0, final_output=None):
         self.stop_reason = stop_reason
         self.cost_usd = cost_usd
+        self.final_output = final_output
+
+
+class _RecordingNotifier:
+    """Captures heartbeat/update calls so tests can assert the notification
+    flow without any real Slack I/O. Returns a deterministic thread handle
+    per heartbeat so completions can be matched to their fire."""
+
+    def __init__(self):
+        self.heartbeats = []
+        self.updates = []
+        self._n = 0
+
+    def heartbeat(self, text):
+        self._n += 1
+        self.heartbeats.append(text)
+        return f"ts-{self._n}"
+
+    def update(self, thread, text):
+        self.updates.append((thread, text))
 
 
 # --------------------------------------------------------------------------
@@ -727,9 +752,10 @@ def test_cmd_loop_runs_and_clears(tmp_path):
     )
     seen = {}
 
-    async def fake_runner(cfg, state_file, *, should_stop):
+    async def fake_runner(cfg, state_file, *, should_stop, notifier):
         seen["cfg"] = cfg
         seen["stop"] = should_stop()  # exercises the closure
+        seen["notifier"] = notifier
         return 0
 
     args = _args(["_loop", "--state-file", str(sfile)])
@@ -737,6 +763,8 @@ def test_cmd_loop_runs_and_clears(tmp_path):
     assert rc == 0
     assert seen["cfg"].prompt == "go"
     assert seen["stop"] is False
+    # A built notifier is passed through (no Slack creds in tests -> Null).
+    assert seen["notifier"] is not None
     assert not sfile.exists()  # cleared on clean exit
 
 
@@ -748,7 +776,7 @@ def test_cmd_loop_should_stop_when_flagged(tmp_path):
     )
     captured = {}
 
-    async def fake_runner(cfg, state_file, *, should_stop):
+    async def fake_runner(cfg, state_file, *, should_stop, notifier):
         captured["stop"] = should_stop()
         return 0
 
@@ -785,3 +813,374 @@ def test_main_module_execution(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         runpy.run_module("tigerharness.autodrive", run_name="__main__")
     assert exc.value.code == 0
+
+
+# --------------------------------------------------------------------------
+# notification config (de)serialization
+# --------------------------------------------------------------------------
+
+def test_config_notify_roundtrip():
+    cfg = _cfg(notify="none", notify_channel="C0OPS")
+    back = runner.config_from_state(runner.config_to_dict(cfg))
+    assert back.notify == "none"
+    assert back.notify_channel == "C0OPS"
+
+
+def test_config_from_state_notify_defaults():
+    # State written before notifications existed has neither key; the config
+    # must deserialize cleanly with the slack default + DM (None channel).
+    cfg = runner.config_from_state({"interval_seconds": 120, "prompt": "go"})
+    assert cfg.notify == runner.DEFAULT_NOTIFY
+    assert cfg.notify_channel is None
+
+
+# --------------------------------------------------------------------------
+# notification text builders
+# --------------------------------------------------------------------------
+
+def test_heartbeat_text_shape():
+    s = runner.heartbeat_text(42, "2026-06-26T14:00:00Z", 3)
+    assert "fire #42" in s
+    assert "2026-06-26T14:00:00Z" in s
+    assert "in-flight 3" in s
+
+
+def test_truncate_summary_under_limit():
+    assert runner._truncate_summary("  short  ") == "short"
+
+
+def test_truncate_summary_over_limit():
+    out = runner._truncate_summary("x" * 700, limit=600)
+    assert out.endswith(" [...]")
+    assert len(out) <= 600 + len(" [...]")
+
+
+def test_completion_text_with_summary_and_cost():
+    out = runner.completion_text(
+        7, _FakeResult(stop_reason="end_turn", cost_usd=0.12,
+                       final_output="Did the thing."),
+    )
+    assert "fire #7 done: stop_reason=end_turn" in out
+    assert "cost=$0.12" in out
+    assert "Did the thing." in out
+
+
+def test_completion_text_no_cost_no_summary():
+    # cost None -> no cost segment; no final_output -> head only (one line).
+    out = runner.completion_text(
+        7, _FakeResult(stop_reason="error_max_turns", cost_usd=None,
+                       final_output=None),
+    )
+    assert out == "fire #7 done: stop_reason=error_max_turns"
+
+
+def test_error_text_shape():
+    out = runner.error_text(3, RuntimeError("not authenticated"))
+    assert "fire #3 FAILED: RuntimeError: not authenticated" == out
+
+
+# --------------------------------------------------------------------------
+# run_loop notification flow (recording notifier, no real Slack)
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_run_loop_posts_heartbeat_and_threads_completion(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    notifier = _RecordingNotifier()
+
+    async def fake_drive(cfg, *, backend=None):
+        return _FakeResult(stop_reason="end_turn", cost_usd=0.1,
+                           final_output="ok")
+
+    async def fake_sleep(secs):
+        pass
+
+    n = await runner.run_loop(
+        _cfg(), p, max_ticks=2, run_drive=fake_drive, sleep=fake_sleep,
+        now=lambda: "T", notifier=notifier,
+    )
+    assert n == 2
+    # One heartbeat per fire...
+    assert len(notifier.heartbeats) == 2
+    assert "fire #1" in notifier.heartbeats[0]
+    assert "fire #2" in notifier.heartbeats[1]
+    # ...and one threaded completion per fire, under the matching heartbeat.
+    assert len(notifier.updates) == 2
+    by_thread = {thread: text for thread, text in notifier.updates}
+    assert "fire #1 done" in by_thread["ts-1"]
+    assert "fire #2 done" in by_thread["ts-2"]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_threads_error_under_heartbeat(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    notifier = _RecordingNotifier()
+
+    async def boom(cfg, *, backend=None):
+        raise RuntimeError("kaboom")
+
+    async def fake_sleep(secs):
+        pass
+
+    await runner.run_loop(
+        _cfg(), p, max_ticks=1, run_drive=boom, sleep=fake_sleep,
+        now=lambda: "T", notifier=notifier,
+    )
+    assert len(notifier.heartbeats) == 1
+    thread, text = notifier.updates[0]
+    assert thread == "ts-1"
+    assert "FAILED: RuntimeError: kaboom" in text
+
+
+@pytest.mark.asyncio
+async def test_run_loop_prunes_completed_notif_tasks(tmp_path):
+    """Over many fires the loop must not accumulate one notification task per
+    completed drive forever -- completed update tasks are pruned each
+    iteration. We give the to_thread update tasks real time to finish so a
+    later iteration's prune sees them done and drops them."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    notifier = _RecordingNotifier()
+
+    async def fake_drive(cfg, *, backend=None):
+        return _FakeResult(stop_reason="end_turn", cost_usd=0.0,
+                           final_output="ok")
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0.02)  # let prior update tasks complete
+
+    n = await runner.run_loop(
+        _cfg(), p, max_ticks=4, run_drive=fake_drive, sleep=fake_sleep,
+        now=lambda: "T", notifier=notifier,
+    )
+    assert n == 4
+    # Every fire heartbeated and every completion threaded, despite pruning.
+    assert len(notifier.heartbeats) == 4
+    assert len(notifier.updates) == 4
+
+
+@pytest.mark.asyncio
+async def test_run_loop_default_notifier_is_null(tmp_path):
+    # No notifier passed -> NullNotifier; the loop still runs and records.
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+
+    async def fake_drive(cfg, *, backend=None):
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        pass
+
+    n = await runner.run_loop(
+        _cfg(), p, max_ticks=1, run_drive=fake_drive, sleep=fake_sleep,
+        now=lambda: "T",
+    )
+    assert n == 1
+    assert runner.read_state(p)["tick_count"] == 1
+
+
+# --------------------------------------------------------------------------
+# notifier seam: Null / Slack / build_notifier
+# --------------------------------------------------------------------------
+
+class _FakeSlackBackend:
+    def __init__(self):
+        self.posts = []
+        self.dms = []
+
+    def post_text(self, text, *, channel=None):
+        self.posts.append((text, channel))
+        return "TS123"
+
+    def dm_text(self, text, *, channel=None, thread_ts=None):
+        self.dms.append((text, channel, thread_ts))
+        return True
+
+
+def test_null_notifier_is_noop():
+    n = NullNotifier()
+    assert n.heartbeat("x") is None
+    assert n.update("ts", "y") is None
+
+
+def test_slack_channel_notifier_heartbeat_and_update():
+    be = _FakeSlackBackend()
+    n = SlackChannelNotifier(be, "C0OPS")
+    ts = n.heartbeat("beat")
+    assert ts == "TS123"
+    assert be.posts == [("beat", "C0OPS")]
+    n.update("TS123", "done")
+    assert be.dms == [("done", "C0OPS", "TS123")]
+
+
+def test_build_notifier_muted_is_null():
+    assert isinstance(build_notifier("none", None), NullNotifier)
+
+
+def test_build_notifier_slack_no_creds_is_null(monkeypatch):
+    # notify=slack but try_load yields no backend -> degrade to NullNotifier.
+    monkeypatch.setattr(
+        "tigerharness.slack_bridge.notify.SlackNotifier.try_load",
+        classmethod(lambda cls: None),
+    )
+    assert isinstance(build_notifier("slack", "C0OPS"), NullNotifier)
+
+
+def test_build_notifier_slack_with_creds(monkeypatch):
+    be = _FakeSlackBackend()
+    monkeypatch.setattr(
+        "tigerharness.slack_bridge.notify.SlackNotifier.try_load",
+        classmethod(lambda cls: be),
+    )
+    n = build_notifier("slack", "C0OPS")
+    assert isinstance(n, SlackChannelNotifier)
+    assert n._channel == "C0OPS"
+    assert n._backend is be
+
+
+# --------------------------------------------------------------------------
+# CLI: team-scoped state anchor (one autodrive per team)
+# --------------------------------------------------------------------------
+
+def test_state_root_team_scoped_ignores_journal_dir(tmp_path, monkeypatch):
+    _make_team(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    # Even with a custom --journal-dir, the lock anchors to <team>/journal.
+    args = _args(["status", "--journal-dir", str(tmp_path / "elsewhere")])
+    assert cli._state_root(args) == tmp_path / "journal"
+
+
+def test_state_root_personal_uses_resolved_journal(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # not a team dir (no configs/personas.yaml)
+    args = _args(["status", "--journal-dir", str(tmp_path / "j")])
+    assert cli._state_root(args) == tmp_path / "j"
+
+
+def test_cmd_start_lock_is_team_scoped(tmp_path, monkeypatch):
+    """A custom --journal-dir redirects the *driven* journal, but the lock
+    stays at the team's canonical journal so the one-per-team guard holds."""
+    team = tmp_path / "Team"
+    _make_team(team)
+    monkeypatch.chdir(team)
+    driven = tmp_path / "driven"
+    captured = {}
+
+    def fake_spawn(state_file, *, cwd, log_file, env):
+        captured["env"] = env
+        return 7
+
+    args = _args(["start", "--journal-dir", str(driven)])
+    rc = cli.cmd_start(args, spawn=fake_spawn, now=lambda: "T")
+    assert rc == 0
+    # Lock at the team's canonical journal, NOT the driven dir.
+    assert runner.state_path(team / "journal").exists()
+    assert not runner.state_path(driven).exists()
+    # The spawned drive is still pinned to the driven journal.
+    assert captured["env"]["TIGERHARNESS_JOURNAL_DIR"] == str(driven)
+
+
+# --------------------------------------------------------------------------
+# CLI: notify config (cmd_start / cmd_status output)
+# --------------------------------------------------------------------------
+
+def test_cmd_start_notify_defaults(tmp_path, capsys):
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    args = _args(["start", "--journal-dir", str(jr)])
+    cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
+    st = runner.read_state(runner.state_path(jr))
+    assert st["notify"] == "slack"
+    assert st["notify_channel"] is None
+    assert "notify: slack -> operator DM" in capsys.readouterr().out
+
+
+def test_cmd_start_notify_channel_flag(tmp_path, capsys):
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    args = _args(
+        ["start", "--journal-dir", str(jr), "--notify-channel", "C0OPS"]
+    )
+    cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
+    st = runner.read_state(runner.state_path(jr))
+    assert st["notify_channel"] == "C0OPS"
+    assert "notify: slack -> C0OPS" in capsys.readouterr().out
+
+
+def test_cmd_start_notify_channel_from_env(tmp_path, monkeypatch):
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    monkeypatch.setenv(cli.NOTIFY_CHANNEL_ENV, "C0ENV")
+    args = _args(["start", "--journal-dir", str(jr)])
+    cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
+    st = runner.read_state(runner.state_path(jr))
+    assert st["notify_channel"] == "C0ENV"
+
+
+def test_cmd_start_notify_flag_beats_env(tmp_path, monkeypatch):
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    monkeypatch.setenv(cli.NOTIFY_CHANNEL_ENV, "C0ENV")
+    args = _args(
+        ["start", "--journal-dir", str(jr), "--notify-channel", "C0FLAG"]
+    )
+    cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
+    st = runner.read_state(runner.state_path(jr))
+    assert st["notify_channel"] == "C0FLAG"
+
+
+def test_cmd_start_notify_none(tmp_path, capsys):
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    args = _args(["start", "--journal-dir", str(jr), "--notify", "none"])
+    cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
+    st = runner.read_state(runner.state_path(jr))
+    assert st["notify"] == "none"
+    assert "notify: none (muted" in capsys.readouterr().out
+
+
+def test_cmd_status_shows_notify(tmp_path, capsys):
+    jr = tmp_path / "journal"
+    runner.write_state(
+        runner.state_path(jr),
+        {
+            "pid": os.getpid(), "interval_seconds": 600, "backend": "claude_p",
+            "notify": "slack", "notify_channel": "C0OPS",
+        },
+    )
+    args = _args(["status", "--journal-dir", str(jr)])
+    cli.cmd_status(args)
+    assert "notify:       slack -> C0OPS" in capsys.readouterr().out
+
+
+def test_cmd_status_shows_notify_muted(tmp_path, capsys):
+    jr = tmp_path / "journal"
+    runner.write_state(
+        runner.state_path(jr),
+        {"pid": os.getpid(), "interval_seconds": 600, "notify": "none"},
+    )
+    args = _args(["status", "--journal-dir", str(jr)])
+    cli.cmd_status(args)
+    assert "notify:       none (muted)" in capsys.readouterr().out
+
+
+def test_cmd_loop_builds_null_notifier_without_creds(tmp_path, monkeypatch):
+    """With no Slack creds, cmd_loop builds a NullNotifier and passes it
+    through -- the daemon runs notification-free rather than crashing."""
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    sfile = tmp_path / "s.json"
+    runner.write_state(
+        sfile,
+        {"interval_seconds": 600, "prompt": "go", "notify": "slack",
+         "notify_channel": "C0OPS"},
+    )
+    seen = {}
+
+    async def fake_runner(cfg, state_file, *, should_stop, notifier):
+        seen["notifier"] = notifier
+        return 0
+
+    args = _args(["_loop", "--state-file", str(sfile)])
+    cli.cmd_loop(args, runner=fake_runner)
+    assert isinstance(seen["notifier"], NullNotifier)
