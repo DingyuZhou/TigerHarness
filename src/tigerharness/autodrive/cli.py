@@ -30,8 +30,10 @@ from typing import Any, Callable
 
 from ..journal.paths import default_journal_root
 from ..journal.scaffold import resolve_default_persona
+from .notifier import build_notifier
 from .runner import (
     DEFAULT_BACKEND,
+    DEFAULT_NOTIFY,
     DEFAULT_PERMISSION_MODE,
     AutodriveConfig,
     clamp_interval,
@@ -47,6 +49,11 @@ from .runner import (
     utcnow_iso,
     write_state,
 )
+
+#: Env override for the daemon-level notify channel (lowest priority after the
+#: ``--notify-channel`` flag, before the operator-DM fallback). Kept here so
+#: both the resolver and the docs point at one name.
+NOTIFY_CHANNEL_ENV = "TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL"
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +89,31 @@ def _team_root_for(journal_root: Path) -> Path | None:
     ).is_file():
         return parent
     return None
+
+
+def _state_root(args: argparse.Namespace) -> Path:
+    """Filesystem anchor for the single-instance state file -- the lock.
+
+    Team-scoped by design (one autodrive per team): when the command is
+    invoked from a team root (cwd has ``configs/personas.yaml``), the lock
+    anchors to that team's canonical ``<team>/journal`` *regardless of any
+    ``--journal-dir`` override*, so a second ``start`` anywhere in the same
+    team resolves to the SAME state file, sees the live pid, and is refused.
+
+    For a personal (non-team) journal there is no team to scope to, so the
+    lock stays under the resolved journal root, as before. Only the lock
+    location is team-canonical; the *driven* journal is still
+    :func:`_resolve_journal_root` and may point elsewhere via
+    ``--journal-dir``.
+
+    Detection keys off the invoking cwd (not the resolved journal): a custom
+    ``--journal-dir`` must not be able to slip a second daemon past the guard
+    while standing in the same team root.
+    """
+    cwd = Path.cwd()
+    if (cwd / "configs" / "personas.yaml").is_file():
+        return cwd / "journal"
+    return _resolve_journal_root(args)
 
 
 # ----- detached spawn / kill seams (injected in tests) -----
@@ -133,14 +165,18 @@ def cmd_start(
 ) -> int:
     journal_root = _resolve_journal_root(args)
     journal_root.mkdir(parents=True, exist_ok=True)
-    sfile = state_path(journal_root)
+    # The lock (state file) is team-canonical so the guard is one-per-team,
+    # even when --journal-dir redirects the *driven* journal elsewhere.
+    state_root = _state_root(args)
+    state_root.mkdir(parents=True, exist_ok=True)
+    sfile = state_path(state_root)
 
     running, state = is_running(sfile)
     if running:
         assert state is not None
         print(
-            f"autodrive already running (pid {state.get('pid')}). Stop it "
-            "first: tigerharness autodrive stop",
+            f"autodrive already running (pid {state.get('pid')}) for this "
+            "team. Stop it first: tigerharness autodrive stop",
             file=sys.stderr,
         )
         return 1
@@ -158,6 +194,13 @@ def cmd_start(
 
     cwd = str(team_root if team_root is not None else journal_root.parent)
     prompt = args.prompt if args.prompt else default_prompt(driver)
+    # Notify channel resolution: flag > env > operator DM (None). Empty
+    # string from either source means "unset" -> fall through.
+    notify_channel = (
+        args.notify_channel
+        or os.environ.get(NOTIFY_CHANNEL_ENV, "").strip()
+        or None
+    )
     cfg = AutodriveConfig(
         interval_seconds=interval,
         driver=driver,
@@ -167,6 +210,8 @@ def cmd_start(
         permission_mode=args.permission_mode,
         prompt=prompt,
         cwd=cwd,
+        notify=args.notify,
+        notify_channel=notify_channel,
     )
 
     # Write the state file BEFORE spawning so the child can read its
@@ -186,7 +231,7 @@ def cmd_start(
         "last_error": None,
     }
     write_state(sfile, state)
-    logf = log_path(journal_root)
+    logf = log_path(state_root)
     # Pin the journal the spawned drives target (so a custom --journal-dir,
     # or a personal journal, resolves to exactly the one autodrive manages),
     # then run the daemon in `cwd` (the team root) so the persona's CLAUDE.md
@@ -208,6 +253,11 @@ def cmd_start(
     )
     print(f"  state: {sfile}")
     print(f"  log:   {logf}")
+    if cfg.notify == "slack":
+        target = cfg.notify_channel or "operator DM"
+        print(f"  notify: slack -> {target}")
+    else:
+        print("  notify: none (muted; use `autodrive status` for health)")
     if cfg.max_budget_usd is None:
         print(
             "  note:  no --max-budget set. claude -p bills the "
@@ -219,20 +269,29 @@ def cmd_start(
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    journal_root = _resolve_journal_root(args)
-    sfile = state_path(journal_root)
+    # Read from the team-canonical lock (same anchor `start` wrote), so a
+    # muted operator standing anywhere in the team still sees daemon health.
+    sfile = state_path(_state_root(args))
     state = read_state(sfile)
     if state is None:
         print("autodrive: stopped (no state file)")
         return 0
     running, _ = is_running(sfile)
     label = "running" if running else "stopped (stale state file)"
+    notify = state.get("notify", DEFAULT_NOTIFY)
+    notify_channel = state.get("notify_channel")
+    notify_target = (
+        f"slack -> {notify_channel or 'operator DM'}"
+        if notify == "slack"
+        else "none (muted)"
+    )
     print(f"autodrive: {label}")
     print(f"  pid:          {state.get('pid')}")
     print(f"  interval:     {int(float(state.get('interval_seconds', 0)))}s")
     print(f"  backend:      {state.get('backend')}")
     print(f"  driver:       {state.get('driver') or '(none)'}")
     print(f"  max_budget:   {state.get('max_budget_usd')}")
+    print(f"  notify:       {notify_target}")
     print(f"  started_at:   {state.get('started_at')}")
     print(f"  fire_count:   {state.get('fire_count', 0)} (drives launched)")
     print(f"  last_fire_at: {state.get('last_fire_at') or '(none yet)'}")
@@ -251,8 +310,10 @@ def cmd_stop(
     *,
     kill: Callable[[int], None] = kill_process_group,
 ) -> int:
-    journal_root = _resolve_journal_root(args)
-    sfile = state_path(journal_root)
+    # Stop the team's one daemon via the same team-canonical lock `start`
+    # used, so `stop` works from anywhere in the team regardless of the
+    # driven journal's --journal-dir.
+    sfile = state_path(_state_root(args))
     state = read_state(sfile)
     if state is None:
         print("autodrive: not running (no state file).")
@@ -295,7 +356,13 @@ def cmd_loop(
         cur = read_state(sfile)
         return cur is None or bool(cur.get("stop_requested"))
 
-    asyncio.run(runner(cfg, sfile, should_stop=should_stop))
+    # Build the notifier from the persisted config. ``build_notifier`` never
+    # raises: muted (``notify=none``) or unloadable creds degrade to a no-op
+    # notifier, never a crash that would take the daemon down.
+    notifier = build_notifier(cfg.notify, cfg.notify_channel)
+    asyncio.run(
+        runner(cfg, sfile, should_stop=should_stop, notifier=notifier)
+    )
     clear_state(sfile)
     return 0
 
@@ -359,6 +426,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt",
         default=None,
         help="Override the built-in 'drive the journal' instruction.",
+    )
+    p_start.add_argument(
+        "--notify",
+        choices=("slack", "none"),
+        default=DEFAULT_NOTIFY,
+        help=(
+            "Daemon-level notifications: 'slack' posts a heartbeat per fire "
+            "plus a threaded status/summary on completion; 'none' mutes "
+            f"(default {DEFAULT_NOTIFY!r}). Muted still has `autodrive "
+            "status` as the pull-based health check."
+        ),
+    )
+    p_start.add_argument(
+        "--notify-channel",
+        default="",
+        dest="notify_channel",
+        help=(
+            "Slack channel id for daemon events (e.g. C0ABC123). Default: "
+            "operator DM. Resolution: this flag > env "
+            f"{NOTIFY_CHANNEL_ENV} > DM."
+        ),
     )
     p_start.set_defaults(func=cmd_start)
 

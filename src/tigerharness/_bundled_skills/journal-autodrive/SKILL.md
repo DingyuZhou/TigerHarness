@@ -29,9 +29,10 @@ unattended autodrive spends real dollars on **every fire**. Guardrails:
 - **`tigerharness autodrive stop`** is the off-switch. Use it.
 - The interval has a **60s floor**; it keeps a typo from piling up dozens of
   concurrent drives.
-- Only **one** autodrive daemon runs per journal (a second `start` is
-  refused). There is no cap on *concurrent drives* -- the journal's busy
-  lease makes a redundant overlapping fire a cheap no-op.
+- Only **one** autodrive daemon runs per **team** (the lock is team-canonical,
+  so a second `start` anywhere in the same team is refused -- even with a
+  different `--journal-dir`). There is no cap on *concurrent drives* -- the
+  journal's busy lease makes a redundant overlapping fire a cheap no-op.
 
 If the user asks for this and you are unsure billing is still on the
 subscription, **say so** before starting it.
@@ -56,6 +57,12 @@ Start (the common request -- "drive every 10 minutes"):
 - `--model`, `--permission-mode`, `--prompt` override the model, the
   unattended permission mode (default `bypassPermissions`), and the
   built-in drive instruction.
+- `--notify {slack,none}` (default `slack`) and `--notify-channel <id>`
+  control daemon-level notifications: by default the daemon posts a Slack
+  **heartbeat per fire** plus a **threaded status/summary on completion**;
+  `none` mutes the push (status is then the pull-based health check). Channel
+  resolution: flag > env `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` > operator
+  DM.
 
 Check:
 
@@ -87,12 +94,14 @@ overlapping fires cheap (they sweep, find the active task busy, and exit). A
 drive that hits its budget cap or context ceiling just leaves the task
 `in_progress`/idle; a later fire resumes it -- truncation is safe because the
 journal's session model is resumable. A drive that errors is logged to
-`<journal>/.autodrive.log` and the loop keeps firing.
+`<team>/journal/.autodrive.log` and the loop keeps firing. By default each
+fire also posts a Slack heartbeat, with the drive's status + summary threaded
+under it once that fire finishes.
 
-State lives in `<journal>/.autodrive.json` with two gauges -- **launched**
-(`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`,
-`last_tick_at`, last stop reason / error); `status` reads it, `stop` clears
-it.
+State (and the team-canonical lock) lives in `<team>/journal/.autodrive.json`
+with two gauges -- **launched** (`fire_count`, `last_fire_at`, `in_flight`)
+and **completed** (`tick_count`, `last_tick_at`, last stop reason / error);
+`status` reads it, `stop` clears it.
 
 ## If you get confused
 

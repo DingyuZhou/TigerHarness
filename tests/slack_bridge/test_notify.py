@@ -198,6 +198,49 @@ class TestSlackNotifierDmText:
             assert n.dm_text("hello") is False
 
 
+class TestSlackNotifierPostText:
+    """``post_text`` returns the message ``ts`` (the thread handle) so a
+    later reply can thread under it -- the autodrive heartbeat path."""
+
+    def _notifier(self):
+        return SlackNotifier(_Creds(bot_token="xoxb-test", target_user_id="U0CEO"))
+
+    def test_returns_ts_on_success(self):
+        n = self._notifier()
+        with patch(
+            "tigerharness.slack_bridge.notify._slack_post_json",
+            return_value={"ok": True, "ts": "1717000000.123456"},
+        ) as mock:
+            assert n.post_text("beat", channel="C0OPS") == "1717000000.123456"
+            payload = mock.call_args[0][2]
+            assert payload["channel"] == "C0OPS"
+            assert payload["text"] == "beat"
+
+    def test_none_when_ts_missing(self):
+        n = self._notifier()
+        with patch(
+            "tigerharness.slack_bridge.notify._slack_post_json",
+            return_value={"ok": True},  # ok but no ts -> not threadable
+        ):
+            assert n.post_text("beat") is None
+
+    def test_none_when_ts_not_str(self):
+        n = self._notifier()
+        with patch(
+            "tigerharness.slack_bridge.notify._slack_post_json",
+            return_value={"ok": True, "ts": 123},  # non-str ts is unusable
+        ):
+            assert n.post_text("beat") is None
+
+    def test_none_on_failure(self):
+        n = self._notifier()
+        with patch(
+            "tigerharness.slack_bridge.notify._slack_post_json",
+            return_value={"ok": False, "error": "channel_not_found"},
+        ):
+            assert n.post_text("beat") is None
+
+
 class TestSlackNotifierDmFile:
     def _notifier(self):
         return SlackNotifier(_Creds(bot_token="xoxb-test", target_user_id="U0CEO"))
@@ -297,6 +340,16 @@ class TestCliWithMocks:
         with patch.object(SlackNotifier, "dm_text", return_value=False):
             ret = main(["text", "hello world"])
         assert ret == 1
+
+    def test_text_with_channel(self, monkeypatch):
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+        monkeypatch.setenv("SLACK_CEO_USER_ID", "U0CEO")
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        with patch.object(SlackNotifier, "dm_text", return_value=True) as mock:
+            ret = main(["text", "hi", "--channel", "C0OPS"])
+        assert ret == 0
+        # The --channel value is threaded through to dm_text (not None).
+        assert mock.call_args.kwargs["channel"] == "C0OPS"
 
     def test_file_success(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")

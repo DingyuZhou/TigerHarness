@@ -246,14 +246,16 @@ class SlackNotifier:
 
     # ---- text DM ----
 
-    def dm_text(
+    def _post_text(
         self,
         text: str,
         *,
         channel: str | None = None,
         thread_ts: str | None = None,
-    ) -> bool:
-        """Post a text message. Default channel = target user's DM."""
+    ) -> dict[str, Any]:
+        """Low-level ``chat.postMessage``. Returns the raw Slack response so
+        callers can read either ``ok`` (``dm_text``) or the message ``ts``
+        (``post_text``, used for threading replies)."""
         target = channel or self._creds.target_user_id
         payload: dict[str, Any] = {"channel": target, "text": text}
         if thread_ts:
@@ -263,11 +265,35 @@ class SlackNotifier:
         )
         if not result.get("ok"):
             log.warning(
-                "notify.dm_text failed: error=%s target=%s",
+                "notify post failed: error=%s target=%s",
                 result.get("error"), target,
             )
-            return False
-        return True
+        return result
+
+    def dm_text(
+        self,
+        text: str,
+        *,
+        channel: str | None = None,
+        thread_ts: str | None = None,
+    ) -> bool:
+        """Post a text message. Default channel = target user's DM."""
+        result = self._post_text(text, channel=channel, thread_ts=thread_ts)
+        return bool(result.get("ok"))
+
+    def post_text(
+        self,
+        text: str,
+        *,
+        channel: str | None = None,
+        thread_ts: str | None = None,
+    ) -> str | None:
+        """Post a message and return its Slack ``ts`` (the thread handle), or
+        ``None`` on failure. Use the returned ``ts`` as ``thread_ts`` on a
+        later call to reply in the same thread."""
+        result = self._post_text(text, channel=channel, thread_ts=thread_ts)
+        ts = result.get("ts")
+        return ts if isinstance(ts, str) else None
 
     # ---- file upload ----
 
@@ -358,7 +384,9 @@ def _cmd_text(args: argparse.Namespace) -> int:
     if n is None:
         print("error: slack creds not configured", file=sys.stderr)
         return 2
-    ok = n.dm_text(args.text, thread_ts=args.thread or None)
+    ok = n.dm_text(
+        args.text, channel=args.channel or None, thread_ts=args.thread or None
+    )
     return 0 if ok else 1
 
 
@@ -382,6 +410,8 @@ def main(argv: list[str] | None = None) -> int:
 
     t = sub.add_parser("text", help="Send a text DM.")
     t.add_argument("text")
+    t.add_argument("--channel", default="",
+                   help="Post to this channel id instead of the operator DM.")
     t.add_argument("--thread", default="",
                    help="Reply in this thread_ts.")
     t.set_defaults(func=_cmd_text)
