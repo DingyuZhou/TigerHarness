@@ -191,6 +191,18 @@ class JournalPaths:
         return self.root / "deferred"
 
     @property
+    def needs_input(self) -> Path:
+        """The ``needs_input/`` tray: tasks a driver parked because they
+        need an Operator decision before proceeding. A task moves here
+        (from ``active/``) via ``journal release --state needs_input``
+        and back (to ``active/``) via ``journal answer``. Living in a
+        separate tray keeps parked tasks out of the active queue --- the
+        cascade physically cannot pick them up --- and makes them visible
+        at a glance (``ls journal/needs_input/``) even with Slack off. See
+        ``docs/journal-operator-questions.md``."""
+        return self.root / "needs_input"
+
+    @property
     def operating_md(self) -> Path:
         return self.root / "OPERATING.md"
 
@@ -214,6 +226,16 @@ class JournalPaths:
                 f"unsafe task id {task_id!r}; refusing to compute path"
             )
         return (self.done if archived else self.active) / task_id
+
+    def needs_input_dir(self, task_id: str) -> Path:
+        """Per-task directory in the ``needs_input/`` tray. Same
+        safe-id gate as ``task_dir``. Used by ``journal answer`` (read +
+        reactivate) and the sweep's tray scan."""
+        if not is_safe_task_id(task_id):
+            raise JournalPathError(
+                f"unsafe task id {task_id!r}; refusing to compute path"
+            )
+        return self.needs_input / task_id
 
     def status_json(self, task_id: str, *, archived: bool = False) -> Path:
         return self.task_dir(task_id, archived=archived) / "status.json"
@@ -249,9 +271,11 @@ class JournalPaths:
     # ---- ensure / inspect ----
 
     def ensure(self) -> "JournalPaths":
-        """Create ``active/`` and ``done/`` under root. Idempotent."""
+        """Create ``active/``, ``done/`` and ``needs_input/`` under root.
+        Idempotent."""
         self.active.mkdir(parents=True, exist_ok=True)
         self.done.mkdir(parents=True, exist_ok=True)
+        self.needs_input.mkdir(parents=True, exist_ok=True)
         return self
 
     def task_exists(self, task_id: str, *, archived: bool = False) -> bool:
@@ -262,10 +286,22 @@ class JournalPaths:
     def list_active_ids(self) -> list[str]:
         """Every directory in ``active/`` whose name parses as a safe
         task id and whose ``status.json`` exists. Sorted for determinism."""
-        if not self.active.is_dir():
+        return self._list_ids_in(self.active)
+
+    def list_needs_input_ids(self) -> list[str]:
+        """Every directory in the ``needs_input/`` tray whose name parses
+        as a safe task id and whose ``status.json`` exists. Sorted for
+        determinism. Used by the sweep to count + surface parked tasks."""
+        return self._list_ids_in(self.needs_input)
+
+    @staticmethod
+    def _list_ids_in(folder: Path) -> list[str]:
+        """Shared scan: safe-id directories under ``folder`` that hold a
+        ``status.json``, sorted."""
+        if not folder.is_dir():
             return []
         out: list[str] = []
-        for entry in sorted(self.active.iterdir()):
+        for entry in sorted(folder.iterdir()):
             if not entry.is_dir():
                 continue
             if not is_safe_task_id(entry.name):
@@ -284,22 +320,54 @@ class JournalPaths:
         Raises ``JournalPathError`` if the task is not in ``active/`` or
         if a same-id directory already exists in ``done/`` (re-archival
         without an explicit overwrite would silently lose history)."""
+        return self._move_task(
+            task_id, self.active, self.done, verb="archive",
+            src_label="active/", dest_label="done/",
+        )
+
+    def park(self, task_id: str) -> Path:
+        """Move ``active/<id>/`` to ``needs_input/<id>/`` (the park).
+        Returns the new tray path. Refuses if the task is not in
+        ``active/`` or a same-id directory already exists in the tray."""
+        return self._move_task(
+            task_id, self.active, self.needs_input, verb="park",
+            src_label="active/", dest_label="needs_input/",
+        )
+
+    def reactivate(self, task_id: str) -> Path:
+        """Move ``needs_input/<id>/`` back to ``active/<id>/`` (the
+        Operator's answer re-entry). Returns the new active path. Refuses
+        if the task is not in the tray or a same-id directory already
+        exists in ``active/``."""
+        return self._move_task(
+            task_id, self.needs_input, self.active, verb="reactivate",
+            src_label="needs_input/", dest_label="active/",
+        )
+
+    def _move_task(
+        self, task_id: str, src_root: Path, dest_root: Path, *,
+        verb: str, src_label: str, dest_label: str,
+    ) -> Path:
+        """Shared tray-to-tray task move (archive / park / reactivate).
+        Atomic on the same filesystem; refuses an unsafe id, a missing
+        source, or a colliding destination (overwriting would silently
+        lose history)."""
         if not is_safe_task_id(task_id):
             raise JournalPathError(
-                f"unsafe task id {task_id!r}; refusing to archive"
+                f"unsafe task id {task_id!r}; refusing to {verb}"
             )
-        src = self.active / task_id
+        src = src_root / task_id
         if not src.is_dir():
             raise JournalPathError(
-                f"cannot archive task {task_id!r}: not in active/"
+                f"cannot {verb} task {task_id!r}: not in {src_label}"
             )
-        dest = self.done / task_id
+        dest = dest_root / task_id
         if dest.exists():
             raise JournalPathError(
-                f"cannot archive task {task_id!r}: done/{task_id} already "
-                "exists (refusing to overwrite history)"
+                f"cannot {verb} task {task_id!r}: {dest_label}{task_id} "
+                "already exists (refusing to overwrite history)"
             )
-        self.done.mkdir(parents=True, exist_ok=True)
+        dest_root.mkdir(parents=True, exist_ok=True)
         # ``shutil.move`` falls back to a copy+delete across filesystems;
         # plain ``rename`` would only work on the same FS. We accept the
         # cost trade-off for portability.

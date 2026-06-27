@@ -20,6 +20,7 @@ plain `claude -p` subprocess.
 | Understand the journal (subscription backend) end to end | [journal.md](journal.md) |
 | Run a multi-persona **workflow** (compile + graph walk) | [journal-workflow-mode.md](journal-workflow-mode.md) |
 | Know how a crashed/idle task resumes | [journal-instant-resume.md](journal-instant-resume.md) |
+| Park a task on an Operator question instead of blocking the drive | [journal-operator-questions.md](journal-operator-questions.md) |
 | Schedule from Slack **cheaply**, or understand rails/billing + `status.json` | [subscription-backend.md](subscription-backend.md) |
 | Drive the journal queue automatically on a timer (the sanctioned exception) | [autodrive.md](autodrive.md) |
 | Get Slack heartbeats + threaded drive summaries from the autodrive daemon (or mute them) | [autodrive-notifications.md](autodrive-notifications.md) |
@@ -51,7 +52,7 @@ plain `claude -p` subprocess.
   Code app, billing a monthly subscription instead of token-metered API. The
   legacy API-billed runners were removed ([adr/0003](adr/0003-remove-legacy-runners.md)).
 - **Journal.** Scaffolds single-persona tasks (`kind=task`) and multi-persona
-  workflows (`kind=workflow`) from team playbooks; **19 CLI verbs** cover the
+  workflows (`kind=workflow`) from team playbooks; **20 CLI verbs** cover the
   lifecycle (incl. the `defer`/`materialize` deferred-inbox pair and
   team-pinned, provenance-stamped scheduling). Workflows compile in-session
   via a drafter/two-critic loop over mechanical Tier-1 validators, then walk

@@ -118,6 +118,19 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    done** needs `--state done` with **no `--output`** (the per-step
    `step-done` notes are the record, and the walk must have reached
    `__done__`). Outside a drive, omit `--driver` (no gate, no `--output`).
+   **Hit an Operator-only question/decision you can't resolve? PARK, don't
+   stall:** write the question to a file and `release <id> --driver <p>
+   --state needs_input --question <file>` — it appends to the task's
+   `questions.md`, moves `active/<id>/ → needs_input/<id>/`, and detaches.
+   Then **notify the Operator** (Slack `slack-notify` skill — *mandatory*
+   when Slack is configured; otherwise the tray move is the signal) and
+   cascade on. Decide-by-default first: only park a genuine Operator call
+   (or when `autonomy=ask`); if `autonomy=judgement`, resolve it yourself
+   and log a `Decision:` in `progress.md` instead. The Operator answers in
+   `questions.md` + runs `journal answer <id>`, which returns the task to
+   `active/` as a resumable `in_progress`; on resume, read the
+   `**Answer:**` section FIRST, then continue. See OPERATING.md "Parking on
+   an Operator question."
 
 6. **CASCADE — the hard loop. THIS is the driver's whole job.** If you
    released a NOT-done task (it's now idle) **OR** the queue still has any

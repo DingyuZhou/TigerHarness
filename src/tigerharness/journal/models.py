@@ -37,11 +37,21 @@ from typing import Any
 class State(str, enum.Enum):
     """Allowed values for ``Status.state``. There is no ``failed`` here;
     failed compiles use ``state=blocked`` paired with
-    ``compile_phase=failed`` (see :class:`CompilePhase`)."""
+    ``compile_phase=failed`` (see :class:`CompilePhase`).
+
+    ``needs_input`` is distinct from ``blocked``: a driver parks a task as
+    ``needs_input`` (and moves it to the ``needs_input/`` tray) when it
+    needs an Operator decision before it can proceed -- a non-blocking,
+    round-trippable ask with a defined question/answer channel
+    (``questions.md`` + the ``journal answer`` verb). ``blocked`` keeps its
+    existing meaning ("needs human attention", e.g. a failed compile,
+    which deliberately stays in ``active/``). See
+    ``docs/journal-operator-questions.md``."""
 
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
+    NEEDS_INPUT = "needs_input"
     DONE = "done"
 
 

@@ -65,6 +65,9 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-06-26: anzai: pre-needs_input ship -- before the parking-on-an-
+        #   Operator-question step-5 callout (park instead of stalling).
+        "d0b1f3704b12a3642211408fd2d2f9ed9dc1b555c856ca1acd2ceb02b5201666",
         # 2026-06-13 (7543935): rukawa: deferred-task inbox -- the ship before
         #   the cascade-after-materialize clarification.
         "072b5d76b8c71c4119367b3881f5dbcb30ce9758f5f52e026e7bed946d27bab8",
@@ -154,7 +157,7 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "d0b1f3704b12a3642211408fd2d2f9ed9dc1b555c856ca1acd2ceb02b5201666",
+    "drive-journal": "d88cb0860201785fc3aedc9daec7d01c935d3cbabf975968de88e35255d965bb",
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",

@@ -67,6 +67,13 @@ sweep / pick / cascade scaffolding is identical for both kinds.
 - `done/<task-id>/` -- archived tasks, same shape, moved here by the
   sweep when `state=done` (or by `journal abort` for failed
   workflows).
+- `needs_input/<task-id>/` -- **parked** tasks awaiting an Operator
+  answer, moved here from `active/` by `journal release --state
+  needs_input` (which also writes/appends `questions.md` -- the
+  Operator's ticket). The folder move is itself the visual signal even
+  when Slack is not configured. `journal answer <task-id>` moves the task
+  back to `active/` as a resumable `in_progress`. See "Parking on an
+  Operator question."
 
 ## How to read state
 
@@ -74,7 +81,10 @@ sweep / pick / cascade scaffolding is identical for both kinds.
 `docs/subscription-backend.md` (status.json field table). The
 load-bearing fields are:
 
-- `state` -- one of `pending`, `in_progress`, `blocked`, `done`.
+- `state` -- one of `pending`, `in_progress`, `blocked`, `needs_input`,
+  `done`. A `needs_input` task is **parked** on an Operator question: it
+  lives in the `needs_input/` tray (not `active/`), out of the actionable
+  queue until the Operator answers. See "Parking on an Operator question."
 - `session_ref` -- the **attach token**. Set (an opaque id) while a
   session is actively driving the task; `null` when no session is
   attached (cleanly handed off, or never claimed). This is the signal
@@ -173,7 +183,9 @@ completed task until no actionable tasks remain.
       "Fresh" means the heartbeat is within the stuck-timeout (default
       30 min; override `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT`, seconds).
    c. Print the summary (pending / resumable / busy / crashed / blocked
-      counts) into the session.
+      / needs-input counts) into the session. Parked (`needs_input`)
+      tasks are surfaced for visibility but are **never actionable** --
+      only the Operator reopens them via `journal answer`.
    d. **Cheap no-op fast path.** If every `in_progress` task is **busy**
       and nothing is idle / crashed / pending, you are done -- **stop the
       invocation here, without reading any task context or this file's
@@ -297,6 +309,16 @@ completed task until no actionable tasks remain.
      graph walk reached `__done__` (every executed step left its note).
    - Blocked (real blocker, or `sessions >= max_sessions`):
      `release <id> --driver <p> --state blocked --next-action "<why>"`.
+   - **Parked on an Operator question** (you hit a judgment call or a
+     decision you genuinely cannot resolve yourself): write the question
+     to a file, then `release <id> --driver <p> --state needs_input
+     --question <question.md>`. This appends the question to the task's
+     `questions.md`, moves the task to the `needs_input/` tray, and
+     detaches. **Do NOT stall the turn waiting for an answer** -- park,
+     notify the Operator, then fall straight into the step-6 cascade:
+     re-sweep and pick the next actionable task. Parking is a clean stop,
+     **not** a turn-end -- the rest of the queue keeps moving. See
+     "Parking on an Operator question."
 
    `release` refreshes `updated_at` and clears `session_ref` for you.
    Do NOT bump `sessions` here -- that happened atomically in `claim`
@@ -311,6 +333,11 @@ completed task until no actionable tasks remain.
    summary", or wait for the next loop fire:
    - If you moved a task to `done` / `blocked`, the next pick is a
      different task.
+   - If you **parked** a task as `needs_input`, it has left the active
+     queue (it lives in the `needs_input/` tray now), so the next pick is
+     a **different** actionable task -- do **NOT** try to re-claim the
+     parked one; it is gone until the Operator answers. (After notifying
+     the Operator, just loop back to step 1 like any other stop.)
    - If you cleanly stopped a task that is NOT done (a natural
      checkpoint, or you split a long job into sessions), it is now
      **idle** -- re-`claim` it and continue **immediately**, no wait.
@@ -381,6 +408,56 @@ invocation rescues it via step 2. A session that stops
 cleanly should `release` instead (detach) -- a detached task is **idle**
 and resumes with no wait, so the 30-minute window only ever applies to a
 genuine crash, never to a normal hand-off.
+
+## Parking on an Operator question (never block the turn)
+
+A drive runs unattended -- there is no human watching the thread to
+answer a mid-drive question in real time. So when a task needs an
+Operator decision you cannot make yourself, **do not stall**: write the
+question back to the task, park it out of the queue, notify the Operator,
+and keep driving the rest of the queue. The Operator answers later and
+reopens the task. Four rules govern this:
+
+1. **Never block the turn -- park, then cascade on.** Waiting in-session
+   for an answer wedges the whole drive (and, in interactive Claude Code,
+   the human's thread). Parking converts a blocking wait into an
+   asynchronous round-trip: `release --state needs_input --question <file>`
+   records the question, moves `active/<id>/` -> `needs_input/<id>/`,
+   detaches, and frees you to cascade. The task is now out of
+   `actionable()` until the Operator answers -- a later task cannot
+   accidentally depend on an unanswered one. **Parking is a clean stop,
+   not a turn-end:** the moment you have parked + notified, go straight
+   back to step 1 (re-sweep) and pick the next actionable task -- a
+   resumable `in_progress`, else a `pending` one. Keep draining the queue
+   exactly as the step-6 cascade demands; **only** end the turn when that
+   re-sweep finds nothing else actionable (then simply stop).
+
+2. **Decide by default; park only what you truly cannot.** Most judgment
+   calls are yours to make. If the task's `autonomy` is `judgement`,
+   resolve the call yourself, record it as a `Decision:` line in
+   `progress.md`, and keep going -- do NOT park. Park only a genuine
+   Operator-only decision (scope, priorities, irreversible/risky choices),
+   or when `autonomy=ask`. Parking a question you could have answered just
+   adds Operator round-trips.
+
+3. **Notify after parking -- mandatory when Slack is configured.** Once
+   parked, tell the Operator: a short Slack message (the `slack-notify`
+   skill) naming the task id and summarising what you need. This is
+   **required** whenever Slack is configured for the team. When it is not,
+   the `needs_input/` tray move is itself the visual signal (the Operator
+   sees the parked task on `ls journal/needs_input/`). Either way the
+   question lives in the task's `questions.md`, so the signal always
+   points back to the full ask.
+
+4. **Consume the answer on resume.** The Operator answers inside
+   `questions.md` and runs `tigerharness journal answer <task-id>`, which
+   moves the task back to `active/` as a **resumable `in_progress`**
+   (detached -> idle). The very next sweep surfaces it under step 2a; when
+   you resume, read the `**Answer:**` section of `questions.md` (and
+   `next_action`) FIRST, act on the Operator's decision, then continue the
+   work. The question block's `**Status:**` flips from OPEN to answered by
+   the Operator's edit -- treat an OPEN block as still-unanswered and do
+   not re-park it.
 
 ## What NOT to do
 

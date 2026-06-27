@@ -1085,9 +1085,12 @@ def test_cmd_start_lock_is_team_scoped(tmp_path, monkeypatch):
 # CLI: notify config (cmd_start / cmd_status output)
 # --------------------------------------------------------------------------
 
-def test_cmd_start_notify_defaults(tmp_path, capsys):
+def test_cmd_start_notify_defaults(tmp_path, capsys, monkeypatch):
     _make_team(tmp_path)
     jr = tmp_path / "journal"
+    # Hermetic: this asserts the *default* (no flag, no env) resolves to the
+    # operator DM, so clear any ambient NOTIFY_CHANNEL_ENV the host may set.
+    monkeypatch.delenv(cli.NOTIFY_CHANNEL_ENV, raising=False)
     args = _args(["start", "--journal-dir", str(jr)])
     cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
     st = runner.read_state(runner.state_path(jr))

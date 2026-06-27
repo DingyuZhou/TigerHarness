@@ -110,6 +110,17 @@ class TestJsonRoundTrip:
         assert decoded["state"] == "pending"
         assert isinstance(decoded["state"], str)
 
+    def test_needs_input_state_round_trips(self):
+        """A parked task (state=needs_input) serialises to the plain
+        wire value and round-trips through from_json. Guards the new
+        State enum member against a missing serialisation path."""
+        import dataclasses
+
+        s = dataclasses.replace(self._make(), state=State.NEEDS_INPUT)
+        decoded = json.loads(s.to_json())
+        assert decoded["state"] == "needs_input"
+        assert Status.from_json(s.to_json()).state is State.NEEDS_INPUT
+
     def test_from_json_rejects_non_json(self):
         with pytest.raises(JournalModelError):
             Status.from_json("not json")
