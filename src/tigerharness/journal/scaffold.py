@@ -91,6 +91,10 @@ _PRIOR_OPERATING_HASHES = {
     # Operator-question feature added the needs_input state + tray and
     # the "Parking on an Operator question" protocol section).
     "f34f4366a168c56730aa4dac76f3b68b11e3f15b83e50679bc5673f7a7f9d775",
+    # first-round needs_input render (d770195): the parking feature shipped,
+    # but before the cascade-after-park clarification made parking flow into
+    # the step-6 cascade ("a clean stop, not a turn-end").
+    "d99d4ea1d88900d3795a9740a26a74839bd2af6afb6a5565e2f8becffd86c405",
 }
 
 

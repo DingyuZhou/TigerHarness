@@ -315,7 +315,9 @@ completed task until no actionable tasks remain.
      --question <question.md>`. This appends the question to the task's
      `questions.md`, moves the task to the `needs_input/` tray, and
      detaches. **Do NOT stall the turn waiting for an answer** -- park,
-     notify the Operator, and cascade to the next actionable task. See
+     notify the Operator, then fall straight into the step-6 cascade:
+     re-sweep and pick the next actionable task. Parking is a clean stop,
+     **not** a turn-end -- the rest of the queue keeps moving. See
      "Parking on an Operator question."
 
    `release` refreshes `updated_at` and clears `session_ref` for you.
@@ -331,6 +333,11 @@ completed task until no actionable tasks remain.
    summary", or wait for the next loop fire:
    - If you moved a task to `done` / `blocked`, the next pick is a
      different task.
+   - If you **parked** a task as `needs_input`, it has left the active
+     queue (it lives in the `needs_input/` tray now), so the next pick is
+     a **different** actionable task -- do **NOT** try to re-claim the
+     parked one; it is gone until the Operator answers. (After notifying
+     the Operator, just loop back to step 1 like any other stop.)
    - If you cleanly stopped a task that is NOT done (a natural
      checkpoint, or you split a long job into sessions), it is now
      **idle** -- re-`claim` it and continue **immediately**, no wait.
@@ -411,13 +418,19 @@ question back to the task, park it out of the queue, notify the Operator,
 and keep driving the rest of the queue. The Operator answers later and
 reopens the task. Four rules govern this:
 
-1. **Never block the turn.** Waiting in-session for an answer wedges the
-   whole drive (and, in interactive Claude Code, the human's thread).
-   Parking converts a blocking wait into an asynchronous round-trip:
-   `release --state needs_input --question <file>` records the question,
-   moves `active/<id>/` -> `needs_input/<id>/`, detaches, and frees you to
-   cascade. The task is now out of `actionable()` until the Operator
-   answers -- a later task cannot accidentally depend on an unanswered one.
+1. **Never block the turn -- park, then cascade on.** Waiting in-session
+   for an answer wedges the whole drive (and, in interactive Claude Code,
+   the human's thread). Parking converts a blocking wait into an
+   asynchronous round-trip: `release --state needs_input --question <file>`
+   records the question, moves `active/<id>/` -> `needs_input/<id>/`,
+   detaches, and frees you to cascade. The task is now out of
+   `actionable()` until the Operator answers -- a later task cannot
+   accidentally depend on an unanswered one. **Parking is a clean stop,
+   not a turn-end:** the moment you have parked + notified, go straight
+   back to step 1 (re-sweep) and pick the next actionable task -- a
+   resumable `in_progress`, else a `pending` one. Keep draining the queue
+   exactly as the step-6 cascade demands; **only** end the turn when that
+   re-sweep finds nothing else actionable (then simply stop).
 
 2. **Decide by default; park only what you truly cannot.** Most judgment
    calls are yours to make. If the task's `autonomy` is `judgement`,
