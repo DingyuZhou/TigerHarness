@@ -7,6 +7,7 @@ lock back-off. Uses a mock summarizer (no live model).
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from textwrap import dedent
 
@@ -101,10 +102,21 @@ def test_no_hard_drop_invariant(tmp_path: Path):
 
 def test_fresh_window_kept_sharp(tmp_path: Path):
     cfg, store, bs = _store(tmp_path, dmax=60, fresh=7)
-    # both within 7 days of 06-19 -> fresh -> never fuzzed even over the bound.
+    # Dates are anchored RELATIVE to now: the fresh-window guard compares
+    # last_used against the real wall clock (fuzz_select.days_between(.., now)),
+    # so hard-coded calendar dates silently age out of the window as time
+    # passes. Both entries sit 1-2 days back -> always fresh -> never fuzzed
+    # even though the store is over the 60-char bound.
+    now = datetime.now(timezone.utc)
+
+    def _fresh(id_, days_ago, weight, text):
+        ts = (now - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return DiaryEntry(id=id_, text=text, created_at=ts, last_used=ts,
+                          source="diary", weight=weight)
+
     bs.save_atomic(STORE_DIARY, [
-        _d("f1", 18, 0.0, "fresh zero-weight note padding padding"),
-        _d("f2", 19, 1.0, "fresh recent note padding padding"),
+        _fresh("f1", 2, 0.0, "fresh zero-weight note padding padding"),
+        _fresh("f2", 1, 1.0, "fresh recent note padding padding"),
     ])
     res = meditate_persona("ctx", MISSION, MockSummarizer(), cfg, bs)
     kept = {e.text for e in bs.load(STORE_DIARY)}
