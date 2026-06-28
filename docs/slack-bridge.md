@@ -524,16 +524,41 @@ The reference [`examples/slack-bridge-multi.service`](../examples/slack-bridge-m
 
 ## Idle compaction (ADR 0004)
 
-Opt-in: between tasks, when the journal is idle and the last turn's
-usage shows the session's context above a threshold, the bridge sends
-one `/compact` turn to the resumed session (the mechanism proved in
+Between tasks, when the journal is idle and the last turn's usage
+shows the session's context above a threshold, the bridge sends one
+`/compact` turn to the resumed session (the mechanism proved in
 `docs/adr/0004-bridge-idle-compaction.md`). Hard rules: never
 mid-task (the idle check is the guard), at most one compact per idle
 period (a per-thread latch cleared by the next real turn), and
 fail-soft everywhere — a failed compact logs and skips, never breaks
 a turn.
 
-Env surface (this section is the single home for these names):
+### Multi-team: per-lane fragment flag (the normal path)
+
+A single bridge process serves N lanes, but a process-wide env var
+can name only one journal. So in multi-team mode each lane configures
+idle compaction in its own `slack-bridge.yaml` fragment:
+
+```yaml
+idle_compact: true   # on by default for teams scaffolded by `tigerharness init`
+```
+
+The journal root is **auto-resolved to `<team>/journal`** — there is
+no path to hand-write. A team whose journal has no `active/` directory
+disables the feature fail-soft (it never aborts the lane), and a
+typo'd flag value reads as off rather than crashing the load. Omit the
+key to opt a lane out; threshold and window keep their defaults
+(`0.30` / `200000`) — tuning them is a future fragment field.
+
+New teams ship with `idle_compact: true` (Operator default,
+2026-06-27). To enable an existing lane, add the line to its fragment
+and restart the bridge.
+
+### Single-tenant / legacy: env surface
+
+When a lane supplies no `idle_compact` config (or you run the
+single-tenant bridge), the bridge falls back to this env surface
+(this section is the single home for these names):
 
 - `TIGERHARNESS_IDLE_COMPACT` — `1`/`true` to enable. **Default off.**
 - `TIGERHARNESS_IDLE_COMPACT_JOURNAL` — the journal root (REQUIRED;

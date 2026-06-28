@@ -112,6 +112,12 @@ class TeamBridgeContext:
     # "rebuild" (legacy claude -p, default) | "off" (in-session sweep
     # protocol owns it). See config.normalize_tiger_memory_trigger.
     tiger_memory_trigger: str = "rebuild"
+    # Per-lane idle-compaction config (ADR 0004). None -> the bridge
+    # falls back to IdleCompactConfig.from_env() (single-tenant / legacy).
+    # Multi-lane builds one per lane from the team's slack-bridge.yaml
+    # fragment (see multi._build_idle_compact), because one process-wide
+    # os.environ cannot describe N lanes' separate journals.
+    idle_compact: "IdleCompactConfig | None" = None
 
     @property
     def is_multi_persona(self) -> bool:
@@ -174,7 +180,13 @@ class SlackBridge:
         self._downloader: FileDownloader = downloader or SlackFileDownloader(
             self._team.slack_bot_token
         )
-        self._idle_compact_cfg = IdleCompactConfig.from_env()
+        # Per-lane config wins (multi-team); fall back to the env surface
+        # only when no lane config was supplied (single-tenant / legacy).
+        self._idle_compact_cfg = (
+            self._team.idle_compact
+            if self._team.idle_compact is not None
+            else IdleCompactConfig.from_env()
+        )
         self._threads: dict[str, _ThreadState] = {}
         self._threads_guard = asyncio.Lock()
 

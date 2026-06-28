@@ -5,6 +5,18 @@ CLI version the verdict is bound to: **Claude Code 2.1.140** — a
 future CLI could change headless slash-command handling; re-run the
 experiment below before trusting this ADR across major versions.
 
+**Implementation status (2026-06-27):** built and live in the
+slack-bridge layer (`slack_bridge/idle_compact.py`). Config moved from
+process-wide env to a **per-lane fragment flag** (`idle_compact: true`
+in each team's `slack-bridge.yaml`), because one bridge process serves
+many lanes and a single `os.environ` cannot name N separate journals;
+the journal root auto-resolves to `<team>/journal`. The env surface
+(`TIGERHARNESS_IDLE_COMPACT*`) remains the single-tenant / legacy
+fallback. Per Operator decision, new teams scaffolded by
+`tigerharness init` ship with the flag **on by default**. See
+`docs/slack-bridge.md` → "Idle compaction" for the operator-facing
+surface.
+
 ## Context
 
 Auto-compaction during interactive drives exists (50% threshold,

@@ -49,6 +49,7 @@ from .bridge import (
     build_persona_agent_config,
 )
 from .config import normalize_tiger_memory_trigger
+from .idle_compact import IdleCompactConfig
 
 log = logging.getLogger("tigerharness.slack_bridge.multi")
 
@@ -180,6 +181,33 @@ def _resolve(maybe_rel: str | os.PathLike[str], base: Path) -> Path:
     return p if p.is_absolute() else (base / p)
 
 
+def _coerce_flag(value: object) -> bool:
+    """Coerce a fragment flag to bool. YAML ``true``/``false`` already
+    parse to Python ``bool``; quoted forms (``"true"``, ``"on"``, ``"1"``)
+    are accepted too. Anything unrecognized reads as ``False`` -- a typo'd
+    flag stays safely off rather than aborting the whole multi-lane bridge
+    (idle-compaction is fail-soft end to end)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
+def _build_idle_compact(spec: dict, team_dir: Path, where: str) -> IdleCompactConfig:
+    """Resolve a lane's idle-compaction config (ADR 0004) from its
+    fragment. The on/off flag lives in the fragment (``idle_compact:
+    true``); the journal root is auto-resolved to ``<team>/journal`` so an
+    operator never hand-writes a path. A team whose journal has no
+    ``active/`` dir disables fail-soft. Threshold/window keep their
+    defaults (0.30 / 200k) -- tuning them is a future fragment field."""
+    return IdleCompactConfig.for_lane(
+        enabled=_coerce_flag(spec.get("idle_compact", False)),
+        journal_root=team_dir / "journal",
+        where=where,
+    )
+
+
 def _read_team_roster(team_dir: Path, where: str) -> tuple[list[str], dict[str, list[str]]]:
     """Return persona names and aliases from ``<team>/configs/personas.yaml``.
 
@@ -293,6 +321,7 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
     tiger_memory_trigger = normalize_tiger_memory_trigger(
         spec.get("tiger_memory_trigger"), where=where
     )
+    idle_compact = _build_idle_compact(spec, team_dir, where)
 
     # Tokens
     env_path = _resolve(env_rel, team_dir)
@@ -321,6 +350,7 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
         tiger_memory_cli=env_vars.get("TIGER_MEMORY_CLI", ""),
         persona_aliases=persona_aliases or None,
         tiger_memory_trigger=tiger_memory_trigger,
+        idle_compact=idle_compact,
     )
     return LaneConfig(name=lane_name, team_ctx=team_ctx, state_path=state_path)
 

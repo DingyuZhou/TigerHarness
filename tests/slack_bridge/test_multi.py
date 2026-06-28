@@ -9,6 +9,7 @@ from tigerharness.slack_bridge.multi import (
     LaneConfig,
     MultiBridgeConfig,
     _check_lane_uniqueness,
+    _coerce_flag,
     _load_yaml,
     _resolve,
     load_multi,
@@ -380,6 +381,67 @@ class TestLoadMultiTigerMemoryTrigger:
         idx = _write_index(tmp_path, ["shohoku"])
         with pytest.raises(ValueError, match="lane 'shohoku'.*unknown tiger_memory_trigger"):
             load_multi(idx)
+
+
+# ---------------------------------------------------------------------------
+# idle_compact (ADR 0004) per-lane wiring
+# ---------------------------------------------------------------------------
+
+class TestLoadMultiIdleCompact:
+    """Per-lane idle compaction comes from the fragment's ``idle_compact``
+    flag; the journal root auto-resolves to ``<team>/journal``."""
+
+    def _fragment(self, root: Path, idle_line: str = "") -> str:
+        return (
+            "default_persona: ayako\n"
+            "allowed_user_ids:\n  - U0CEO\n"
+            f"state_dir: {root / 'state/shohoku'}\n"
+            f"{idle_line}"
+        )
+
+    def test_absent_flag_disables(self, tmp_path: Path):
+        # _make_valid_team's fragment has no idle_compact line.
+        _make_valid_team(tmp_path, "shohoku")
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        ic = cfg.lanes[0].team_ctx.idle_compact
+        assert ic is not None
+        assert ic.enabled is False
+
+    def test_enabled_with_journal_arms(self, tmp_path: Path):
+        team_dir = _make_valid_team(tmp_path, "shohoku")
+        # The journal must exist with an active/ dir for the feature to arm.
+        (team_dir / "journal" / "active").mkdir(parents=True)
+        _write_fragment(team_dir, self._fragment(tmp_path, "idle_compact: true\n"))
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        ic = cfg.lanes[0].team_ctx.idle_compact
+        assert ic.enabled is True
+        assert ic.journal_root == team_dir / "journal"
+
+    def test_enabled_but_no_journal_disables_fail_soft(self, tmp_path: Path):
+        # Flag on, but the team has no journal/active dir -> disabled,
+        # and the whole multi-load still succeeds (never aborts a lane).
+        team_dir = _make_valid_team(tmp_path, "shohoku")
+        _write_fragment(team_dir, self._fragment(tmp_path, "idle_compact: true\n"))
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        assert cfg.lanes[0].team_ctx.idle_compact.enabled is False
+
+    def test_quoted_flag_forms_accepted(self, tmp_path: Path):
+        team_dir = _make_valid_team(tmp_path, "shohoku")
+        (team_dir / "journal" / "active").mkdir(parents=True)
+        _write_fragment(
+            team_dir, self._fragment(tmp_path, 'idle_compact: "on"\n'))
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        assert cfg.lanes[0].team_ctx.idle_compact.enabled is True
+
+    def test_coerce_flag_truth_table(self):
+        for truthy in (True, "1", "true", "TRUE", "yes", "on", " On "):
+            assert _coerce_flag(truthy) is True
+        for falsy in (False, "0", "false", "off", "", "nope", None, 1, []):
+            assert _coerce_flag(falsy) is False
 
 
 # ---------------------------------------------------------------------------
