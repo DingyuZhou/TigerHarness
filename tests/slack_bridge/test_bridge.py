@@ -299,6 +299,56 @@ class TestSlackBridgeInitErrors:
             SlackBridge(cfg, None, agent_cfg, MagicMock())
 
 
+class TestIdleCompactConfigSelection:
+    """The bridge prefers a per-lane ``team_ctx.idle_compact`` when set
+    (multi-team), and only falls back to ``IdleCompactConfig.from_env()``
+    when the lane supplied none (single-tenant / legacy)."""
+
+    def _team_ctx(self, tmp_path: Path, idle_compact):
+        from tigerharness.slack_bridge.bridge import (
+            PersonaSlot, TeamBridgeContext,
+        )
+        return TeamBridgeContext(
+            team_name="shohoku",
+            slack_app_token="xapp-x", slack_bot_token="xoxb-x",
+            allowed_user_ids=frozenset({"U0CEO"}),
+            agent_cwd=str(tmp_path),
+            personas={"a": PersonaSlot(
+                name="a",
+                agent_config=AgentConfig(name="a", instructions="x"),
+            )},
+            default_persona="a",
+            idle_compact=idle_compact,
+        )
+
+    def test_per_lane_config_wins(self, tmp_path: Path):
+        from tigerharness.slack_bridge.idle_compact import IdleCompactConfig
+        journal = tmp_path / "journal"
+        (journal / "active").mkdir(parents=True)
+        lane_cfg = IdleCompactConfig(enabled=True, journal_root=journal)
+        b = SlackBridge(
+            team_ctx=self._team_ctx(tmp_path, lane_cfg),
+            backend=MagicMock(), store=MagicMock(),
+        )
+        assert b._idle_compact_cfg is lane_cfg
+
+    def test_falls_back_to_env_when_lane_unset(self, tmp_path: Path):
+        # No per-lane config -> the bridge consults from_env(). With a
+        # clean env that yields a disabled config (the conservative default).
+        from tigerharness.slack_bridge import bridge as bridge_mod
+        sentinel = object()
+        with patch.object(
+            bridge_mod.IdleCompactConfig, "from_env",
+            return_value=sentinel,
+        ) as from_env:
+            b = SlackBridge(
+                team_ctx=self._team_ctx(tmp_path, None),
+                backend=MagicMock(), store=MagicMock(),
+            )
+        from_env.assert_called_once()
+        assert b._idle_compact_cfg is sentinel
+
+
 class TestBuildBridge:
     """`build_bridge(cfg, state_path=...)` composes the bridge wiring.
 

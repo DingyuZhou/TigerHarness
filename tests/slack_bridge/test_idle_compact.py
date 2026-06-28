@@ -113,6 +113,54 @@ class TestConfigParsing:
         assert cfg.context_window_tokens == 100_000
 
 
+class TestForLane:
+    """Per-lane config (multi-team mode): one bridge process, many
+    journals -- the journal root is passed in, never read from the
+    process-wide env. Same fail-soft guards as ``from_env``."""
+
+    def test_disabled_flag_yields_disabled(self, tmp_path):
+        # The off switch short-circuits before any journal/range check,
+        # so even a perfectly good root stays disabled.
+        cfg = IdleCompactConfig.for_lane(
+            enabled=False, journal_root=_journal(tmp_path))
+        assert cfg.enabled is False
+        assert cfg.journal_root is None
+
+    def test_enabled_with_good_root_enables(self, tmp_path):
+        root = _journal(tmp_path)
+        cfg = IdleCompactConfig.for_lane(
+            enabled=True, journal_root=root)
+        assert cfg.enabled is True
+        assert cfg.journal_root == root
+        assert cfg.threshold_fraction == 0.30
+        assert cfg.context_window_tokens == 200_000
+
+    def test_enabled_with_bad_root_disables(self, tmp_path, caplog):
+        cfg = IdleCompactConfig.for_lane(
+            enabled=True, journal_root=tmp_path / "nope",
+            where="teams[2] Shohoku")
+        assert cfg.enabled is False
+        # The `where` tag rides along in the warning so logs name the lane.
+        assert "no active/ dir" in caplog.text
+        assert "Shohoku" in caplog.text
+
+    def test_out_of_range_threshold_disables(self, tmp_path, caplog):
+        cfg = IdleCompactConfig.for_lane(
+            enabled=True, journal_root=_journal(tmp_path),
+            threshold_fraction=1.5)
+        assert cfg.enabled is False
+        assert "invalid" in caplog.text
+
+    def test_custom_threshold_and_window_carry_through(self, tmp_path):
+        root = _journal(tmp_path)
+        cfg = IdleCompactConfig.for_lane(
+            enabled=True, journal_root=root,
+            threshold_fraction=0.5, context_window_tokens=100_000)
+        assert cfg.enabled is True
+        assert cfg.threshold_fraction == 0.5
+        assert cfg.context_window_tokens == 100_000
+
+
 class TestContextFraction:
     def test_real_payload(self):
         assert context_fraction(HOT_USAGE, 200_000) == pytest.approx(

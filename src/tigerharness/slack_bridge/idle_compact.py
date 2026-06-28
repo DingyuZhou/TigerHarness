@@ -71,12 +71,6 @@ class IdleCompactConfig:
             )
             return cls()
         root = Path(raw_root)
-        if not (root / "active").is_dir():
-            log.warning(
-                "idle-compact journal root %s has no active/ dir; "
-                "feature disabled", root,
-            )
-            return cls()
         try:
             threshold = float(e.get(
                 "TIGERHARNESS_IDLE_COMPACT_THRESHOLD",
@@ -85,18 +79,80 @@ class IdleCompactConfig:
             window = int(e.get(
                 "TIGERHARNESS_IDLE_COMPACT_WINDOW", str(_DEFAULT_WINDOW),
             ))
-            if not (0.0 < threshold < 1.0) or window <= 0:
-                raise ValueError(f"threshold={threshold} window={window}")
         except ValueError as exc:
             log.warning(
                 "idle-compact config invalid (%s); feature disabled", exc,
             )
             return cls()
+        return cls._enabled_or_disabled(
+            journal_root=root, threshold=threshold, window=window, source="",
+        )
+
+    @classmethod
+    def _enabled_or_disabled(
+        cls,
+        *,
+        journal_root: Path,
+        threshold: float,
+        window: int,
+        source: str,
+    ) -> "IdleCompactConfig":
+        """Shared tail for :meth:`from_env` and :meth:`for_lane`: apply
+        the journal-exists and range guards, returning the ENABLED config
+        only when both pass and a DISABLED one (with a warning) otherwise.
+        Fail-soft by construction -- a missing journal or a nonsense
+        threshold never raises, it just turns the feature off. ``source``
+        is appended to the warning so logs say which path (env vs a named
+        lane) tripped."""
+        if not (journal_root / "active").is_dir():
+            log.warning(
+                "idle-compact journal root %s has no active/ dir; "
+                "feature disabled%s", journal_root, source,
+            )
+            return cls()
+        if not (0.0 < threshold < 1.0) or window <= 0:
+            log.warning(
+                "idle-compact config invalid (threshold=%s window=%s); "
+                "feature disabled%s", threshold, window, source,
+            )
+            return cls()
         return cls(
             enabled=True,
-            journal_root=root,
+            journal_root=journal_root,
             threshold_fraction=threshold,
             context_window_tokens=window,
+        )
+
+    @classmethod
+    def for_lane(
+        cls,
+        *,
+        enabled: bool,
+        journal_root: Path,
+        threshold_fraction: float = _DEFAULT_THRESHOLD,
+        context_window_tokens: int = _DEFAULT_WINDOW,
+        where: str = "",
+    ) -> "IdleCompactConfig":
+        """Build a per-lane config for multi-team mode.
+
+        Why this exists alongside :meth:`from_env`: one bridge process
+        serves many lanes, but ``from_env`` reads the single process-wide
+        ``os.environ`` and so can describe only ONE journal. Multi-team
+        config therefore comes per-lane from each team's
+        ``slack-bridge.yaml`` fragment; the caller passes the resolved
+        on/off flag plus the journal root it auto-resolves to
+        ``<team>/journal`` (so an operator never hand-writes a path).
+        Same fail-soft guards as ``from_env``: a disabled flag, a journal
+        without ``active/``, or an out-of-range threshold/window all yield
+        a disabled config -- this never raises, so one lane's bad config
+        can never abort the whole multi-lane bridge."""
+        if not enabled:
+            return cls()
+        return cls._enabled_or_disabled(
+            journal_root=journal_root,
+            threshold=threshold_fraction,
+            window=context_window_tokens,
+            source=f" ({where})" if where else "",
         )
 
 
