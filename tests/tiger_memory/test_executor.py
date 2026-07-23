@@ -1,6 +1,7 @@
-"""Tests for the in-session extraction write-back (executor.py)."""
+"""Tests for the in-session extraction write-back (executor.py, ADR 0007)."""
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from textwrap import dedent
 
@@ -9,13 +10,15 @@ import pytest
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
-    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
+    STORE_TOPICS,
 )
 from tigerharness.tiger_memory.executor import IngestResult, ingest_extraction
 from tigerharness.tiger_memory.lifecycle import ExtractionParseError
 from tigerharness.tiger_memory.store import Store
+
+NOW = "2026-07-23T00:00:00Z"
 
 _BUNDLE = dedent("""\
     @@SKILLS@@
@@ -25,10 +28,22 @@ _BUNDLE = dedent("""\
     @@MUST_REMEMBER@@
     KIND: decision
     MEMO: store lives in-repo
-    @@DIARY@@
-    WEIGHT: 2
-    REACTION: ok
-    TEXT: shipped a thing
+    @@TOPICS@@
+    TOPIC: NEW
+    NAME: Store Revamp
+    SUMMARY: Topic-store revamp status.
+    DETAIL: shipped the three-store layout
+""")
+
+# A follow-up bundle routing a detail to the topic minted by _BUNDLE.
+_FOLLOWUP = dedent("""\
+    @@SKILLS@@
+    NONE
+    @@MUST_REMEMBER@@
+    NONE
+    @@TOPICS@@
+    TOPIC: store-revamp
+    DETAIL: compaction landed too
 """)
 
 
@@ -51,18 +66,45 @@ def test_ingest_extraction_writes_stores(tmp_path: Path) -> None:
     store.init_layout()
     result = ingest_extraction(
         store, cfg, conversation_uuid="c1", source="claude_code",
-        bundle_text=_BUNDLE,
+        bundle_text=_BUNDLE, now=NOW,
     )
     assert isinstance(result, IngestResult)
     assert result.conversation_uuid == "c1"
     assert result.skills_added == 1
     assert result.must_remember_added == 1
-    assert result.diary_added == 1
+    assert result.topics_added == 1
     assert result.total_added == 3
     bstore = BoundedStore(cfg, store)
     assert len(bstore.load(STORE_SKILLS)) == 1
     assert len(bstore.load(STORE_MUST_REMEMBER)) == 1
-    assert len(bstore.load(STORE_DIARY)) == 1
+    topics = bstore.load(STORE_TOPICS)
+    assert len(topics) == 1
+    t = topics[0]
+    assert t.slug == "store-revamp" and t.touch_count == 1
+    assert t.summary == "Topic-store revamp status."
+    assert t.text == "## 2026-07-23\n- shipped the three-store layout"
+
+
+def test_ingest_extraction_routes_to_existing_topic(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    ingest_extraction(store, cfg, conversation_uuid="c1", source="claude_code",
+                      bundle_text=_BUNDLE, now=NOW)
+    result = ingest_extraction(
+        store, cfg, conversation_uuid="c2", source="claude_code",
+        bundle_text=_FOLLOWUP, now="2026-07-24T00:00:00Z",
+    )
+    assert result.skills_added == 0
+    assert result.must_remember_added == 0
+    assert result.topics_added == 1
+    assert result.total_added == 1
+    topics = BoundedStore(cfg, store).load(STORE_TOPICS)
+    assert len(topics) == 1  # routed, not duplicated
+    t = topics[0]
+    assert t.touch_count == 2
+    assert t.last_used == "2026-07-24T00:00:00Z"
+    assert "## 2026-07-24\n- compaction landed too" in t.text
 
 
 def test_ingest_extraction_malformed_raises_before_write(tmp_path: Path) -> None:
@@ -73,4 +115,13 @@ def test_ingest_extraction_malformed_raises_before_write(tmp_path: Path) -> None
         ingest_extraction(store, cfg, conversation_uuid="c1",
                           source="x", bundle_text="no markers here")
     # Nothing written.
-    assert BoundedStore(cfg, store).load(STORE_SKILLS) == []
+    bstore = BoundedStore(cfg, store)
+    assert bstore.load(STORE_SKILLS) == []
+    assert bstore.load(STORE_TOPICS) == []
+
+
+def test_ingest_extraction_has_no_summarizer_kwarg() -> None:
+    # ADR 0007: extraction happens in the sub-agent; the write-back entry
+    # point is pure parse+merge and takes no summarizer.
+    params = inspect.signature(ingest_extraction).parameters
+    assert "summarizer" not in params

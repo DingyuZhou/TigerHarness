@@ -1,18 +1,14 @@
-"""tiger-memory CLI entrypoint (bounded-store revamp).
+"""tiger-memory CLI entrypoint (topic-store revamp, ADR 0007).
 
 Subcommands:
 
     Writers:
         init          create empty store, validate config
         rebuild       fresh-start: drop the retired surface, regenerate the
-                      session-start briefing (skill index + must_remember +
-                      emotional view + unprocessed notice)
+                      session-start briefing (indexes + detail files + notice)
         pin           write a must_remember entry directly
-        import-legacy one-off (idempotent) seed of the three stores from the
-                      old must_memorize.md pins + daily/weekly/monthly rollups.
-                      MUST run BEFORE the fresh-start `rebuild` (which deletes
-                      the legacy files): merge -> migrate configs ->
-                      import-legacy -> rebuild -> sweep.
+        migrate-to-topics  one-off (idempotent): retire diary/fuzzy files to
+                      <root>/retired/ and create the topics store
 
     Readers (lockless):
         state         show JSON state snapshot for the three bounded stores
@@ -26,6 +22,10 @@ Subcommands:
                             map_reduce item's staged chunk digests (ADR 0006 Pt1)
         ingest-staged       ingest every staged <uuid>.extract.md card in ONE
                             process (per-persona merge serialized by construction)
+        compact-plan        stage one compaction prompt per over-bound surface
+                            (index / detail / must_remember); print the manifest
+        compact-apply       validate + apply every staged compaction card in
+                            ONE process (deterministic convergence fallback)
 
     Team-sweep gating (B3, non-AI -- drive the in-session protocol):
         sweep-plan      claim the team sweep; print targets for this wake
@@ -79,20 +79,15 @@ def main(argv: list[str] | None = None) -> int:
         default="operator_explicit",
     )
 
-    p_imp = sub.add_parser(
-        "import-legacy",
-        help="One-off (idempotent) seed of the 3 stores from the old "
-             "must_memorize.md pins + daily/weekly/monthly rollups. Run BEFORE "
-             "`rebuild` (which deletes the legacy files).",
+    p_mig = sub.add_parser(
+        "migrate-to-topics",
+        help="One-off (idempotent): retire diary/fuzzy journal files to "
+             "<root>/retired/ and create the topics store (ADR 0007).",
     )
-    p_imp.add_argument(
-        "--mock", action="store_true",
-        help="Use the deterministic mock summarizer (no live model; CI/dry-run).",
-    )
-    p_imp.add_argument(
-        "--force", action="store_true",
-        help="Re-seed even if already imported (drops prior import-legacy "
-             "entries first).",
+    p_mig.add_argument(
+        "--apply", action="store_true",
+        help="Perform it (move files, create topics.md). "
+             "Default: dry-run (preview only, nothing written).",
     )
 
     # ----- readers -----
@@ -126,6 +121,18 @@ def main(argv: list[str] | None = None) -> int:
         "ingest-staged",
         help="Glue: ingest every staged <uuid>.extract.md card in ONE process "
              "(per-persona merge serialized by construction -- no race).",
+    )
+
+    sub.add_parser(
+        "compact-plan",
+        help="Stage one compaction prompt per over-bound surface (non-AI; "
+             "runs the deterministic stale-topic forget first).",
+    )
+
+    sub.add_parser(
+        "compact-apply",
+        help="Validate + apply every staged compaction card in ONE process "
+             "(deterministic convergence fallback; no silent oversize).",
     )
 
     # ----- B3 team-sweep gating convenience CLIs (non-AI) -----
@@ -168,14 +175,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Repair mechanical drift + quarantine non-mechanical to "
              "<store>.rejected.md (no silent loss).")
 
-    p_mig = sub.add_parser(
-        "migrate-emotional-to-diary",
-        help="Convert legacy emotional.md -> dated-bullet diary.md.")
-    p_mig.add_argument(
-        "--apply", action="store_true",
-        help="Perform it (snapshot .bak, write diary.md, mark done). "
-             "Default: dry-run (preview only, nothing written).")
-
     args = parser.parse_args(argv)
 
     try:
@@ -194,8 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "pin":
         from .lifecycle import pin as pin_cmd
         return pin_cmd(cfg, store, memo=args.memo, kind=args.kind)
-    if args.cmd == "import-legacy":
-        return _cmd_import_legacy(cfg, store, mock=args.mock, force=args.force)
+    if args.cmd == "migrate-to-topics":
+        return _cmd_migrate_topics(cfg, store, apply=args.apply)
     if args.cmd == "state":
         return _cmd_state(cfg, store)
     if args.cmd == "plan":
@@ -206,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_build_reduce_prompts(cfg, store)
     if args.cmd == "ingest-staged":
         return _cmd_ingest_staged(cfg, store)
+    if args.cmd == "compact-plan":
+        return _cmd_compact_plan(cfg, store)
+    if args.cmd == "compact-apply":
+        return _cmd_compact_apply(cfg, store)
     if args.cmd == "sweep-plan":
         return _cmd_sweep_plan(
             cfg, token=args.token, max_personas=args.max_personas,
@@ -218,10 +221,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_sweep_complete(cfg, now=args.now)
     if args.cmd == "sweep-release":
         return _cmd_sweep_release(cfg)
-    if args.cmd == "check":
+    if args.cmd == "check":  # pragma: no branch  # exhaustive
         return _cmd_check(cfg, store, fix=args.fix)
-    if args.cmd == "migrate-emotional-to-diary":  # pragma: no branch  # exhaustive
-        return _cmd_migrate_diary(cfg, store, apply=args.apply)
     return 2  # pragma: no cover  # argparse rejects unknown subcommands first
 
 
@@ -268,41 +269,37 @@ def _cmd_check(cfg: Config, store: Store, *, fix: bool) -> int:
     return 0 if report.ok else 1
 
 
-def _cmd_migrate_diary(cfg: Config, store: Store, *, apply: bool) -> int:
-    """Convert legacy emotional.md -> diary.md (dry-run unless ``--apply``).
-
-    Exit 0 on a clean dry-run/apply or a no-op skip; exit 1 if accounting does
-    not balance (a source block neither kept nor explicitly forgotten).
-    """
-    from .migrate_emotional_to_diary import migrate_store
+def _cmd_migrate_topics(cfg: Config, store: Store, *, apply: bool) -> int:
+    """Retire diary/fuzzy files + create the topics store (dry-run unless
+    ``--apply``). Idempotent; exit 0 always (a no-op re-run is success)."""
+    from .migrate_topics import migrate_store
     res = migrate_store(cfg, store, apply=apply)
-    print(json.dumps({
-        "persona": res.persona, "applied": res.applied,
-        "skipped_reason": res.skipped_reason, "source_blocks": res.source_blocks,
-        "converted": res.converted, "kept": res.kept, "forgotten": res.forgotten,
-        "no_loss": res.no_loss,
-    }, indent=2))
-    return 0 if (res.skipped_reason or res.no_loss) else 1
-
-
-def _cmd_import_legacy(cfg: Config, store: Store, *, mock: bool, force: bool) -> int:
-    """One-off legacy import — seed the three stores from the old pins + rollups.
-
-    Idempotent: a no-op once imported (unless ``--force``). ``--mock`` uses the
-    deterministic mock summarizer (no live model). NEVER runs ``rebuild`` — the
-    caller drops the legacy files AFTER (merge -> migrate configs ->
-    import-legacy -> rebuild -> sweep).
-    """
-    from .import_legacy import import_legacy_run
-    from .lifecycle import _build_summarizer
-    summarizer = _build_summarizer(cfg, mock=mock)
-    result = import_legacy_run(cfg, store, summarizer=summarizer, force=force)
-    if result.get("skipped") == "already":
-        print("import-legacy: already imported; nothing to do (use --force to re-seed)")
-        return 0
-    print(f"import-legacy seeded: {result['skills']} skills, "
-          f"{result['must_remember']} must_remember, {result['diary']} emotional")
+    print(json.dumps(res.to_dict(), indent=2))
     return 0
+
+
+def _cmd_compact_plan(cfg: Config, store: Store) -> int:
+    """Stage compaction prompts for every over-bound surface (non-AI)."""
+    from .compaction import compact_plan
+    manifest = compact_plan(cfg, store)
+    print(json.dumps(manifest, indent=2))
+    return 0
+
+
+def _cmd_compact_apply(cfg: Config, store: Store) -> int:
+    """Apply every staged compaction card in one process.
+
+    Exit: 0 = clean (some cards may be skipped-no-card; they simply re-stage
+    next sweep); 1 = ≥1 malformed card; 2 = no compaction manifest.
+    """
+    from .compaction import compact_apply
+    try:
+        report = compact_apply(cfg, store)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(report.to_dict(), indent=2))
+    return 1 if report.malformed else 0
 
 
 def _cmd_plan(cfg: Config, store: Store, max_sessions: int | None) -> int:
@@ -380,7 +377,7 @@ def _cmd_ingest_extraction(cfg: Config, store: Store, uuid: str) -> int:
         return 1
     print(f"ingested {result.conversation_uuid} (+{result.total_added} entries: "
           f"{result.skills_added} skills, {result.must_remember_added} "
-          f"must_remember, {result.diary_added} emotional)")
+          f"must_remember, {result.topics_added} topic detail(s))")
     return 0
 
 

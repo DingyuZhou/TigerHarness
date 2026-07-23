@@ -57,7 +57,8 @@ So restore the *idea* on the staging path:
   `chunk_condense` prompt (recoverable from PR #42).
 - A **reduce step** runs the normal extraction prompt over the concatenated
   digests to emit the final 3-store card (`<uuid>.extract.md`). The extraction
-  contract (`@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@DIARY@@`) stays
+  contract (`@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@TOPICS@@` since
+  ADR 0007) stays
   single-sourced — only the reduce emits it; the map digests are plain prose.
 - Keep a hard depth cap + a bounded `_clip` as the last-resort termination
   guard (a pathological input can't loop forever), exactly as PR #42 did.
@@ -78,7 +79,7 @@ Persist a per-conversation cursor so each sweep processes only the new slice:
 - **Short-range context = a small raw overlap window.** Include the last few
   events *before* the cursor (recommend 3–5 completed turns) as **read-only**
   context in the slice prompt; extract memory only from events *after* the
-  cursor. Dedup + meditation fold any incidental overlap.
+  cursor. Dedup + compaction fold any incidental overlap.
 - **Advance the cursor** only after the slice's card is successfully ingested.
 
 We **do not** add a periodic full re-sweep backstop (explicitly dropped per

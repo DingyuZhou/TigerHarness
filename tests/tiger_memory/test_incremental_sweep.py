@@ -340,13 +340,15 @@ def test_active_cut_is_whole_turn_boundary(tmp_path, monkeypatch) -> None:
     content = _turns([
         ("2026-06-29T00:00:00Z", "user", "A" * 40),
         ("2026-06-29T00:05:00Z", "assistant", "B" * 40),    # completed sum > 50
-        ("2026-06-29T00:10:00Z", "user", "TAIL"),
+        # NB: sentinel must not be a substring of the extract prompt template
+        # (which contains e.g. "DETAIL:"), so not plain "TAIL".
+        ("2026-06-29T00:10:00Z", "user", "LIVETAIL"),
     ])
     rec = _rec(content, active=True, last="2026-06-29T00:10:00Z")
     item = _plan(cfg, store, rec, monkeypatch)[0]
     staged = _staged(item)
     assert "A" * 40 in staged and "B" * 40 in staged        # whole completed turns
-    assert "TAIL" not in staged                             # cut before the live tail
+    assert "LIVETAIL" not in staged                         # cut before the live tail
     assert item["cursor_event_at"] == "2026-06-29T00:05:00+00:00"
 
 

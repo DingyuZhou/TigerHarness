@@ -27,6 +27,11 @@ def test_loads_minimal(minimal_config_yaml: Path) -> None:
     # Extraction word budgets default.
     assert cfg.memory_extract.memo_words == 25
     assert cfg.memory_extract.skill_procedure_words == 120
+    assert cfg.memory_extract.topic_summary_words == 25
+    assert cfg.memory_extract.topic_detail_words == 80
+    assert cfg.memory_extract.max_output_words == 600
+    # reaction_words is gone with the diary store (ADR 0007).
+    assert not hasattr(cfg.memory_extract, "reaction_words")
 
 
 def test_memory_extract_explicit_overrides(tmp_path: Path) -> None:
@@ -35,12 +40,14 @@ def test_memory_extract_explicit_overrides(tmp_path: Path) -> None:
         "memory_extract:\n"
         "  skill_procedure_words: 80\n"
         "  memo_words: 15\n"
-        "  reaction_words: 30\n"
+        "  topic_summary_words: 20\n"
+        "  topic_detail_words: 60\n"
         "  max_output_words: 400\n",
     ))
     assert cfg.memory_extract.skill_procedure_words == 80
     assert cfg.memory_extract.memo_words == 15
-    assert cfg.memory_extract.reaction_words == 30
+    assert cfg.memory_extract.topic_summary_words == 20
+    assert cfg.memory_extract.topic_detail_words == 60
     assert cfg.memory_extract.max_output_words == 400
 
 
@@ -474,6 +481,35 @@ def test_content_budgets_explicit_overrides(tmp_path: Path) -> None:
     cfg = load_config(cfg_path)
     assert cfg.budgets.max_prompt_content_chars == 50_000
     assert cfg.budgets.max_staged_content_chars == 90_000
+
+
+def test_rebuild_defaults(minimal_config_yaml: Path) -> None:
+    """Fixture sets only lock_path; the rest of rebuild falls to defaults."""
+    cfg = load_config(minimal_config_yaml)
+    assert cfg.rebuild.trigger == "lazy"
+    assert cfg.rebuild.idle_threshold_hours == 1.0
+    assert cfg.rebuild.rebuild_timeout_minutes == 60
+    assert cfg.rebuild.lock_path.name == "test.lock"
+
+
+def test_rebuild_explicit_overrides(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "rebuild.yaml"
+    cfg_path.write_text(
+        f"agent:\n  name: T\n  role: t\n"
+        f"store:\n  root: {tmp_path}/memory\n"
+        f"sources:\n  - kind: claude_code\n    project_path: {tmp_path}/p/\n"
+        f"summarizer:\n  backend: anthropic\n  model: m\n  prompts: default/v1\n"
+        f"rebuild:\n"
+        f"  trigger: eager\n"
+        f"  idle_threshold_hours: 0.5\n"
+        f"  lock_path: {tmp_path}/x.lock\n"
+        f"  rebuild_timeout_minutes: 15\n"
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.rebuild.trigger == "eager"
+    assert cfg.rebuild.idle_threshold_hours == 0.5
+    assert cfg.rebuild.lock_path == tmp_path / "x.lock"
+    assert cfg.rebuild.rebuild_timeout_minutes == 15
 
 
 def test_collapse_defaults_off(minimal_config_yaml: Path) -> None:

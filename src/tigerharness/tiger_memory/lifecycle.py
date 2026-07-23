@@ -1,9 +1,9 @@
-"""Session → memory extraction (bounded-store revamp; design §2, §4; plan §2 dev-3).
+"""Session → memory extraction (topic-store revamp, ADR 0007; design §2, §4).
 
 This module turns a *finished* session — discovered via the unchanged
 ``sources/`` adapters — into candidate entries for the three bounded stores
-(``skills`` / ``must_remember`` / ``emotional``), in-persona, then ingests
-them through Mitsui's :class:`BoundedStore`. It replaces the old
+(``skills`` / ``must_remember`` / ``topics``), in-persona, then ingests
+them through :class:`BoundedStore`. It replaces the old
 rollup / archive / ``longer_memory`` chronological lifecycle entirely
 (design §3 — fully retired, no safety net).
 
@@ -42,15 +42,18 @@ from .config import Config
 from .cursor import load_cursor
 from .entries import (
     KIND_OPERATOR_EXPLICIT,
-    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
+    STORE_TOPICS,
     VALID_KINDS,
     BaseEntry,
-    DiaryEntry,
+    EntryError,
     MustRememberEntry,
     SkillEntry,
+    TopicEntry,
+    topic_slug,
 )
+from .indexes import render_topic_routing_list
 from .prefilter import filter_transcript
 from .skills import refresh_importance
 from .sources import (
@@ -91,12 +94,27 @@ class Decision:
 # section markers, in this order.
 MARK_SKILLS = "@@SKILLS@@"
 MARK_MUST_REMEMBER = "@@MUST_REMEMBER@@"
-MARK_DIARY = "@@DIARY@@"
-_MARKERS = (MARK_SKILLS, MARK_MUST_REMEMBER, MARK_DIARY)
+MARK_TOPICS = "@@TOPICS@@"
+_MARKERS = (MARK_SKILLS, MARK_MUST_REMEMBER, MARK_TOPICS)
 
 
 class ExtractionParseError(ValueError):
     """The extraction output didn't satisfy the marker contract."""
+
+
+@dataclass
+class TopicCandidate:
+    """One parsed ``@@TOPICS@@`` block — routing info, not yet an entry.
+
+    ``slug`` is empty for a NEW topic (``name`` then carries the human name
+    to mint a slug from); otherwise it addresses an existing topic.
+    ``summary`` is empty when the block left the existing summary alone.
+    """
+
+    slug: str
+    name: str
+    summary: str
+    detail: str
 
 
 @dataclass
@@ -105,13 +123,13 @@ class Candidates:
 
     skills: list[SkillEntry]
     must_remember: list[MustRememberEntry]
-    diary: list[DiaryEntry]
+    topics: list[TopicCandidate]
 
     def is_empty(self) -> bool:
-        return not (self.skills or self.must_remember or self.diary)
+        return not (self.skills or self.must_remember or self.topics)
 
     def total(self) -> int:
-        return len(self.skills) + len(self.must_remember) + len(self.diary)
+        return len(self.skills) + len(self.must_remember) + len(self.topics)
 
 
 def _split_sections(text: str) -> dict[str, str]:
@@ -133,13 +151,13 @@ def _split_sections(text: str) -> dict[str, str]:
             pos[stripped] = i
     if any(m not in pos for m in _MARKERS):
         raise ExtractionParseError("missing one or more section markers")
-    i_s, i_m, i_e = pos[MARK_SKILLS], pos[MARK_MUST_REMEMBER], pos[MARK_DIARY]
-    if not (i_s < i_m < i_e):
+    i_s, i_m, i_t = pos[MARK_SKILLS], pos[MARK_MUST_REMEMBER], pos[MARK_TOPICS]
+    if not (i_s < i_m < i_t):
         raise ExtractionParseError("section markers out of order")
     return {
         STORE_SKILLS: "\n".join(lines[i_s + 1:i_m]).strip(),
-        STORE_MUST_REMEMBER: "\n".join(lines[i_m + 1:i_e]).strip(),
-        STORE_DIARY: "\n".join(lines[i_e + 1:]).strip(),
+        STORE_MUST_REMEMBER: "\n".join(lines[i_m + 1:i_t]).strip(),
+        STORE_TOPICS: "\n".join(lines[i_t + 1:]).strip(),
     }
 
 
@@ -210,29 +228,37 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
                 kind=kind, importance=1.0,
             )
         )
-    emo: list[DiaryEntry] = []
-    for b in _section_blocks(sections[STORE_DIARY]):
-        body = b.get("TEXT")
-        weight = _parse_weight(b.get("WEIGHT"))
-        if weight is None or not body:
+    topics: list[TopicCandidate] = []
+    for b in _section_blocks(sections[STORE_TOPICS]):
+        target = (b.get("TOPIC") or "").strip()
+        name = (b.get("NAME") or "").strip()
+        summary = (b.get("SUMMARY") or "").strip()
+        detail = (b.get("DETAIL") or "").strip()
+        if not target or not detail:
             continue
-        emo.append(
-            DiaryEntry(
-                text=body, created_at=now, last_used=now, source=source,
-                weight=weight,
+        if target.upper() == "NEW":
+            # A NEW topic must be nameable, sluggable, and index-worthy; a
+            # block missing any of that is dropped (never the whole bundle).
+            # The slug probe here keeps an unsluggable NAME (e.g. all
+            # symbols) from blowing up mid-ingest after other stores saved.
+            if not name or not summary:
+                continue
+            try:
+                topic_slug(name)
+            except EntryError:
+                continue
+            topics.append(
+                TopicCandidate(slug="", name=name, summary=summary, detail=detail)
             )
-        )
-    return Candidates(skills=skills, must_remember=must, diary=emo)
-
-
-def _parse_weight(raw: str | None) -> float | None:
-    """Parse a signed emotional weight; ``None`` if missing/unparseable."""
-    if raw is None:
-        return None
-    try:
-        return float(raw.strip().split()[0]) if raw.strip() else None
-    except (ValueError, IndexError):
-        return None
+        else:
+            try:
+                slug = topic_slug(target)
+            except EntryError:
+                continue
+            topics.append(
+                TopicCandidate(slug=slug, name=name, summary=summary, detail=detail)
+            )
+    return Candidates(skills=skills, must_remember=must, topics=topics)
 
 
 # ----- extraction (the model touch point) -----------------------------------
@@ -244,13 +270,16 @@ def extract_candidates(
     rec: SourceRecord,
     *,
     now: str | None = None,
+    topic_index: str = "",
 ) -> Candidates:
     """Run the extraction prompt over *rec* and parse the typed candidates.
 
     The single LLM call (mock in CI). A backend error or a malformed bundle is
     logged-and-swallowed into empty candidates so one bad session never aborts
     a sweep. The transcript is pre-filtered (if enabled) and clipped to the
-    staged ceiling before the call.
+    staged ceiling before the call. *topic_index* is the routing list of the
+    persona's existing topics (``render_topic_routing_list``) embedded so the
+    summarizer files facts into existing topics instead of minting duplicates.
     """
     now = now or iso_now()
     content = rec.content
@@ -261,18 +290,8 @@ def extract_candidates(
             drop_system_reminders=cfg.prefilter.drop_system_reminders,
         )
     content = _clip(content, cfg.budgets.max_prompt_content_chars)
-    prompt = _fill_prompt(
-        _prompts_root(cfg) / "extract_memory.md",
-        agent_name=cfg.agent.name,
-        source=rec.source,
-        source_id=rec.source_id,
-        first_event_at=rec.first_event_at.isoformat(),
-        last_event_at=rec.last_event_at.isoformat(),
-        procedure_max_words=cfg.memory_extract.skill_procedure_words,
-        memo_max_words=cfg.memory_extract.memo_words,
-        reaction_max_words=cfg.memory_extract.reaction_words,
-        weight_cap=int(cfg.memory.diary.weight_cap),
-        content=content,
+    prompt = _fill_extract_prompt(
+        cfg, _prompts_root(cfg), rec, content, topic_index=topic_index
     )
     try:
         raw = summarizer.summarize(
@@ -283,10 +302,88 @@ def extract_candidates(
         log.warning("extraction parse failed for %s: %s", rec.conversation_uuid, exc)
     except Exception:  # noqa: BLE001 — one bad session must not abort the sweep
         log.exception("extraction call failed for %s", rec.conversation_uuid)
-    return Candidates(skills=[], must_remember=[], diary=[])
+    return Candidates(skills=[], must_remember=[], topics=[])
 
 
 # ----- ingest (candidates → bounded stores) ---------------------------------
+
+
+def _append_topic_detail(text: str, date: str, detail: str) -> str:
+    """Append one detail bullet to a topic body under its ``## <date>`` section.
+
+    The body is a sequence of dated sections (``## YYYY-MM-DD`` headings, each
+    followed by ``- `` bullets, newest section last). If the last section is
+    already *date*'s, the bullet joins it; otherwise a new section is opened.
+    """
+    bullet = f"- {detail}"
+    body = text.rstrip()
+    if not body:
+        return f"## {date}\n{bullet}"
+    headers = re.findall(r"^## (\d{4}-\d{2}-\d{2})\s*$", body, flags=re.MULTILINE)
+    if headers and headers[-1] == date:
+        return f"{body}\n{bullet}"
+    return f"{body}\n\n## {date}\n{bullet}"
+
+
+def _route_topic_candidates(
+    existing: list[BaseEntry],
+    topics: list[TopicCandidate],
+    *,
+    now: str,
+    source: str,
+) -> tuple[list[BaseEntry], int]:
+    """Fold topic *candidates* into *existing* topic entries (ADR 0007 routing).
+
+    A candidate addressing a known slug appends its detail (dated), bumps
+    freshness (``last_used``) and ``touch_count``, and refreshes the summary
+    when one was provided. An unknown/NEW candidate mints a new topic — unless
+    its minted slug collides with an existing topic, in which case it merges
+    as a touch (no duplicate topics by construction). Returns the merged list
+    and how many candidates landed.
+    """
+    by_slug: dict[str, TopicEntry] = {
+        e.slug: e for e in existing if isinstance(e, TopicEntry)
+    }
+    landed = 0
+    day = now[:10]
+    for cand in topics:
+        slug = cand.slug or topic_slug(cand.name)
+        entry = by_slug.get(slug)
+        if entry is None:
+            if not cand.slug:
+                # Genuinely new topic.
+                entry = TopicEntry(
+                    text=f"## {day}\n- {cand.detail}",
+                    created_at=now, last_used=now, source=source,
+                    name=cand.name, slug=slug, summary=cand.summary,
+                    touch_count=1,
+                )
+                existing.append(entry)
+                by_slug[slug] = entry
+                landed += 1
+                continue
+            # An "existing" slug the store no longer has (e.g. forgotten
+            # between plan and ingest). Recover rather than drop: revive it
+            # as a new topic named from the slug (or the block's NAME).
+            name = cand.name or slug.replace("-", " ")
+            summary = cand.summary or cand.detail
+            entry = TopicEntry(
+                text=f"## {day}\n- {cand.detail}",
+                created_at=now, last_used=now, source=source,
+                name=name, slug=slug, summary=summary,
+                touch_count=1,
+            )
+            existing.append(entry)
+            by_slug[slug] = entry
+            landed += 1
+            continue
+        entry.text = _append_topic_detail(entry.text, day, cand.detail)
+        if cand.summary:
+            entry.summary = cand.summary
+        entry.last_used = now
+        entry.touch_count += 1
+        landed += 1
+    return existing, landed
 
 
 def ingest_candidates(
@@ -298,20 +395,20 @@ def ingest_candidates(
 ) -> dict[str, int]:
     """Merge *candidates* into the three bounded stores (per-store, atomic).
 
-    Returns a per-store count of entries added. Each store is loaded, the new
-    candidates appended (skills get their ``importance`` refreshed from
-    ``usage_count`` + ``last_used``), and the whole store re-saved atomically.
-    Meditation/compaction is NOT run here — the sweep runs it post-ingest only
-    when a store is over its overflow limit (the hysteresis trigger).
+    Returns a per-store count of entries/details added. Skills and
+    must_remember append (skills get their ``importance`` refreshed from
+    ``usage_count`` + ``last_used``); topic candidates ROUTE — into an
+    existing topic when the slug matches, else as a new topic. Compaction is
+    NOT run here — the sweep stages it post-ingest only when a surface is
+    over its overflow limit (the hysteresis trigger).
     """
     now = now or iso_now()
-    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_DIARY: 0}
+    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 0}
     if candidates.is_empty():
         return added
     per_store: dict[str, list[BaseEntry]] = {
         STORE_SKILLS: list(candidates.skills),
         STORE_MUST_REMEMBER: list(candidates.must_remember),
-        STORE_DIARY: list(candidates.diary),
     }
     for store_name, new_entries in per_store.items():
         if not new_entries:
@@ -323,9 +420,16 @@ def ingest_candidates(
         merged = existing + new_entries
         bstore.save_atomic(store_name, merged)
         added[store_name] = len(new_entries)
+    if candidates.topics:
+        existing = bstore.load(STORE_TOPICS)
+        merged, landed = _route_topic_candidates(
+            existing, candidates.topics, now=now, source="extract"
+        )
+        bstore.save_atomic(STORE_TOPICS, merged)
+        added[STORE_TOPICS] = landed
     log.info(
-        "ingest: +%d skills, +%d must_remember, +%d emotional",
-        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_DIARY],
+        "ingest: +%d skills, +%d must_remember, +%d topic detail(s)",
+        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_TOPICS],
     )
     return added
 
@@ -340,19 +444,19 @@ def extract_and_ingest(
 ) -> dict[str, int]:
     """In-process extract → ingest for one finished session (mock-backed in CI).
 
-    When ``memory.diary.evocation_enabled`` is set, runs the associative-evocation
-    pass after ingest (one batched summarizer call): reinforce the old items each
-    new diary note recalls and append a concise recall reference. Default off, so
-    this is a no-op unless deliberately enabled (the model call is a rail choice).
+    The current topic routing list is read from the store and embedded in the
+    extraction prompt so facts land in existing topics (ADR 0007).
     """
     now = now or iso_now()
-    candidates = extract_candidates(cfg, summarizer, rec, now=now)
     bstore = BoundedStore(cfg, store)
-    added = ingest_candidates(bstore, cfg, candidates, now=now)
-    if cfg.memory.diary.evocation_enabled:
-        from .evocation import evoke_and_reinforce
-        evoke_and_reinforce(bstore, cfg, candidates, summarizer, now=now)
-    return added
+    topic_entries = [
+        e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
+    ]
+    candidates = extract_candidates(
+        cfg, summarizer, rec, now=now,
+        topic_index=render_topic_routing_list(topic_entries),
+    )
+    return ingest_candidates(bstore, cfg, candidates, now=now)
 
 
 # ----- discovery + idle decision --------------------------------------------
@@ -502,11 +606,15 @@ def _pack_stacks(
     return stacks
 
 
-def _fill_extract_prompt(cfg: Config, prompts_root: Path, rec, content: str) -> str:
+def _fill_extract_prompt(
+    cfg: Config, prompts_root: Path, rec, content: str, *, topic_index: str
+) -> str:
     """Fill the 3-store extraction prompt for one transcript (or reduced
     digest concatenation). The ``@@SKILLS@@`` / ``@@MUST_REMEMBER@@`` /
-    ``@@DIARY@@`` contract lives ONLY here, so it stays single-sourced whether
-    the input is a whole small transcript or the reduced digests of a big one.
+    ``@@TOPICS@@`` contract lives ONLY here, so it stays single-sourced
+    whether the input is a whole small transcript or the reduced digests of a
+    big one. *topic_index* is the persona's current topic routing list, so
+    the summarizer files facts into existing topics (ADR 0007).
     """
     return _fill_prompt(
         prompts_root / "extract_memory.md",
@@ -517,10 +625,20 @@ def _fill_extract_prompt(cfg: Config, prompts_root: Path, rec, content: str) -> 
         last_event_at=rec.last_event_at.isoformat(),
         procedure_max_words=cfg.memory_extract.skill_procedure_words,
         memo_max_words=cfg.memory_extract.memo_words,
-        reaction_max_words=cfg.memory_extract.reaction_words,
-        weight_cap=int(cfg.memory.diary.weight_cap),
+        topic_summary_max_words=cfg.memory_extract.topic_summary_words,
+        topic_detail_max_words=cfg.memory_extract.topic_detail_words,
+        topic_index=topic_index,
         content=content,
     )
+
+
+def _topic_routing_index(cfg: Config, store: Store) -> str:
+    """The persona's current topic routing list, straight off the store."""
+    bstore = BoundedStore(cfg, store)
+    entries = [
+        e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
+    ]
+    return render_topic_routing_list(entries)
 
 
 def _per_chunk_words(cfg: Config, n_chunks: int) -> int:
@@ -721,7 +839,10 @@ def _compute_incremental_slice(
     return _SliceResult(prompt_content, cursor_event_at, cursor_events)
 
 
-def _stage_record(cfg: Config, staging: Path, prompts_root: Path, rec, content: str) -> dict:
+def _stage_record(
+    cfg: Config, staging: Path, prompts_root: Path, rec, content: str,
+    *, topic_index: str,
+) -> dict:
     """Stage one EXTRACT record and return its manifest item.
 
     Two shapes, distinguished by ``kind``:
@@ -746,7 +867,10 @@ def _stage_record(cfg: Config, staging: Path, prompts_root: Path, rec, content: 
     if len(content) <= cfg.budgets.max_staged_content_chars:
         prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
         prompt_path.write_text(
-            _fill_extract_prompt(cfg, prompts_root, rec, content), encoding="utf-8"
+            _fill_extract_prompt(
+                cfg, prompts_root, rec, content, topic_index=topic_index
+            ),
+            encoding="utf-8",
         )
         base["kind"] = "single"
         base["prompt_path"] = str(prompt_path)
@@ -800,6 +924,7 @@ def plan_extraction(
     staging.mkdir(parents=True)
 
     prompts_root = _prompts_root(cfg)
+    topic_index = _topic_routing_index(cfg, store)
     items: list[dict] = []
     weighted: list[tuple[str, int]] = []
     processed = 0
@@ -818,7 +943,9 @@ def plan_extraction(
         if sliced is None:
             continue  # nothing new, or active-but-under-threshold
         content = sliced.prompt_content
-        item = _stage_record(cfg, staging, prompts_root, rec, content)
+        item = _stage_record(
+            cfg, staging, prompts_root, rec, content, topic_index=topic_index
+        )
         # The high-water mark this slice advances the cursor to once its card is
         # ingested (the on_slice_ingested hook reads these off the manifest).
         item["cursor_event_at"] = sliced.cursor_event_at
@@ -849,7 +976,7 @@ def plan_extraction(
 
 # The legacy on-disk surface the fresh-start rebuild drops: the retired
 # rollup/archive store dir + the old journal markdown files. The three new
-# stores (skills.md / must_remember.md / diary.md) live in journal/ and
+# stores (skills.md / must_remember.md / topics.md) live in journal/ and
 # are NOT in this set, so a rebuild that runs after extraction keeps them.
 _LEGACY_JOURNAL_FILES = (
     "must_memorize.md",
@@ -861,7 +988,7 @@ _LEGACY_JOURNAL_FILES = (
 def rebuild(cfg: Config, store: Store) -> int:
     """Fresh-start rebuild (design §10.6): drop the retired surface, then
     regenerate the session-start briefing (skill index + must_remember +
-    emotional view + unprocessed notice).
+    topic index + detail files + unprocessed notice).
 
     Migration is a fresh start — there is no one-time converter. The first
     rebuild removes the old rollup ``archive/`` dir and legacy journal files
@@ -1113,7 +1240,10 @@ def build_reduce_prompt(cfg: Config, store: Store, item: dict) -> str | None:
     )
     prompt_path = _sweep_staging_dir(store) / f"{item['conversation_uuid']}.prompt.md"
     prompt_path.write_text(
-        _fill_extract_prompt(cfg, _prompts_root(cfg), rec, content),
+        _fill_extract_prompt(
+            cfg, _prompts_root(cfg), rec, content,
+            topic_index=_topic_routing_index(cfg, store),
+        ),
         encoding="utf-8",
     )
     return str(prompt_path)

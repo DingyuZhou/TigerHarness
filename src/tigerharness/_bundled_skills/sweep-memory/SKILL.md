@@ -11,15 +11,17 @@ the heartbeat. The bulky extraction work runs in isolated **Task-tool
 sub-agents** so it bills to the **subscription**, regardless of which
 conversation triggered it.
 
-This skill drives the bounded-store memory model (design
-`docs/DESIGN-memory.md`): each persona has **three** bounded stores --
-`skills`, `must_remember`, `diary` -- and a sweep turns a persona's
-finished transcripts into entries in those stores. The canonical
-runtime contract is `docs/tiger-memory-sweep-protocol.md` in the
-tigerharness package. If anything here seems to contradict it, that doc
-wins. This skill is the driver over the non-AI gating CLIs (`sweep-plan` /
+This skill drives the topic-store memory model (design
+`docs/DESIGN-memory.md`, ADR 0007): each persona has **three** bounded
+stores -- `skills`, `must_remember`, `topics` -- and a sweep turns a
+persona's finished transcripts into entries in those stores, then
+compacts any surface that outgrew its bound. The canonical runtime
+contract is `docs/tiger-memory-sweep-protocol.md` in the tigerharness
+package. If anything here seems to contradict it, that doc wins. This
+skill is the driver over the non-AI gating CLIs (`sweep-plan` /
 `sweep-done` / `sweep-complete` / `sweep-release`) plus the per-persona
-`plan` / `ingest-staged` / `rebuild` CLIs.
+`plan` / `ingest-staged` / `compact-plan` / `compact-apply` / `rebuild`
+CLIs.
 
 ## When to use this skill
 
@@ -131,28 +133,28 @@ b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
    fresh-window). Stacks are independent, so run the sub-agents **in
    parallel** (a sane cap, e.g. ~6 concurrent). Each sub-agent's brief:
    - **Read**: each `<uuid>.prompt.md` in its assigned stack (the prompt
-     already embeds the prefiltered transcript and the full output
-     contract) and, for context, the persona's current stores
-     (`skills.md` / `must_remember.md` / `diary.md` under the store's
-     `journal/` dir). Nothing else.
-   - **Do**: for each uuid in the stack, in order -- read the prompt and
-     act **as that persona, in character**; emit ONLY the
-     `@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@DIARY@@` bundle per the
-     prompt's output contract; **self-validate** (all three markers
-     present, each on its own line, in that order; a section is either
-     well-formed blocks or the literal `NONE`); and **write that bundle
-     to a card file** `<store>/.sweep-staging/<uuid>.extract.md`. **Do
-     NOT ingest** and do NOT run any `tiger-memory` command -- the driver
-     glues all cards in one step. Return only a short confirmation (e.g.
-     `carded 5 uuids`).
+     already embeds the prefiltered transcript, the persona's current
+     topic routing list, and the full output contract). Nothing else.
+   - **Do**: for each uuid in the stack, in order -- read the prompt;
+     emit ONLY the `@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@TOPICS@@`
+     bundle per the prompt's output contract; **self-validate** (all
+     three markers present, each on its own line, in that order; a
+     section is either well-formed blocks or the literal `NONE`; every
+     `@@TOPICS@@` block routes to an existing slug from the embedded
+     list or is `TOPIC: NEW` with NAME + SUMMARY + DETAIL); and **write
+     that bundle to a card file**
+     `<store>/.sweep-staging/<uuid>.extract.md`. **Do NOT ingest** and do
+     NOT run any `tiger-memory` command -- the driver glues all cards in
+     one step. Return only a short confirmation (e.g. `carded 5 uuids`).
    - The bulky bundle must NEVER be returned to you -- it lives only in
      the card file.
    - **It is correct to emit `NONE` for a store.** Most sessions add
      little; the stores are bounded and forgetting is first-class, so the
      sub-agent should be selective -- only durable, reusable lessons
-     (skills), genuine external directives (must_remember), and real
-     diary notes (diary). A card that is `NONE` / `NONE` / `NONE` is a
-     valid, expected outcome.
+     (skills), genuine external directives (must_remember), and durable
+     project knowledge filed by topic (topics; prefer routing into an
+     existing topic over minting a new one). A card that is `NONE` /
+     `NONE` / `NONE` is a valid, expected outcome.
 
 b'. **Oversized transcripts -- the map->reduce two-phase.** Most items are
    `kind="single"` (one `<uuid>.prompt.md`, the 2b flow above). An item
@@ -171,7 +173,7 @@ b'. **Oversized transcripts -- the map->reduce two-phase.** Most items are
      `chunk_condense` prompt -- do NOT glob the staging dir or guess
      names) and writes one digest per chunk **at the matching
      `digest_paths` path from the manifest**, as **plain neutral prose --
-     NOT** the `@@SKILLS@@ / @@MUST_REMEMBER@@ / @@DIARY@@` contract (that
+     NOT** the `@@SKILLS@@ / @@MUST_REMEMBER@@ / @@TOPICS@@` contract (that
      stays single-sourced in the reduce). **Hand the sub-agent the
      manifest's `chunk_prompts` and `digest_paths` literally** -- a digest
      written to a path that does not match `digest_paths` makes the reduce
@@ -231,29 +233,55 @@ c. **Glue the cards** (non-AI, deterministic, race-free) once **all** of
    For a `map_reduce` uuid, `ingest-staged` drops its chunk prompts +
    digests alongside the card, so the staging dir is clean next pass.
 
-d. **Finalize the persona**, then record it done:
+d. **Compact what outgrew its bound** (staged, same sub-agent shape as
+   extraction):
 
    ```bash
-   $TM --config "<target.config_path>" rebuild   # fresh-start drop + briefing
+   $TM --config "<target.config_path>" compact-plan
+   ```
+
+   Non-AI. It first runs the deterministic stale-topic forget (topics
+   not refreshed within `forget_days` drop oldest-first while the topic
+   index is over its `max`), then stages one prompt per surface still
+   at/over its `overflow_limit` under `<store>/.compact-staging/` and
+   prints a manifest (`targets`: kind / key / `prompt_path` /
+   `card_path`). **`targets: []` -> skip straight to step e** (the
+   common case).
+
+   Otherwise, spawn **ONE Task sub-agent per target** (parallel, same
+   cap). Each sub-agent's brief: read its `prompt_path` (the prompt
+   embeds the store content and the strict output contract), emit ONLY
+   the contracted replacement, **write it to exactly `card_path`**, run
+   no `tiger-memory` command, and return a one-line confirmation. Then
+   glue:
+
+   ```bash
+   $TM --config "<target.config_path>" compact-apply
+   ```
+
+   Non-AI, one process. It validates every card, applies them atomically
+   (operator-explicit directives are carried over verbatim -- a card can
+   never drop them; fresh topics are protected from forget/merge), and
+   deterministically trims any surface a card left over its `max`. It
+   prints `{"applied": [...], "skipped_no_card": [...], "malformed":
+   [...], "forced_trims": [...], "still_over": [...]}`; exit `1` means a
+   malformed card (re-run just that target with a fresh sub-agent, or
+   leave it -- the surface re-stages next wake), `2` means no manifest.
+
+e. **Finalize the persona**, then record it done:
+
+   ```bash
+   $TM --config "<target.config_path>" rebuild   # format gate + briefing
    $TM --config "$DRIVER" sweep-done --persona "<target.name>"
    ```
 
-   `rebuild` is the **fresh-start** finalize: it drops the retired
-   legacy on-disk surface (old rollup summaries, `must_memorize.md`,
-   `longer_memory.md`, the `archive/` dir) the very first time, then
-   regenerates the session-start briefing (the **skill index** + the full
-   `must_remember` view + the top-by-magnitude `diary` view + the
-   unprocessed-session notice) from the three stores. It does NOT
-   re-extract -- `ingest-staged` already wrote the entries.
-
-   **Meditation** (the bounded-store compaction: merge near-duplicates ->
-   relevance-check + downgrade stale owner directives -> compact ->
-   guarded-forget) runs automatically inside the sweep, per store, **only
-   when that store is over its `overflow_limit`** (the hysteresis
-   trigger). You do not invoke it by hand; it is a no-op when every store
-   is under bound. Its only model calls (similarity / staleness /
-   compaction judgements) go through the persona's summarizer, so they
-   also stay on the subscription rail.
+   `rebuild` drops any retired legacy surface, format-checks the three
+   stores (`check --fix` semantics: mechanical repair + quarantine), and
+   regenerates the session-start briefing: `must_remember.md`,
+   `skill_index.md`, `topic_index.md` (the ONLY files a persona loads at
+   bootstrap) plus the per-skill and per-topic detail files under
+   `briefing/skills/` and `briefing/topics/`. It does NOT re-extract --
+   `ingest-staged` already wrote the entries.
 
 Different personas have separate stores and are independent -- you may
 process several `targets` concurrently (each its own plan -> stacks ->
@@ -282,16 +310,20 @@ process several `targets` concurrently (each its own plan -> stacks ->
 ## The three bounded stores (what a sweep is feeding)
 
 - **`skills`** -- learned, reusable lessons (name + when-to-use trigger +
-  procedure). Count-bounded. Importance grows with use; the session-start
-  briefing loads only the **skill index** (name + trigger + one line),
-  and the persona reads the full skill on demand.
-- **`must_remember`** -- external directives (`owner_explicit` /
+  procedure). The rendered **skill index** is length-bounded
+  (characters); the session-start briefing loads only that index, and
+  each skill's procedure is a separate detail file read on demand.
+- **`must_remember`** -- external directives (`operator_explicit` /
   `preference` / `decision` / `incident`). Length-bounded (characters).
-  `owner_explicit` directives start elevated and are protected from
-  forgetting until meditation's relevance-check downgrades a stale one.
-- **`diary`** -- the persona's signed diary notes (`weight` in
-  `[-10, +10]`, decaying toward 0). Length-bounded. Strong feelings (for
-  or against) survive; near-neutral / decayed items are forgotten first.
+  `operator_explicit` directives are protected: compaction carries them
+  over verbatim and can never drop one.
+- **`topics`** -- named, growing bodies of durable project knowledge.
+  The rendered **topic index** (slug + freshness + one-line summary,
+  freshest first) is length-bounded and is the only topic surface loaded
+  at session start; each topic's dated detail body is a separate file,
+  itself bounded per-topic. Sweeps route new facts into existing topics
+  (or mint new ones); compaction merges near-duplicate topics and
+  forgets ones not refreshed within `forget_days`.
 
 ## Guardrails (already enforced by the package)
 
@@ -307,10 +339,12 @@ process several `targets` concurrently (each its own plan -> stacks ->
 - **Stacks bound per-sub-agent context.** The plan packs transcripts into
   stacks so a backlog runs as many fresh contexts, not one ballooning
   one.
-- **Bounded + self-pruning.** Each store has a `max` + `overflow_limit`
-  (hysteresis); meditation only fires over the overflow limit and never
-  drops a still-relevant `owner_explicit` directive.
-- **Subscription-safe** -> the executor is always the Task sub-agent.
+- **Bounded + self-pruning.** Every surface has a `max` +
+  `overflow_limit` (hysteresis); compaction only stages over the
+  overflow limit, never drops an `operator_explicit` directive, and
+  never forgets/merges a fresh topic.
+- **Subscription-safe** -> the executor is always the Task sub-agent
+  (extraction AND compaction).
 
 ## What NOT to do
 
@@ -328,7 +362,7 @@ process several `targets` concurrently (each its own plan -> stacks ->
   one of `sweep-complete` (done / empty) or `sweep-release` (cap hit).
 - **Never** hand-edit the sweep-state JSON or any store file -- drive
   state only through the CLIs above. Forgetting is irreversible with no
-  safety net; let meditation, not a hand-edit, prune a store.
+  safety net; let the staged compaction, not a hand-edit, prune a store.
 
 ## If you get confused
 

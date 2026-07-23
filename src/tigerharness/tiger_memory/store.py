@@ -1,9 +1,9 @@
 """Filesystem store for tiger-memory: folder layout, atomic writes, lock.
 
-Layout (design doc §4 — the shipped three-store model):
+Layout (design doc §4 — the shipped three-store model, ADR 0007):
     <root>/
         journal/    the three bounded stores:
-                    ``skills.md`` / ``must_remember.md`` / ``diary.md``
+                    ``skills.md`` / ``must_remember.md`` / ``topics.md``
                     plus ``.state.json`` (sweep bookkeeping)
         briefing/   session-load working set (rebuilt atomically)
 

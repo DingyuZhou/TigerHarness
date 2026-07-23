@@ -1,17 +1,20 @@
-"""Tests for the three store entry schemas (design §4; plan §1+§2 dev-1)."""
+"""Tests for the three store entry schemas (ADR 0007; skills/must_remember/topics)."""
 from __future__ import annotations
+
+import inspect
 
 import pytest
 
 from tigerharness.tiger_memory import entries as E
 from tigerharness.tiger_memory.entries import (
-    DiaryEntry,
     EntryError,
     MustRememberEntry,
     SkillEntry,
+    TopicEntry,
     entry_class_for,
     entry_from_frontmatter,
     new_id,
+    topic_slug,
 )
 
 NOW = "2026-06-17T00:00:00Z"
@@ -29,6 +32,23 @@ def _base(**kw):
 def test_new_id_unique_and_nonempty() -> None:
     a, b = new_id(), new_id()
     assert a and b and a != b
+
+
+# ----- store roster (ADR 0007) ----------------------------------------------
+
+
+def test_store_roster_is_exactly_three() -> None:
+    assert E.STORE_NAMES == ("skills", "must_remember", "topics")
+    assert E.STORE_TOPICS == "topics"
+    # Diary and fuzzy are retired — no free-text store remains.
+    for gone in ("DiaryEntry", "STORE_DIARY", "STORE_FUZZY", "ALL_STORE_NAMES"):
+        assert not hasattr(E, gone)
+
+
+@pytest.mark.parametrize("cls", [SkillEntry, MustRememberEntry, TopicEntry])
+def test_validate_takes_no_extra_args(cls: type) -> None:
+    # The old weight_cap kwarg is gone everywhere (ADR 0007).
+    assert list(inspect.signature(cls.validate).parameters) == ["self"]
 
 
 # ----- skill ---------------------------------------------------------------
@@ -116,56 +136,113 @@ def test_must_remember_rejects_bad_repeat_count() -> None:
             m.validate()
 
 
-# ----- emotional -----------------------------------------------------------
+# ----- topic_slug (ADR 0007) -------------------------------------------------
 
 
-def test_emotional_valid() -> None:
-    e = DiaryEntry(weight=-7.5, **_base())
-    e.validate()
-    assert e.store_name == E.STORE_DIARY
-    assert e.frontmatter()["weight"] == -7.5
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("Topic Store Revamp!", "topic-store-revamp"),
+        ("  A/B_c  9 ", "a-b-c-9"),
+        ("already-good", "already-good"),
+        ("ADR 0007", "adr-0007"),
+        ("--edge--", "edge"),
+    ],
+)
+def test_topic_slug_normalizes(name: str, expected: str) -> None:
+    assert topic_slug(name) == expected
 
 
-def test_emotional_rejects_over_cap() -> None:
-    e = DiaryEntry(weight=11, **_base())
-    with pytest.raises(EntryError, match="weight_cap"):
-        e.validate()
+@pytest.mark.parametrize("name", ["", "!!!", "---", "  ", "🙂🙂"])
+def test_topic_slug_symbol_only_raises(name: str) -> None:
+    with pytest.raises(EntryError, match="empty slug"):
+        topic_slug(name)
 
 
-def test_emotional_custom_cap() -> None:
-    e = DiaryEntry(weight=9, **_base())
-    e.validate(weight_cap=10)
-    with pytest.raises(EntryError, match="weight_cap"):
-        e.validate(weight_cap=8)
+# ----- topics (ADR 0007) ------------------------------------------------------
 
 
-def test_emotional_rejects_bool_weight() -> None:
-    e = DiaryEntry(weight=True, **_base())
-    with pytest.raises(EntryError, match="weight"):
-        e.validate()
+def _topic(**kw):
+    d = dict(name="Topic Store Revamp", summary="What changed and why.")
+    d.update(kw)
+    return TopicEntry(**_base(), **d)
 
 
-def test_emotional_weight_at_cap_ok() -> None:
-    DiaryEntry(weight=10, **_base()).validate()
-    DiaryEntry(weight=-10, **_base()).validate()
+def test_topic_valid_and_frontmatter() -> None:
+    t = _topic(slug="topic-store-revamp", touch_count=3)
+    t.validate()
+    assert t.store_name == E.STORE_TOPICS
+    fm = t.frontmatter()
+    assert fm["store"] == "topics"
+    assert fm["name"] == "Topic Store Revamp"
+    assert fm["slug"] == "topic-store-revamp"
+    assert fm["summary"] == "What changed and why."
+    assert fm["touch_count"] == 3
 
 
-def test_emotional_rejects_nan_weight() -> None:
-    """GAP-3 (schema): a NaN weight is a non-value — ``abs(nan) > cap`` is
-    False so it would slip past the cap check and poison the keep-rank
-    ordering. ``validate`` must reject it as non-finite."""
-    e = DiaryEntry(weight=float("nan"), **_base())
-    with pytest.raises(EntryError, match="finite"):
-        e.validate()
+def test_topic_slug_auto_derives_from_name() -> None:
+    t = _topic()  # no slug given
+    assert t.slug == "topic-store-revamp"
+    t.validate()
 
 
-@pytest.mark.parametrize("weight", [float("inf"), float("-inf")])
-def test_emotional_rejects_inf_weight(weight: float) -> None:
-    """GAP-3 (schema): ±inf are non-finite and explicitly rejected (the
-    finite check subsumes the over-cap path for them)."""
-    e = DiaryEntry(weight=weight, **_base())
-    with pytest.raises(EntryError, match="finite"):
-        e.validate()
+def test_topic_explicit_slug_is_kept() -> None:
+    t = _topic(slug="custom-address")
+    assert t.slug == "custom-address"
+    t.validate()
+
+
+def test_topic_symbol_only_name_raises_at_construction() -> None:
+    # Auto-derivation runs in __post_init__, so an unaddressable name fails fast.
+    with pytest.raises(EntryError, match="empty slug"):
+        _topic(name="!!!")
+
+
+def test_topic_blank_name_skips_derivation_and_fails_validate() -> None:
+    t = _topic(name="  ")  # no derivation attempted; slug stays empty
+    assert t.slug == ""
+    with pytest.raises(EntryError, match="name"):
+        t.validate()
+
+
+@pytest.mark.parametrize(
+    "bad_slug", ["Bad-Slug", "-lead", "trail-", "a--b", "a b", "a_b"]
+)
+def test_topic_rejects_malformed_slug(bad_slug: str) -> None:
+    t = _topic(slug=bad_slug)
+    with pytest.raises(EntryError, match="slug"):
+        t.validate()
+
+
+def test_topic_rejects_empty_slug() -> None:
+    t = _topic()
+    t.slug = ""  # simulate a corrupt write
+    with pytest.raises(EntryError, match="slug"):
+        t.validate()
+
+
+def test_topic_rejects_blank_summary() -> None:
+    t = _topic(summary="   ")
+    with pytest.raises(EntryError, match="summary"):
+        t.validate()
+
+
+def test_topic_rejects_bad_touch_count() -> None:
+    for bad in (0, -2, True, 2.5):
+        t = _topic(touch_count=bad)
+        with pytest.raises(EntryError, match="touch_count"):
+            t.validate()
+
+
+def test_topic_touch_count_default_is_one() -> None:
+    t = _topic()
+    t.validate()
+    assert t.touch_count == 1
+
+
+def test_topic_to_dict_carries_store_name() -> None:
+    d = _topic().to_dict()
+    assert d["store_name"] == "topics" and d["slug"] == "topic-store-revamp"
 
 
 # ----- base-field validation (shared) --------------------------------------
@@ -195,12 +272,12 @@ def test_base_rejects_blank_id() -> None:
 def test_entry_class_for_known() -> None:
     assert entry_class_for("skills") is SkillEntry
     assert entry_class_for("must_remember") is MustRememberEntry
-    assert entry_class_for("diary") is DiaryEntry
+    assert entry_class_for("topics") is TopicEntry
 
 
 def test_entry_class_for_unknown_raises() -> None:
     with pytest.raises(EntryError, match="unknown store_name"):
-        entry_class_for("nope")
+        entry_class_for("diary")
 
 
 def test_from_frontmatter_skill_roundtrip() -> None:
@@ -222,18 +299,59 @@ def test_from_frontmatter_must_remember_roundtrip() -> None:
     assert rebuilt.repeat_count == 3  # the reinforcement count round-trips
 
 
-def test_from_frontmatter_emotional_roundtrip() -> None:
-    e = DiaryEntry(weight=3.5, **_base())
-    rebuilt = entry_from_frontmatter("diary", e.frontmatter(), e.text)
-    assert isinstance(rebuilt, DiaryEntry)
-    assert rebuilt.weight == 3.5
+def test_from_frontmatter_topic_roundtrip() -> None:
+    t = _topic(slug="topic-store-revamp", touch_count=5)
+    rebuilt = entry_from_frontmatter("topics", t.frontmatter(), t.text)
+    assert isinstance(rebuilt, TopicEntry)
+    assert rebuilt.name == t.name and rebuilt.slug == "topic-store-revamp"
+    assert rebuilt.summary == t.summary and rebuilt.touch_count == 5
+    assert rebuilt.id == t.id and rebuilt.last_used == NOW
+    rebuilt.validate()
 
 
 def test_from_frontmatter_missing_id_gets_fresh() -> None:
     fm = {"created_at": NOW, "last_used": NOW, "source": "s"}
-    rebuilt = entry_from_frontmatter("diary", fm, "body")
+    rebuilt = entry_from_frontmatter("topics", fm, "body")
     assert rebuilt.id  # a fresh id was minted
-    assert rebuilt.weight == 0.0
+    assert rebuilt.touch_count == 1  # dataclass default
+
+
+def test_from_frontmatter_topic_numeric_string_coerces() -> None:
+    fm = _topic().frontmatter()
+    fm["touch_count"] = "7"
+    rebuilt = entry_from_frontmatter("topics", fm, "body")
+    assert rebuilt.touch_count == 7
+
+
+def test_from_frontmatter_topic_bad_touch_count_raises() -> None:
+    fm = _topic().frontmatter()
+    fm["touch_count"] = "many"
+    with pytest.raises(EntryError, match="touch_count"):
+        entry_from_frontmatter("topics", fm, "body")
+
+
+def test_from_frontmatter_skill_bad_numerics_raise() -> None:
+    s = SkillEntry(name="N", trigger="t", procedure="p", **_base())
+    fm = s.frontmatter()
+    fm["usage_count"] = "lots"
+    with pytest.raises(EntryError, match="usage_count"):
+        entry_from_frontmatter("skills", fm, s.text)
+    fm = s.frontmatter()
+    fm["importance"] = "high"
+    with pytest.raises(EntryError, match="importance"):
+        entry_from_frontmatter("skills", fm, s.text)
+
+
+def test_from_frontmatter_must_remember_bad_numerics_raise() -> None:
+    m = MustRememberEntry(kind="decision", **_base())
+    fm = m.frontmatter()
+    fm["repeat_count"] = "never"
+    with pytest.raises(EntryError, match="repeat_count"):
+        entry_from_frontmatter("must_remember", fm, m.text)
+    fm = m.frontmatter()
+    fm["importance"] = []
+    with pytest.raises(EntryError, match="importance"):
+        entry_from_frontmatter("must_remember", fm, m.text)
 
 
 def test_legacy_owner_explicit_kind_normalized_on_read() -> None:

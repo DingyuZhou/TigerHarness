@@ -1,10 +1,10 @@
-# Memory extraction — prompt template (bounded-store revamp)
+# Memory extraction — prompt template (topic-store revamp, ADR 0007)
 
 You are **{agent_name}**, processing one of your own finished work
-sessions into memory — **in character, as yourself**. Read the
-transcript and decide what is worth carrying forward into your three
-bounded memory stores. Be selective: most sessions add little. It is
-correct to emit `NONE` for a store when nothing qualifies.
+sessions into memory. Read the transcript and decide what is worth
+carrying forward into your three bounded memory stores. Be selective:
+most sessions add little. It is correct to emit `NONE` for a store when
+nothing qualifies.
 
 Source: {source} ({source_id})
 First event: {first_event_at}
@@ -17,13 +17,13 @@ Conversation transcript:
 
 **Large transcripts:** this may be long and span more than one read
 window. Read it in FULL before extracting — page through to the end. No
-operator-explicit directive, hard-won lesson, or strong reaction should be
-lost to length.
+operator-explicit directive, hard-won lesson, or durable project fact
+should be lost to length.
 
 **Ignore memory boilerplate.** If the session includes you reading or
 restating your own tiger-memory briefing (`briefing/*`,
-`must_remember.md`, `skills.md`, `emotional.md`), treat that as context,
-not material to extract.
+`must_remember.md`, the skill index, the topic index), treat that as
+context, not material to extract.
 
 ## Output contract — STRICT
 
@@ -36,8 +36,8 @@ trailing commentary.
 <skill blocks, or NONE>
 @@MUST_REMEMBER@@
 <must-remember blocks, or NONE>
-@@DIARY@@
-<emotional blocks, or NONE>
+@@TOPICS@@
+<topic blocks, or NONE>
 ```
 
 ### @@SKILLS@@ — learned, invokable lessons (0 to 3)
@@ -70,18 +70,28 @@ MEMO: <= {memo_max_words} words; one sentence; specific>
 
 If none, write exactly `NONE` under the marker.
 
-### @@DIARY@@ — your diary (0 to 3)
-A short, dated diary note, as {agent_name}. Write a note for each substantive
-thing you did — **including neutral, low-charge work (weight 0)**; do NOT skip a
-note just because it was not emotionally strong (forgetting is a meditation
-concern, never a write-time filter). Each note carries, concisely: **what I did**,
-**why this weight** (the reasoning for the rating — this is what deepens your
-personality), and **what I learned / could do better** next time if applicable.
-One block per note, blank line between:
+### @@TOPICS@@ — durable project knowledge, filed by topic (0 to 3)
+A topic is a named, growing body of knowledge about one subject (a
+subsystem, an ongoing effort, a recurring theme). File durable facts
+from this session into topics — **route to an existing topic whenever
+one fits; create a new topic only when nothing fits**.
+
+Your existing topics (freshest first):
+{topic_index}
+
+One block per topic touched, blank line between:
 
 ```
-WEIGHT: <signed number in [-{weight_cap}, +{weight_cap}]; + = liked/for, - = disliked/against, 0 = neutral>
-TEXT: <= {reaction_max_words} words; what I did + why this weight + what I learned / could do better>
+TOPIC: <an existing slug from the list above, or exactly NEW>
+NAME: <required when TOPIC is NEW — a short human topic name; omit otherwise>
+SUMMARY: <= {topic_summary_max_words} words — the topic's refreshed one-line
+  index summary (required for NEW; for an existing topic include it only
+  when the old summary no longer fits)>
+DETAIL: <= {topic_detail_max_words} words — the new durable facts/events
+  from THIS session to append under the topic>
 ```
+
+Only durable knowledge belongs here — decisions, how things work,
+project state. No feelings, no play-by-play, no transient status.
 
 If none, write exactly `NONE` under the marker.

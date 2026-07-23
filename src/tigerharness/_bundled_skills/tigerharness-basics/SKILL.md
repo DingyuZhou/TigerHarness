@@ -95,22 +95,25 @@ Don't hand-run gate commands outside a drive; scaffold with the
 ## `tigerharness tiger-memory` (alias: `tm`)
 
 Per-persona persistent memory: **three bounded stores** (`skills` /
-`must_remember` / `emotional`) that self-prune via meditation. Each
-persona's store and config live under `memories/<Name>/`; pass the
-config explicitly or via env:
+`must_remember` / `topics`) that self-prune via staged compaction
+(ADR 0007). Only the small indexes load at session start; per-skill and
+per-topic detail files load on demand. Each persona's store and config
+live under `memories/<Name>/`; pass the config explicitly or via env:
 
     tigerharness tm --config memories/<Name>/tiger-memory.config.yaml rebuild
     tigerharness tm --config ... pin "Operator prefers tabular diffs" --kind preference
     tigerharness tm --config ... state
 
 Common verbs: `init` (create empty store + validate config), `rebuild`
-(fresh-start: drop the retired surface, regenerate the session-start
-briefing — the session-start hook), `pin` (write a `must_remember`
-entry; `--kind owner_explicit|preference|decision|incident`), `state`
-(JSON snapshot of the three stores). The in-session sub-agent executor
-(`plan` stages extraction prompts, `ingest-extraction` writes back one
-bundle over stdin, `ingest-staged` glues every staged `.extract.md`
-card in one process) and the `sweep-*` family back the in-session and
+(format gate + regenerate the session-start briefing — the
+session-start hook), `pin` (write a `must_remember` entry; `--kind
+operator_explicit|preference|decision|incident`), `state` (JSON snapshot
+of the three stores), `migrate-to-topics` (one-off: retire a pre-ADR-0007
+diary/fuzzy surface). The in-session sub-agent executor (`plan` stages
+extraction prompts, `ingest-extraction` writes back one bundle over
+stdin, `ingest-staged` glues every staged `.extract.md` card in one
+process, `compact-plan` / `compact-apply` stage + apply bound
+compactions) and the `sweep-*` family back the in-session and
 team-sweep protocols — driven by the `sweep-memory` skill, like the
 journal gates. Deep dive: `docs/tiger-memory.md` and the canonical
 design `docs/DESIGN-memory.md` in the tigerharness repo.

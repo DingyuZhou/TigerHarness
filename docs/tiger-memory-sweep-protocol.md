@@ -17,10 +17,11 @@ Python (the `tiger_memory.sweep` module + the `tiger-memory` CLI), AI in
 the session's own sub-agents.
 
 The memory model is the **three bounded stores** (`skills` /
-`must_remember` / `emotional`) — see [`DESIGN-memory.md`](DESIGN-memory.md).
-A sweep turns each stale persona's finished transcripts into entries in
-those stores; post-ingest **meditation** compacts any store that has gone
-over its overflow limit.
+`must_remember` / `topics`) — see [`DESIGN-memory.md`](DESIGN-memory.md)
+and [ADR 0007](adr/0007-topic-store-revamp.md). A sweep turns each stale
+persona's finished transcripts into entries in those stores; post-ingest
+**staged compaction** (`compact-plan` → card sub-agents → `compact-apply`)
+compacts any surface that has gone over its must-compact bound.
 
 ## When it runs
 
@@ -37,7 +38,10 @@ extraction work is `tiger-memory plan` (stages prompts + packs **stacks**),
 the extraction sub-agents (which only write bundle **cards**), and
 `tiger-memory ingest-staged` (the single-process, race-free **glue** that
 merges every `.extract.md` card into the three stores). `ingest-extraction`
-remains for the one-bundle-over-stdin path (a single uuid).
+remains for the one-bundle-over-stdin path (a single uuid). Post-ingest
+compaction is the same staged shape: `tiger-memory compact-plan` (non-AI
+staging), one card sub-agent per target, `tiger-memory compact-apply`
+(non-AI, deterministically convergent).
 
 1. **Claim the team sweep.** Compute `team_memories_dir =
    cfg.store.root.parent` for any persona on the team (= `<team>/memories/`).
@@ -70,19 +74,29 @@ remains for the one-bundle-over-stdin path (a single uuid).
         the prefiltered transcript — staged in full up to the
         `max_staged_content_chars` ceiling, clipped only beyond it — so the
         bulky content never enters *your* context) **and** the persona's
-        three stores (`skills.md` / `must_remember.md` / `emotional.md`).
+        three stores (`skills.md` / `must_remember.md` / `topics.md`). The
+        prompt also embeds the persona's **existing-topic routing list**
+        (slug + summary, freshest first), so the sub-agent can route new
+        knowledge into existing topics.
       - **Writes**: a bundle **card**
         `<store>/.sweep-staging/<uuid>.extract.md` per uuid — and nothing
         else. It does **not** ingest and runs no `tiger-memory` command.
       - **Instruction**: for each uuid in the stack, act **as that persona,
         in character**; read the prompt; emit ONLY the
-        `@@SKILLS@@/@@MUST_REMEMBER@@/@@DIARY@@` bundle per the prompt's
+        `@@SKILLS@@/@@MUST_REMEMBER@@/@@TOPICS@@` bundle per the prompt's
         output contract; **self-validate** (all three markers present, each
         on its own line, in that order; each section is well-formed blocks
         or the literal `NONE`); write it to the card; then **return only a
         short confirmation** (e.g. "carded N uuids"). The bulky bundle must
         never be returned to you (B8 fresh-window) — it lives only in the
         card. A `NONE`/`NONE`/`NONE` card is a valid, expected outcome.
+      - **The `@@TOPICS@@` grammar**: one block per topic touched —
+        `TOPIC:` (an existing slug from the embedded routing list, or
+        exactly `NEW`), `NAME:` (required for `NEW`), `SUMMARY:` (required
+        for `NEW`; for an existing topic only when the old summary no
+        longer fits), `DETAIL:` (the new durable facts — always required).
+        Route to an existing topic whenever one fits; a malformed block is
+        dropped at ingest, never the whole bundle.
    c. **Glue** once all of this persona's stacks have carded: `tiger-memory
       --config <target.config_path> ingest-staged`. It reads every
       `<uuid>.extract.md` card and merges each bundle's blocks into the
@@ -104,7 +118,7 @@ remains for the one-bundle-over-stdin path (a single uuid).
    - **(map)** the extraction sub-agent reads each `<uuid>.chunkNN.prompt.md`
      (a `chunk_condense` prompt) and writes the matching
      `<uuid>.chunkNN.digest.md` — **plain neutral prose, NOT** the
-     `@@SKILLS@@/@@MUST_REMEMBER@@/@@DIARY@@` contract (that stays
+     `@@SKILLS@@/@@MUST_REMEMBER@@/@@TOPICS@@` contract (that stays
      single-sourced in the reduce).
    - **(reduce, non-AI glue)** once a uuid's digests are all written, run
      `tiger-memory --config <target.config_path> build-reduce-prompts`. It
@@ -118,15 +132,36 @@ remains for the one-bundle-over-stdin path (a single uuid).
      ingests it. `ingest-staged` drops the chunk prompts + digests with the
      card.
 
-   d. **Finalize**: `tiger-memory --config <target.config_path> rebuild` —
+   d. **Compact (staged, ADR 0007)**: after the glue, run `tiger-memory
+      --config <target.config_path> compact-plan`. It is non-AI: it first
+      drops topics stale beyond `forget_days` deterministically, then
+      stages one prompt per surface still over its must-compact bound
+      under `<store>/.compact-staging/` and prints the manifest. If the
+      manifest's `targets` list is **empty**, skip straight to 2e —
+      nothing needs compacting (the common case). Otherwise:
+      - Spawn **one Task sub-agent per staged prompt**. Each sub-agent
+        reads its `<key>.prompt.md` (the prompt embeds the surface's
+        current content and a strict marker contract —
+        `@@MUST_REMEMBER@@`, `@@SKILLS@@`, `@@TOPIC_ROSTER@@`, or
+        `@@TOPIC_DETAIL@@`), writes the compacted replacement to
+        `<key>.card.md` next to it, and returns only a short
+        confirmation — the card content never enters your context.
+      - Run `tiger-memory --config <target.config_path> compact-apply`.
+        Non-AI: it validates each card, applies it atomically, and
+        guarantees convergence deterministically (an oversized card is
+        hard-trimmed by keep-rank/freshness; protected content —
+        operator-explicit directives, fresh topics — is never
+        force-dropped and lands in `still_over` instead). Exit `1` means
+        ≥1 malformed card (kept in place; re-card just those or leave
+        them for the next sweep); exit `2` means no manifest (a
+        sequencing bug — surface it).
+   e. **Finalize**: `tiger-memory --config <target.config_path> rebuild` —
       `ingest-staged` already wrote the entries, so `rebuild` does not
       re-extract; it runs the fresh-start finalize tail (drops the retired
-      legacy surface on first run, then regenerates the briefing — skill
-      index + must_remember + emotional view + unprocessed notice). Then
+      legacy surface on first run, runs the `check --fix` format gate,
+      then regenerates the briefing — must_remember + skill index + topic
+      index + detail files + unprocessed notice). Then
       `sweep.record_persona_done(team_memories_dir, target.name)`.
-      **Meditation** (compaction of any store over its overflow limit) runs
-      automatically inside the sweep, per store; it is a no-op when every
-      store is under bound and never invoked by hand.
 
 3. **Close the run.**
    - All due personas processed → `sweep.mark_sweep_complete(

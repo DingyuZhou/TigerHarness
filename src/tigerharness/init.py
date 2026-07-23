@@ -134,6 +134,9 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0bc91d13201769b6327e762bc9763db3c8b97c7923d3830171effedad9e56691",
     },
     "tigerharness-basics": {
+        # 2026-07-23 (topic-store revamp, ADR 0007): anzai: pre topic-store
+        #   ship -- store roster still said emotional/meditation.
+        "d32ae9739696c3f199088396143922b663edbd0a75fc07a6163b85e378d6f604",
         # 2026-06-17 (b5-doc-draft): anzai: tiger-memory CLI verb list -> live set
         #   (init/rebuild/pin/state/plan/ingest-extraction/ingest-staged/sweep-*);
         #   dropped search/drill/tree/raw/bootstrap/resummarize/ingest-summary.
@@ -148,6 +151,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-07-23 (topic-store revamp, ADR 0007): anzai: pre topic-store
+        #   ship -- the last 4-store-era bundle (@@DIARY@@ contract, in-sweep
+        #   meditation) before topics + staged compaction replaced them.
+        "6818e4e7c349bf4b2ce32bb1041df4c10b6170512a76387a566eaca912aaf3da",
         # 2026-07-22 (idle-maintenance): ayako: pre drive-tail ship -- before
         #   the executor-context relax (agent drives may run the sweep; plain
         #   daemons still cannot).
@@ -179,8 +186,8 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "6818e4e7c349bf4b2ce32bb1041df4c10b6170512a76387a566eaca912aaf3da",
-    "tigerharness-basics": "d32ae9739696c3f199088396143922b663edbd0a75fc07a6163b85e378d6f604",
+    "sweep-memory": "8e073a798fe4e9c57085b9c4223de0b45889d51cc529a683e8e69b3eec69b52c",
+    "tigerharness-basics": "6ff9e36ae47785865c6b39fc7528fd5dd8209370b3871b781f987d508118bbd5",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }
 
@@ -374,7 +381,6 @@ summarizer:
 
 rebuild:
   idle_threshold_hours: 1
-  resummarize_window_days: 7
   rebuild_timeout_minutes: 60
 """
 

@@ -1,9 +1,12 @@
-"""Tests for the extraction lifecycle (lifecycle.py, bounded-store revamp).
+"""Tests for the extraction lifecycle (lifecycle.py, topic-store revamp ADR 0007).
 
-Covers the extraction-bundle parser, the in-process extract→ingest path (under
-the mock summarizer — no live model), the idle/extract decision, the staging
-planner, the fresh-start rebuild, pin → must_remember, mission-text sourcing,
-and the clip/stack helpers.
+Covers the extraction-bundle parser (@@SKILLS@@ / @@MUST_REMEMBER@@ /
+@@TOPICS@@ marker contract + topic-block grammar), topic routing
+(_append_topic_detail / _route_topic_candidates), the in-process
+extract→ingest path (scripted summarizer — no live model), the idle/extract
+decision, the staging planner (routing list embedded in the prompt), the
+fresh-start rebuild, pin → must_remember, mission-text sourcing, and the
+clip/stack helpers.
 """
 from __future__ import annotations
 
@@ -19,9 +22,10 @@ from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
     KIND_OPERATOR_EXPLICIT,
     KIND_PREFERENCE,
-    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
+    STORE_TOPICS,
+    TopicEntry,
 )
 from tigerharness.tiger_memory.sources.base import SourceRecord
 from tigerharness.tiger_memory.store import Store
@@ -43,8 +47,10 @@ class ScriptedExtractor(Summarizer):
         super().__init__()
         self._bundle = bundle
         self._raises = raises
+        self.last_prompt: str | None = None
 
     def summarize(self, *, prompt: str, max_words: int) -> str:
+        self.last_prompt = prompt
         if self._raises is not None:
             raise self._raises
         return self._bundle
@@ -80,6 +86,21 @@ def _rec(content: str = "hi", *, activity_mtime: float = 0.0) -> SourceRecord:
     )
 
 
+def _topic(
+    slug: str = "bounded-store",
+    *,
+    name: str = "Bounded store",
+    summary: str = "the bounded-store substrate",
+    text: str = "## 2026-06-01\n- first fact",
+    touch_count: int = 1,
+    last_used: str = NOW,
+) -> TopicEntry:
+    return TopicEntry(
+        text=text, created_at=NOW, last_used=last_used, source="extract",
+        name=name, slug=slug, summary=summary, touch_count=touch_count,
+    )
+
+
 _FULL_BUNDLE = dedent("""\
     @@SKILLS@@
     NAME: Bound a markdown store
@@ -93,10 +114,14 @@ _FULL_BUNDLE = dedent("""\
     KIND: preference
     MEMO: targeted git add, never -A
 
-    @@DIARY@@
-    WEIGHT: 7
-    TEXT: landed the bounded-store substrate clean and green
+    @@TOPICS@@
+    TOPIC: NEW
+    NAME: Bounded store revamp
+    SUMMARY: three bounded stores replace the rollup lifecycle
+    DETAIL: landed the bounded-store substrate clean and green
 """)
+
+_EMPTY_BUNDLE = "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@TOPICS@@\nNONE\n"
 
 
 # ----- bundle parsing -------------------------------------------------------
@@ -108,24 +133,25 @@ def test_parse_full_bundle() -> None:
     assert c.skills[0].name == "Bound a markdown store"
     assert c.skills[0].procedure.startswith("write one entry")
     assert [e.kind for e in c.must_remember] == [KIND_OPERATOR_EXPLICIT, KIND_PREFERENCE]
-    assert len(c.diary) == 1
-    assert c.diary[0].weight == 7.0
-    assert c.diary[0].text == "landed the bounded-store substrate clean and green"
+    assert len(c.topics) == 1
+    t = c.topics[0]
+    assert t.slug == ""  # NEW → slug minted at routing time
+    assert t.name == "Bounded store revamp"
+    assert t.summary == "three bounded stores replace the rollup lifecycle"
+    assert t.detail == "landed the bounded-store substrate clean and green"
     assert not c.is_empty()
     assert c.total() == 4
 
 
 def test_parse_all_none() -> None:
-    c = lc.parse_extraction(
-        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@DIARY@@\nNONE\n",
-        now=NOW, source="x",
-    )
+    c = lc.parse_extraction(_EMPTY_BUNDLE, now=NOW, source="x")
     assert c.is_empty()
+    assert c.total() == 0
 
 
 def test_parse_missing_marker_raises() -> None:
     with pytest.raises(lc.ExtractionParseError, match="missing"):
-        lc.parse_extraction("@@SKILLS@@\nNONE\n@@DIARY@@\nNONE\n", now=NOW, source="x")
+        lc.parse_extraction("@@SKILLS@@\nNONE\n@@TOPICS@@\nNONE\n", now=NOW, source="x")
 
 
 def test_parse_empty_raises() -> None:
@@ -134,9 +160,48 @@ def test_parse_empty_raises() -> None:
 
 
 def test_parse_out_of_order_raises() -> None:
-    bundle = "@@DIARY@@\nNONE\n@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
+    bundle = "@@TOPICS@@\nNONE\n@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
     with pytest.raises(lc.ExtractionParseError, match="out of order"):
         lc.parse_extraction(bundle, now=NOW, source="x")
+
+
+def test_parse_inline_echoed_marker_does_not_split() -> None:
+    # A marker token quoted INSIDE a line (untrusted transcript echo) is not a
+    # whole-line marker, so it must not mis-split the bundle.
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        TOPIC: NEW
+        NAME: Marker echo
+        SUMMARY: quoting markers inline is safe
+        DETAIL: the transcript quoted @@SKILLS@@ inline and nothing split
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert c.skills == [] and c.must_remember == []
+    assert len(c.topics) == 1
+    assert "@@SKILLS@@" in c.topics[0].detail
+
+
+def test_parse_duplicate_standalone_marker_first_wins() -> None:
+    # A second standalone occurrence of an earlier marker (e.g. echoed as a
+    # whole line late in the bundle) is ignored — the FIRST occurrence of each
+    # marker defines the split, so the sections stay in order.
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        KIND: decision
+        MEMO: markers split on first standalone occurrence
+        @@TOPICS@@
+        NONE
+        @@SKILLS@@
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert len(c.must_remember) == 1
+    assert c.topics == []
 
 
 def test_parse_skips_malformed_blocks() -> None:
@@ -151,16 +216,125 @@ def test_parse_skips_malformed_blocks() -> None:
         KIND: decision
         MEMO:
 
-        @@DIARY@@
-        WEIGHT: not-a-number
-        TEXT: y
+        @@TOPICS@@
+        DETAIL: detail with no TOPIC line
 
-        WEIGHT: 3
+        TOPIC: NEW
+        SUMMARY: new but nameless
+        DETAIL: dropped for missing NAME
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.skills == []           # missing trigger/procedure
     assert c.must_remember == []    # bad kind + empty memo
-    assert c.diary == []        # bad weight + missing TEXT
+    assert c.topics == []           # missing TOPIC + NEW without NAME
+
+
+def test_parse_topic_new_requires_summary() -> None:
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        TOPIC: NEW
+        NAME: Named but summaryless
+        DETAIL: dropped — a NEW topic must be index-worthy
+    """)
+    assert lc.parse_extraction(bundle, now=NOW, source="x").topics == []
+
+
+def test_parse_topic_new_unsluggable_name_dropped() -> None:
+    """A NEW block whose NAME has no sluggable characters (all symbols /
+    non-Latin) is dropped at parse time — it must never survive to routing,
+    where minting its slug would raise mid-ingest after other stores saved."""
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        TOPIC: NEW
+        NAME: 日本語
+        SUMMARY: unrepresentable in an ascii slug
+        DETAIL: dropped, not crashed
+
+        TOPIC: NEW
+        NAME: !!!
+        SUMMARY: symbols only
+        DETAIL: dropped, not crashed
+
+        TOPIC: NEW
+        NAME: Survivor Topic
+        SUMMARY: the good sibling still lands
+        DETAIL: kept
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert [t.name for t in c.topics] == ["Survivor Topic"]
+
+
+def test_parse_topic_existing_requires_detail() -> None:
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        TOPIC: bounded-store
+        SUMMARY: a refresh with nothing to append
+    """)
+    assert lc.parse_extraction(bundle, now=NOW, source="x").topics == []
+
+
+def test_parse_topic_bad_slug_dropped() -> None:
+    # A TOPIC target with no alphanumerics yields an empty slug → EntryError
+    # → that block (only) is dropped, never the bundle.
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        TOPIC: !!!
+        DETAIL: unaddressable
+
+        TOPIC: bounded-store
+        DETAIL: this one still lands
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert [t.slug for t in c.topics] == ["bounded-store"]
+
+
+def test_parse_topic_existing_slug_normalized() -> None:
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        TOPIC: Bounded Store
+        SUMMARY: refreshed summary
+        DETAIL: a new fact
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert len(c.topics) == 1
+    t = c.topics[0]
+    assert t.slug == "bounded-store"   # normalized to canonical slug form
+    assert t.summary == "refreshed summary"
+    assert t.detail == "a new fact"
+
+
+def test_parse_topic_existing_summary_optional() -> None:
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        TOPIC: bounded-store
+        DETAIL: append without touching the summary
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert c.topics[0].summary == ""
 
 
 def test_parse_multiline_value_continuation() -> None:
@@ -173,18 +347,11 @@ def test_parse_multiline_value_continuation() -> None:
 
         @@MUST_REMEMBER@@
         NONE
-        @@DIARY@@
+        @@TOPICS@@
         NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert "second line" in c.skills[0].procedure
-
-
-def test_parse_weight_empty_string() -> None:
-    assert lc._parse_weight("") is None
-    assert lc._parse_weight(None) is None
-    assert lc._parse_weight("garbage") is None
-    assert lc._parse_weight("5 stars") == 5.0
 
 
 def test_section_blocks_leading_blank_and_continuation() -> None:
@@ -202,7 +369,7 @@ def test_section_blocks_none_only() -> None:
 
 def test_section_blocks_trailing_blank_flushes() -> None:
     # A trailing blank line flushes the block, so the final `if current`
-    # sees an empty current (the 170->172 branch).
+    # sees an empty current.
     section = "NAME: x\nTRIGGER: t\nPROCEDURE: p\n\n"
     blocks = lc._section_blocks(section)
     assert len(blocks) == 1 and blocks[0]["NAME"] == "x"
@@ -231,6 +398,16 @@ def test_extract_candidates_parses(tmp_path: Path) -> None:
     assert c.total() == 4
 
 
+def test_extract_candidates_embeds_topic_index(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    s = ScriptedExtractor(_FULL_BUNDLE)
+    routing = "- `seed-topic` — Seed topic (last 2026-06-17): seeded"
+    lc.extract_candidates(cfg, s, _rec(), now=NOW, topic_index=routing)
+    assert s.last_prompt is not None
+    assert routing in s.last_prompt
+    assert "{topic_index}" not in s.last_prompt
+
+
 def test_extract_candidates_parse_error_yields_empty(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     c = lc.extract_candidates(cfg, ScriptedExtractor("garbage no markers"), _rec())
@@ -249,6 +426,145 @@ def test_extract_candidates_prefilter_off(tmp_path: Path) -> None:
     assert c.total() == 4
 
 
+def test_fill_extract_prompt_fills_topic_placeholders(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    routing = "- `seed-topic` — Seed topic (last 2026-06-17): seeded"
+    prompt = lc._fill_extract_prompt(
+        cfg, lc._prompts_root(cfg), _rec(), "THE-CONTENT", topic_index=routing
+    )
+    assert "THE-CONTENT" in prompt
+    assert routing in prompt
+    assert "TestTiger" in prompt
+    for marker in ("@@SKILLS@@", "@@MUST_REMEMBER@@", "@@TOPICS@@"):
+        assert marker in prompt
+    for placeholder in (
+        "{topic_index}", "{topic_summary_max_words}", "{topic_detail_max_words}",
+        "{procedure_max_words}", "{memo_max_words}", "{content}",
+    ):
+        assert placeholder not in prompt
+
+
+# ----- _append_topic_detail ---------------------------------------------------
+
+
+def test_append_topic_detail_empty_body() -> None:
+    assert lc._append_topic_detail("", "2026-06-17", "first fact") == (
+        "## 2026-06-17\n- first fact"
+    )
+    # Whitespace-only body counts as empty too.
+    assert lc._append_topic_detail("  \n", "2026-06-17", "f") == "## 2026-06-17\n- f"
+
+
+def test_append_topic_detail_same_day_appends_bullet() -> None:
+    body = "## 2026-06-17\n- first"
+    out = lc._append_topic_detail(body, "2026-06-17", "second")
+    assert out == "## 2026-06-17\n- first\n- second"
+
+
+def test_append_topic_detail_new_day_opens_section() -> None:
+    body = "## 2026-06-16\n- old"
+    out = lc._append_topic_detail(body, "2026-06-17", "new")
+    assert out == "## 2026-06-16\n- old\n\n## 2026-06-17\n- new"
+
+
+def test_append_topic_detail_headerless_body_opens_section() -> None:
+    # A body with no dated headers at all (legacy/hand-edited) still gets a
+    # fresh dated section rather than a stray bullet.
+    out = lc._append_topic_detail("some prose", "2026-06-17", "fact")
+    assert out == "some prose\n\n## 2026-06-17\n- fact"
+
+
+# ----- _route_topic_candidates ------------------------------------------------
+
+
+def test_route_existing_appends_touches_and_refreshes_summary() -> None:
+    entry = _topic(last_used="2026-06-01T00:00:00Z")
+    cand = lc.TopicCandidate(
+        slug="bounded-store", name="", summary="fresher summary", detail="new fact"
+    )
+    merged, landed = lc._route_topic_candidates(
+        [entry], [cand], now=NOW, source="extract"
+    )
+    assert landed == 1 and merged == [entry]
+    assert entry.touch_count == 2
+    assert entry.last_used == NOW
+    assert entry.summary == "fresher summary"
+    assert entry.text.endswith(f"## {NOW[:10]}\n- new fact")
+
+
+def test_route_existing_without_summary_keeps_old() -> None:
+    entry = _topic(summary="original")
+    cand = lc.TopicCandidate(slug="bounded-store", name="", summary="", detail="d")
+    lc._route_topic_candidates([entry], [cand], now=NOW, source="extract")
+    assert entry.summary == "original"
+
+
+def test_route_new_mints_topic() -> None:
+    cand = lc.TopicCandidate(
+        slug="", name="Sweep Staging!", summary="how staging works", detail="d1"
+    )
+    merged, landed = lc._route_topic_candidates([], [cand], now=NOW, source="extract")
+    assert landed == 1 and len(merged) == 1
+    t = merged[0]
+    assert isinstance(t, TopicEntry)
+    assert t.slug == "sweep-staging"       # minted from the name
+    assert t.name == "Sweep Staging!"
+    assert t.summary == "how staging works"
+    assert t.touch_count == 1
+    assert t.text == f"## {NOW[:10]}\n- d1"
+    assert t.source == "extract" and t.last_used == NOW
+
+
+def test_route_unknown_existing_slug_revives() -> None:
+    # An "existing" slug the store no longer has: revived as a new topic,
+    # name derived from the slug, summary falling back to the detail.
+    cand = lc.TopicCandidate(slug="lost-topic", name="", summary="", detail="the fact")
+    merged, landed = lc._route_topic_candidates([], [cand], now=NOW, source="extract")
+    assert landed == 1 and len(merged) == 1
+    t = merged[0]
+    assert t.slug == "lost-topic"
+    assert t.name == "lost topic"
+    assert t.summary == "the fact"
+    assert t.touch_count == 1
+
+
+def test_route_unknown_existing_slug_revive_keeps_given_fields() -> None:
+    cand = lc.TopicCandidate(
+        slug="lost-topic", name="Lost Topic", summary="its summary", detail="d"
+    )
+    merged, _ = lc._route_topic_candidates([], [cand], now=NOW, source="extract")
+    assert merged[0].name == "Lost Topic"
+    assert merged[0].summary == "its summary"
+
+
+def test_route_new_slug_collision_merges_as_touch() -> None:
+    # A NEW candidate whose minted slug collides with an existing topic must
+    # merge into it (no duplicate topics by construction).
+    entry = _topic("bounded-store", touch_count=3)
+    cand = lc.TopicCandidate(
+        slug="", name="Bounded Store", summary="near-duplicate", detail="extra"
+    )
+    merged, landed = lc._route_topic_candidates(
+        [entry], [cand], now=NOW, source="extract"
+    )
+    assert landed == 1 and merged == [entry]
+    assert entry.touch_count == 4
+    assert "- extra" in entry.text
+
+
+def test_route_two_new_same_name_single_mint() -> None:
+    # Two NEW candidates minting the same slug in one batch: the second lands
+    # as a touch on the first (by_slug is updated as topics mint).
+    c1 = lc.TopicCandidate(slug="", name="One Topic", summary="s1", detail="d1")
+    c2 = lc.TopicCandidate(slug="", name="one topic", summary="s2", detail="d2")
+    merged, landed = lc._route_topic_candidates([], [c1, c2], now=NOW, source="x")
+    assert landed == 2 and len(merged) == 1
+    t = merged[0]
+    assert t.touch_count == 2
+    assert "- d1" in t.text and "- d2" in t.text
+    assert t.summary == "s2"  # the second block's summary refreshes
+
+
 # ----- ingest ---------------------------------------------------------------
 
 
@@ -258,11 +574,13 @@ def test_ingest_writes_three_stores(tmp_path: Path) -> None:
     store.init_layout()
     c = lc.parse_extraction(_FULL_BUNDLE, now=NOW, source="x")
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert added == {STORE_SKILLS: 1, STORE_MUST_REMEMBER: 2, STORE_DIARY: 1}
+    assert added == {STORE_SKILLS: 1, STORE_MUST_REMEMBER: 2, STORE_TOPICS: 1}
     bstore = BoundedStore(cfg, store)
     assert len(bstore.load(STORE_SKILLS)) == 1
     assert len(bstore.load(STORE_MUST_REMEMBER)) == 2
-    assert len(bstore.load(STORE_DIARY)) == 1
+    topics = bstore.load(STORE_TOPICS)
+    assert len(topics) == 1
+    assert topics[0].slug == "bounded-store-revamp"
     # Skill importance refreshed (>=0; log1p(0)=0 for usage_count 0).
     assert bstore.load(STORE_SKILLS)[0].importance >= 0.0
 
@@ -271,22 +589,58 @@ def test_ingest_empty_is_noop(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     store = Store(cfg.store.root)
     store.init_layout()
-    empty = lc.parse_extraction(
-        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@DIARY@@\nNONE\n",
-        now=NOW, source="x",
-    )
+    empty = lc.parse_extraction(_EMPTY_BUNDLE, now=NOW, source="x")
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, empty)
-    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_DIARY: 0}
+    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 0}
 
 
-def test_ingest_appends_to_existing(tmp_path: Path) -> None:
+def test_ingest_reingest_routes_into_same_topic(tmp_path: Path) -> None:
+    # Re-ingesting the same bundle appends to the SAME topic (slug routing),
+    # never a duplicate — skills/must_remember append as before.
     cfg = _cfg(tmp_path)
     store = Store(cfg.store.root)
     store.init_layout()
     c = lc.parse_extraction(_FULL_BUNDLE, now=NOW, source="x")
     lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert len(BoundedStore(cfg, store).load(STORE_DIARY)) == 2
+    c2 = lc.parse_extraction(_FULL_BUNDLE, now=NOW, source="x")
+    lc.ingest_candidates(BoundedStore(cfg, store), cfg, c2, now=NOW)
+    bstore = BoundedStore(cfg, store)
+    topics = bstore.load(STORE_TOPICS)
+    assert len(topics) == 1
+    assert topics[0].touch_count == 2
+    assert len(bstore.load(STORE_MUST_REMEMBER)) == 4
+
+
+def test_ingest_topics_only(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    c = lc.Candidates(
+        skills=[], must_remember=[],
+        topics=[lc.TopicCandidate(slug="", name="Solo", summary="s", detail="d")],
+    )
+    added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
+    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 1}
+    assert not BoundedStore(cfg, store).load(STORE_SKILLS)
+
+
+def test_ingest_no_topics_skips_topic_store(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        KIND: decision
+        MEMO: only a memo
+        @@TOPICS@@
+        NONE
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
+    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 1, STORE_TOPICS: 0}
+    assert BoundedStore(cfg, store).load(STORE_TOPICS) == []
 
 
 def test_extract_and_ingest(tmp_path: Path) -> None:
@@ -295,6 +649,33 @@ def test_extract_and_ingest(tmp_path: Path) -> None:
     store.init_layout()
     added = lc.extract_and_ingest(cfg, store, ScriptedExtractor(_FULL_BUNDLE), _rec())
     assert added[STORE_SKILLS] == 1
+    assert added[STORE_TOPICS] == 1
+
+
+def test_extract_and_ingest_routes_to_existing_topic(tmp_path: Path) -> None:
+    # End-to-end: the store's routing list is embedded in the prompt, and a
+    # bundle addressing an existing slug lands as a touch, not a new topic.
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    BoundedStore(cfg, store).save_atomic(STORE_TOPICS, [_topic("bounded-store")])
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        TOPIC: bounded-store
+        DETAIL: routed straight into the seed topic
+    """)
+    s = ScriptedExtractor(bundle)
+    added = lc.extract_and_ingest(cfg, store, s, _rec(), now=NOW)
+    assert added[STORE_TOPICS] == 1
+    assert s.last_prompt is not None and "`bounded-store`" in s.last_prompt
+    topics = BoundedStore(cfg, store).load(STORE_TOPICS)
+    assert len(topics) == 1
+    assert topics[0].touch_count == 2
+    assert "routed straight into the seed topic" in topics[0].text
 
 
 # ----- decide ---------------------------------------------------------------
@@ -324,7 +705,28 @@ def test_plan_extraction_stages_idle(tmp_path: Path, monkeypatch) -> None:
     staging = lc._sweep_staging_dir(store)
     assert (staging / "manifest.json").exists()
     assert (staging / "conv-1.prompt.md").exists()
-    assert "extract" in (staging / "conv-1.prompt.md").read_text()
+    prompt = (staging / "conv-1.prompt.md").read_text()
+    assert "extract" in prompt
+    # No topics yet → the routing list is the explicit "everything is NEW" note.
+    assert "(no topics exist yet" in prompt
+    assert "{topic_index}" not in prompt
+
+
+def test_plan_extraction_prompt_embeds_routing_list(tmp_path: Path, monkeypatch) -> None:
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    BoundedStore(cfg, store).save_atomic(
+        STORE_TOPICS, [_topic("seed-topic", name="Seed topic", summary="seeded")]
+    )
+    monkeypatch.setattr(
+        lc, "_discover", lambda c, **kw: [_rec(content="abc", activity_mtime=0.0)]
+    )
+    items = lc.plan_extraction(cfg, store)
+    assert len(items) == 1
+    prompt = (lc._sweep_staging_dir(store) / "conv-1.prompt.md").read_text()
+    assert "`seed-topic`" in prompt
+    assert "seeded" in prompt
 
 
 def test_plan_extraction_skips_active(tmp_path: Path, monkeypatch) -> None:
@@ -417,8 +819,9 @@ def test_rebuild_drops_legacy_surface(tmp_path: Path) -> None:
     # only see it when an old store carried one — recreate that here.
     store.paths.archive.mkdir(parents=True, exist_ok=True)
     (store.paths.archive / "x.md").write_text("archive entry")
-    # A new-store file must survive the fresh start.
-    (journal / "skills.md").write_text("---\nid: x\nstore: skills\n---\nkeep me\n")
+    # New-store files must survive the fresh start.
+    bstore = BoundedStore(cfg, store)
+    bstore.save_atomic(STORE_TOPICS, [_topic("keep-me", name="Keep me")])
 
     assert lc.rebuild(cfg, store) == 0
     assert not (journal / "must_memorize.md").exists()
@@ -426,7 +829,8 @@ def test_rebuild_drops_legacy_surface(tmp_path: Path) -> None:
     assert not (journal / "20260101-120000-abc.md").exists()
     assert not (journal / "20260101-daily-abc.md").exists()
     assert not (store.paths.archive / "x.md").exists()
-    assert (journal / "skills.md").exists()  # preserved
+    kept = BoundedStore(cfg, store).load(STORE_TOPICS)  # preserved
+    assert [t.slug for t in kept] == ["keep-me"]
     assert store.paths.briefing.exists()     # regenerated
 
 
@@ -435,6 +839,23 @@ def test_rebuild_idempotent_no_legacy(tmp_path: Path) -> None:
     store = Store(cfg.store.root)
     assert lc.rebuild(cfg, store) == 0
     assert lc.rebuild(cfg, store) == 0  # no legacy, no archive dir → fine
+
+
+def test_rebuild_runs_format_gate(tmp_path: Path) -> None:
+    """The per-persona rebuild runs `check --fix`: a non-canonical topics
+    store is mechanically repaired before the briefing is assembled from it."""
+    from tigerharness.tiger_memory.check import check_all
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    BoundedStore(cfg, store).save_atomic(STORE_TOPICS, [_topic("drifty")])
+    topics_path = store.paths.journal / "topics.md"
+    # Parseable but non-canonical (trailing blank drift) — the gate rewrites.
+    topics_path.write_text(topics_path.read_text() + "\n\n\n")
+    assert not check_all(cfg, store).ok
+    assert lc.rebuild(cfg, store) == 0
+    assert check_all(cfg, store).ok
+    assert [t.slug for t in BoundedStore(cfg, store).load(STORE_TOPICS)] == ["drifty"]
 
 
 # ----- pin ------------------------------------------------------------------
@@ -580,19 +1001,3 @@ def test_discover_runs_adapters(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     # No real transcripts on disk → discover yields nothing, but exercises the loop.
     assert lc._discover(cfg) == []
-
-
-def test_rebuild_runs_format_gate(tmp_path: Path) -> None:
-    """The per-persona rebuild runs `check --fix`: a non-canonical diary store
-    is mechanically repaired before the briefing is assembled from it."""
-    from tigerharness.tiger_memory.check import check_all
-    cfg = _cfg(tmp_path)
-    store = Store(cfg.store.root)
-    store.init_layout()
-    # days descending = parseable but non-canonical (the gate canonicalizes).
-    (store.paths.journal / "diary.md").write_text(
-        "## 2026-06-18\n- (+1) b\n\n## 2026-06-17\n- (+1) a\n"
-    )
-    assert lc.rebuild(cfg, store) == 0
-    assert check_all(cfg, store).ok
-    assert (store.paths.journal / "diary.md").read_text().startswith("## 2026-06-17")

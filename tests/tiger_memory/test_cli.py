@@ -1,8 +1,10 @@
-"""Tests for the trimmed tiger-memory CLI (cli.py, bounded-store revamp).
+"""Tests for the trimmed tiger-memory CLI (cli.py, topic-store revamp).
 
-The retired subcommands (search/drill/tree/raw/bootstrap/resummarize) are
-gone; this covers init / rebuild / pin / state and the in-session executor
-glue (plan / ingest-extraction / ingest-staged).
+The retired subcommands (search/drill/tree/raw/bootstrap/resummarize,
+import-legacy, migrate-emotional-to-diary) are gone; this covers init /
+rebuild / pin / state / migrate-to-topics, the in-session executor glue
+(plan / ingest-extraction / build-reduce-prompts / ingest-staged) and the
+staged compaction glue (compact-plan / compact-apply).
 """
 from __future__ import annotations
 
@@ -10,17 +12,15 @@ import json
 from pathlib import Path
 from textwrap import dedent
 
-import pytest
-
 from tigerharness.tiger_memory import lifecycle as lc
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.cli import main
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.cursor import Cursor, load_cursor
 from tigerharness.tiger_memory.entries import (
-    STORE_DIARY,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
+    STORE_TOPICS,
 )
 from tigerharness.tiger_memory.sources.base import SourceRecord
 from tigerharness.tiger_memory.store import Store
@@ -50,8 +50,11 @@ _BUNDLE = dedent("""\
     @@MUST_REMEMBER@@
     KIND: decision
     MEMO: d
-    @@DIARY@@
-    NONE
+    @@TOPICS@@
+    TOPIC: NEW
+    NAME: Store Revamp
+    SUMMARY: the topic-store revamp
+    DETAIL: switched the bundle to the topics contract
 """)
 
 
@@ -131,9 +134,12 @@ def test_ingest_extraction_via_stdin(tmp_path: Path, monkeypatch, capsys) -> Non
     assert main(["--config", str(cfg_path), "ingest-extraction", "--uuid", "c1"]) == 0
     out = capsys.readouterr().out
     assert "ingested c1" in out
+    assert "1 topic detail(s)" in out
     cfg = load_config(cfg_path)
     store = Store(cfg.store.root)
-    assert len(BoundedStore(cfg, store).load(STORE_SKILLS)) == 1
+    bstore = BoundedStore(cfg, store)
+    assert len(bstore.load(STORE_SKILLS)) == 1
+    assert len(bstore.load(STORE_TOPICS)) == 1
 
 
 def test_ingest_extraction_unknown_uuid(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -328,6 +334,160 @@ def test_ingest_item_bundle_map_reduce_drops_chunks_and_digests(tmp_path: Path) 
     _ingest_item_bundle(cfg, store, item, _BUNDLE)
     for f in (*chunks, *digests):
         assert not f.exists()                          # all staged files consumed
+
+
+# ----- migrate-to-topics (ADR 0007 one-off) ---------------------------------
+
+
+def test_migrate_to_topics_dry_run_then_apply(tmp_path: Path, capsys) -> None:
+    cfg_path = _cfg_path(tmp_path)
+    cfg = load_config(cfg_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    diary = store.paths.journal / "diary.md"
+    diary.write_text("old diary content\n")
+
+    # Dry-run (no --apply): reports the plan, moves/creates nothing.
+    assert main(["--config", str(cfg_path), "migrate-to-topics"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["applied"] is False
+    assert out["retired"] == ["diary.md"]
+    assert out["topics_created"] is True
+    assert diary.exists()                                # untouched
+    assert not (store.paths.journal / "topics.md").exists()
+
+    # --apply: retires the file and creates the topics store.
+    assert main(["--config", str(cfg_path), "migrate-to-topics", "--apply"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["applied"] is True and out["retired"] == ["diary.md"]
+    assert not diary.exists()
+    assert (store.root / "retired" / "diary.md").read_text() == \
+        "old diary content\n"
+    assert (store.paths.journal / "topics.md").exists()
+
+    # Idempotent: a re-run is a no-op report.
+    assert main(["--config", str(cfg_path), "migrate-to-topics", "--apply"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["retired"] == [] and out["topics_created"] is False
+
+
+# ----- compact-plan / compact-apply (ADR 0007 staged compaction) -------------
+
+
+def _compact_cfg_path(tmp_path: Path) -> Path:
+    """Config with a tight must_remember bound so one pinned memo overflows."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(dedent(f"""\
+        agent: {{name: T, role: t}}
+        store: {{root: {tmp_path}/memory}}
+        sources:
+          - kind: claude_code
+            project_path: {tmp_path}/proj/
+        summarizer: {{backend: anthropic, model: m, prompts: default/v1}}
+        memory:
+          must_remember:
+            max_length: 20
+            overflow_limit: 30
+        rebuild:
+          lock_path: {tmp_path}/lock
+    """))
+    return p
+
+
+def test_compact_plan_empty_when_under_bounds(tmp_path: Path, capsys) -> None:
+    cfg_path = _cfg_path(tmp_path)
+    main(["--config", str(cfg_path), "init"])
+    capsys.readouterr()
+    assert main(["--config", str(cfg_path), "compact-plan"]) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert manifest["targets"] == []
+    assert manifest["dropped_stale_topics"] == []
+
+
+def test_compact_plan_stages_target_when_over(tmp_path: Path, capsys) -> None:
+    cfg_path = _compact_cfg_path(tmp_path)
+    memo = "a memo well past the thirty char overflow limit"
+    main(["--config", str(cfg_path), "pin", memo, "--kind", "decision"])
+    capsys.readouterr()
+    assert main(["--config", str(cfg_path), "compact-plan"]) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert [t["kind"] for t in manifest["targets"]] == ["must_remember"]
+    target = manifest["targets"][0]
+    assert Path(target["prompt_path"]).exists()          # prompt staged
+    assert not Path(target["card_path"]).exists()        # card is the agent's job
+
+
+def test_compact_apply_no_manifest_exits_2(tmp_path: Path, capsys) -> None:
+    cfg_path = _cfg_path(tmp_path)
+    Store(load_config(cfg_path).store.root).init_layout()
+    assert main(["--config", str(cfg_path), "compact-apply"]) == 2
+    assert "no compaction manifest" in capsys.readouterr().err
+
+
+def test_compact_apply_malformed_card_exits_1(tmp_path: Path, capsys) -> None:
+    cfg_path = _compact_cfg_path(tmp_path)
+    memo = "a memo well past the thirty char overflow limit"
+    main(["--config", str(cfg_path), "pin", memo, "--kind", "decision"])
+    capsys.readouterr()
+    main(["--config", str(cfg_path), "compact-plan"])
+    manifest = json.loads(capsys.readouterr().out)
+    target = manifest["targets"][0]
+    Path(target["card_path"]).write_text("garbage, no marker")
+    assert main(["--config", str(cfg_path), "compact-apply"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["applied"] == []
+    assert report["malformed"][0]["key"] == "must_remember"
+    assert Path(target["card_path"]).exists()            # kept for inspection
+
+
+def test_compact_apply_clean_card_exits_0(tmp_path: Path, capsys) -> None:
+    cfg_path = _compact_cfg_path(tmp_path)
+    memo = "a memo well past the thirty char overflow limit"
+    main(["--config", str(cfg_path), "pin", memo, "--kind", "decision"])
+    capsys.readouterr()
+    main(["--config", str(cfg_path), "compact-plan"])
+    manifest = json.loads(capsys.readouterr().out)
+    target = manifest["targets"][0]
+    Path(target["card_path"]).write_text(dedent("""\
+        @@MUST_REMEMBER@@
+        KIND: decision
+        MEMO: short memo
+    """))
+    assert main(["--config", str(cfg_path), "compact-apply"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["applied"] == ["must_remember"]
+    assert report["malformed"] == [] and report["skipped_no_card"] == []
+    # Applied target's staging files are consumed.
+    assert not Path(target["prompt_path"]).exists()
+    assert not Path(target["card_path"]).exists()
+    cfg = load_config(cfg_path)
+    entries = BoundedStore(cfg, Store(cfg.store.root)).load(STORE_MUST_REMEMBER)
+    assert [e.text for e in entries] == ["short memo"]
+
+
+def test_compact_apply_skipped_no_card_exits_0(tmp_path: Path, capsys) -> None:
+    cfg_path = _compact_cfg_path(tmp_path)
+    memo = "a memo well past the thirty char overflow limit"
+    main(["--config", str(cfg_path), "pin", memo, "--kind", "decision"])
+    main(["--config", str(cfg_path), "compact-plan"])
+    capsys.readouterr()
+    assert main(["--config", str(cfg_path), "compact-apply"]) == 0  # no card yet
+    report = json.loads(capsys.readouterr().out)
+    assert report["skipped_no_card"] == ["must_remember"]
+
+
+# ----- check ------------------------------------------------------------------
+
+
+def test_check_clean_store(tmp_path: Path, capsys) -> None:
+    cfg_path = _cfg_path(tmp_path)
+    main(["--config", str(cfg_path), "init"])
+    capsys.readouterr()
+    assert main(["--config", str(cfg_path), "check"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert {s["store"] for s in payload["stores"]} == \
+        {STORE_SKILLS, STORE_MUST_REMEMBER, STORE_TOPICS}
 
 
 def _rec_distinct(uuid: str) -> SourceRecord:

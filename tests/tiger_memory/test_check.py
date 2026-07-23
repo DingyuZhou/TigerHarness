@@ -1,7 +1,8 @@
-"""Tests for the format-check + repair verb (check.py, plan §2 dev-3, Mitsui).
+"""Tests for the format-check + repair verb (check.py, ADR 0007).
 
-Covers validate / --fix / quarantine across all three stores + the CLI exit
-codes, to 100% branch coverage. Pure-Python, no model calls.
+Covers validate / --fix / quarantine across the three frontmatter stores
+(skills / must_remember / topics) + the CLI exit codes. Pure-Python, no
+model calls.
 """
 from __future__ import annotations
 
@@ -13,7 +14,12 @@ import pytest
 from tigerharness.tiger_memory import check as chk
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
-from tigerharness.tiger_memory.entries import DiaryEntry, MustRememberEntry, SkillEntry
+from tigerharness.tiger_memory.entries import (
+    STORE_NAMES,
+    MustRememberEntry,
+    SkillEntry,
+    TopicEntry,
+)
 from tigerharness.tiger_memory.store import Store
 
 NOW = "2026-06-17T00:00:00Z"
@@ -35,11 +41,6 @@ def bstore(tmp_path: Path) -> BoundedStore:
           backend: anthropic
           model: m
           prompts: default/v1
-        memory:
-          diary:
-            max_length: 4000
-            overflow_limit: 6000
-            weight_cap: 10
     """))
     cfg = load_config(cfg_path)
     store = Store(cfg.store.root)
@@ -47,8 +48,8 @@ def bstore(tmp_path: Path) -> BoundedStore:
     return BoundedStore(cfg, store)
 
 
-def _diary_path(bstore: BoundedStore) -> Path:
-    return bstore.store.paths.journal / "diary.md"
+def _path(bstore: BoundedStore, store_name: str) -> Path:
+    return bstore.store.paths.journal / f"{store_name}.md"
 
 
 def _skill(name="S") -> SkillEntry:
@@ -56,63 +57,49 @@ def _skill(name="S") -> SkillEntry:
                       name=name, trigger="t", procedure="p")
 
 
+def _must(text="m") -> MustRememberEntry:
+    return MustRememberEntry(text=text, created_at=NOW, last_used=NOW,
+                             source="pin", kind="preference")
+
+
+def _topic(name="Topic One") -> TopicEntry:
+    return TopicEntry(text="## 2026-06-17\n- fact", created_at=NOW,
+                      last_used=NOW, source="x", name=name,
+                      summary="what this topic is")
+
+
+def _by_name(report: chk.CheckReport, store_name: str) -> chk.StoreCheck:
+    return next(s for s in report.stores if s.store_name == store_name)
+
+
 # ----- clean / absent -------------------------------------------------------
 
 def test_check_absent_stores_ok(bstore: BoundedStore):
     report = chk.check_all(bstore.cfg, bstore.store)
     assert report.ok and all(s.valid == 0 for s in report.stores)
+    # Exactly the three frontmatter stores, in STORE_NAMES order.
+    assert [s.store_name for s in report.stores] == list(STORE_NAMES)
+    assert "diary" not in {s.store_name for s in report.stores}
+    assert "fuzzy" not in {s.store_name for s in report.stores}
 
 
 def test_check_clean_stores_ok(bstore: BoundedStore):
     bstore.save_atomic("skills", [_skill()])
-    bstore.save_atomic("diary", [DiaryEntry(text="note", created_at=NOW,
-                                            last_used=NOW, source="x", weight=3.0)])
+    bstore.save_atomic("must_remember", [_must()])
+    bstore.save_atomic("topics", [_topic()])
     report = chk.check_all(bstore.cfg, bstore.store)
     assert report.ok
-    diary = next(s for s in report.stores if s.store_name == "diary")
-    assert diary.valid == 1 and diary.problems == []
+    for name in STORE_NAMES:
+        s = _by_name(report, name)
+        assert s.valid == 1 and s.problems == [] and s.quarantined == 0
 
 
-# ----- diary: mechanical + quarantine --------------------------------------
+# ----- schema-invalid entries → quarantine ----------------------------------
 
-def test_check_diary_noncanonical_is_mechanical(bstore: BoundedStore):
-    # days descending = parseable but non-canonical (serialize sorts ascending).
-    _diary_path(bstore).write_text("## 2026-06-18\n- (+1) b\n\n## 2026-06-17\n- (+1) a\n")
-    report = chk.check_all(bstore.cfg, bstore.store)
-    diary = next(s for s in report.stores if s.store_name == "diary")
-    assert not diary.ok and "canonical" in diary.problems[0]
-    # --fix rewrites canonically (ascending), nothing quarantined.
-    chk.check_all(bstore.cfg, bstore.store, fix=True)
-    assert chk.check_all(bstore.cfg, bstore.store).ok
-    assert _diary_path(bstore).read_text().startswith("## 2026-06-17")
-
-
-def test_check_diary_quarantines_unparseable(bstore: BoundedStore):
-    _diary_path(bstore).write_text("## 2026-06-17\n- (+2) keep me\nGARBAGE LINE\n")
-    report = chk.check_all(bstore.cfg, bstore.store, fix=True)
-    diary = next(s for s in report.stores if s.store_name == "diary")
-    assert diary.quarantined == 1 and diary.repaired
-    # good bullet kept, garbage moved to the sidecar, live store now valid.
-    assert "keep me" in _diary_path(bstore).read_text()
-    assert "GARBAGE LINE" in (bstore.store.paths.journal / "diary.rejected.md").read_text()
-    assert chk.check_all(bstore.cfg, bstore.store).ok
-
-
-def test_check_quarantine_appends_to_existing_sidecar(bstore: BoundedStore):
-    sidecar = bstore.store.paths.journal / "diary.rejected.md"
-    sidecar.write_text("earlier reject\n")
-    _diary_path(bstore).write_text("## 2026-06-17\n- (+1) ok\nGARBAGE\n")
-    chk.check_all(bstore.cfg, bstore.store, fix=True)
-    body = sidecar.read_text()
-    assert "earlier reject" in body and "GARBAGE" in body
-
-
-# ----- frontmatter stores ---------------------------------------------------
-
-def test_check_frontmatter_invalid_entry(bstore: BoundedStore):
+def test_check_skills_invalid_entry(bstore: BoundedStore):
     # write a skills file with one good + one schema-invalid (blank name) block.
     bstore.save_atomic("skills", [_skill("Good")])
-    path = bstore.store.paths.journal / "skills.md"
+    path = _path(bstore, "skills")
     bad = dedent("""\
 
         <!-- tiger-memory-entry -->
@@ -132,34 +119,108 @@ def test_check_frontmatter_invalid_entry(bstore: BoundedStore):
         """)
     path.write_text(path.read_text() + bad)
     report = chk.check_all(bstore.cfg, bstore.store)
-    skills = next(s for s in report.stores if s.store_name == "skills")
+    skills = _by_name(report, "skills")
     assert not skills.ok and skills.valid == 1
+    assert "invalid skills entry id='bad1'" in skills.problems[0]
     # --fix quarantines the bad block, keeps the good one.
     chk.check_all(bstore.cfg, bstore.store, fix=True)
     assert chk.check_all(bstore.cfg, bstore.store).ok
-    assert (bstore.store.paths.journal / "skills.rejected.md").exists()
+    assert "Good" in path.read_text()
+    assert "bad1" in (bstore.store.paths.journal / "skills.rejected.md").read_text()
+
+
+def test_check_topics_invalid_entry(bstore: BoundedStore):
+    # A topic block whose slug is not canonical (uppercase + space) is
+    # schema-invalid: quarantined under --fix, the good topic kept.
+    bstore.save_atomic("topics", [_topic("Keeper")])
+    path = _path(bstore, "topics")
+    bad = dedent("""\
+
+        <!-- tiger-memory-entry -->
+        ---
+        id: badt
+        store: topics
+        created_at: 2026-06-17T00:00:00Z
+        last_used: 2026-06-17T00:00:00Z
+        source: x
+        name: Bad Topic
+        slug: "Bad Slug"
+        summary: s
+        touch_count: 1
+        ---
+        body
+        """)
+    path.write_text(path.read_text() + bad)
+    report = chk.check_all(bstore.cfg, bstore.store)
+    topics = _by_name(report, "topics")
+    assert not topics.ok and topics.valid == 1
+    assert "invalid topics entry id='badt'" in topics.problems[0]
+    fixed = chk.check_all(bstore.cfg, bstore.store, fix=True)
+    assert _by_name(fixed, "topics").quarantined == 1
+    assert chk.check_all(bstore.cfg, bstore.store).ok
+    assert "Keeper" in path.read_text()
+    sidecar = bstore.store.paths.journal / "topics.rejected.md"
+    assert "Bad Slug" in sidecar.read_text()
 
 
 def test_check_frontmatter_unparseable_block(bstore: BoundedStore):
-    bstore.save_atomic("must_remember",
-                       [MustRememberEntry(text="m", created_at=NOW, last_used=NOW,
-                                          source="pin", kind="preference")])
-    path = bstore.store.paths.journal / "must_remember.md"
+    bstore.save_atomic("must_remember", [_must()])
+    path = _path(bstore, "must_remember")
     path.write_text(path.read_text() + "\n<!-- tiger-memory-entry -->\nno frontmatter here\n")
-    report = chk.check_all(bstore.cfg, bstore.store, fix=True)
-    mr = next(s for s in report.stores if s.store_name == "must_remember")
+    report = chk.check_all(bstore.cfg, bstore.store)
+    mr = _by_name(report, "must_remember")
+    assert "unparseable block (no frontmatter)" in mr.problems
+    fixed = chk.check_all(bstore.cfg, bstore.store, fix=True)
+    mr = _by_name(fixed, "must_remember")
     assert mr.quarantined == 1 and mr.repaired
+    assert "no frontmatter here" in (
+        bstore.store.paths.journal / "must_remember.rejected.md"
+    ).read_text()
+    assert chk.check_all(bstore.cfg, bstore.store).ok
 
 
-def test_check_frontmatter_noncanonical_mechanical(bstore: BoundedStore):
-    bstore.save_atomic("skills", [_skill("A")])
-    path = bstore.store.paths.journal / "skills.md"
+def test_check_quarantine_appends_to_existing_sidecar(bstore: BoundedStore):
+    sidecar = bstore.store.paths.journal / "topics.rejected.md"
+    sidecar.write_text("earlier reject\n")
+    _path(bstore, "topics").write_text("GARBAGE LINE\n")
+    chk.check_all(bstore.cfg, bstore.store, fix=True)
+    body = sidecar.read_text()
+    assert "earlier reject" in body and "GARBAGE LINE" in body
+
+
+# ----- mechanical drift → canonical rewrite, no quarantine -------------------
+
+def test_check_noncanonical_mechanical(bstore: BoundedStore):
+    bstore.save_atomic("topics", [_topic("A")])
+    path = _path(bstore, "topics")
     path.write_text(path.read_text() + "\n\n")  # trailing whitespace = non-canonical
     report = chk.check_all(bstore.cfg, bstore.store)
-    skills = next(s for s in report.stores if s.store_name == "skills")
-    assert not skills.ok and "canonical" in skills.problems[0]
+    topics = _by_name(report, "topics")
+    assert not topics.ok and topics.problems == ["topics not in canonical format"]
+    fixed = chk.check_all(bstore.cfg, bstore.store, fix=True)
+    topics = _by_name(fixed, "topics")
+    # mechanical only: repaired in place, nothing quarantined.
+    assert topics.repaired and topics.quarantined == 0
+    assert not (bstore.store.paths.journal / "topics.rejected.md").exists()
+    assert chk.check_all(bstore.cfg, bstore.store).ok
+
+
+def test_check_frontmatter_blank_trailing_block_skipped(bstore: BoundedStore):
+    """A trailing empty block (no frontmatter, blank) is skipped silently — it
+    is not a 'problem', just non-canonical whitespace --fix tidies away."""
+    bstore.save_atomic("skills", [_skill("A")])
+    path = _path(bstore, "skills")
+    path.write_text(path.read_text() + "\n<!-- tiger-memory-entry -->\n\n")
+    report = chk.check_all(bstore.cfg, bstore.store)
+    skills = _by_name(report, "skills")
+    # the blank block raised no per-block problem; only the canonical mismatch.
+    assert skills.problems == ["skills not in canonical format"]
     chk.check_all(bstore.cfg, bstore.store, fix=True)
     assert chk.check_all(bstore.cfg, bstore.store).ok
+
+
+def test_rejected_path_naming():
+    assert chk._rejected_path(Path("/j/topics.md")) == Path("/j/topics.rejected.md")
 
 
 # ----- CLI exit codes -------------------------------------------------------
@@ -176,57 +237,12 @@ def test_cli_check_clean_exit_zero(bstore: BoundedStore, tmp_path: Path, capsys)
 
 
 def test_cli_check_dirty_exit_one(bstore: BoundedStore, tmp_path: Path):
-    _diary_path(bstore).write_text("GARBAGE\n")
+    _path(bstore, "topics").write_text("GARBAGE\n")
     assert _cli(tmp_path) == 1
 
 
 def test_cli_check_fix_exit_zero(bstore: BoundedStore, tmp_path: Path):
-    _diary_path(bstore).write_text("GARBAGE\n")
+    _path(bstore, "topics").write_text("GARBAGE\n")
     assert _cli(tmp_path, "--fix") == 0
     # after --fix the store is clean.
     assert _cli(tmp_path) == 0
-
-
-def test_check_frontmatter_blank_trailing_block_skipped(bstore: BoundedStore):
-    """A trailing empty block (no frontmatter, blank) is skipped silently — it
-    is not a 'problem', just non-canonical whitespace --fix tidies away."""
-    bstore.save_atomic("skills", [_skill("A")])
-    path = bstore.store.paths.journal / "skills.md"
-    path.write_text(path.read_text() + "\n<!-- tiger-memory-entry -->\n\n")
-    report = chk.check_all(bstore.cfg, bstore.store)
-    skills = next(s for s in report.stores if s.store_name == "skills")
-    # the blank block raised no per-block problem; only the canonical mismatch.
-    assert skills.problems == ["skills not in canonical format"]
-    chk.check_all(bstore.cfg, bstore.store, fix=True)
-    assert chk.check_all(bstore.cfg, bstore.store).ok
-
-
-# ----- fuzzy store (4-store model, b1-dev-3) --------------------------------
-
-def test_check_fuzzy_empty_ok(bstore: "BoundedStore") -> None:
-    r = chk.check_store(bstore, "fuzzy", fix=False)
-    assert r.ok and r.valid == 0
-
-
-def test_check_fuzzy_under_bound_ok(bstore: "BoundedStore") -> None:
-    from tigerharness.tiger_memory import fuzzy_store
-    fuzzy_store.save_fuzzy(bstore.cfg, bstore.store, "## Fuzzy\n- gist\n")
-    r = chk.check_store(bstore, "fuzzy", fix=False)
-    assert r.ok and r.valid == 1
-
-
-def test_check_fuzzy_over_overflow_flagged_and_fixed(bstore: "BoundedStore") -> None:
-    from tigerharness.tiger_memory import fuzzy_store
-    bstore.store.paths.journal.mkdir(parents=True, exist_ok=True)
-    fuzzy_store.fuzzy_path(bstore.store).write_text("x" * 6001)  # >= overflow 6000
-    r = chk.check_store(bstore, "fuzzy", fix=False)
-    assert not r.ok and "overflow_limit" in r.problems[0]
-    r2 = chk.check_store(bstore, "fuzzy", fix=True)
-    assert r2.repaired
-    assert len(fuzzy_store.load_fuzzy(bstore.store)) <= bstore.memory.fuzzy.max_length
-
-
-def test_check_all_includes_fuzzy(bstore: "BoundedStore") -> None:
-    rep = chk.check_all(bstore.cfg, bstore.store)
-    assert len(rep.stores) == 4
-    assert any(s.store_name == "fuzzy" for s in rep.stores)

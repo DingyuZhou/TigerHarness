@@ -1,0 +1,672 @@
+"""Staged compaction for the three bounded stores (ADR 0007).
+
+Replaces the retired in-process meditation engine with the same
+subscription-rail shape the sweep's extraction uses:
+
+- :func:`compact_plan` (non-AI) scans the stores; every surface at/over its
+  ``overflow_limit`` gets one prompt staged under ``.compact-staging/`` plus
+  a manifest entry. Deterministic pre-passes that need no judgement run
+  here: topics stale beyond ``forget_days`` are dropped outright (oldest
+  first) when the topic index is over its ``max``.
+- Task sub-agents (spawned by the sweep skill) each read one prompt and
+  write one ``<target>.card.md`` — the compacted replacement, per the
+  prompt's strict marker contract.
+- :func:`compact_apply` (non-AI) validates each card and applies it
+  atomically. Convergence is guaranteed deterministically: a surface still
+  over its ``max`` after the card is applied is trimmed by keep-rank /
+  freshness rules — except protected content (operator-explicit directives,
+  fresh topics), which is never force-dropped; a surface that cannot shrink
+  without touching protected content stays over-max and is reported.
+
+Prompts and cards are markdown files; the bulky store content transits only
+the sub-agent's context, never the driver's (billing model B8).
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+
+from .bounded_store import BoundedStore
+from .config import Config
+from .entries import (
+    KIND_OPERATOR_EXPLICIT,
+    STORE_MUST_REMEMBER,
+    STORE_SKILLS,
+    STORE_TOPICS,
+    VALID_KINDS,
+    EntryError,
+    MustRememberEntry,
+    SkillEntry,
+    TopicEntry,
+)
+from .ranking import days_between
+from .skills import refresh_importance, skills_keep_rank
+from .state import iso_now
+from .store import Store
+
+log = logging.getLogger("tigerharness.tiger_memory.compaction")
+
+STAGING_DIR_NAME = ".compact-staging"
+CARD_SUFFIX = ".card.md"
+
+# Card contract markers, one per target kind.
+MARK_MUST_REMEMBER = "@@MUST_REMEMBER@@"
+MARK_SKILLS = "@@SKILLS@@"
+MARK_TOPIC_ROSTER = "@@TOPIC_ROSTER@@"
+MARK_TOPIC_DETAIL = "@@TOPIC_DETAIL@@"
+
+KIND_MUST_REMEMBER = "must_remember"
+KIND_SKILLS = "skills"
+KIND_TOPIC_ROSTER = "topic_roster"
+KIND_TOPIC_DETAIL = "topic_detail"
+KIND_SKILL_DETAIL = "skill_detail"
+
+
+class CompactionParseError(ValueError):
+    """A compaction card didn't satisfy its marker contract."""
+
+
+def _staging_dir(store: Store) -> Path:
+    return store.root / STAGING_DIR_NAME
+
+
+def _prompts_root(cfg: Config) -> Path:
+    from .lifecycle import _prompts_root as lifecycle_prompts_root
+    return lifecycle_prompts_root(cfg)
+
+
+def _fill(cfg: Config, name: str, **kwargs) -> str:
+    from .lifecycle import _fill_prompt
+    return _fill_prompt(_prompts_root(cfg) / name, **kwargs)
+
+
+def _is_fresh(entry: TopicEntry, now: str, fresh_days: int) -> bool:
+    return days_between(entry.last_used, now) <= fresh_days
+
+
+def _is_stale(entry: TopicEntry, now: str, forget_days: int) -> bool:
+    return days_between(entry.last_used, now) > forget_days
+
+
+# ----- plan -------------------------------------------------------------------
+
+
+def _forget_stale_topics(
+    bstore: BoundedStore, topics: list[TopicEntry], now: str
+) -> tuple[list[TopicEntry], list[str]]:
+    """Deterministic pre-pass: while the topic index is over ``max``, drop
+    topics stale beyond ``forget_days``, oldest first. Never touches a topic
+    inside the stale window; returns survivors + the dropped slugs."""
+    cfgt = bstore.memory.topics
+    dropped: list[str] = []
+    survivors = list(topics)
+    stale = sorted(
+        (t for t in survivors if _is_stale(t, now, cfgt.forget_days)),
+        key=lambda t: t.last_used,
+    )
+    for victim in stale:
+        if bstore.index_chars(STORE_TOPICS, survivors) <= cfgt.index_max_length:
+            break
+        survivors.remove(victim)
+        dropped.append(victim.slug)
+    return survivors, dropped
+
+
+def _render_mr_blocks(entries: list[MustRememberEntry]) -> str:
+    if not entries:
+        return "(none)"
+    out = []
+    for e in entries:
+        out.append(f"KIND: {e.kind}\nMEMO: {e.text}")
+    return "\n\n".join(out)
+
+
+def _render_skill_blocks(entries: list[SkillEntry]) -> str:
+    out = []
+    for e in entries:
+        out.append(
+            f"NAME: {e.name}\nTRIGGER: {e.trigger}\n"
+            f"PROCEDURE: {e.procedure}\n"
+            f"(usage {e.usage_count}×, importance {float(e.importance):.2f}, "
+            f"last used {e.last_used[:10]})"
+        )
+    return "\n\n".join(out)
+
+
+def _render_roster(
+    topics: list[TopicEntry], now: str, fresh_days: int
+) -> str:
+    out = []
+    for e in sorted(topics, key=lambda t: t.last_used, reverse=True):
+        fresh = " [fresh]" if _is_fresh(e, now, fresh_days) else ""
+        out.append(
+            f"- `{e.slug}` — {e.name}{fresh} · last {e.last_used[:10]} · "
+            f"{e.touch_count}× · detail {len(e.text)} chars\n  {e.summary}"
+        )
+    return "\n".join(out)
+
+
+def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
+    """Stage one compaction prompt per over-bound surface; return the manifest.
+
+    Runs the deterministic stale-topic forget first (no AI needed for
+    "not refreshed for a while"), then stages prompts only for surfaces
+    still at/over their ``overflow_limit``. Writes
+    ``.compact-staging/manifest.json``; an empty ``targets`` list means
+    nothing needs compacting.
+    """
+    now = now or iso_now()
+    bstore = BoundedStore(cfg, store)
+    staging = _staging_dir(store)
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    targets: list[dict] = []
+    dropped_stale: list[str] = []
+
+    # --- topics: deterministic stale forget, then roster + detail targets ---
+    topics = [
+        e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
+    ]
+    if bstore.is_over_overflow(STORE_TOPICS, topics):
+        survivors, dropped_stale = _forget_stale_topics(bstore, topics, now)
+        if dropped_stale:
+            bstore.save_atomic(STORE_TOPICS, survivors)
+            log.info(
+                "compact-plan: forgot %d stale topic(s): %s",
+                len(dropped_stale), ", ".join(dropped_stale),
+            )
+            topics = survivors
+    if bstore.is_over_overflow(STORE_TOPICS, topics):
+        prompt_path = staging / "topic_roster.prompt.md"
+        prompt_path.write_text(
+            _fill(
+                cfg, "compact_topic_roster.md",
+                agent_name=cfg.agent.name,
+                current_chars=bstore.index_chars(STORE_TOPICS, topics),
+                max_chars=cfg.memory.topics.index_max_length,
+                fresh_days=cfg.memory.topics.fresh_days,
+                summary_max_words=cfg.memory_extract.topic_summary_words,
+                roster=_render_roster(
+                    topics, now, cfg.memory.topics.fresh_days
+                ),
+            ),
+            encoding="utf-8",
+        )
+        targets.append(_target(KIND_TOPIC_ROSTER, "topic_roster", prompt_path))
+    for t in topics:
+        if bstore.is_detail_over_overflow(t):
+            key = f"topic_detail.{t.slug}"
+            prompt_path = staging / f"{key}.prompt.md"
+            prompt_path.write_text(
+                _fill(
+                    cfg, "compact_topic_detail.md",
+                    agent_name=cfg.agent.name,
+                    topic_name=t.name,
+                    topic_slug=t.slug,
+                    current_chars=bstore.detail_chars(t),
+                    max_chars=cfg.memory.topics.detail_max_length,
+                    body=t.text,
+                ),
+                encoding="utf-8",
+            )
+            targets.append(
+                _target(KIND_TOPIC_DETAIL, key, prompt_path, slug=t.slug)
+            )
+
+    # --- skills: index target + per-skill detail targets ---
+    skills = [e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)]
+    if bstore.is_over_overflow(STORE_SKILLS, skills):
+        prompt_path = staging / "skills.prompt.md"
+        prompt_path.write_text(
+            _fill(
+                cfg, "compact_skills.md",
+                agent_name=cfg.agent.name,
+                current_chars=bstore.index_chars(STORE_SKILLS, skills),
+                max_chars=cfg.memory.skills.index_max_length,
+                procedure_max_words=cfg.memory_extract.skill_procedure_words,
+                entries=_render_skill_blocks(
+                    sorted(
+                        skills,
+                        key=lambda e: skills_keep_rank(e, now, cfg),
+                        reverse=True,
+                    )
+                ),
+            ),
+            encoding="utf-8",
+        )
+        targets.append(_target(KIND_SKILLS, "skills", prompt_path))
+    for s in skills:
+        if bstore.is_detail_over_overflow(s):
+            key = f"skill_detail.{s.id}"
+            prompt_path = staging / f"{key}.prompt.md"
+            prompt_path.write_text(
+                _fill(
+                    cfg, "compact_skill_detail.md",
+                    agent_name=cfg.agent.name,
+                    skill_name=s.name,
+                    skill_trigger=s.trigger,
+                    current_chars=bstore.detail_chars(s),
+                    max_chars=cfg.memory.skills.detail_max_length,
+                    procedure=s.procedure,
+                ),
+                encoding="utf-8",
+            )
+            targets.append(
+                _target(KIND_SKILL_DETAIL, key, prompt_path, entry_id=s.id)
+            )
+
+    # --- must_remember ---
+    must = [
+        e for e in bstore.load(STORE_MUST_REMEMBER)
+        if isinstance(e, MustRememberEntry)
+    ]
+    if bstore.is_over_overflow(STORE_MUST_REMEMBER, must):
+        protected = [e for e in must if e.kind == KIND_OPERATOR_EXPLICIT]
+        compactable = [e for e in must if e.kind != KIND_OPERATOR_EXPLICIT]
+        budget = cfg.memory.must_remember.max_length - bstore.length_chars(
+            protected
+        )
+        from .lifecycle import team_mission_text
+        mission = team_mission_text(cfg).strip() or "(no charter mission found)"
+        prompt_path = staging / "must_remember.prompt.md"
+        prompt_path.write_text(
+            _fill(
+                cfg, "compact_must_remember.md",
+                agent_name=cfg.agent.name,
+                current_chars=bstore.length_chars(must),
+                max_chars=max(0, budget),
+                protected=_render_mr_blocks(protected),
+                entries=_render_mr_blocks(compactable),
+                mission=mission,
+            ),
+            encoding="utf-8",
+        )
+        targets.append(_target(KIND_MUST_REMEMBER, "must_remember", prompt_path))
+
+    manifest = {
+        "generated_at": now,
+        "dropped_stale_topics": dropped_stale,
+        "targets": targets,
+    }
+    (staging / "manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    log.info("compact-plan: staged %d target(s)", len(targets))
+    return manifest
+
+
+def _target(kind: str, key: str, prompt_path: Path, **extra) -> dict:
+    card_path = prompt_path.with_name(f"{key}{CARD_SUFFIX}")
+    item = {
+        "kind": kind,
+        "key": key,
+        "prompt_path": str(prompt_path),
+        "card_path": str(card_path),
+    }
+    item.update(extra)
+    return item
+
+
+# ----- card parsing -------------------------------------------------------------
+
+
+def _section_after_marker(text: str, marker: str) -> str:
+    """The card body under *marker* (whole-line match). Raises on a missing
+    marker or an empty card."""
+    if not text or not text.strip():
+        raise CompactionParseError("empty compaction card")
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() == marker:
+            return "\n".join(lines[i + 1:]).strip()
+    raise CompactionParseError(f"missing marker {marker}")
+
+
+def _blocks(section: str) -> list[dict[str, str]]:
+    from .lifecycle import _section_blocks
+    return _section_blocks(section)
+
+
+# ----- apply -------------------------------------------------------------------
+
+
+@dataclass
+class ApplyReport:
+    applied: list[str]
+    skipped_no_card: list[str]
+    malformed: list[dict]
+    forced_trims: list[str]
+    still_over: list[str]
+
+    def to_dict(self) -> dict:
+        return {
+            "applied": self.applied,
+            "skipped_no_card": self.skipped_no_card,
+            "malformed": self.malformed,
+            "forced_trims": self.forced_trims,
+            "still_over": self.still_over,
+        }
+
+
+def compact_apply(cfg: Config, store: Store, *, now: str | None = None) -> ApplyReport:
+    """Validate + apply every staged compaction card (one process, race-free).
+
+    Cards are applied per target; a malformed card is reported and skipped
+    (the surface stays over-bound and re-stages next sweep). After each
+    apply, the deterministic convergence pass trims any surface still over
+    its ``max`` — except protected content, which is never force-dropped.
+    """
+    now = now or iso_now()
+    staging = _staging_dir(store)
+    manifest_path = staging / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"no compaction manifest at {manifest_path}; run compact-plan first"
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    bstore = BoundedStore(cfg, store)
+    report = ApplyReport([], [], [], [], [])
+
+    for item in manifest.get("targets", []):
+        key = item["key"]
+        card_path = Path(item["card_path"])
+        if not card_path.exists():
+            report.skipped_no_card.append(key)
+            continue
+        text = card_path.read_text(encoding="utf-8")
+        try:
+            _apply_one(bstore, cfg, item, text, now, report)
+            report.applied.append(key)
+        except (CompactionParseError, EntryError) as exc:
+            report.malformed.append({"key": key, "error": str(exc)})
+
+    # Drop applied targets' staging files so a re-run only retries failures.
+    for item in manifest.get("targets", []):
+        if item["key"] in report.applied:
+            Path(item["prompt_path"]).unlink(missing_ok=True)
+            Path(item["card_path"]).unlink(missing_ok=True)
+
+    log.info(
+        "compact-apply: %d applied, %d skipped, %d malformed, %d forced trims",
+        len(report.applied), len(report.skipped_no_card),
+        len(report.malformed), len(report.forced_trims),
+    )
+    return report
+
+
+def _apply_one(
+    bstore: BoundedStore,
+    cfg: Config,
+    item: dict,
+    text: str,
+    now: str,
+    report: ApplyReport,
+) -> None:
+    kind = item["kind"]
+    if kind == KIND_MUST_REMEMBER:
+        _apply_must_remember(bstore, cfg, text, now, report)
+    elif kind == KIND_SKILLS:
+        _apply_skills(bstore, cfg, text, now, report)
+    elif kind == KIND_TOPIC_ROSTER:
+        _apply_topic_roster(bstore, cfg, text, now, report)
+    elif kind == KIND_TOPIC_DETAIL:
+        _apply_topic_detail(bstore, cfg, item["slug"], text, now, report)
+    elif kind == KIND_SKILL_DETAIL:
+        _apply_skill_detail(bstore, cfg, item["entry_id"], text, now, report)
+    else:
+        raise CompactionParseError(f"unknown target kind {kind!r}")
+
+
+def _apply_must_remember(
+    bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport
+) -> None:
+    section = _section_after_marker(text, MARK_MUST_REMEMBER)
+    new_entries: list[MustRememberEntry] = []
+    for b in _blocks(section):
+        kind = (b.get("KIND") or "").lower()
+        memo = b.get("MEMO")
+        if kind not in VALID_KINDS or not memo:
+            raise CompactionParseError(f"bad must_remember block: {b!r}")
+        if kind == KIND_OPERATOR_EXPLICIT:
+            # Protected entries are carried over automatically; a card must
+            # not mint new operator directives out of a compaction.
+            continue
+        new_entries.append(
+            MustRememberEntry(
+                text=memo, created_at=now, last_used=now, source="compact",
+                kind=kind, importance=1.0,
+            )
+        )
+    with bstore.store_lock(STORE_MUST_REMEMBER):
+        current = [
+            e for e in bstore.load(STORE_MUST_REMEMBER)
+            if isinstance(e, MustRememberEntry)
+        ]
+        protected = [e for e in current if e.kind == KIND_OPERATOR_EXPLICIT]
+        merged: list[MustRememberEntry] = protected + new_entries
+        # Deterministic convergence: trim lowest-importance, oldest
+        # non-protected entries until under max (never protected ones).
+        max_len = cfg.memory.must_remember.max_length
+        if bstore.length_chars(merged) > max_len:
+            report.forced_trims.append(STORE_MUST_REMEMBER)
+            droppable = sorted(
+                (e for e in merged if e.kind != KIND_OPERATOR_EXPLICIT),
+                key=lambda e: (float(e.importance), e.last_used),
+            )
+            for victim in droppable:
+                if bstore.length_chars(merged) <= max_len:
+                    break
+                merged.remove(victim)
+        if bstore.length_chars(merged) > max_len:
+            report.still_over.append(STORE_MUST_REMEMBER)
+        bstore.save_atomic(STORE_MUST_REMEMBER, merged)
+
+
+def _apply_skills(
+    bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport
+) -> None:
+    section = _section_after_marker(text, MARK_SKILLS)
+    new_entries: list[SkillEntry] = []
+    for b in _blocks(section):
+        name, trigger, proc = b.get("NAME"), b.get("TRIGGER"), b.get("PROCEDURE")
+        if not (name and trigger and proc):
+            raise CompactionParseError(f"bad skill block: {b!r}")
+        new_entries.append(
+            SkillEntry(
+                text=proc, created_at=now, last_used=now, source="compact",
+                name=name, trigger=trigger, procedure=proc,
+            )
+        )
+    with bstore.store_lock(STORE_SKILLS):
+        current = [
+            e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)
+        ]
+        # Carry usage/recency forward for kept skills (matched by name,
+        # case-insensitive) so compaction does not reset the keep-rank.
+        by_name = {e.name.strip().lower(): e for e in current}
+        for e in new_entries:
+            old = by_name.get(e.name.strip().lower())
+            if old is not None:
+                e.usage_count = old.usage_count
+                e.created_at = old.created_at
+                e.last_used = old.last_used
+            refresh_importance(e, now, cfg)
+        merged: list[SkillEntry] = list(new_entries)
+        max_len = cfg.memory.skills.index_max_length
+        if bstore.index_chars(STORE_SKILLS, merged) > max_len:
+            report.forced_trims.append(STORE_SKILLS)
+            for victim in sorted(
+                list(merged), key=lambda e: skills_keep_rank(e, now, cfg)
+            ):
+                if bstore.index_chars(STORE_SKILLS, merged) <= max_len:
+                    break
+                merged.remove(victim)
+        if bstore.index_chars(STORE_SKILLS, merged) > max_len:
+            report.still_over.append(STORE_SKILLS)
+        bstore.save_atomic(STORE_SKILLS, merged)
+
+
+def _apply_topic_roster(
+    bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport
+) -> None:
+    section = _section_after_marker(text, MARK_TOPIC_ROSTER)
+    directives = _blocks(section)
+    cfgt = cfg.memory.topics
+    with bstore.store_lock(STORE_TOPICS):
+        topics = [
+            e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
+        ]
+        by_slug = {t.slug: t for t in topics}
+        for d in directives:
+            action = (d.get("ACTION") or "").lower()
+            if action == "forget":
+                slug = (d.get("TOPIC") or "").strip()
+                victim = by_slug.get(slug)
+                if victim is None:
+                    continue
+                if _is_fresh(victim, now, cfgt.fresh_days):
+                    log.warning(
+                        "compact-apply: refusing to forget fresh topic %r", slug
+                    )
+                    continue
+                topics.remove(victim)
+                del by_slug[slug]
+            elif action == "merge":
+                into_slug = (d.get("INTO") or "").strip()
+                into = by_slug.get(into_slug)
+                if into is None:
+                    continue
+                for from_slug in (d.get("FROM") or "").split():
+                    src = by_slug.get(from_slug.strip())
+                    if src is None or src is into:
+                        continue
+                    if _is_fresh(src, now, cfgt.fresh_days):
+                        log.warning(
+                            "compact-apply: refusing to merge away fresh "
+                            "topic %r", src.slug
+                        )
+                        continue
+                    into.text = f"{into.text.rstrip()}\n\n{src.text.strip()}"
+                    into.touch_count += src.touch_count
+                    into.last_used = max(into.last_used, src.last_used)
+                    topics.remove(src)
+                    del by_slug[src.slug]
+                summary = (d.get("SUMMARY") or "").strip()
+                if summary:
+                    into.summary = summary
+            elif action == "summary":
+                slug = (d.get("TOPIC") or "").strip()
+                summary = (d.get("SUMMARY") or "").strip()
+                target = by_slug.get(slug)
+                if target is not None and summary:
+                    target.summary = summary
+            else:
+                raise CompactionParseError(f"bad roster directive: {d!r}")
+        # Deterministic convergence: still over max → forget non-fresh topics,
+        # oldest-touched first. Fresh topics are never force-dropped.
+        max_len = cfgt.index_max_length
+        if bstore.index_chars(STORE_TOPICS, topics) > max_len:
+            report.forced_trims.append(STORE_TOPICS)
+            for victim in sorted(topics, key=lambda t: t.last_used):
+                if bstore.index_chars(STORE_TOPICS, topics) <= max_len:
+                    break
+                if _is_fresh(victim, now, cfgt.fresh_days):
+                    continue
+                topics.remove(victim)
+        if bstore.index_chars(STORE_TOPICS, topics) > max_len:
+            report.still_over.append(STORE_TOPICS)
+        bstore.save_atomic(STORE_TOPICS, topics)
+
+
+_DATE_SECTION_RE = re.compile(
+    r"(?m)^## \d{4}-\d{2}-\d{2}\s*$"
+)
+
+
+def _split_dated_sections(body: str) -> list[str]:
+    """Split a topic body into its dated sections (each starts at a ``##``
+    date heading). Content before the first heading (e.g. an "earlier"
+    digest) stays attached to the first section."""
+    marks = [m.start() for m in _DATE_SECTION_RE.finditer(body)]
+    if len(marks) <= 1:
+        return [body]
+    cuts = [0] + marks[1:] + [len(body)]
+    return [body[cuts[i]:cuts[i + 1]] for i in range(len(cuts) - 1)]
+
+
+def _apply_topic_detail(
+    bstore: BoundedStore, cfg: Config, slug: str, text: str, now: str,
+    report: ApplyReport,
+) -> None:
+    body = _section_after_marker(text, MARK_TOPIC_DETAIL)
+    if not body:
+        raise CompactionParseError("empty topic detail body")
+    with bstore.store_lock(STORE_TOPICS):
+        topics = [
+            e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
+        ]
+        target = next((t for t in topics if t.slug == slug), None)
+        if target is None:
+            # The topic vanished between plan and apply (e.g. the roster
+            # card merged/forgot it). Nothing to do.
+            return
+        target.text = body
+        # Deterministic convergence: drop oldest dated sections until the
+        # detail file fits its max — the same "oldest goes first" rule the
+        # roster uses.
+        max_len = cfg.memory.topics.detail_max_length
+        if bstore.detail_chars(target) > max_len:
+            report.forced_trims.append(f"topic_detail.{slug}")
+            sections = _split_dated_sections(target.text)
+            while len(sections) > 1:
+                candidate = "".join(sections[1:]).lstrip("\n")
+                target.text = candidate
+                sections = sections[1:]
+                if bstore.detail_chars(target) <= max_len:
+                    break
+        if bstore.detail_chars(target) > max_len:
+            report.still_over.append(f"topic_detail.{slug}")
+        bstore.save_atomic(STORE_TOPICS, topics)
+
+
+def _apply_skill_detail(
+    bstore: BoundedStore, cfg: Config, entry_id: str, text: str, now: str,
+    report: ApplyReport,
+) -> None:
+    section = _section_after_marker(text, MARK_SKILLS)
+    blocks = _blocks(section)
+    if len(blocks) != 1:
+        raise CompactionParseError(
+            f"skill detail card must contain exactly one block; got {len(blocks)}"
+        )
+    b = blocks[0]
+    name, trigger, proc = b.get("NAME"), b.get("TRIGGER"), b.get("PROCEDURE")
+    if not (name and trigger and proc):
+        raise CompactionParseError(f"bad skill block: {b!r}")
+    with bstore.store_lock(STORE_SKILLS):
+        skills = [
+            e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)
+        ]
+        target = next((s for s in skills if s.id == entry_id), None)
+        if target is None:
+            return  # merged/dropped by the roster card between plan and apply
+        target.name = name
+        target.trigger = trigger
+        target.procedure = proc
+        target.text = proc
+        max_len = cfg.memory.skills.detail_max_length
+        if bstore.detail_chars(target) > max_len:
+            report.forced_trims.append(f"skill_detail.{entry_id}")
+            overshoot = bstore.detail_chars(target) - max_len
+            keep = max(1, len(target.procedure) - overshoot - 1)
+            target.procedure = target.procedure[:keep].rstrip() + "…"
+            target.text = target.procedure
+        if bstore.detail_chars(target) > max_len:
+            report.still_over.append(f"skill_detail.{entry_id}")
+        bstore.save_atomic(STORE_SKILLS, skills)
