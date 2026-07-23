@@ -65,6 +65,10 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-07-22 (critique round): ayako: first idle-maintenance-tail ship
+        #   (ba03eef) -- called compact-idle "model-free"; superseded by the
+        #   accurate one-bounded-/compact-turn wording.
+        "ee417d20079fe3ce3e7616fdc8b79df71a1f91a3e5a3b50014c442e1e3a388a1",
         # 2026-07-22 (idle-maintenance): ayako: pre idle-maintenance-tail ship
         #   -- before the step-6 callout + tail section (compact-idle + memory
         #   sweep when the queue drains).
@@ -171,7 +175,7 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "ee417d20079fe3ce3e7616fdc8b79df71a1f91a3e5a3b50014c442e1e3a388a1",
+    "drive-journal": "b2f4a99050eb144c6d9945418ba82c0d55ab7630ca30ec22b17faa0f622f4a64",
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",

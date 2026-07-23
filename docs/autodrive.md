@@ -63,9 +63,10 @@ drives are drained so their results are recorded before the daemon exits.
 A fire that finds **nothing actionable and nothing busy** is not a pure
 no-op: per the drive-journal skill's idle-maintenance tail (also spelled
 out in the per-tick prompt), it runs the team's two self-gating chores
-before stopping — `tigerharness slack-bridge compact-idle` (model-free;
-compacts heavy, quiet Slack bridge lanes when the team opted in — see
-docs/slack-bridge.md "Idle compaction") and the `sweep-memory` skill
+before stopping — `tigerharness slack-bridge compact-idle` (its only
+model call is one bounded `/compact` turn per heavy, quiet Slack bridge
+lane, when the team opted in — see docs/slack-bridge.md "Idle
+compaction") and the `sweep-memory` skill
 (team memory refresh, gated by its staleness floor + watermark + lease;
 its summarize work runs in Task-tool sub-agents, which a `claude -p`
 drive session can spawn). Both are cheap no-ops when fresh, so an idle

@@ -157,3 +157,93 @@ def test_records_snapshot_is_a_copy(tmp_path: Path) -> None:
     snap = store.records()
     snap.clear()
     assert store.get("1.1") == "sess"
+
+
+# ----- cross-process merge-patch writes (two writers, one file) -----
+
+
+def test_two_stores_never_clobber_each_other(tmp_path: Path) -> None:
+    """Bridge daemon and compact-idle CLI each hold their own ThreadStore
+    over the same file. A write must publish only its own record's delta,
+    merged over CURRENT disk state -- never its stale in-memory snapshot."""
+    path = tmp_path / "threads.json"
+    a = ThreadStore(path)
+    b = ThreadStore(path)  # loaded before a writes anything
+    a.set("1.1", "sess-1", persona="Ayako", team="T", last_usage=USAGE)
+    b.set("2.2", "sess-2", persona="Rukawa")  # stale snapshot lacks 1.1
+    disk = ThreadStore(path)
+    assert disk.get("1.1") == "sess-1"  # survived b's write
+    assert disk.get("2.2") == "sess-2"
+    assert disk.get_record("1.1").last_usage == USAGE
+
+
+def test_set_merges_against_disk_not_memory(tmp_path: Path) -> None:
+    """The _UNSET-preserve base is the on-disk record at write time: a
+    latch cleared by another process must not be resurrected by a stale
+    in-memory value."""
+    path = tmp_path / "threads.json"
+    bridge_store = ThreadStore(path)
+    bridge_store.set("1.1", "sess", team="T", last_usage=USAGE)
+    # Another process (compact-idle) clears the latch on disk.
+    ThreadStore(path).set("1.1", "sess", last_usage=None)
+    # The bridge writes an unrelated field; its stale memory of USAGE
+    # must not come back.
+    bridge_store.set("1.1", "sess", persona="Ayako")
+    assert ThreadStore(path).get_record("1.1").last_usage is None
+
+
+def test_mark_in_flight_merges_against_disk(tmp_path: Path) -> None:
+    path = tmp_path / "threads.json"
+    a = ThreadStore(path)
+    a.set("1.1", "sess", team="T")
+    b = ThreadStore(path)
+    a.set("1.1", "sess", last_usage=USAGE)  # disk now has usage
+    b.mark_in_flight("1.1", True)  # b's snapshot predates the usage
+    rec = ThreadStore(path).get_record("1.1")
+    assert rec.in_flight is True and rec.last_usage == USAGE
+
+
+def test_clear_in_flight_all(tmp_path: Path) -> None:
+    path = tmp_path / "threads.json"
+    store = ThreadStore(path)
+    store.set("1.1", "s1", in_flight=True)
+    store.set("2.2", "s2", in_flight=False)
+    ThreadStore(path).clear_in_flight_all()
+    reloaded = ThreadStore(path)
+    assert reloaded.get_record("1.1").in_flight is False
+    assert reloaded.get_record("2.2").in_flight is False
+    # Idempotent second call (no-write path).
+    reloaded.clear_in_flight_all()
+
+
+def test_usage_sanitized_to_token_allowlist(tmp_path: Path) -> None:
+    """Exotic usage payloads (extra keys, non-numeric, non-JSON values)
+    must never reach the save path -- only the three token counts the
+    threshold check reads are stored."""
+    path = tmp_path / "threads.json"
+    store = ThreadStore(path)
+    store.set("1.1", "sess", last_usage={
+        "input_tokens": 5,
+        "cache_read_input_tokens": 100.0,
+        "server_tool_use": {"web_search_requests": object()},  # unserializable
+        "output_tokens": 9,  # not in the allowlist
+        "cache_creation_input_tokens": "not-a-number",
+    })
+    rec = ThreadStore(path).get_record("1.1")
+    assert rec.last_usage == {"input_tokens": 5, "cache_read_input_tokens": 100}
+    store.set("2.2", "sess2", last_usage={"only": "junk"})
+    assert ThreadStore(path).get_record("2.2").last_usage is None
+    store.set("3.3", "sess3", last_usage="not-even-a-dict")
+    assert ThreadStore(path).get_record("3.3").last_usage is None
+
+
+def test_legacy_two_arg_set_preserves_persona(tmp_path: Path) -> None:
+    """persona now follows the same preserve-unless-passed rule as the
+    metadata fields (explicit None still clears)."""
+    path = tmp_path / "threads.json"
+    store = ThreadStore(path)
+    store.set("1.1", "sess", persona="Ayako")
+    store.set("1.1", "sess-new")  # legacy shape: session id only
+    assert store.get_record("1.1").persona == "Ayako"
+    store.set("1.1", "sess-new", persona=None)
+    assert store.get_record("1.1").persona is None

@@ -133,8 +133,9 @@ def default_prompt(driver: str | None) -> str:
         "`--allow-api-drive` flag is harmless when no Slack thread marker "
         "is set). When the final sweep finds nothing actionable and "
         "nothing busy, run the skill's idle-maintenance tail before "
-        "stopping: `tigerharness slack-bridge compact-idle` (model-free, "
-        "self-gating) and the team's sweep-memory skill (self-gating via "
+        "stopping: `tigerharness slack-bridge compact-idle` (self-gating; "
+        "its only model call is one bounded /compact turn per heavy idle "
+        "lane) and the team's sweep-memory skill (self-gating via "
         "its watermark + lease; its summarize work runs in Task-tool "
         "sub-agents, which THIS session may spawn). Then stop cleanly."
     )

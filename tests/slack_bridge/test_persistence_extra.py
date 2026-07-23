@@ -18,7 +18,7 @@ class TestSaveErrorPath:
         with patch("tigerharness.slack_bridge.persistence.os.replace",
                     side_effect=OSError("disk full")):
             with pytest.raises(OSError):
-                store._save()
+                store._write_map(store.records())
         # The original file should still be intact (or the store data unaffected)
         # Re-create store to verify
         store2 = ThreadStore(tmp_path / "threads.json")
@@ -27,7 +27,7 @@ class TestSaveErrorPath:
     def test_save_concurrent_read(self, tmp_path: Path):
         store = ThreadStore(tmp_path / "threads.json")
         store.set("t1", "session-abc")
-        store._save()
+        store._write_map(store.records())
         # Read back
         store2 = ThreadStore(tmp_path / "threads.json")
         assert store2.get("t1") == "session-abc"

@@ -562,7 +562,11 @@ turn. The `compact-idle` subcommand closes that gap from the *driver*
 side: an idle drive (an autodrive tick, or a manual `drive-journal`
 whose sweep found the queue drained) runs one external pass. Same
 config (`idle_compact: true` in the team fragment), same journal-idle
-guard, same one-`/compact`-turn mechanism; run it from the team root.
+guard, same one-`/compact`-turn mechanism. The pass resolves the
+lane's `agent_cwd` itself and pins the resumed `claude` subprocess to
+it (`--resume` only finds a session from the project directory it was
+opened under), so the command works from any invoking directory —
+`--team-dir` names the team.
 
 To make this possible the bridge stamps turn metadata into each
 `threads.json` record at its turn boundary: `team`, `last_usage`,

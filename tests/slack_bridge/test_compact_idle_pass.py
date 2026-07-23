@@ -218,6 +218,38 @@ class TestCompaction:
         assert rec.last_usage == HOT_USAGE
 
 
+class TestConcurrentWriterSafety:
+    @pytest.mark.asyncio
+    async def test_latch_write_does_not_drop_records_created_mid_pass(
+        self, tmp_path,
+    ):
+        """A /compact turn is slow; the live bridge may create NEW thread
+        records while the pass runs. The latch write must go through a
+        fresh load of threads.json, not the pass's start-of-run snapshot
+        -- otherwise the new record is silently dropped and that Slack
+        thread loses its session."""
+        team = _team(
+            tmp_path,
+            fragment="idle_compact: true\nstate_dir: state\nagent_cwd: .\n",
+        )
+        _seed(team, {
+            "a.1": {"session_id": "sess-a", "team": "Shohoku",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD},
+        })
+        state_path = team / "state" / "threads.json"
+
+        async def send(session_id: str) -> None:
+            # Simulate the bridge writing a brand-new thread record
+            # while the /compact turn is in flight.
+            ThreadStore(state_path).set("new.9", "sess-new", persona="Rukawa")
+
+        report = await compact_idle_once(team, send=send, now=NOW)
+        assert report["compacted"] == ["a.1"]
+        reloaded = ThreadStore(state_path)
+        assert reloaded.get_record("a.1").last_usage is None  # latched
+        assert reloaded.get("new.9") == "sess-new"  # survived the pass
+
+
 class TestDefaultSend:
     @pytest.mark.asyncio
     async def test_builds_resume_compact_turn(self, monkeypatch):
@@ -230,14 +262,75 @@ class TestDefaultSend:
         session.close = AsyncMock()
         backend = MagicMock()
         backend.open_session = AsyncMock(return_value=session)
-        backend.run = AsyncMock()
-        monkeypatch.setattr(sdk, "get_backend", lambda name: backend)
+        ok = MagicMock()
+        ok.stop_reason = "end_turn"
+        backend.run = AsyncMock(return_value=ok)
+        seen_kwargs: dict = {}
 
-        send = _default_send()
+        def fake_get_backend(name, **kw):
+            seen_kwargs.update(kw)
+            return backend
+
+        monkeypatch.setattr(sdk, "get_backend", fake_get_backend)
+
+        send = _default_send(cwd="/some/team")
         await send("sess-1")
+        # The backend must be pinned to the lane's agent_cwd -- --resume
+        # only finds a session from the project dir it was opened under.
+        assert seen_kwargs == {"cwd": "/some/team"}
         backend.open_session.assert_awaited_once_with(resume_id="sess-1")
         prompt = backend.run.await_args.args[1]
         assert prompt == "/compact"
+        session.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_error_stop_reason_raises_no_false_success(self, monkeypatch):
+        """claude_p reports a failed CLI (stale session id, future CLI
+        drift) as a RESULT with stop_reason='error', not an exception.
+        Swallowing that would clear the latch on a lane that was never
+        compacted -- the sender must raise instead."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import tigerharness.agent_sdk as sdk
+        from tigerharness.slack_bridge.idle_compact import _default_send
+
+        session = MagicMock()
+        session.close = AsyncMock()
+        bad = MagicMock()
+        bad.stop_reason = "error"
+        backend = MagicMock()
+        backend.open_session = AsyncMock(return_value=session)
+        backend.run = AsyncMock(return_value=bad)
+        monkeypatch.setattr(sdk, "get_backend", lambda name, **kw: backend)
+
+        send = _default_send(cwd="/t")
+        with pytest.raises(RuntimeError, match="stop_reason='error'"):
+            await send("sess-1")
+        session.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_wedged_compact_turn_times_out(self, monkeypatch):
+        """A hung claude subprocess must not hang the calling drive."""
+        import asyncio as aio
+        from unittest.mock import AsyncMock, MagicMock
+
+        import tigerharness.agent_sdk as sdk
+        from tigerharness.slack_bridge.idle_compact import _default_send
+
+        session = MagicMock()
+        session.close = AsyncMock()
+
+        async def hang(*a, **kw):
+            await aio.sleep(3600)
+
+        backend = MagicMock()
+        backend.open_session = AsyncMock(return_value=session)
+        backend.run = hang
+        monkeypatch.setattr(sdk, "get_backend", lambda name, **kw: backend)
+
+        send = _default_send(cwd="/t", timeout_seconds=0.05)
+        with pytest.raises(aio.TimeoutError):
+            await send("sess-1")
         session.close.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -252,7 +345,7 @@ class TestDefaultSend:
         backend = MagicMock()
         backend.open_session = AsyncMock(return_value=session)
         backend.run = AsyncMock(side_effect=RuntimeError("no"))
-        monkeypatch.setattr(sdk, "get_backend", lambda name: backend)
+        monkeypatch.setattr(sdk, "get_backend", lambda name, **kw: backend)
 
         send = _default_send()
         with pytest.raises(RuntimeError):
@@ -277,7 +370,7 @@ class TestDefaultSend:
         async def fake(session_id: str) -> None:
             sent.append(session_id)
 
-        monkeypatch.setattr(mod, "_default_send", lambda: fake)
+        monkeypatch.setattr(mod, "_default_send", lambda **kw: fake)
         report = await compact_idle_once(team, now=NOW)
         assert report["compacted"] == ["a.1"] and sent == ["sess-a"]
 
@@ -311,7 +404,7 @@ class TestCli:
         async def fake(session_id: str) -> None:
             sent.append(session_id)
 
-        monkeypatch.setattr(mod, "_default_send", lambda: fake)
+        monkeypatch.setattr(mod, "_default_send", lambda **kw: fake)
         rc = compact_idle_main(
             ["--team-dir", str(team), "--min-quiet-seconds", "0"]
         )
@@ -319,3 +412,125 @@ class TestCli:
         report = json.loads(capsys.readouterr().out)
         # With the quiet window disabled the fresh lane is eligible.
         assert report["compacted"] == ["a.1"] and sent == ["sess-a.1"]
+
+
+class TestMidPassRaces:
+    @pytest.mark.asyncio
+    async def test_concurrent_pass_exits_busy(self, tmp_path):
+        import fcntl
+
+        team = _team(tmp_path)
+        _seed(team, {})
+        lease_path = team / "state" / "compact-idle.lock"
+        lease_path.parent.mkdir(parents=True, exist_ok=True)
+        holder = open(lease_path, "w")
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            report = await compact_idle_once(team, now=NOW)
+        finally:
+            holder.close()
+        assert report["ran"] is False and report["reason"] == "busy"
+
+    @pytest.mark.asyncio
+    async def test_lane_that_went_active_mid_pass_is_skipped(self, tmp_path):
+        """Candidate 2's session gets a live bridge turn while candidate
+        1's slow /compact runs -- the pre-send recheck must catch it."""
+        team = _team(tmp_path)
+        _seed(team, {
+            "a.1": {"session_id": "sess-a", "team": "Shohoku",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD},
+            "b.1": {"session_id": "sess-b", "team": "Shohoku",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD},
+        })
+        state_path = team / "state" / "threads.json"
+        sent: list[str] = []
+
+        async def send(session_id: str) -> None:
+            sent.append(session_id)
+            if session_id == "sess-a":
+                # Bridge marks candidate b in_flight during our send.
+                ThreadStore(state_path).mark_in_flight("b.1", True)
+
+        report = await compact_idle_once(team, send=send, now=NOW)
+        assert sent == ["sess-a"]
+        assert report["compacted"] == ["a.1"]
+        assert report["skipped"] == {"went_active": 1}
+
+    @pytest.mark.asyncio
+    async def test_journal_going_busy_mid_pass_stops_sending(self, tmp_path):
+        from tigerharness.journal.models import Status
+
+        team = _team(tmp_path)
+        _seed(team, {
+            "a.1": {"session_id": "sess-a", "team": "Shohoku",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD},
+            "b.1": {"session_id": "sess-b", "team": "Shohoku",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD},
+        })
+        sent: list[str] = []
+
+        async def send(session_id: str) -> None:
+            sent.append(session_id)
+            tdir = team / "journal" / "active" / "20260722-x-bbbb"
+            tdir.mkdir(parents=True, exist_ok=True)
+            (tdir / "status.json").write_text(
+                Status.new(id="20260722-x-bbbb", title="t", persona="P")
+                .to_json()
+            )
+
+        report = await compact_idle_once(team, send=send, now=NOW)
+        assert sent == ["sess-a"]
+        assert report["compacted"] == ["a.1"]
+        assert report["reason"] == "journal_busy"
+        assert report["skipped"] == {"journal_busy": 1}
+
+    @pytest.mark.asyncio
+    async def test_latch_skipped_when_session_id_changed_mid_send(
+        self, tmp_path,
+    ):
+        """A turn landing DURING the send restamps the record (new
+        session id + fresh usage); the latch must not roll that back."""
+        team = _team(tmp_path)
+        _seed(team, {
+            "a.1": {"session_id": "sess-a", "team": "Shohoku",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD},
+        })
+        state_path = team / "state" / "threads.json"
+
+        async def send(session_id: str) -> None:
+            ThreadStore(state_path).set(
+                "a.1", "sess-a2", persona="Ayako",
+                last_usage=HOT_USAGE, last_turn_at=FRESH,
+            )
+
+        report = await compact_idle_once(team, send=send, now=NOW)
+        assert report["compacted"] == ["a.1"]
+        rec = ThreadStore(state_path).get_record("a.1")
+        # The mid-send restamp survives untouched -- no rollback, no latch.
+        assert rec.session_id == "sess-a2"
+        assert rec.last_usage == HOT_USAGE
+
+    @pytest.mark.asyncio
+    async def test_latch_write_failure_is_fail_soft(self, tmp_path, monkeypatch):
+        import tigerharness.slack_bridge.idle_compact as mod
+
+        team = _team(tmp_path)
+        _seed(team, {
+            "a.1": {"session_id": "sess-a", "team": "Shohoku",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD},
+        })
+        send, sent = _sender()
+        real_set = mod.ThreadStore.set
+
+        def broken_set(self, *a, **kw):
+            raise OSError("disk full")
+
+        # Break set() only after the scan (the seeding above used it).
+        monkeypatch.setattr(mod.ThreadStore, "set", broken_set)
+        try:
+            report = await compact_idle_once(team, send=send, now=NOW)
+        finally:
+            monkeypatch.setattr(mod.ThreadStore, "set", real_set)
+        assert sent == ["sess-a"]
+        assert report["compacted"] == ["a.1"]
+        assert report["skipped"] == {"latch_failed": 1}

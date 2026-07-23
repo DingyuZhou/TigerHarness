@@ -28,7 +28,7 @@ class TestPersistenceSaveError:
         with patch("os.replace", side_effect=OSError("disk full")), \
              patch("os.unlink", side_effect=OSError("unlink also failed")):
             with pytest.raises(OSError, match="disk full"):
-                store._save()
+                store._write_map(store.records())
 
 
 # ----- slack_bridge/config.py: 70 (bad bot token prefix) -----------------

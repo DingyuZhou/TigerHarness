@@ -174,11 +174,13 @@ whole tail** when anything is busy (a job is running — the user's
 "no jobs running" condition) or when you are stopping at the context
 ceiling (step 7 — hand off instead).
 
-1. **Compact heavy idle bridge lanes** (model-free):
+1. **Compact heavy idle bridge lanes**:
    `tigerharness slack-bridge compact-idle`. Self-gating: it does
    nothing unless the team opted in (`idle_compact: true`), a lane's
    last-stamped usage crosses the threshold, the lane is quiet, and the
-   journal is idle. Run it from the team root.
+   journal is idle. Its only model call is the single bounded
+   `/compact` turn it sends per eligible lane. Run it from the team
+   root.
 2. **Sweep the team's memory**: invoke the `sweep-memory` skill.
    Self-gating via its staleness floor + watermark + soft lease — a
    fresh team is a few tokens of no-op. Its summarize work runs in
@@ -186,7 +188,7 @@ ceiling (step 7 — hand off instead).
    autodrive `claude -p` fire) can spawn; the executor ban only covers
    plain daemons that cannot host sub-agents.
 
-Order matters slightly: compact first (it is pure CLI and fast), then
+Order matters slightly: compact first (bounded, usually a no-op), then
 the memory sweep (it may fan out sub-agents). If the sweep claims work,
 finish it per that skill (every claim ends in `sweep-complete` or
 `sweep-release`) — do not abandon a claimed sweep just because the

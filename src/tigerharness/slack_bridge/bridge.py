@@ -178,6 +178,11 @@ class SlackBridge:
 
         self._backend = backend
         self._store = store
+        # Crash sanitization: at construction no turn is running, so any
+        # persisted in_flight marker is a leftover from a killed bridge.
+        # Clearing here keeps a crash from making the compact-idle pass
+        # skip that lane forever.
+        self._store.clear_in_flight_all()
         self._downloader: FileDownloader = downloader or SlackFileDownloader(
             self._team.slack_bot_token
         )
@@ -317,6 +322,11 @@ class SlackBridge:
         # orphan claude subprocesses on SIGTERM.
         self._in_flight += 1
         self._drained.clear()
+        # Tracks whether THIS dispatch set the thread's persisted
+        # in_flight marker -- the finally below must not clear a marker
+        # owned by another dispatch that is still mid-turn (e.g. when we
+        # bail on shutdown before ever taking the state lock).
+        in_flight_marked = False
         try:
             state = await self._get_or_open_thread(thread_key, text)
 
@@ -348,10 +358,14 @@ class SlackBridge:
                 )
                 # Guard the external compact-idle pass: while this turn
                 # runs, the persisted record says in_flight so an outside
-                # `/compact --resume` never races the live session. The
-                # matching clear happens in the turn-end store.set below
-                # (success) or the finally at the end of dispatch.
+                # `/compact --resume` never races the live session. It
+                # stays set through the bridge's own idle-compact turn
+                # below and is cleared only by the finally at the end of
+                # dispatch -- clearing it at the turn-end stamp would
+                # open a window where the external pass races the
+                # in-bridge /compact.
                 self._store.mark_in_flight(thread_key, True)
+                in_flight_marked = True
                 try:
                     result = await run_with_retry(
                         self._backend,
@@ -368,7 +382,9 @@ class SlackBridge:
                     if state.session.id:
                         # Stamp the turn metadata the external
                         # compact-idle pass reads (team, final usage,
-                        # boundary time) and clear the in_flight guard.
+                        # boundary time). in_flight is deliberately NOT
+                        # cleared here -- the dispatch finally owns that,
+                        # after the in-bridge idle-compact turn below.
                         self._store.set(
                             thread_key,
                             state.session.id,
@@ -376,7 +392,6 @@ class SlackBridge:
                             team=self._team.team_name or None,
                             last_usage=getattr(result, "usage", None),
                             last_turn_at=_utcnow_iso(),
-                            in_flight=False,
                         )
                     # Track LLM spend: agent call cost contributes to the
                     # bridge's running tally alongside router calls.
@@ -434,10 +449,12 @@ class SlackBridge:
                 reply_text = bridge_body or ""
             await say(text=reply_text, thread_ts=thread_key)
         finally:
-            # A failed turn skips the turn-end store.set, so make sure
-            # the persisted in_flight guard never sticks (idempotent
-            # no-op when the success path already cleared it).
-            self._store.mark_in_flight(thread_key, False)
+            # Clear the persisted in_flight guard -- but only if THIS
+            # dispatch set it; a dispatch that bailed early (shutdown,
+            # error before the state lock) must not clear a marker a
+            # concurrent dispatch still owns.
+            if in_flight_marked:
+                self._store.mark_in_flight(thread_key, False)
             self._in_flight -= 1
             if self._in_flight == 0:  # pragma: no branch  # tested with single-request flows
                 self._drained.set()

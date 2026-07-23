@@ -34,6 +34,8 @@ Env surface (documented in docs/slack-bridge.md, the single home):
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -49,6 +51,9 @@ log = logging.getLogger("tigerharness.slack_bridge.idle_compact")
 _DEFAULT_THRESHOLD = 0.30
 _DEFAULT_WINDOW = 200_000
 _DEFAULT_MIN_QUIET_SECONDS = 120
+#: Hard ceiling on a single /compact turn -- a wedged claude subprocess
+#: must never hang the calling drive indefinitely.
+_DEFAULT_COMPACT_TIMEOUT_SECONDS = 600
 
 
 @dataclass(frozen=True)
@@ -239,6 +244,7 @@ async def compact_idle_once(
     min_quiet_seconds: int = _DEFAULT_MIN_QUIET_SECONDS,
     send: Any = None,
     now: "datetime | None" = None,
+    compact_timeout_seconds: float = _DEFAULT_COMPACT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """The external, run-once idle-compaction pass (``slack-bridge
     compact-idle``).
@@ -263,16 +269,22 @@ async def compact_idle_once(
     - records whose last turn is younger than ``min_quiet_seconds`` are
       skipped (extra margin against racing a turn that is just landing);
     - the stamped usage must put the session over the threshold;
-    - the journal must be idle (checked once, after the cheap gates);
+    - the journal must be idle, and every gate is RE-CHECKED against
+      fresh disk state immediately before each (slow) ``/compact`` send
+      -- a lane that went active mid-pass is skipped (``went_active``);
+    - one pass per team at a time (non-blocking flock lease; a
+      concurrent invocation exits with reason ``busy``);
+    - each ``/compact`` turn is bounded by ``compact_timeout_seconds``
+      (default 600) so a wedged subprocess cannot hang the drive;
     - one compact per idle period: a compacted record's ``last_usage``
-      is cleared, so the pass cannot re-fire until a real turn restamps
-      it.
+      is cleared (only if the session id is unchanged), so the pass
+      cannot re-fire until a real turn restamps it.
 
     ``send`` is an async callable ``(session_id) -> None`` injected by
-    tests; the default resolves the ``claude_p`` backend and sends one
-    ``/compact`` on a resumed session. Run from the team root -- the
-    backend inherits the process cwd, which must match the cwd the
-    bridge's sessions were opened under for ``--resume`` to find them.
+    tests; the default resolves the ``claude_p`` backend pinned to the
+    lane's agent_cwd (from the fragment), because ``--resume`` only
+    finds a session from the same project directory the bridge opened
+    it under -- so the pass itself may be invoked from anywhere.
     """
     report: dict[str, Any] = {
         "ran": False,
@@ -310,32 +322,79 @@ async def compact_idle_once(
         if state_dir_raw
         else default_state_path()
     )
+    # One pass per team at a time: a manual drive and an autodrive tick
+    # can both hit the idle tail; without a lease they would each compact
+    # every candidate. Non-blocking flock -- the loser exits "busy".
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    lease_path = state_path.with_name("compact-idle.lock")
+    lease = open(lease_path, "w", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            report["reason"] = "busy"
+            return report
+
+        return await _scan_and_compact(
+            report, _skip,
+            team_dir=team_dir, spec=spec, cfg=cfg, state_path=state_path,
+            min_quiet_seconds=min_quiet_seconds, send=send, now=now,
+            compact_timeout_seconds=compact_timeout_seconds,
+            _resolve=_resolve,
+        )
+    finally:
+        lease.close()
+
+
+def _eligible(
+    rec: Any, team_name: str, moment: "datetime", min_quiet_seconds: int,
+    cfg: IdleCompactConfig, _skip: Any,
+) -> bool:
+    """The per-record cheap gates, shared by the scan and the pre-send
+    recheck. Increments a skip reason and returns False when any fails."""
+    if rec.team != team_name:
+        _skip("other_team")
+        return False
+    if rec.in_flight:
+        _skip("in_flight")
+        return False
+    last_turn = _parse_iso(rec.last_turn_at)
+    if last_turn is None:
+        _skip("no_turn_stamp")
+        return False
+    if last_turn.tzinfo is None:
+        last_turn = last_turn.replace(tzinfo=timezone.utc)
+    if (moment - last_turn).total_seconds() < min_quiet_seconds:
+        _skip("too_recent")
+        return False
+    fraction = context_fraction(rec.last_usage, cfg.context_window_tokens)
+    if fraction < cfg.threshold_fraction:
+        _skip("below_threshold")
+        return False
+    return True
+
+
+async def _scan_and_compact(
+    report: dict[str, Any], _skip: Any, *,
+    team_dir: Path, spec: dict, cfg: IdleCompactConfig, state_path: Path,
+    min_quiet_seconds: int, send: Any, now: "datetime | None",
+    compact_timeout_seconds: float, _resolve: Any,
+) -> dict[str, Any]:
+    """The lease-holding body of :func:`compact_idle_once`."""
     store = ThreadStore(state_path)
+    # The lane's sessions were opened by a `claude` subprocess running in
+    # the lane's agent_cwd (bridge builds its backend with that cwd), and
+    # `--resume` only finds a session from the same project directory.
+    # Resolve it the same way the lane loader does, so this pass works
+    # regardless of where the CLI itself was invoked.
+    agent_cwd = str(_resolve(str(spec.get("agent_cwd") or "."), team_dir))
 
     moment = now if now is not None else datetime.now(timezone.utc)
     candidates: list[tuple[str, Any]] = []
     for thread_ts, rec in sorted(store.records().items()):
         report["checked"] += 1
-        if rec.team != team_dir.name:
-            _skip("other_team")
-            continue
-        if rec.in_flight:
-            _skip("in_flight")
-            continue
-        last_turn = _parse_iso(rec.last_turn_at)
-        if last_turn is None:
-            _skip("no_turn_stamp")
-            continue
-        if last_turn.tzinfo is None:
-            last_turn = last_turn.replace(tzinfo=timezone.utc)
-        if (moment - last_turn).total_seconds() < min_quiet_seconds:
-            _skip("too_recent")
-            continue
-        fraction = context_fraction(rec.last_usage, cfg.context_window_tokens)
-        if fraction < cfg.threshold_fraction:
-            _skip("below_threshold")
-            continue
-        candidates.append((thread_ts, rec))
+        if _eligible(rec, team_dir.name, moment, min_quiet_seconds, cfg, _skip):
+            candidates.append((thread_ts, rec))
 
     report["ran"] = True
     if not candidates:
@@ -347,11 +406,34 @@ async def compact_idle_once(
         return report
 
     if send is None:
-        send = _default_send()
+        send = _default_send(
+            cwd=agent_cwd, timeout_seconds=compact_timeout_seconds,
+        )
 
-    for thread_ts, rec in candidates:
+    for index, (thread_ts, rec) in enumerate(candidates):
+        # A /compact turn can take minutes, so the scan-time gates are
+        # stale by the time later candidates send. Re-check everything
+        # against fresh disk state immediately before each send: the
+        # record (a turn may be running or just landed; the session id
+        # may have changed) and, after the first send, the journal.
+        if index > 0 and not journal_is_idle(cfg.journal_root):
+            report["reason"] = "journal_busy"
+            _skip("journal_busy", len(candidates) - index)
+            break
+        fresh = ThreadStore(state_path).get_record(thread_ts)
+        if (
+            fresh is None
+            or fresh.session_id != rec.session_id
+            or not _eligible(
+                fresh, team_dir.name,
+                datetime.now(timezone.utc) if now is None else now,
+                min_quiet_seconds, cfg, lambda _r: None,
+            )
+        ):
+            _skip("went_active")
+            continue
         try:
-            await send(rec.session_id)
+            await send(fresh.session_id)
         except Exception:  # noqa: BLE001 -- one bad lane never stops the pass
             log.exception(
                 "compact-idle: /compact failed for thread=%s; skipping",
@@ -360,13 +442,21 @@ async def compact_idle_once(
             _skip("send_failed")
             continue
         # One-per-idle-period latch: clear the stamped usage so only a
-        # real future turn can make this lane eligible again.
-        store.set(
-            thread_ts,
-            rec.session_id,
-            persona=rec.persona,
-            last_usage=None,
-        )
+        # real future turn can make this lane eligible again. Written
+        # through a fresh store (lock-protected read-merge-patch), and
+        # only if the session id is still the one we compacted -- a turn
+        # that landed during the send restamped everything and owns the
+        # record now.
+        try:
+            latch = ThreadStore(state_path)
+            cur = latch.get_record(thread_ts)
+            if cur is not None and cur.session_id == fresh.session_id:
+                latch.set(thread_ts, cur.session_id, last_usage=None)
+        except Exception:  # noqa: BLE001 -- a failed latch must not kill the pass
+            log.exception(
+                "compact-idle: latch write failed for thread=%s", thread_ts,
+            )
+            _skip("latch_failed")
         report["compacted"].append(thread_ts)
         log.info(
             "compact-idle: compacted thread=%s (team=%s)",
@@ -375,12 +465,25 @@ async def compact_idle_once(
     return report
 
 
-def _default_send() -> Any:
+def _default_send(
+    *,
+    cwd: str | None = None,
+    timeout_seconds: float = _DEFAULT_COMPACT_TIMEOUT_SECONDS,
+) -> Any:
     """Build the real ``/compact`` sender over the ``claude_p`` backend
-    (the ADR 0004 mechanism: one prompt turn on a resumed session)."""
+    (the ADR 0004 mechanism: one prompt turn on a resumed session).
+
+    ``cwd`` must be the lane's agent_cwd: the claude CLI resolves
+    ``--resume`` against the project directory derived from the
+    subprocess cwd, so it has to match where the bridge opened the
+    session. The run is bounded by ``timeout_seconds``, and a non-clean
+    ``stop_reason`` RAISES: claude_p reports a failed CLI (e.g. "No
+    conversation found" from a stale session id) as an error *result*,
+    not an exception -- treating that as success would clear the latch
+    on a lane that was never compacted."""
     from tigerharness.agent_sdk import AgentConfig, get_backend
 
-    backend = get_backend("claude_p")
+    backend = get_backend("claude_p", cwd=cwd)
     agent_cfg = AgentConfig(
         name="compact-idle",
         extra={"permission_mode": "bypassPermissions"},
@@ -389,7 +492,16 @@ def _default_send() -> Any:
     async def send(session_id: str) -> None:
         session = await backend.open_session(resume_id=session_id)
         try:
-            await backend.run(agent_cfg, "/compact", session=session)
+            result = await asyncio.wait_for(
+                backend.run(agent_cfg, "/compact", session=session),
+                timeout=timeout_seconds,
+            )
+            stop = getattr(result, "stop_reason", None)
+            if stop not in (None, "end_turn"):
+                raise RuntimeError(
+                    f"/compact did not complete cleanly "
+                    f"(stop_reason={stop!r})"
+                )
         finally:
             await session.close()
 
@@ -426,12 +538,22 @@ def main(argv: "list[str] | None" = None) -> int:
             f"(default {_DEFAULT_MIN_QUIET_SECONDS}s)"
         ),
     )
+    parser.add_argument(
+        "--compact-timeout-seconds",
+        type=float,
+        default=_DEFAULT_COMPACT_TIMEOUT_SECONDS,
+        help=(
+            "hard ceiling on a single /compact turn "
+            f"(default {_DEFAULT_COMPACT_TIMEOUT_SECONDS}s)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     report = asyncio.run(
         compact_idle_once(
             Path(args.team_dir).resolve(),
             min_quiet_seconds=args.min_quiet_seconds,
+            compact_timeout_seconds=args.compact_timeout_seconds,
         )
     )
     print(json.dumps(report, indent=2, sort_keys=True))
