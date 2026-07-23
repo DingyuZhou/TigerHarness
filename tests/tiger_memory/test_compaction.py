@@ -954,3 +954,138 @@ def test_plan_then_apply_roundtrip_must_remember(tmp_path):
     assert not Path(target["prompt_path"]).exists()
     assert not Path(target["card_path"]).exists()
     assert (store.root / cp.STAGING_DIR_NAME / "manifest.json").exists()
+
+
+# ----- exact-duplicate dedup pre-pass (plan) -----------------------------------
+
+
+def test_dedup_must_remember_merges_exact_normalized_dupes():
+    a = _memo("Never  bill the API rail.", kind="decision", importance=1.0,
+              last="2026-01-02T00:00:00Z")
+    b = _memo("never bill the API   rail.", kind="decision", importance=3.0,
+              last="2026-03-02T00:00:00Z")
+    c = _memo("Never bill the API rail.", kind="incident")  # different kind
+    survivors, dropped = cp._dedup_must_remember([a, b, c])
+    assert survivors == [a, c] and dropped == 1
+    assert a.repeat_count == 2
+    assert a.last_used == "2026-03-02T00:00:00Z"
+    assert a.importance == 3.0
+
+
+def test_dedup_skills_merges_exact_normalized_dupes():
+    a = _skill("Bound a store", "growth", "compact it", usage=2,
+               last="2026-01-02T00:00:00Z")
+    b = _skill("bound A  store", "GROWTH", "Compact   it", usage=3,
+               last="2026-04-02T00:00:00Z")
+    c = _skill("Bound a store", "growth", "different procedure")
+    survivors, dropped = cp._dedup_skills([a, b, c])
+    assert survivors == [a, c] and dropped == 1
+    assert a.usage_count == 5
+    assert a.last_used == "2026-04-02T00:00:00Z"
+
+
+def test_plan_dedup_persists_and_reports_counts(tmp_path):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "skills": {"index_max_length": 4000, "index_overflow_limit": 6000},
+        "must_remember": {"max_length": 4000, "overflow_limit": 6000},
+    })
+    bstore.save_atomic(STORE_SKILLS, [
+        _skill("Dup", "t", "p"), _skill("dup", "T", "P"), _skill("Other", "t", "p"),
+    ])
+    bstore.save_atomic(STORE_MUST_REMEMBER, [
+        _memo("same memo"), _memo("same  MEMO"), _memo("unique"),
+    ])
+    manifest = cp.compact_plan(cfg, store, now=NOW)
+    assert manifest["deduped_skills"] == 1
+    assert manifest["deduped_must_remember"] == 1
+    assert manifest["targets"] == []  # generous bounds: dedup alone suffices
+    assert len(bstore.load(STORE_SKILLS)) == 2
+    assert len(bstore.load(STORE_MUST_REMEMBER)) == 2
+
+
+def test_plan_dedup_can_bring_store_back_under_overflow(tmp_path):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 60, "overflow_limit": 90},
+    })
+    # Two copies push past overflow (2 * 50 = 100 >= 90); one copy fits.
+    memo = "x" * 50
+    bstore.save_atomic(STORE_MUST_REMEMBER, [_memo(memo), _memo(memo)])
+    manifest = cp.compact_plan(cfg, store, now=NOW)
+    assert manifest["deduped_must_remember"] == 1
+    assert not any(
+        t["kind"] == cp.KIND_MUST_REMEMBER for t in manifest["targets"]
+    )
+
+
+def test_plan_protected_memos_rendered_with_ids(tmp_path):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 20, "overflow_limit": 30},
+    })
+    op = _memo("keep me forever, operator said so", kind="operator_explicit")
+    bstore.save_atomic(STORE_MUST_REMEMBER, [op])
+    manifest = cp.compact_plan(cfg, store, now=NOW)
+    (target,) = [
+        t for t in manifest["targets"] if t["kind"] == cp.KIND_MUST_REMEMBER
+    ]
+    prompt = Path(target["prompt_path"]).read_text(encoding="utf-8")
+    assert f"ID: {op.id}" in prompt
+    assert "Relevance check" in prompt
+
+
+# ----- STALE relevance-downgrade (apply) ---------------------------------------
+
+
+def test_apply_stale_downgrades_protected_to_decision(tmp_path):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 2000, "overflow_limit": 3000},
+    })
+    op_stale = _memo("stale directive", kind="operator_explicit", importance=5.0)
+    op_live = _memo("live directive", kind="operator_explicit", importance=5.0)
+    bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale, op_live])
+    staging = _stage(store, [
+        _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,
+                "must_remember"),
+    ])
+    _card(staging, "must_remember", (
+        "@@MUST_REMEMBER@@\n"
+        f"STALE: {op_stale.id}\n"
+        "\n"
+        "STALE: not-a-real-id\n"       # unknown id: ignored
+        "\n"
+        "KIND: preference\n"
+        "MEMO: tidy survivor\n"
+    ))
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["must_remember"]
+    entries = {
+        e.text: e for e in bstore.load(STORE_MUST_REMEMBER)
+    }
+    assert entries["stale directive"].kind == "decision"      # downgraded
+    assert entries["stale directive"].id == op_stale.id        # same entry
+    assert entries["live directive"].kind == "operator_explicit"
+    assert entries["tidy survivor"].kind == "preference"
+
+
+def test_apply_stale_downgraded_entry_is_trimmable(tmp_path):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        # Tight bound: only the live directive fits.
+        "must_remember": {"max_length": 20, "overflow_limit": 30},
+    })
+    op_stale = _memo("this old directive is very long indeed",
+                     kind="operator_explicit", importance=5.0)
+    op_live = _memo("keep me", kind="operator_explicit", importance=5.0)
+    bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale, op_live])
+    staging = _stage(store, [
+        _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,
+                "must_remember"),
+    ])
+    _card(staging, "must_remember", (
+        "@@MUST_REMEMBER@@\n"
+        f"STALE: {op_stale.id}\n"
+    ))
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["must_remember"]
+    assert cp.STORE_MUST_REMEMBER not in report.still_over
+    texts = [e.text for e in bstore.load(STORE_MUST_REMEMBER)]
+    assert texts == ["keep me"]        # downgraded entry trimmed to converge
+    assert report.forced_trims == [cp.STORE_MUST_REMEMBER]

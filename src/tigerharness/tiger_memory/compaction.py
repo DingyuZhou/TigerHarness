@@ -33,6 +33,7 @@ from pathlib import Path
 from .bounded_store import BoundedStore
 from .config import Config
 from .entries import (
+    KIND_DECISION,
     KIND_OPERATOR_EXPLICIT,
     STORE_MUST_REMEMBER,
     STORE_SKILLS,
@@ -116,12 +117,69 @@ def _forget_stale_topics(
     return survivors, dropped
 
 
-def _render_mr_blocks(entries: list[MustRememberEntry]) -> str:
+def _dedup_must_remember(
+    entries: list[MustRememberEntry],
+) -> tuple[list[MustRememberEntry], int]:
+    """Merge EXACT duplicate memos (same kind + whitespace/case-normalized
+    text) into their first occurrence, summing ``repeat_count`` and keeping
+    the freshest ``last_used`` / highest importance. Deterministic and
+    loss-free — dropping an identical copy loses nothing, and the repeat
+    signal is preserved. Sweeps re-capture the same directive verbatim
+    session after session, so this is the cheap first shrink."""
+    seen: dict[tuple[str, str], MustRememberEntry] = {}
+    survivors: list[MustRememberEntry] = []
+    dropped = 0
+    for e in entries:
+        key = (e.kind, " ".join(e.text.split()).lower())
+        first = seen.get(key)
+        if first is None:
+            seen[key] = e
+            survivors.append(e)
+        else:
+            first.repeat_count += e.repeat_count
+            first.last_used = max(first.last_used, e.last_used)
+            first.importance = max(first.importance, e.importance)
+            dropped += 1
+    return survivors, dropped
+
+
+def _dedup_skills(entries: list[SkillEntry]) -> tuple[list[SkillEntry], int]:
+    """Merge EXACT duplicate skills (same normalized name + trigger +
+    procedure), summing ``usage_count`` and keeping the freshest
+    ``last_used``. Same loss-free rationale as the memo dedup."""
+    seen: dict[tuple[str, str, str], SkillEntry] = {}
+    survivors: list[SkillEntry] = []
+    dropped = 0
+    for e in entries:
+        key = (
+            " ".join(e.name.split()).lower(),
+            " ".join(e.trigger.split()).lower(),
+            " ".join(e.procedure.split()).lower(),
+        )
+        first = seen.get(key)
+        if first is None:
+            seen[key] = e
+            survivors.append(e)
+        else:
+            first.usage_count += e.usage_count
+            first.last_used = max(first.last_used, e.last_used)
+            dropped += 1
+    return survivors, dropped
+
+
+def _render_mr_blocks(
+    entries: list[MustRememberEntry], *, with_ids: bool = False
+) -> str:
     if not entries:
         return "(none)"
     out = []
     for e in entries:
-        out.append(f"KIND: {e.kind}\nMEMO: {e.text}")
+        lines = []
+        if with_ids:
+            lines.append(f"ID: {e.id}")
+        lines.append(f"KIND: {e.kind}")
+        lines.append(f"MEMO: {e.text}")
+        out.append("\n".join(lines))
     return "\n\n".join(out)
 
 
@@ -219,8 +277,14 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
                 _target(KIND_TOPIC_DETAIL, key, prompt_path, slug=t.slug)
             )
 
-    # --- skills: index target + per-skill detail targets ---
+    # --- skills: exact-dup merge, then index target + detail targets ---
     skills = [e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)]
+    skills, deduped_skills = _dedup_skills(skills)
+    if deduped_skills:
+        for e in skills:
+            refresh_importance(e, now, cfg)
+        bstore.save_atomic(STORE_SKILLS, skills)
+        log.info("compact-plan: merged %d exact-duplicate skill(s)", deduped_skills)
     if bstore.is_over_overflow(STORE_SKILLS, skills):
         prompt_path = staging / "skills.prompt.md"
         prompt_path.write_text(
@@ -261,11 +325,17 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
                 _target(KIND_SKILL_DETAIL, key, prompt_path, entry_id=s.id)
             )
 
-    # --- must_remember ---
+    # --- must_remember: exact-dup merge, then the compact target ---
     must = [
         e for e in bstore.load(STORE_MUST_REMEMBER)
         if isinstance(e, MustRememberEntry)
     ]
+    must, deduped_mr = _dedup_must_remember(must)
+    if deduped_mr:
+        bstore.save_atomic(STORE_MUST_REMEMBER, must)
+        log.info(
+            "compact-plan: merged %d exact-duplicate memo(s)", deduped_mr
+        )
     if bstore.is_over_overflow(STORE_MUST_REMEMBER, must):
         protected = [e for e in must if e.kind == KIND_OPERATOR_EXPLICIT]
         compactable = [e for e in must if e.kind != KIND_OPERATOR_EXPLICIT]
@@ -281,7 +351,7 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
                 agent_name=cfg.agent.name,
                 current_chars=bstore.length_chars(must),
                 max_chars=max(0, budget),
-                protected=_render_mr_blocks(protected),
+                protected=_render_mr_blocks(protected, with_ids=True),
                 entries=_render_mr_blocks(compactable),
                 mission=mission,
             ),
@@ -292,6 +362,8 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
     manifest = {
         "generated_at": now,
         "dropped_stale_topics": dropped_stale,
+        "deduped_skills": deduped_skills,
+        "deduped_must_remember": deduped_mr,
         "targets": targets,
     }
     (staging / "manifest.json").write_text(
@@ -428,7 +500,15 @@ def _apply_must_remember(
 ) -> None:
     section = _section_after_marker(text, MARK_MUST_REMEMBER)
     new_entries: list[MustRememberEntry] = []
+    stale_ids: set[str] = set()
     for b in _blocks(section):
+        if "STALE" in b:
+            # The relevance-check verdict on a protected directive: the id
+            # names an operator_explicit entry judged no longer relevant to
+            # the live mission. It is DOWNGRADED (to `decision`, rejoining
+            # the normal decay pool) — never directly dropped.
+            stale_ids.add((b["STALE"] or "").strip())
+            continue
         kind = (b.get("KIND") or "").lower()
         memo = b.get("MEMO")
         if kind not in VALID_KINDS or not memo:
@@ -448,8 +528,22 @@ def _apply_must_remember(
             e for e in bstore.load(STORE_MUST_REMEMBER)
             if isinstance(e, MustRememberEntry)
         ]
-        protected = [e for e in current if e.kind == KIND_OPERATOR_EXPLICIT]
-        merged: list[MustRememberEntry] = protected + new_entries
+        protected: list[MustRememberEntry] = []
+        downgraded: list[MustRememberEntry] = []
+        for e in current:
+            if e.kind != KIND_OPERATOR_EXPLICIT:
+                continue
+            if e.id in stale_ids:
+                e.kind = KIND_DECISION
+                downgraded.append(e)
+            else:
+                protected.append(e)
+        if downgraded:
+            log.info(
+                "compact-apply: relevance-check downgraded %d operator "
+                "directive(s) to decision", len(downgraded),
+            )
+        merged: list[MustRememberEntry] = protected + downgraded + new_entries
         # Deterministic convergence: trim lowest-importance, oldest
         # non-protected entries until under max (never protected ones).
         max_len = cfg.memory.must_remember.max_length

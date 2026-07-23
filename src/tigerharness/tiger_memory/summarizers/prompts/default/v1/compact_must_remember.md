@@ -7,12 +7,19 @@ what still earns its place.
 Current size: {current_chars} characters. Target: **at most {max_chars}
 characters** (measured over the rewritten memos + kinds).
 
-## Protected entries (kept automatically — do NOT include them in your output)
+## Protected entries (kept automatically — do NOT rewrite them)
 
 These operator-explicit directives are preserved verbatim by the applier;
 budget for them is already accounted in the target above:
 
 {protected}
+
+**Relevance check.** For each protected entry above, judge it against the
+team mission below. If one is clearly stale — superseded, resolved, or no
+longer relevant to the live mission — mark it with a `STALE:` block (its
+`ID:` value). It is then DOWNGRADED to a normal `decision` (it rejoins the
+ordinary pool and may later be compacted or forgotten) — it is never
+silently deleted. When in doubt, keep it protected: do not mark it.
 
 ## Entries to compact
 
@@ -35,12 +42,17 @@ Emit exactly this marker on its own line, then the replacement blocks:
 
 ```
 @@MUST_REMEMBER@@
-KIND: <operator_explicit | preference | decision | incident>
+STALE: <id of a protected entry that failed the relevance check>
+
+KIND: <preference | decision | incident>
 MEMO: <one sentence>
 
 KIND: ...
 MEMO: ...
 ```
 
-Blank line between blocks. If nothing survives, write exactly `NONE`
-under the marker. No other preamble or commentary.
+Blank line between blocks; `STALE:` blocks (zero or more) may be mixed
+with `KIND:`/`MEMO:` blocks. Never emit `KIND: operator_explicit` — a
+compaction cannot mint operator directives. If nothing survives and
+nothing is stale, write exactly `NONE` under the marker. No other
+preamble or commentary.
