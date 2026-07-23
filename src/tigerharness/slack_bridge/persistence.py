@@ -12,13 +12,23 @@ Each entry on disk::
 
     "<thread_ts>": {
         "session_id": "abc-def-...",
-        "persona": "ayako"            // may be null for pre-routing records
+        "persona": "ayako",           // may be null for pre-routing records
+        "team": "Shohoku",            // lane/team name; null on old records
+        "last_usage": {...},          // final turn's usage payload, or null
+        "last_turn_at": "2026-...Z",  // ISO time of last completed turn
+        "in_flight": false            // a bridge turn is running right now
     }
 
 For backward compatibility with the pre-routing schema, a bare string
 value (``"<thread_ts>": "abc-def"``) is read as a record with
 ``persona=None``. Callers handle ``persona=None`` by falling back to the
-team's ``default_persona``. All writes use the new dict shape.
+team's ``default_persona``. All writes use the new dict shape. The
+``team`` / ``last_usage`` / ``last_turn_at`` / ``in_flight`` fields exist
+for the external idle-compaction pass (``slack-bridge compact-idle``):
+the bridge stamps them at its turn boundary, and the pass reads them to
+find heavy, quiet lanes it may safely ``/compact``. Records missing them
+(written by an older bridge) simply read as "unknown" and are skipped by
+that pass.
 
 Writes are atomic via ``tmp + os.replace``. Read errors fall back to an
 empty map with a warning rather than failing the bridge to start.
@@ -47,6 +57,11 @@ def default_state_path() -> Path:
     return root / "slack-bridge" / "threads.json"
 
 
+#: Sentinel for ThreadStore.set keyword arguments: "leave the stored
+#: value as it is" (an explicit ``None`` means "clear it").
+_UNSET: object = object()
+
+
 @dataclass(frozen=True)
 class ThreadRecord:
     """One thread's persisted state: which claude session, which persona.
@@ -54,9 +69,17 @@ class ThreadRecord:
     *persona* is ``None`` only for records read from the pre-routing
     on-disk schema (a bare session-id string). Callers must resolve it
     to the team's ``default_persona`` before dispatch.
+
+    *team* / *last_usage* / *last_turn_at* / *in_flight* are the turn
+    metadata the external ``compact-idle`` pass reads; all default to
+    the "unknown" values an older on-disk record implies.
     """
     session_id: str
     persona: str | None = None
+    team: str | None = None
+    last_usage: dict | None = None
+    last_turn_at: str | None = None
+    in_flight: bool = False
 
 
 class ThreadStore:
@@ -104,9 +127,18 @@ class ThreadStore:
                 if not isinstance(sid, str) or not sid:
                     continue
                 persona = v.get("persona")
+                team = v.get("team")
+                usage = v.get("last_usage")
+                turn_at = v.get("last_turn_at")
                 loaded[key] = ThreadRecord(
                     session_id=sid,
                     persona=persona if isinstance(persona, str) and persona else None,
+                    team=team if isinstance(team, str) and team else None,
+                    last_usage=usage if isinstance(usage, dict) else None,
+                    last_turn_at=(
+                        turn_at if isinstance(turn_at, str) and turn_at else None
+                    ),
+                    in_flight=bool(v.get("in_flight", False)),
                 )
         self._map = loaded
         log.info(
@@ -134,18 +166,63 @@ class ThreadStore:
         session_id: str,
         *,
         persona: str | None = None,
+        team: str | object = _UNSET,
+        last_usage: dict | None | object = _UNSET,
+        last_turn_at: str | None | object = _UNSET,
+        in_flight: bool | object = _UNSET,
     ) -> None:
-        """Persist a thread's session + persona. Empty session_id is a
-        no-op (matches pre-routing behavior). Re-writing the same
-        ``(session_id, persona)`` is also a no-op."""
+        """Persist a thread's session + persona (+ turn metadata).
+
+        Empty session_id is a no-op (matches pre-routing behavior).
+        Re-writing an identical record is also a no-op. The metadata
+        keywords default to *leave the stored value unchanged*, so the
+        pre-existing two-argument call sites keep whatever metadata a
+        newer caller stamped; pass an explicit ``None`` to clear one.
+        """
         if not session_id:
             return
         existing = self._map.get(thread_ts)
-        new = ThreadRecord(session_id=session_id, persona=persona)
+
+        def _keep(value: object, current: object) -> object:
+            return current if value is _UNSET else value
+
+        cur = existing if existing is not None else ThreadRecord(session_id="")
+        new = ThreadRecord(
+            session_id=session_id,
+            persona=persona,
+            team=_keep(team, cur.team),            # type: ignore[arg-type]
+            last_usage=_keep(last_usage, cur.last_usage),  # type: ignore[arg-type]
+            last_turn_at=_keep(last_turn_at, cur.last_turn_at),  # type: ignore[arg-type]
+            in_flight=bool(_keep(in_flight, cur.in_flight)),
+        )
         if existing == new:
             return
         self._map[thread_ts] = new
         self._save()
+
+    def mark_in_flight(self, thread_ts: str, flag: bool) -> None:
+        """Flip the ``in_flight`` marker on an existing record.
+
+        A thread with no record yet (its first turn is still running)
+        is a silent no-op -- the external compact-idle pass cannot see
+        that thread either way, so there is nothing to guard."""
+        existing = self._map.get(thread_ts)
+        if existing is None or existing.in_flight == flag:
+            return
+        self._map[thread_ts] = ThreadRecord(
+            session_id=existing.session_id,
+            persona=existing.persona,
+            team=existing.team,
+            last_usage=existing.last_usage,
+            last_turn_at=existing.last_turn_at,
+            in_flight=flag,
+        )
+        self._save()
+
+    def records(self) -> dict[str, ThreadRecord]:
+        """Snapshot of all records (read-only copy) -- the compact-idle
+        pass iterates this."""
+        return dict(self._map)
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,7 +237,14 @@ class ThreadStore:
         try:
             with fd as tf:
                 serializable = {
-                    k: {"session_id": v.session_id, "persona": v.persona}
+                    k: {
+                        "session_id": v.session_id,
+                        "persona": v.persona,
+                        "team": v.team,
+                        "last_usage": v.last_usage,
+                        "last_turn_at": v.last_turn_at,
+                        "in_flight": v.in_flight,
+                    }
                     for k, v in self._map.items()
                 }
                 json.dump(serializable, tf, indent=2, sort_keys=True)

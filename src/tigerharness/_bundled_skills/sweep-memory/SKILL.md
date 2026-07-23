@@ -28,11 +28,16 @@ wins. This skill is the driver over the non-AI gating CLIs (`sweep-plan` /
   every session start is safe and correct.
 - When the user explicitly asks to "sweep memory", "refresh team
   memory", or "rebuild memories".
+- From a **drive's idle-maintenance tail** (the `drive-journal` skill):
+  when a drive — including an Operator-sanctioned autodrive `claude -p`
+  fire — ends with nothing actionable and nothing busy, it invokes this
+  skill before stopping. Same cheap no-op guarantee applies.
 
-Do NOT drive this from a non-interactive `claude -p` / cron / API
-context. The executor must be a **Task-tool sub-agent**, which only a
-running interactive session can spawn. A daemon (the slack-bridge) cannot
--- that is exactly why this lives in the session, not the daemon.
+The executor must be a **Task-tool sub-agent** — only an *agent session*
+(interactive, or a sanctioned agentic drive such as an autodrive fire)
+can spawn one. A plain daemon process (the slack-bridge) cannot, and
+shelling out to `claude -p` as the executor is banned (see billing,
+below) -- that is exactly why this lives in the session, not the daemon.
 
 ## The billing model (load-bearing -- do not get this wrong)
 

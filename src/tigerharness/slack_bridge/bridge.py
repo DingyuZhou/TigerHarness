@@ -40,6 +40,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -345,6 +346,12 @@ class SlackBridge:
                     "thread=%s persona=%s dispatch (resume=%s, chars=%d, files=%d)",
                     thread_key, state.persona, resume_id, len(prompt), len(attachments),
                 )
+                # Guard the external compact-idle pass: while this turn
+                # runs, the persisted record says in_flight so an outside
+                # `/compact --resume` never races the live session. The
+                # matching clear happens in the turn-end store.set below
+                # (success) or the finally at the end of dispatch.
+                self._store.mark_in_flight(thread_key, True)
                 try:
                     result = await run_with_retry(
                         self._backend,
@@ -359,10 +366,17 @@ class SlackBridge:
                     else:
                         bridge_body = "_(empty reply)_"
                     if state.session.id:
+                        # Stamp the turn metadata the external
+                        # compact-idle pass reads (team, final usage,
+                        # boundary time) and clear the in_flight guard.
                         self._store.set(
                             thread_key,
                             state.session.id,
                             persona=state.persona,
+                            team=self._team.team_name or None,
+                            last_usage=getattr(result, "usage", None),
+                            last_turn_at=_utcnow_iso(),
+                            in_flight=False,
                         )
                     # Track LLM spend: agent call cost contributes to the
                     # bridge's running tally alongside router calls.
@@ -398,6 +412,17 @@ class SlackBridge:
                         already_compacted=state.idle_compacted,
                         label=f"thread={thread_key}",
                     )
+                    if state.idle_compacted and state.session.id:
+                        # The session just compacted, so the stamped
+                        # usage no longer describes its context -- clear
+                        # it so the external compact-idle pass doesn't
+                        # fire a redundant second /compact.
+                        self._store.set(
+                            thread_key,
+                            state.session.id,
+                            persona=state.persona,
+                            last_usage=None,
+                        )
                 except Exception as exc:
                     log.exception("backend failure for thread %s", thread_key)
                     bridge_body = f":warning: backend error: `{exc}`"
@@ -409,6 +434,10 @@ class SlackBridge:
                 reply_text = bridge_body or ""
             await say(text=reply_text, thread_ts=thread_key)
         finally:
+            # A failed turn skips the turn-end store.set, so make sure
+            # the persisted in_flight guard never sticks (idempotent
+            # no-op when the success path already cleared it).
+            self._store.mark_in_flight(thread_key, False)
             self._in_flight -= 1
             if self._in_flight == 0:  # pragma: no branch  # tested with single-request flows
                 self._drained.set()
@@ -571,6 +600,11 @@ def _trigger_tiger_memory_rebuild(
 
 
 _BOT_MENTION_RE = re.compile(r"<@[A-Z0-9]+>\s*")
+
+
+def _utcnow_iso() -> str:
+    """Turn-boundary timestamp for the persisted thread record."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _strip_bot_mention(text: str) -> str:

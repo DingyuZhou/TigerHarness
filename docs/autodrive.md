@@ -58,6 +58,20 @@ resumable. A drive that raises is logged as `last_error` and the loop keeps
 firing; one bad drive never takes the daemon down. On `stop`, any still-running
 drives are drained so their results are recorded before the daemon exits.
 
+### Idle fires run the maintenance tail
+
+A fire that finds **nothing actionable and nothing busy** is not a pure
+no-op: per the drive-journal skill's idle-maintenance tail (also spelled
+out in the per-tick prompt), it runs the team's two self-gating chores
+before stopping — `tigerharness slack-bridge compact-idle` (model-free;
+compacts heavy, quiet Slack bridge lanes when the team opted in — see
+docs/slack-bridge.md "Idle compaction") and the `sweep-memory` skill
+(team memory refresh, gated by its staleness floor + watermark + lease;
+its summarize work runs in Task-tool sub-agents, which a `claude -p`
+drive session can spawn). Both are cheap no-ops when fresh, so an idle
+cadence stays cheap; a fire that exits on the busy cheap-exit skips the
+tail entirely.
+
 ### Notifications (heartbeat on fire, summary on done)
 
 By default the daemon posts a **heartbeat to Slack on every fire**, then

@@ -34,16 +34,21 @@ Env surface (documented in docs/slack-bridge.md, the single home):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .persistence import ThreadStore, default_state_path
 
 log = logging.getLogger("tigerharness.slack_bridge.idle_compact")
 
 _DEFAULT_THRESHOLD = 0.30
 _DEFAULT_WINDOW = 200_000
+_DEFAULT_MIN_QUIET_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -216,6 +221,221 @@ def should_compact(
     if fraction < cfg.threshold_fraction:
         return False
     return journal_is_idle(cfg.journal_root)
+
+
+def _parse_iso(value: str | None) -> "datetime | None":
+    """Tolerant ISO-8601 parse; bad/missing input reads as None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+async def compact_idle_once(
+    team_dir: Path,
+    *,
+    min_quiet_seconds: int = _DEFAULT_MIN_QUIET_SECONDS,
+    send: Any = None,
+    now: "datetime | None" = None,
+) -> dict[str, Any]:
+    """The external, run-once idle-compaction pass (``slack-bridge
+    compact-idle``).
+
+    The bridge's own hook (:func:`maybe_compact`) only fires at a lane
+    turn boundary, so a lane left heavy while the journal was busy stays
+    heavy until its next Slack turn. This pass closes that gap from the
+    *driver* side: an idle drive (autodrive tick or a manual
+    drive-journal) calls it after the queue drains. It is model-free
+    orchestration -- the single ``/compact`` turn it may send per lane is
+    the same ADR 0004 mechanism the bridge uses.
+
+    Safety gates, in order, all fail-soft (skip, never raise):
+
+    - team fragment must exist and set ``idle_compact: true``
+      (:func:`IdleCompactConfig.for_lane` -- identical config to the
+      bridge's own hook);
+    - a record must carry this team's name (stamped by the bridge at its
+      turn boundary; older records are invisible and skipped);
+    - ``in_flight`` records are skipped (a live bridge turn owns the
+      session);
+    - records whose last turn is younger than ``min_quiet_seconds`` are
+      skipped (extra margin against racing a turn that is just landing);
+    - the stamped usage must put the session over the threshold;
+    - the journal must be idle (checked once, after the cheap gates);
+    - one compact per idle period: a compacted record's ``last_usage``
+      is cleared, so the pass cannot re-fire until a real turn restamps
+      it.
+
+    ``send`` is an async callable ``(session_id) -> None`` injected by
+    tests; the default resolves the ``claude_p`` backend and sends one
+    ``/compact`` on a resumed session. Run from the team root -- the
+    backend inherits the process cwd, which must match the cwd the
+    bridge's sessions were opened under for ``--resume`` to find them.
+    """
+    report: dict[str, Any] = {
+        "ran": False,
+        "team": team_dir.name,
+        "checked": 0,
+        "compacted": [],
+        "skipped": {},
+    }
+
+    def _skip(reason: str, count: int = 1) -> None:
+        report["skipped"][reason] = report["skipped"].get(reason, 0) + count
+
+    fragment = team_dir / "configs" / "slack-bridge.yaml"
+    if not fragment.exists():
+        report["reason"] = "no_fragment"
+        return report
+    try:
+        from .multi import _build_idle_compact, _load_yaml, _resolve
+
+        spec = _load_yaml(fragment)
+        cfg = _build_idle_compact(
+            spec, team_dir, f"compact-idle ({fragment})"
+        )
+    except Exception:  # noqa: BLE001 -- fail-soft, like the bridge hook
+        log.exception("compact-idle: could not load %s; skipping", fragment)
+        report["reason"] = "bad_fragment"
+        return report
+    if not cfg.enabled or cfg.journal_root is None:
+        report["reason"] = "disabled"
+        return report
+
+    state_dir_raw = str(spec.get("state_dir") or "").strip()
+    state_path = (
+        (_resolve(state_dir_raw, team_dir) / "threads.json").resolve()
+        if state_dir_raw
+        else default_state_path()
+    )
+    store = ThreadStore(state_path)
+
+    moment = now if now is not None else datetime.now(timezone.utc)
+    candidates: list[tuple[str, Any]] = []
+    for thread_ts, rec in sorted(store.records().items()):
+        report["checked"] += 1
+        if rec.team != team_dir.name:
+            _skip("other_team")
+            continue
+        if rec.in_flight:
+            _skip("in_flight")
+            continue
+        last_turn = _parse_iso(rec.last_turn_at)
+        if last_turn is None:
+            _skip("no_turn_stamp")
+            continue
+        if last_turn.tzinfo is None:
+            last_turn = last_turn.replace(tzinfo=timezone.utc)
+        if (moment - last_turn).total_seconds() < min_quiet_seconds:
+            _skip("too_recent")
+            continue
+        fraction = context_fraction(rec.last_usage, cfg.context_window_tokens)
+        if fraction < cfg.threshold_fraction:
+            _skip("below_threshold")
+            continue
+        candidates.append((thread_ts, rec))
+
+    report["ran"] = True
+    if not candidates:
+        return report
+
+    if not journal_is_idle(cfg.journal_root):
+        report["reason"] = "journal_busy"
+        _skip("journal_busy", len(candidates))
+        return report
+
+    if send is None:
+        send = _default_send()
+
+    for thread_ts, rec in candidates:
+        try:
+            await send(rec.session_id)
+        except Exception:  # noqa: BLE001 -- one bad lane never stops the pass
+            log.exception(
+                "compact-idle: /compact failed for thread=%s; skipping",
+                thread_ts,
+            )
+            _skip("send_failed")
+            continue
+        # One-per-idle-period latch: clear the stamped usage so only a
+        # real future turn can make this lane eligible again.
+        store.set(
+            thread_ts,
+            rec.session_id,
+            persona=rec.persona,
+            last_usage=None,
+        )
+        report["compacted"].append(thread_ts)
+        log.info(
+            "compact-idle: compacted thread=%s (team=%s)",
+            thread_ts, team_dir.name,
+        )
+    return report
+
+
+def _default_send() -> Any:
+    """Build the real ``/compact`` sender over the ``claude_p`` backend
+    (the ADR 0004 mechanism: one prompt turn on a resumed session)."""
+    from tigerharness.agent_sdk import AgentConfig, get_backend
+
+    backend = get_backend("claude_p")
+    agent_cfg = AgentConfig(
+        name="compact-idle",
+        extra={"permission_mode": "bypassPermissions"},
+    )
+
+    async def send(session_id: str) -> None:
+        session = await backend.open_session(resume_id=session_id)
+        try:
+            await backend.run(agent_cfg, "/compact", session=session)
+        finally:
+            await session.close()
+
+    return send
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    """``tigerharness slack-bridge compact-idle`` -- run one external
+    idle-compaction pass for the team rooted at ``--team-dir`` (default:
+    the current directory) and print the JSON report."""
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser(
+        prog="tigerharness slack-bridge compact-idle",
+        description=(
+            "Compact heavy, quiet Slack bridge lanes once, if the team "
+            "opted in (idle_compact: true) and the journal is idle. "
+            "Model-free except the single /compact turn per eligible "
+            "lane. Safe to run repeatedly; every gate is a cheap no-op."
+        ),
+    )
+    parser.add_argument(
+        "--team-dir",
+        default=".",
+        help="team root (contains configs/slack-bridge.yaml); default cwd",
+    )
+    parser.add_argument(
+        "--min-quiet-seconds",
+        type=int,
+        default=_DEFAULT_MIN_QUIET_SECONDS,
+        help=(
+            "skip lanes whose last turn finished more recently than this "
+            f"(default {_DEFAULT_MIN_QUIET_SECONDS}s)"
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    report = asyncio.run(
+        compact_idle_once(
+            Path(args.team_dir).resolve(),
+            min_quiet_seconds=args.min_quiet_seconds,
+        )
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
 
 
 async def maybe_compact(

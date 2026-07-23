@@ -61,6 +61,9 @@ _PRIOR_OPERATING_HASHES = {
     # Each entry is a previously-shipped rendered OPERATING.md an existing
     # journal may still have on disk; all refresh to the current (merged
     # cascade + per-persona-memory) template.
+    # pre idle-maintenance-tail render (before the drained-queue
+    # compact-idle + sweep-memory tail was added to the cascade section).
+    "d3766194aeb76ac3e0a29da9b35669c825eaf39ca59ccf32d4de7864ecb7d20f",
     # pre-cascade-after-materialize render (origin/main before the step-2d
     # "materialize is not a turn-end" clarification).
     "95b1f0667cd6f260770727ab35f662f1421f66412d6c0e35fc1d1180260ad634",

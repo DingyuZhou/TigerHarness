@@ -65,6 +65,10 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-07-22 (idle-maintenance): ayako: pre idle-maintenance-tail ship
+        #   -- before the step-6 callout + tail section (compact-idle + memory
+        #   sweep when the queue drains).
+        "d88cb0860201785fc3aedc9daec7d01c935d3cbabf975968de88e35255d965bb",
         # 2026-06-26: anzai: pre-needs_input ship -- before the parking-on-an-
         #   Operator-question step-5 callout (park instead of stalling).
         "d0b1f3704b12a3642211408fd2d2f9ed9dc1b555c856ca1acd2ceb02b5201666",
@@ -140,6 +144,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-07-22 (idle-maintenance): ayako: pre drive-tail ship -- before
+        #   the executor-context relax (agent drives may run the sweep; plain
+        #   daemons still cannot).
+        "ef558bbf027b819287d5dbd6342594a567b2b2c5908f75e5de00d5d54ff8c438",
         # 2026-06-17 (b5-doc-draft): anzai: rewrite to the 3-store contract
         #   (@@SKILLS@@/@@MUST_REMEMBER@@/@@EMOTIONAL@@, .extract.md cards,
         #   meditation) -- the prior bundle described the retired collapsed-
@@ -163,11 +171,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "d88cb0860201785fc3aedc9daec7d01c935d3cbabf975968de88e35255d965bb",
+    "drive-journal": "ee417d20079fe3ce3e7616fdc8b79df71a1f91a3e5a3b50014c442e1e3a388a1",
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "ef558bbf027b819287d5dbd6342594a567b2b2c5908f75e5de00d5d54ff8c438",
+    "sweep-memory": "6818e4e7c349bf4b2ce32bb1041df4c10b6170512a76387a566eaca912aaf3da",
     "tigerharness-basics": "d32ae9739696c3f199088396143922b663edbd0a75fc07a6163b85e378d6f604",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }

@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
         if rest and rest[0] in ("gen-service", "gen_service"):
             from .slack_bridge.gen_service import main as gs_main
             return gs_main(rest[1:])
+        if rest and rest[0] in ("compact-idle", "compact_idle"):
+            from .slack_bridge.idle_compact import main as ci_main
+            return ci_main(rest[1:])
         from .slack_bridge.notify import main as notify_main
         return notify_main(rest)
     elif cmd in ("--help", "-h", "help"):
