@@ -1099,7 +1099,17 @@ class TestTeamPlanXdgJournalReminder:
             "global journal root" in r for r in plan.manual_reminders
         )
 
-    def test_absent_xdg_root_silent(self, tmp_path: Path) -> None:
+    def test_absent_xdg_root_silent(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # Isolate every input to default_journal_root() so "absent" is
+        # genuinely absent -- it reads the real environment AND the real cwd
+        # (not home=). Env alone is insufficient: priority #2 resolves to
+        # <cwd>/journal when cwd is a team dir, so a sibling test that leaves
+        # cwd inside a team root makes this one false-fail in the full suite.
+        monkeypatch.delenv("TIGERHARNESS_JOURNAL_DIR", raising=False)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+        monkeypatch.chdir(tmp_path)
         _make_team(tmp_path, "tigers", ["ayako"])
         plan = build_team_plan(
             team="tigers", teams_root=tmp_path, home=tmp_path,

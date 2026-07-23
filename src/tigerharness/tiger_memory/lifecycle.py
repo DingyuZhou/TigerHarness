@@ -28,14 +28,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterable
 
 from .bounded_store import BoundedStore
 from .config import Config
+from .cursor import load_cursor
 from .entries import (
     KIND_OPERATOR_EXPLICIT,
     STORE_DIARY,
@@ -498,6 +502,282 @@ def _pack_stacks(
     return stacks
 
 
+def _fill_extract_prompt(cfg: Config, prompts_root: Path, rec, content: str) -> str:
+    """Fill the 3-store extraction prompt for one transcript (or reduced
+    digest concatenation). The ``@@SKILLS@@`` / ``@@MUST_REMEMBER@@`` /
+    ``@@DIARY@@`` contract lives ONLY here, so it stays single-sourced whether
+    the input is a whole small transcript or the reduced digests of a big one.
+    """
+    return _fill_prompt(
+        prompts_root / "extract_memory.md",
+        agent_name=cfg.agent.name,
+        source=rec.source,
+        source_id=rec.source_id,
+        first_event_at=rec.first_event_at.isoformat(),
+        last_event_at=rec.last_event_at.isoformat(),
+        procedure_max_words=cfg.memory_extract.skill_procedure_words,
+        memo_max_words=cfg.memory_extract.memo_words,
+        reaction_max_words=cfg.memory_extract.reaction_words,
+        weight_cap=int(cfg.memory.diary.weight_cap),
+        content=content,
+    )
+
+
+def _per_chunk_words(cfg: Config, n_chunks: int) -> int:
+    """Per-chunk digest word budget for the map step.
+
+    Aim the *concatenated* digests well under the staging ceiling (target half)
+    so the reduce is a single pass in the common case, with a 120-word floor so
+    a tiny chunk still yields a usable digest. ~6 chars/word.
+    """
+    target_total = cfg.budgets.max_staged_content_chars // 2
+    per_chunk_chars = max(1, target_total // max(1, n_chunks))
+    return max(120, per_chunk_chars // 6)
+
+
+# ----- incremental slicing (ADR 0006 Part 2 — per-session high-water mark) ---
+
+
+def _prefilter(cfg: Config, content: str) -> str:
+    """Apply the configured transcript pre-filter (or pass through when off)."""
+    if cfg.prefilter.enabled:
+        return filter_transcript(
+            content,
+            drop_tool_results=cfg.prefilter.drop_tool_results,
+            drop_system_reminders=cfg.prefilter.drop_system_reminders,
+        )
+    return content
+
+
+# A rendered turn header — ``[<iso-ts>] user:`` / ``[<iso-ts>] assistant:`` —
+# the same structural boundary the prefilter recognises. The timestamp group
+# may be empty (an event with no timestamp), in which case the turn carries no
+# slice boundary and is always treated as post-cursor (re-process, never skip).
+_TURN_HEADER_RE = re.compile(r"^\[([^\]]*)\]\s+(?:user|assistant):\s*$")
+
+# Read-only continuity context delimiters (acceptance #2). The overlap window
+# is prior, already-extracted turns prepended ONLY for continuity; the prompt
+# marks them so the sub-agent extracts solely from the post-cursor slice.
+_OVERLAP_OPEN = (
+    "[read-only context — earlier turns already summarized; DO NOT re-extract, "
+    "shown only for continuity]\n"
+)
+_OVERLAP_CLOSE = (
+    "\n[end read-only context — extract ONLY from the turns that follow]\n\n"
+)
+
+
+@dataclass
+class _Turn:
+    """One transcript turn: its event timestamp (``None`` if unparseable) and
+    the full original block (header line + body), so re-joining turns is
+    lossless."""
+
+    event_at: datetime | None
+    text: str
+
+
+@dataclass
+class _SliceResult:
+    """The post-cursor slice staged for one record: the prompt content (a
+    read-only overlap window + the extraction-target slice, pre-filtered) plus
+    the new high-water mark to advance the cursor to once the card ingests."""
+
+    prompt_content: str
+    cursor_event_at: str
+    cursor_events: int
+
+
+def _parse_iso(raw: str | None) -> datetime | None:
+    """Parse an ISO turn timestamp to an aware datetime; ``None`` if empty or
+    unparseable. A naive timestamp is assumed UTC so slice comparisons never
+    mix naive/aware datetimes."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _parse_turns(content: str) -> list[_Turn]:
+    """Split a rendered transcript dump into turns on the ``[<ts>] <role>:``
+    header lines. Each turn keeps its original text (header + body) so the
+    concatenation of every turn's ``text`` reproduces *content* exactly."""
+    turns: list[_Turn] = []
+    cur_lines: list[str] = []
+    cur_ts: datetime | None = None
+    for line in content.splitlines(keepends=True):
+        m = _TURN_HEADER_RE.match(line.rstrip("\n"))
+        if m is not None:
+            if cur_lines:
+                turns.append(_Turn(cur_ts, "".join(cur_lines)))
+            cur_lines = [line]
+            cur_ts = _parse_iso(m.group(1))
+        else:
+            cur_lines.append(line)
+    if cur_lines:
+        turns.append(_Turn(cur_ts, "".join(cur_lines)))
+    return turns
+
+
+def _join_turns(turns: list[_Turn]) -> str:
+    return "".join(t.text for t in turns)
+
+
+def _active_slice_turns(cfg: Config, post_turns: list[_Turn]) -> list[_Turn] | None:
+    """For a still-active session, choose the completed-turn slice to extract
+    now, or ``None`` to keep waiting (the idle pass mops up the tail).
+
+    Holds back the live tail turn and extracts the completed turns once they
+    exceed ``active_slice_threshold_chars`` (measured on PREFILTERED content,
+    cut at a whole-turn boundary — never mid-turn). The hard case: when the
+    current (last) turn ALONE exceeds the threshold there is no completed
+    boundary below it, so the whole post-cursor slice is extracted now (Part 1's
+    chunker handles the oversized turn) rather than waiting and re-opening the
+    leak.
+    """
+    threshold = cfg.budgets.active_slice_threshold_chars
+    completed = post_turns[:-1]
+    if completed and len(_prefilter(cfg, _join_turns(completed))) > threshold:
+        return completed
+    if len(_prefilter(cfg, _join_turns([post_turns[-1]]))) > threshold:
+        return post_turns
+    return None
+
+
+def _boundary_marker(turns: list[_Turn], boundary: _Turn, rec) -> tuple[str, int]:
+    """The new cursor (last_event_at, processed_events) after a slice ending at
+    *boundary*. With no parseable boundary timestamp (e.g. a worklog record),
+    fall back to the record's last event + the full turn count so the count
+    guard still has a value."""
+    if boundary.event_at is None:
+        return rec.last_event_at.isoformat(), len(turns)
+    count = sum(
+        1 for t in turns if t.event_at is not None and t.event_at <= boundary.event_at
+    )
+    return boundary.event_at.isoformat(), count
+
+
+def _with_overlap(cfg: Config, overlap_turns: list[_Turn], target: str) -> str:
+    """Prepend the bounded read-only overlap window to the extraction target."""
+    if not overlap_turns:
+        return target
+    overlap = _prefilter(cfg, _join_turns(overlap_turns))
+    return f"{_OVERLAP_OPEN}{overlap}{_OVERLAP_CLOSE}{target}"
+
+
+def _compute_incremental_slice(
+    cfg: Config, store: Store, rec, *, active: bool
+) -> _SliceResult | None:
+    """Compute the post-cursor slice to stage for *rec*, or ``None`` to skip.
+
+    Loads the record's cursor, drops it (full pass) if the count guard trips,
+    partitions turns into pre/post-cursor, applies the active-session threshold
+    gate, then builds the staged prompt (read-only overlap window + the
+    extraction target, pre-filtered) and the boundary to advance the cursor to.
+    """
+    turns = _parse_turns(rec.content)
+    cursor = load_cursor(store, rec.conversation_uuid)
+    cut = _parse_iso(cursor.last_event_at) if cursor is not None else None
+    if cursor is not None and cut is not None:
+        pre = [t for t in turns if t.event_at is not None and t.event_at <= cut]
+        if len(pre) != cursor.processed_events:
+            cut = None  # event-filter changed underneath us — re-process in full
+
+    if cut is None:
+        pre_turns: list[_Turn] = []
+        post_turns = turns
+    else:
+        pre_turns = [t for t in turns if t.event_at is not None and t.event_at <= cut]
+        post_turns = [
+            t for t in turns if not (t.event_at is not None and t.event_at <= cut)
+        ]
+
+    if not post_turns:
+        return None  # nothing new since the cursor
+
+    if active:
+        slice_turns = _active_slice_turns(cfg, post_turns)
+        if slice_turns is None:
+            return None  # SKIP_ACTIVE — under threshold; wait for the idle pass
+    else:
+        slice_turns = post_turns
+
+    target = _prefilter(cfg, _join_turns(slice_turns))
+    overlap = (
+        pre_turns[-cfg.budgets.overlap_turns:]
+        if cfg.budgets.overlap_turns > 0
+        else []
+    )
+    prompt_content = _with_overlap(cfg, overlap, target)
+    cursor_event_at, cursor_events = _boundary_marker(turns, slice_turns[-1], rec)
+    return _SliceResult(prompt_content, cursor_event_at, cursor_events)
+
+
+def _stage_record(cfg: Config, staging: Path, prompts_root: Path, rec, content: str) -> dict:
+    """Stage one EXTRACT record and return its manifest item.
+
+    Two shapes, distinguished by ``kind``:
+
+    - ``kind="single"`` (content within the staging ceiling) — one
+      ``<uuid>.prompt.md`` extraction prompt, exactly as before (back-compat).
+    - ``kind="map_reduce"`` (oversized) — split losslessly on line boundaries
+      into ``<uuid>.chunkNN.prompt.md`` condense prompts (the map step). The
+      sub-agent writes a ``<uuid>.chunkNN.digest.md`` per chunk, then a reduce
+      runs the extraction prompt over the concatenated digests to emit
+      ``<uuid>.extract.md``. No lossy middle-elision on this path — that is the
+      whole point of ADR 0006 Part 1.
+    """
+    base = {
+        "conversation_uuid": rec.conversation_uuid,
+        "source": rec.source,
+        "source_id": rec.source_id,
+        "first_event_at": rec.first_event_at.isoformat(),
+        "last_event_at": rec.last_event_at.isoformat(),
+        "raw_path": str(rec.raw_path),
+    }
+    if len(content) <= cfg.budgets.max_staged_content_chars:
+        prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
+        prompt_path.write_text(
+            _fill_extract_prompt(cfg, prompts_root, rec, content), encoding="utf-8"
+        )
+        base["kind"] = "single"
+        base["prompt_path"] = str(prompt_path)
+        return base
+    chunks = _split_on_boundaries(content, cfg.budgets.chunk_content_chars)
+    per_chunk_words = _per_chunk_words(cfg, len(chunks))
+    chunk_prompts: list[str] = []
+    digest_paths: list[str] = []
+    for i, chunk in enumerate(chunks):
+        stem = f"{rec.conversation_uuid}.chunk{i + 1:02d}"
+        cp_path = staging / f"{stem}.prompt.md"
+        cp_path.write_text(
+            _fill_prompt(
+                prompts_root / "chunk_condense.md",
+                agent_name=cfg.agent.name,
+                chunk_index=i + 1,
+                chunk_total=len(chunks),
+                max_words=per_chunk_words,
+                content=chunk,
+            ),
+            encoding="utf-8",
+        )
+        chunk_prompts.append(str(cp_path))
+        digest_paths.append(str(staging / f"{stem}.digest.md"))
+    base["kind"] = "map_reduce"
+    base["chunk_prompts"] = chunk_prompts
+    base["digest_paths"] = digest_paths
+    base["reduce_with"] = "extract_memory.md"
+    return base
+
+
 def plan_extraction(
     cfg: Config, store: Store, *, max_sessions: int | None = None
 ) -> list[dict]:
@@ -524,44 +804,30 @@ def plan_extraction(
     weighted: list[tuple[str, int]] = []
     processed = 0
     for d in decisions:
-        if d.action != EXTRACT:
-            continue
+        # Both idle (EXTRACT) and still-active (SKIP_ACTIVE) records are now
+        # candidates (``_decide`` emits only these two): an active session is
+        # extracted incrementally once its post-cursor slice crosses the Q3
+        # threshold (ADR 0006 Part 2); an idle one always stages whatever is
+        # past its cursor.
         if max_sessions is not None and processed >= max_sessions:
             break
         rec = d.record
-        content = rec.content
-        if cfg.prefilter.enabled:
-            content = filter_transcript(
-                content,
-                drop_tool_results=cfg.prefilter.drop_tool_results,
-                drop_system_reminders=cfg.prefilter.drop_system_reminders,
-            )
-        clipped = _clip(content, cfg.budgets.max_staged_content_chars)
-        prompt = _fill_prompt(
-            prompts_root / "extract_memory.md",
-            agent_name=cfg.agent.name,
-            source=rec.source,
-            source_id=rec.source_id,
-            first_event_at=rec.first_event_at.isoformat(),
-            last_event_at=rec.last_event_at.isoformat(),
-            procedure_max_words=cfg.memory_extract.skill_procedure_words,
-            memo_max_words=cfg.memory_extract.memo_words,
-            reaction_max_words=cfg.memory_extract.reaction_words,
-            weight_cap=int(cfg.memory.diary.weight_cap),
-            content=clipped,
+        sliced = _compute_incremental_slice(
+            cfg, store, rec, active=(d.action == SKIP_ACTIVE)
         )
-        prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
-        prompt_path.write_text(prompt, encoding="utf-8")
-        items.append({
-            "conversation_uuid": rec.conversation_uuid,
-            "source": rec.source,
-            "source_id": rec.source_id,
-            "first_event_at": rec.first_event_at.isoformat(),
-            "last_event_at": rec.last_event_at.isoformat(),
-            "raw_path": str(rec.raw_path),
-            "prompt_path": str(prompt_path),
-        })
-        weighted.append((rec.conversation_uuid, len(clipped)))
+        if sliced is None:
+            continue  # nothing new, or active-but-under-threshold
+        content = sliced.prompt_content
+        item = _stage_record(cfg, staging, prompts_root, rec, content)
+        # The high-water mark this slice advances the cursor to once its card is
+        # ingested (the on_slice_ingested hook reads these off the manifest).
+        item["cursor_event_at"] = sliced.cursor_event_at
+        item["cursor_events"] = sliced.cursor_events
+        items.append(item)
+        # One stack slot per conversation (a map_reduce item expands into its
+        # own N-map + 1-reduce sub-agent turns inside that slot), weighted by
+        # the staged slice length so the packer's budget still reflects size.
+        weighted.append((rec.conversation_uuid, len(content)))
         processed += 1
 
     stacks = _pack_stacks(
@@ -730,3 +996,124 @@ def _clip(text: str, max_chars: int) -> str:
         return text[:max_chars]
     half = (max_chars - len(_CLIP_MARKER)) // 2
     return text[:half] + _CLIP_MARKER + text[-half:]
+
+
+def _split_on_boundaries(text: str, max_chars: int) -> list[str]:
+    """Split *text* into consecutive chunks each ``<= max_chars``, losslessly.
+
+    Prefers line boundaries so a chunk never cuts mid-line. A single line
+    longer than *max_chars* is hard-split (the only case that cuts within a
+    line). The concatenation of the returned chunks equals *text* exactly —
+    that losslessness is what makes chunk-and-reduce preserve the middle of an
+    oversized transcript where ``_clip`` silently dropped it.
+    """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    buf: list[str] = []
+    running = 0
+    for line in text.splitlines(keepends=True):
+        if len(line) > max_chars:
+            if buf:
+                chunks.append("".join(buf))
+                buf, running = [], 0
+            for i in range(0, len(line), max_chars):
+                piece = line[i:i + max_chars]
+                if len(piece) == max_chars:
+                    chunks.append(piece)
+                else:
+                    buf.append(piece)
+                    running += len(piece)
+            continue
+        if buf and running + len(line) > max_chars:
+            chunks.append("".join(buf))
+            buf, running = [], 0
+        buf.append(line)
+        running += len(line)
+    if buf:
+        chunks.append("".join(buf))
+    return chunks
+
+
+def _concat_digests(parts: list[str]) -> str:
+    """Join mapped chunk digests with explicit part markers (reduce input)."""
+    return "\n\n".join(
+        f"[transcript part {i + 1}/{len(parts)}]\n{p}"
+        for i, p in enumerate(parts)
+    )
+
+
+def _reduce_digests(parts: list[str], cfg: Config, *, condense) -> str:
+    """Reduce mapped chunk digests into one under-ceiling block.
+
+    Concatenate *parts*; while the concatenation still exceeds
+    ``max_staged_content_chars`` and depth budget remains
+    (``max_reduce_depth``), re-condense each part via the injected *condense*
+    callable ``(part, index, total) -> str`` — one more map round, keeping the
+    part count (and thus the fixed per-part marker overhead) constant so the
+    loop actually converges as content shrinks. At the depth cap, fall back to
+    the bounded ``_clip`` guard so termination is guaranteed even for a
+    pathological (non-shrinking) condenser. This is the lossless main line with
+    a bounded last-resort guard, never ``_clip``'s silent middle-elision on the
+    normal path.
+
+    *condense* is an injectable seam: in production it is another sub-agent map
+    round; tests inject a deterministic callable so every branch here (fits
+    immediately / shrinks within budget / hits the depth-cap guard) is
+    reachable without a live model.
+    """
+    ceiling = cfg.budgets.max_staged_content_chars
+    text = _concat_digests(parts)
+    depth = 0
+    while len(text) > ceiling and depth < cfg.budgets.max_reduce_depth:
+        parts = [condense(p, i + 1, len(parts)) for i, p in enumerate(parts)]
+        text = _concat_digests(parts)
+        depth += 1
+    if len(text) > ceiling:
+        log.warning(
+            "reduce-digests: hit depth cap (%d) at %d chars; bounded-clip guard",
+            cfg.budgets.max_reduce_depth, len(text),
+        )
+        return _clip(text, ceiling)
+    return text
+
+
+def build_reduce_prompt(cfg: Config, store: Store, item: dict) -> str | None:
+    """Assemble the final extraction prompt for one ``map_reduce`` item from its
+    staged chunk digests — the reduce step of ADR 0006 Part 1.
+
+    Returns the written ``<uuid>.prompt.md`` path, or ``None`` if not every
+    digest is staged yet (the map phase is still in flight for this uuid — a
+    later sweep pass retries). Concatenates the digests with part markers,
+    applies the bounded last-resort ``_clip`` guard only if the concatenation
+    still exceeds the staging ceiling, then fills the single-sourced
+    ``extract_memory.md`` contract over them — yielding the SAME
+    ``<uuid>.prompt.md`` filename + shape the single path produces, so the
+    downstream card-write + ingest are identical.
+
+    The multi-round sub-agent re-condense lives in the sweep skill (it needs
+    sub-agent turns, which only the subscription rail can run); this pure-Python
+    step is the guaranteed-terminating guard so the staged reduce prompt never
+    exceeds the ceiling even if the skill stops condensing early.
+    """
+    digest_paths = [Path(p) for p in item["digest_paths"]]
+    if not all(p.exists() for p in digest_paths):
+        return None
+    content = _concat_digests([p.read_text(encoding="utf-8") for p in digest_paths])
+    ceiling = cfg.budgets.max_staged_content_chars
+    if len(content) > ceiling:
+        content = _clip(content, ceiling)
+    rec = SimpleNamespace(
+        source=item["source"],
+        source_id=item["source_id"],
+        first_event_at=datetime.fromisoformat(item["first_event_at"]),
+        last_event_at=datetime.fromisoformat(item["last_event_at"]),
+    )
+    prompt_path = _sweep_staging_dir(store) / f"{item['conversation_uuid']}.prompt.md"
+    prompt_path.write_text(
+        _fill_extract_prompt(cfg, _prompts_root(cfg), rec, content),
+        encoding="utf-8",
+    )
+    return str(prompt_path)

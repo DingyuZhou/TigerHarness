@@ -13,7 +13,7 @@ conversation triggered it.
 
 This skill drives the bounded-store memory model (design
 `docs/DESIGN-memory.md`): each persona has **three** bounded stores --
-`skills`, `must_remember`, `emotional` -- and a sweep turns a persona's
+`skills`, `must_remember`, `diary` -- and a sweep turns a persona's
 finished transcripts into entries in those stores. The canonical
 runtime contract is `docs/tiger-memory-sweep-protocol.md` in the
 tigerharness package. If anything here seems to contradict it, that doc
@@ -128,11 +128,11 @@ b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
    - **Read**: each `<uuid>.prompt.md` in its assigned stack (the prompt
      already embeds the prefiltered transcript and the full output
      contract) and, for context, the persona's current stores
-     (`skills.md` / `must_remember.md` / `emotional.md` under the store's
+     (`skills.md` / `must_remember.md` / `diary.md` under the store's
      `journal/` dir). Nothing else.
    - **Do**: for each uuid in the stack, in order -- read the prompt and
      act **as that persona, in character**; emit ONLY the
-     `@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@EMOTIONAL@@` bundle per the
+     `@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@DIARY@@` bundle per the
      prompt's output contract; **self-validate** (all three markers
      present, each on its own line, in that order; a section is either
      well-formed blocks or the literal `NONE`); and **write that bundle
@@ -146,11 +146,68 @@ b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
      little; the stores are bounded and forgetting is first-class, so the
      sub-agent should be selective -- only durable, reusable lessons
      (skills), genuine external directives (must_remember), and real
-     reactions (emotional). A card that is `NONE` / `NONE` / `NONE` is a
+     diary notes (diary). A card that is `NONE` / `NONE` / `NONE` is a
      valid, expected outcome.
 
+b'. **Oversized transcripts -- the map->reduce two-phase.** Most items are
+   `kind="single"` (one `<uuid>.prompt.md`, the 2b flow above). An item
+   whose prefiltered content exceeds `max_staged_content_chars` is staged
+   by `plan` as `kind="map_reduce"` instead: in the `items` manifest it
+   carries explicit **`chunk_prompts`** and **`digest_paths`** lists and
+   has **no** `prompt_path`, so the oversized middle is split losslessly
+   rather than silently clipped. If `plan`'s `items` shows ANY
+   `map_reduce` uuid, run this extra hop for those uuids **between 2b and
+   2c** (skipping it silently drops the oversized content -- the exact
+   data-loss this path closes). It is a **three-hop dance**: a map
+   sub-agent, then the driver's reduce CLI, then a second (carding)
+   sub-agent -- and only then does 2c run.
+   - **(map -- sub-agent round 1)** the stack's Task sub-agent reads the
+     **exact `chunk_prompts` paths from the manifest** (each a
+     `chunk_condense` prompt -- do NOT glob the staging dir or guess
+     names) and writes one digest per chunk **at the matching
+     `digest_paths` path from the manifest**, as **plain neutral prose --
+     NOT** the `@@SKILLS@@ / @@MUST_REMEMBER@@ / @@DIARY@@` contract (that
+     stays single-sourced in the reduce). **Hand the sub-agent the
+     manifest's `chunk_prompts` and `digest_paths` literally** -- a digest
+     written to a path that does not match `digest_paths` makes the reduce
+     below see a *missing* digest and the uuid wedges in `pending` forever.
+     Same brief as 2b (read only its assigned files; return a short
+     confirmation); it writes digests, **not a card**, for these uuids.
+   - **(reduce -- non-AI glue, the driver runs it; no sub-agent)** once a
+     uuid's digests are **all** written: `$TM --config
+     "<target.config_path>" build-reduce-prompts`. It concatenates that
+     uuid's digests (a bounded last-resort clip only if they *still*
+     overflow), fills the single-sourced contract over them, and writes
+     `<uuid>.prompt.md` -- the **same** filename and shape a single item
+     has. It prints `{"built": [...], "pending": [...]}` and exits `0`
+     (pending is not an error) or `2` (no manifest). **Read this as your
+     health signal:** a uuid in `built` is ready to card; a uuid in
+     `pending` is not fully mapped yet. A uuid that **stays in `pending`
+     across more than one pass** is the symptom of a missing or **misnamed
+     digest** (round 1 wrote to the wrong path) -- investigate that uuid,
+     do not just re-run. Its cursor never advances until it builds, so it
+     cannot silently skip, but it also never ingests until the digest is
+     fixed. Never force it.
+   - **(card -- sub-agent round 2)** for each now-`built` uuid the
+     `<uuid>.prompt.md` is **indistinguishable from a single item**: spawn
+     a 2b-style sub-agent to turn it into the `<uuid>.extract.md` card.
+     **Only after this second round has carded the built uuids do you run
+     2c (`ingest-staged`)** -- running `ingest-staged` straight after
+     `build-reduce-prompts`, before the carding round, would skip the card
+     (`skipped_no_card`) and leave the cursor unmoved.
+
+   **To verify the oversized path end to end:** force an item over
+   `max_staged_content_chars`, confirm `plan` stages it as
+   `kind="map_reduce"`, walk map -> `build-reduce-prompts` (uuid lands in
+   `built`) -> card -> `ingest-staged`, and confirm the uuid appears in
+   `ingest-staged`'s **`ingested`** list. A uuid stuck in `pending`, or
+   surfacing in `skipped_no_card`, means the dance broke at the hop named
+   above.
+
 c. **Glue the cards** (non-AI, deterministic, race-free) once **all** of
-   this persona's stacks have finished carding:
+   this persona's stacks have finished carding (for a `map_reduce` uuid,
+   "carded" means its reduce-built `<uuid>.prompt.md` has been turned into
+   an `<uuid>.extract.md`):
 
    ```bash
    $TM --config "<target.config_path>" ingest-staged
@@ -166,6 +223,8 @@ c. **Glue the cards** (non-AI, deterministic, race-free) once **all** of
    to re-stage next wake); `2` no manifest (a planning bug -- surface
    it). A skipped (no-card) item simply was not extracted this wake; the
    store, not the card, is the durable ledger, so it re-stages next wake.
+   For a `map_reduce` uuid, `ingest-staged` drops its chunk prompts +
+   digests alongside the card, so the staging dir is clean next pass.
 
 d. **Finalize the persona**, then record it done:
 
@@ -178,7 +237,7 @@ d. **Finalize the persona**, then record it done:
    legacy on-disk surface (old rollup summaries, `must_memorize.md`,
    `longer_memory.md`, the `archive/` dir) the very first time, then
    regenerates the session-start briefing (the **skill index** + the full
-   `must_remember` view + the top-by-magnitude `emotional` view + the
+   `must_remember` view + the top-by-magnitude `diary` view + the
    unprocessed-session notice) from the three stores. It does NOT
    re-extract -- `ingest-staged` already wrote the entries.
 
@@ -225,7 +284,7 @@ process several `targets` concurrently (each its own plan -> stacks ->
   `preference` / `decision` / `incident`). Length-bounded (characters).
   `owner_explicit` directives start elevated and are protected from
   forgetting until meditation's relevance-check downgrades a stale one.
-- **`emotional`** -- the persona's signed reactions (`weight` in
+- **`diary`** -- the persona's signed diary notes (`weight` in
   `[-10, +10]`, decaying toward 0). Length-bounded. Strong feelings (for
   or against) survive; near-neutral / decayed items are forgotten first.
 

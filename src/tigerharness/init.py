@@ -145,6 +145,12 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         #   meditation) -- the prior bundle described the retired collapsed-
         #   summary flow (@@SHORT@@/@@DETAILED@@/@@MUST_MEMORIZE@@, .summary.md).
         "fe6455719d5c9bf688b9d9de5f1b9653e9a67d59f2438a920f6e27c2237d3323",
+        # 2026-06-29 (b5-doc-draft, ADR 0006): anzai: add the map->reduce
+        #   two-phase for oversized transcripts (build-reduce-prompts) and
+        #   correct the retired @@EMOTIONAL@@ marker + `emotional` store name
+        #   to the live @@DIARY@@ / `diary`. The pre-ADR-0006 bundle (this
+        #   hash) is auto-refreshed forward for existing teams.
+        "f00bcf6f6420935269dce6006f475c98312fe72e6826abc86823c9edf3a7af33",
     },
     # workflow-append-steps: only ever shipped once (current == sole history) --
     #   no prior version to register.
@@ -161,7 +167,7 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "f00bcf6f6420935269dce6006f475c98312fe72e6826abc86823c9edf3a7af33",
+    "sweep-memory": "ef558bbf027b819287d5dbd6342594a567b2b2c5908f75e5de00d5d54ff8c438",
     "tigerharness-basics": "d32ae9739696c3f199088396143922b663edbd0a75fc07a6163b85e378d6f604",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }

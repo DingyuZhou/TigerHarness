@@ -83,6 +83,27 @@ class BudgetsConfig:
     # ``docs/tiger-memory-sweep-protocol.md``.
     sweep_stack_content_chars: int = 200_000
     sweep_stack_max_items: int = 8
+    # Chunk-and-reduce (ADR 0006 Part 1). A transcript (or incremental slice)
+    # over ``max_staged_content_chars`` is no longer lossy-clipped: it is split
+    # on line boundaries into chunks each ``<= chunk_content_chars`` (the map
+    # step's per-chunk budget), each chunk is condensed to a neutral digest by
+    # the sub-agent, and the concatenated digests are reduced into the final
+    # card. ``max_reduce_depth`` caps how many times the digest concatenation
+    # may itself be re-condensed before the bounded ``_clip`` last-resort guard
+    # fires, so a pathological input can't loop forever. See
+    # ``docs/tiger-memory-sweep-protocol.md``.
+    chunk_content_chars: int = 80_000
+    max_reduce_depth: int = 2
+    # Incremental sweep (ADR 0006 Part 2). ``overlap_turns`` is the number of
+    # already-processed turns prepended to an incremental slice as *read-only*
+    # continuity context (not re-extracted). ``active_slice_threshold_chars`` is
+    # the Q3 trigger: a still-active session is extracted early once its
+    # unprocessed slice (measured on PREFILTERED content) exceeds this, cutting
+    # at the last completed turn boundary so the leak ADR 0006 closes can't
+    # re-open while a long session stays live. See
+    # ``docs/tiger-memory-sweep-protocol.md``.
+    overlap_turns: int = 4
+    active_slice_threshold_chars: int = 100_000
 
 
 @dataclass(frozen=True)
@@ -456,6 +477,18 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         ),
         sweep_stack_max_items=int(
             budgets_raw.get("sweep_stack_max_items", 8)
+        ),
+        chunk_content_chars=int(
+            budgets_raw.get("chunk_content_chars", 80_000)
+        ),
+        max_reduce_depth=int(
+            budgets_raw.get("max_reduce_depth", 2)
+        ),
+        overlap_turns=int(
+            budgets_raw.get("overlap_turns", 4)
+        ),
+        active_slice_threshold_chars=int(
+            budgets_raw.get("active_slice_threshold_chars", 100_000)
         ),
     )
 

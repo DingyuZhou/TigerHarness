@@ -22,6 +22,8 @@ Subcommands:
                       transcript; print the work manifest
         ingest-extraction   write back one sub-agent's extraction bundle
                             (stdin) for a planned conversation uuid
+        build-reduce-prompts  reduce step: assemble <uuid>.prompt.md from a
+                            map_reduce item's staged chunk digests (ADR 0006 Pt1)
         ingest-staged       ingest every staged <uuid>.extract.md card in ONE
                             process (per-persona merge serialized by construction)
 
@@ -114,6 +116,13 @@ def main(argv: list[str] | None = None) -> int:
                        help="conversation_uuid from the plan manifest.")
 
     sub.add_parser(
+        "build-reduce-prompts",
+        help="Reduce step (ADR 0006 Part 1): for every map_reduce item whose "
+             "chunk digests are all staged, assemble its <uuid>.prompt.md from "
+             "the digests so the normal extract + ingest flow finishes it.",
+    )
+
+    sub.add_parser(
         "ingest-staged",
         help="Glue: ingest every staged <uuid>.extract.md card in ONE process "
              "(per-persona merge serialized by construction -- no race).",
@@ -193,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_plan(cfg, store, args.max_sessions)
     if args.cmd == "ingest-extraction":
         return _cmd_ingest_extraction(cfg, store, args.uuid)
+    if args.cmd == "build-reduce-prompts":
+        return _cmd_build_reduce_prompts(cfg, store)
     if args.cmd == "ingest-staged":
         return _cmd_ingest_staged(cfg, store)
     if args.cmd == "sweep-plan":
@@ -324,9 +335,27 @@ def _ingest_item_bundle(cfg: Config, store: Store, item: dict, bundle_text: str)
         source=item["source"],
         bundle_text=bundle_text,
     )
-    # The staged prompt embeds the (prefiltered) transcript; once ingested it
-    # is consumed, so drop it to avoid leaving transcript content at rest.
-    Path(item["prompt_path"]).unlink(missing_ok=True)
+    # ADR 0006 Part 2: advance the session's high-water-mark cursor — but ONLY
+    # after the card above ingested cleanly (ingest raises before this on a
+    # malformed bundle, leaving the cursor untouched → a re-stage next sweep).
+    # Ordering-, not transaction-, protected: a crash here re-processes the same
+    # slice next sweep (idempotent), never skips it.
+    cursor_event_at = item.get("cursor_event_at")
+    if cursor_event_at is not None:
+        from .cursor import on_slice_ingested
+        on_slice_ingested(
+            store, item["conversation_uuid"],
+            slice_end_event_at=cursor_event_at,
+            processed_events=int(item.get("cursor_events", 0)),
+        )
+    # The staged prompt(s) embed the (prefiltered) transcript; once ingested
+    # they are consumed, so drop them to avoid leaving transcript content at
+    # rest. A "single" item has one prompt_path; a "map_reduce" item has chunk
+    # prompts + their digests (ADR 0006 Part 1).
+    for staged in [item.get("prompt_path"), *item.get("chunk_prompts", []),
+                   *item.get("digest_paths", [])]:
+        if staged:
+            Path(staged).unlink(missing_ok=True)
     return result
 
 
@@ -352,6 +381,34 @@ def _cmd_ingest_extraction(cfg: Config, store: Store, uuid: str) -> int:
     print(f"ingested {result.conversation_uuid} (+{result.total_added} entries: "
           f"{result.skills_added} skills, {result.must_remember_added} "
           f"must_remember, {result.diary_added} emotional)")
+    return 0
+
+
+def _cmd_build_reduce_prompts(cfg: Config, store: Store) -> int:
+    """Reduce step (ADR 0006 Part 1): for every ``map_reduce`` manifest item
+    whose chunk digests are all staged, assemble its ``<uuid>.prompt.md`` from
+    the digests (the single-sourced extract contract over the concatenated
+    digests) so the normal extraction sub-agent + ``ingest-staged`` flow can
+    finish it exactly like a single-prompt item. An item still missing a digest
+    is reported ``pending`` and retried on a later sweep pass.
+
+    Exit: 0 always (a pending item is not an error); 2 = no plan manifest.
+    """
+    from .lifecycle import build_reduce_prompt
+    manifest = _load_plan_manifest(store)
+    if manifest is None:
+        return 2
+    built: list[str] = []
+    pending: list[str] = []
+    for item in manifest.get("items", []):
+        if item.get("kind") != "map_reduce":
+            continue
+        uuid = item.get("conversation_uuid")
+        if build_reduce_prompt(cfg, store, item) is None:
+            pending.append(uuid)
+        else:
+            built.append(uuid)
+    print(json.dumps({"built": built, "pending": pending}, indent=2))
     return 0
 
 
