@@ -95,6 +95,29 @@ remains for the one-bundle-over-stdin path (a single uuid).
       bug, surface it). A no-card item simply was not extracted this wake;
       the **store**, not the card, is the durable ledger (a re-`plan` wipes
       the staging dir), so it re-stages next wake.
+   **Oversized transcripts — the map→reduce path (ADR 0006 Part 1).** Most
+   items are `kind="single"` (one `<uuid>.prompt.md`, the flow above). An item
+   whose prefiltered content exceeds `max_staged_content_chars` is staged as
+   `kind="map_reduce"` instead — it carries `chunk_prompts` + `digest_paths`
+   (and **no** `prompt_path`), so the oversized middle is never silently
+   clipped. For each such uuid, between 2b and 2c:
+   - **(map)** the extraction sub-agent reads each `<uuid>.chunkNN.prompt.md`
+     (a `chunk_condense` prompt) and writes the matching
+     `<uuid>.chunkNN.digest.md` — **plain neutral prose, NOT** the
+     `@@SKILLS@@/@@MUST_REMEMBER@@/@@DIARY@@` contract (that stays
+     single-sourced in the reduce).
+   - **(reduce, non-AI glue)** once a uuid's digests are all written, run
+     `tiger-memory --config <target.config_path> build-reduce-prompts`. It
+     concatenates the digests (bounded last-resort clip only if they *still*
+     overflow), fills the single-sourced `extract_memory.md` contract over
+     them, and writes `<uuid>.prompt.md` — the **same** filename + shape a
+     single item has. It prints `{"built": [...], "pending": [...]}`; a
+     `pending` uuid is simply not fully mapped yet (retried next pass).
+   - From there the uuid is indistinguishable from a single item: a sub-agent
+     turns `<uuid>.prompt.md` into the `<uuid>.extract.md` card, and 2c
+     ingests it. `ingest-staged` drops the chunk prompts + digests with the
+     card.
+
    d. **Finalize**: `tiger-memory --config <target.config_path> rebuild` —
       `ingest-staged` already wrote the entries, so `rebuild` does not
       re-extract; it runs the fresh-start finalize tail (drops the retired

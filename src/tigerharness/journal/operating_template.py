@@ -373,6 +373,19 @@ completed task until no actionable tasks remain.
    Don't manufacture a stopping point just because one task finished or
    the conversation feels long -- drain the queue while the session is hot.
 
+   **Idle-maintenance tail.** When the drive ends because the sweep found
+   *nothing actionable and nothing busy* (queue drained), run the team's
+   two self-gating maintenance chores before stopping: (1)
+   `tigerharness slack-bridge compact-idle` -- plain CLI orchestration
+   whose only model call is the single bounded `/compact` turn it may
+   send per heavy, quiet Slack bridge lane, and only when the team opted
+   in and the journal is idle; (2) the team's memory sweep
+   (the `sweep-memory` skill) -- self-gating via its staleness floor,
+   watermark, and soft lease, so a fresh team costs a few tokens. Skip
+   the tail entirely when anything is busy or when you are stopping at
+   the context ceiling (hand off instead). Both chores are cheap no-ops
+   when fresh, so a frequent idle loop fire stays cheap.
+
 ## Stop conditions for step 4
 
 Exit the inner loop on **any** of:

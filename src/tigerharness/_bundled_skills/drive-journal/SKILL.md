@@ -142,6 +142,10 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    when step 1 finds nothing actionable, the human ends it, or you hit the
    true context ceiling (step 7). **Never manufacture a stopping point
    just because a session finished or the conversation feels long.**
+   **Ending because nothing is actionable AND nothing is busy? Run the
+   idle-maintenance tail (below) first, then stop.** (Ending on the
+   busy cheap-exit or the context ceiling skips the tail — a job is
+   running, or you have no context to spare.)
 
 7. **Checkpoint-and-hand-off near the ceiling — "context heavy" still is
    NOT a panic.** Every session checkpoints to `progress.md` +
@@ -159,6 +163,36 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    Compaction and hand-offs are safe for *memory* too — as long as a
    `kind=task` done note is built from the durable record (step 5),
    since that note is the only thing ingested.
+
+## Idle-maintenance tail (queue drained — leave the camp clean)
+
+When the drive ends because the sweep found **nothing actionable and
+nothing busy** (empty queue, or everything parked/blocked/done), run the
+team's two self-gating maintenance chores before stopping. Both are
+cheap no-ops when fresh, so an idle loop fire stays cheap; **skip the
+whole tail** when anything is busy (a job is running — the user's
+"no jobs running" condition) or when you are stopping at the context
+ceiling (step 7 — hand off instead).
+
+1. **Compact heavy idle bridge lanes**:
+   `tigerharness slack-bridge compact-idle`. Self-gating: it does
+   nothing unless the team opted in (`idle_compact: true`), a lane's
+   last-stamped usage crosses the threshold, the lane is quiet, and the
+   journal is idle. Its only model call is the single bounded
+   `/compact` turn it sends per eligible lane. Run it from the team
+   root.
+2. **Sweep the team's memory**: invoke the `sweep-memory` skill.
+   Self-gating via its staleness floor + watermark + soft lease — a
+   fresh team is a few tokens of no-op. Its summarize work runs in
+   Task-tool sub-agents, which any agent drive session (including an
+   autodrive `claude -p` fire) can spawn; the executor ban only covers
+   plain daemons that cannot host sub-agents.
+
+Order matters slightly: compact first (bounded, usually a no-op), then
+the memory sweep (it may fan out sub-agents). If the sweep claims work,
+finish it per that skill (every claim ends in `sweep-complete` or
+`sweep-release`) — do not abandon a claimed sweep just because the
+drive is "done".
 
 ## If you get confused
 

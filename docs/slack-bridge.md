@@ -554,6 +554,32 @@ New teams ship with `idle_compact: true` (Operator default,
 2026-06-27). To enable an existing lane, add the line to its fragment
 and restart the bridge.
 
+### The external pass: `tigerharness slack-bridge compact-idle`
+
+The bridge's own hook fires only at a lane's **turn boundary** — a lane
+left heavy while the journal was busy stays heavy until its next Slack
+turn. The `compact-idle` subcommand closes that gap from the *driver*
+side: an idle drive (an autodrive tick, or a manual `drive-journal`
+whose sweep found the queue drained) runs one external pass. Same
+config (`idle_compact: true` in the team fragment), same journal-idle
+guard, same one-`/compact`-turn mechanism. The pass resolves the
+lane's `agent_cwd` itself and pins the resumed `claude` subprocess to
+it (`--resume` only finds a session from the project directory it was
+opened under), so the command works from any invoking directory —
+`--team-dir` names the team.
+
+To make this possible the bridge stamps turn metadata into each
+`threads.json` record at its turn boundary: `team`, `last_usage`,
+`last_turn_at`, and an `in_flight` marker held for the duration of a
+turn. The pass only considers records stamped with the invoking team's
+name, skips `in_flight` and recently-active lanes
+(`--min-quiet-seconds`, default 120), requires the stamped usage to
+cross the threshold, checks the journal is idle, and clears
+`last_usage` after compacting (the one-per-idle-period latch — only a
+real future turn can re-arm the lane). Records written by an older
+bridge lack the stamps and are simply skipped until their next turn.
+Every gate fails soft; the command prints a JSON report and exits 0.
+
 ### Single-tenant / legacy: env surface
 
 When a lane supplies no `idle_compact` config (or you run the
