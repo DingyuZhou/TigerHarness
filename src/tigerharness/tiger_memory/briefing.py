@@ -191,14 +191,22 @@ def _render_notice(cfg: Config) -> str:
 
 
 def _render_must_remember(entries: list[MustRememberEntry]) -> str:
-    """Full must_remember store, highest-importance first."""
+    """Full must_remember store, highest-importance first.
+
+    Each line carries the item's freshness anchor — ``last`` is the day a
+    sweep last TOUCHed it (or it was written) and ``×N`` how often it has
+    recurred. An item untouched past ``must_remember.forget_days`` becomes
+    forget-eligible at compaction, so the date is load-bearing, not
+    decoration.
+    """
     if not entries:
         return "# Must remember\n\n_(empty)_\n"
     ordered = sorted(entries, key=lambda e: float(e.importance), reverse=True)
     lines = ["# Must remember (read first, always load-bearing)", ""]
     for e in ordered:
         lines.append(
-            f"- **[{e.kind}]** (importance {float(e.importance):.1f}) {e.text}"
+            f"- **[{e.kind}]** (importance {float(e.importance):.1f} · "
+            f"last {e.last_used[:10]} · {e.repeat_count}×) {e.text}"
         )
     return "\n".join(lines) + "\n"
 

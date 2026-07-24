@@ -303,7 +303,10 @@ def test_render_must_remember_orders_by_importance() -> None:
         [_must("minor", imp=0.5), _must("major", "incident", imp=9.0)]
     )
     assert out.index("major") < out.index("minor")
-    assert "**[incident]**" in out and "(importance 9.0)" in out
+    # Freshness is load-bearing (TOUCH-driven forgetting): every line shows
+    # the last-touched day + repeat count next to the importance.
+    assert "**[incident]**" in out
+    assert f"(importance 9.0 · last {NOW[:10]} · 1×)" in out
 
 
 def test_render_must_remember_empty() -> None:
