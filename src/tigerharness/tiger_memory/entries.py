@@ -197,17 +197,17 @@ class SkillEntry(BaseEntry):
 class MustRememberEntry(BaseEntry):
     """An external directive (design §4.2).
 
-    ``kind`` is one of ``VALID_KINDS``. ``operator_explicit`` directives start
-    elevated; meditation's relevance-check may downgrade a stale one to a
-    normal kind (``decision``), after which it rejoins the decay pool (§4.2).
+    ``kind`` is one of ``VALID_KINDS``. ``operator_explicit`` directives are
+    protected by kind; the compaction relevance-check may downgrade a stale
+    one to a normal kind (``decision``), after which it rejoins the normal
+    pool. There is NO importance scalar — salience is ``repeat_count``
+    (recurrence) + ``last_used`` (the TOUCH-refreshed freshness anchor).
     """
 
     kind: str = KIND_PREFERENCE
-    importance: float = 0.0
     #: Reinforcement count — how many times this fact has recurred across
-    #: sessions (the 4-store importance signal, brief §store roster). Starts at
-    #: 1; the meditation merge increments it (and derives ``importance`` from it)
-    #: so a repeated directive ranks higher, not lower.
+    #: sessions (re-extracted, deduped into, or TOUCHed by a sweep). Starts
+    #: at 1; a repeated directive ranks higher, not lower.
     repeat_count: int = 1
 
     def __post_init__(self) -> None:
@@ -220,10 +220,6 @@ class MustRememberEntry(BaseEntry):
                 f"must_remember.kind must be one of {VALID_KINDS}; "
                 f"got {self.kind!r}."
             )
-        if isinstance(self.importance, bool) or not isinstance(
-            self.importance, (int, float)
-        ):
-            raise EntryError("must_remember.importance must be a number.")
         if isinstance(self.repeat_count, bool) or not isinstance(
             self.repeat_count, int
         ) or self.repeat_count < 1:
@@ -233,7 +229,6 @@ class MustRememberEntry(BaseEntry):
         fm = super().frontmatter()
         fm.update({
             "kind": self.kind,
-            "importance": float(self.importance),
             "repeat_count": self.repeat_count,
         })
         return fm
@@ -375,11 +370,10 @@ def entry_from_frontmatter(
             **base_kwargs,
         )
     if cls is MustRememberEntry:
+        # A legacy ``importance`` key in old frontmatter is simply ignored
+        # (unknown keys are forward-tolerant); the next save drops it.
         return MustRememberEntry(
             kind=normalize_kind(str(fm.get("kind", KIND_PREFERENCE))),
-            importance=_coerce_float(
-                fm.get("importance", 0.0), "must_remember.importance"
-            ),
             repeat_count=_coerce_int(
                 fm.get("repeat_count", 1), "must_remember.repeat_count"
             ),

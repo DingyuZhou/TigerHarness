@@ -123,13 +123,14 @@ skills/topics and the flat entry length for must_remember;
 ### 4.2 Must-remember — external directives
 
 - `MustRememberEntry`: text, `kind` (`operator_explicit` / `preference` /
-  `decision` / `incident`), `importance`, `repeat_count` (a fact seen N
+  `decision` / `incident`), `repeat_count` (a fact seen N
   times outranks a one-off), source + date.
 - Loads whole at session start, so it must stay small: bounds tightened by
   ADR 0007 (from 8000/10000), now **2000 / 3000** chars (Operator-set
   2026-07-23).
-- `pin --kind operator_explicit` writes importance 5.0; extracted entries
-  start at 1.0.
+- There is no importance scalar: salience is `repeat_count` (recurrence,
+  starts at 1 and grows on re-capture, dedup-merge, or TOUCH) +
+  `last_used` (the TOUCH-refreshed freshness anchor).
 - **Freshness — the TOUCH mechanism.** The extraction prompt embeds the
   persona's current must-remember items (one line each: id, kind, memo —
   `indexes.render_must_remember_touch_list`, filled into
@@ -271,7 +272,7 @@ the sweep's subsequent `rebuild`). Returns an `ApplyReport`
   must_remember the drop order (`_mr_drop_order`) is: **(1)** stale normal
   entries (untouched past `forget_days`), oldest `last_used` first —
   the TOUCH mechanism kept everything that still comes up fresh; **(2)**
-  fresh normal entries, lowest (importance, recency) first; **(3)** only
+  fresh normal entries, lowest (repeat_count, recency) first; **(3)** only
   as the very last resort, a *stale* `operator_explicit` directive,
   oldest first — each such drop is logged as a warning, never silent.
 - **Protections beat convergence**: content that may not be trimmed

@@ -242,7 +242,7 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
         must.append(
             MustRememberEntry(
                 text=memo, created_at=now, last_used=now, source=source,
-                kind=kind, importance=1.0,
+                kind=kind,
             )
         )
     topics: list[TopicCandidate] = []
@@ -1104,11 +1104,10 @@ def pin(cfg: Config, store: Store, *, memo: str, kind: str) -> int:
     now = iso_now()
     bstore = BoundedStore(cfg, store)
     entries = bstore.load(STORE_MUST_REMEMBER)
-    importance = 5.0 if kind == KIND_OPERATOR_EXPLICIT else 1.0
     entries.append(
         MustRememberEntry(
             text=memo, created_at=now, last_used=now, source="pin",
-            kind=kind, importance=importance,
+            kind=kind,
         )
     )
     bstore.save_atomic(STORE_MUST_REMEMBER, entries)

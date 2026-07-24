@@ -191,22 +191,34 @@ def _render_notice(cfg: Config) -> str:
 
 
 def _render_must_remember(entries: list[MustRememberEntry]) -> str:
-    """Full must_remember store, highest-importance first.
+    """Full must_remember store: operator directives first, then by
+    recurrence and freshness.
 
-    Each line carries the item's freshness anchor — ``last`` is the day a
+    Each line carries the item's salience signals — ``last`` is the day a
     sweep last TOUCHed it (or it was written) and ``×N`` how often it has
     recurred. An item untouched past ``must_remember.forget_days`` becomes
     forget-eligible at compaction, so the date is load-bearing, not
-    decoration.
+    decoration. (There is no importance scalar — recurrence + freshness
+    ARE the ranking.)
     """
     if not entries:
         return "# Must remember\n\n_(empty)_\n"
-    ordered = sorted(entries, key=lambda e: float(e.importance), reverse=True)
+    from .entries import KIND_OPERATOR_EXPLICIT
+    # Stable two-pass sort: freshest first within each recurrence bucket,
+    # then protected directives first, most-recurrent next.
+    by_freshness = sorted(entries, key=lambda e: e.last_used, reverse=True)
+    ordered = sorted(
+        by_freshness,
+        key=lambda e: (
+            e.kind != KIND_OPERATOR_EXPLICIT,   # protected directives first
+            -e.repeat_count,                     # most-recurrent next
+        ),
+    )
     lines = ["# Must remember (read first, always load-bearing)", ""]
     for e in ordered:
         lines.append(
-            f"- **[{e.kind}]** (importance {float(e.importance):.1f} · "
-            f"last {e.last_used[:10]} · {e.repeat_count}×) {e.text}"
+            f"- **[{e.kind}]** (last {e.last_used[:10]} · {e.repeat_count}×) "
+            f"{e.text}"
         )
     return "\n".join(lines) + "\n"
 

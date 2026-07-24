@@ -127,10 +127,10 @@ def _make_store(tmp_path: Path, sub: str = "m", **kw) -> BoundedStore:
     return BoundedStore(cfg, store)
 
 
-def _mr(kind: str, text: str, last_used: str = NOW, imp: float = 0.0):
+def _mr(kind: str, text: str, last_used: str = NOW):
     return MustRememberEntry(
         text=text, created_at=NOW, last_used=last_used, source="pin",
-        kind=kind, importance=imp,
+        kind=kind,
     )
 
 

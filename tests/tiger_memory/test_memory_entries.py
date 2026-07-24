@@ -104,7 +104,7 @@ def test_skill_rejects_nonnumber_importance() -> None:
 
 def test_must_remember_valid_all_kinds() -> None:
     for kind in E.VALID_KINDS:
-        m = MustRememberEntry(kind=kind, importance=3, **_base())
+        m = MustRememberEntry(kind=kind, **_base())
         m.validate()
         assert m.frontmatter()["kind"] == kind
     assert m.store_name == E.STORE_MUST_REMEMBER
@@ -116,10 +116,11 @@ def test_must_remember_rejects_bad_kind() -> None:
         m.validate()
 
 
-def test_must_remember_rejects_bool_importance() -> None:
-    m = MustRememberEntry(kind="decision", importance=True, **_base())
-    with pytest.raises(EntryError, match="importance"):
-        m.validate()
+def test_must_remember_has_no_importance_field() -> None:
+    # Salience is repeat_count + last_used; the importance scalar is gone.
+    m = MustRememberEntry(kind="decision", **_base())
+    assert not hasattr(m, "importance")
+    assert "importance" not in m.frontmatter()
 
 
 def test_must_remember_repeat_count_default_and_frontmatter() -> None:
@@ -292,7 +293,7 @@ def test_from_frontmatter_skill_roundtrip() -> None:
 
 
 def test_from_frontmatter_must_remember_roundtrip() -> None:
-    m = MustRememberEntry(kind="incident", importance=1, repeat_count=3, **_base())
+    m = MustRememberEntry(kind="incident", repeat_count=3, **_base())
     rebuilt = entry_from_frontmatter("must_remember", m.frontmatter(), m.text)
     assert isinstance(rebuilt, MustRememberEntry)
     assert rebuilt.kind == "incident"
@@ -348,10 +349,21 @@ def test_from_frontmatter_must_remember_bad_numerics_raise() -> None:
     fm["repeat_count"] = "never"
     with pytest.raises(EntryError, match="repeat_count"):
         entry_from_frontmatter("must_remember", fm, m.text)
+
+
+def test_from_frontmatter_must_remember_legacy_importance_ignored() -> None:
+    # Frontmatter written before the importance removal carries an
+    # ``importance:`` key; loading must ignore it (forward-tolerant), even
+    # when its value would never coerce to a number.
+    m = MustRememberEntry(kind="decision", repeat_count=2, **_base())
     fm = m.frontmatter()
-    fm["importance"] = []
-    with pytest.raises(EntryError, match="importance"):
-        entry_from_frontmatter("must_remember", fm, m.text)
+    fm["importance"] = []  # any junk value — the key is simply dropped
+    rebuilt = entry_from_frontmatter("must_remember", fm, m.text)
+    assert isinstance(rebuilt, MustRememberEntry)
+    assert rebuilt.repeat_count == 2
+    assert not hasattr(rebuilt, "importance")
+    assert "importance" not in rebuilt.frontmatter()  # next save drops it
+    rebuilt.validate()
 
 
 def test_legacy_owner_explicit_kind_normalized_on_read() -> None:

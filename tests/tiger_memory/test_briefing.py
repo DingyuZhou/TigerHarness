@@ -74,9 +74,9 @@ def _skill(name, imp=1.0, usage=0) -> SkillEntry:
     )
 
 
-def _must(text, kind="preference", imp=1.0) -> MustRememberEntry:
-    return MustRememberEntry(text=text, created_at=NOW, last_used=NOW,
-                             source="x", kind=kind, importance=imp)
+def _must(text, kind="preference", repeats=1, last_used=NOW) -> MustRememberEntry:
+    return MustRememberEntry(text=text, created_at=NOW, last_used=last_used,
+                             source="x", kind=kind, repeat_count=repeats)
 
 
 def _topic(name, *, last_used=NOW, touches=1, summary=None) -> TopicEntry:
@@ -96,7 +96,7 @@ def test_rebuild_assembles_all_files(tmp_path: Path) -> None:
     _seed(
         cfg, store,
         skills=[_skill("A", imp=2.0), _skill("B", imp=5.0)],
-        must=[_must("never push", "operator_explicit", imp=5.0), _must("use uv")],
+        must=[_must("never push", "operator_explicit", repeats=5), _must("use uv")],
         topics=[_topic("Old Topic", last_used=OLD),
                 _topic("Fresh Topic", last_used=NOW, touches=3)],
     )
@@ -298,15 +298,22 @@ def test_rebuild_cleans_up_tmp_on_error(tmp_path: Path, monkeypatch) -> None:
 # ----- renderers / helpers ---------------------------------------------------
 
 
-def test_render_must_remember_orders_by_importance() -> None:
-    out = bf._render_must_remember(
-        [_must("minor", imp=0.5), _must("major", "incident", imp=9.0)]
-    )
-    assert out.index("major") < out.index("minor")
+def test_render_must_remember_orders_by_recurrence() -> None:
+    # Operator directives lead regardless of recurrence; the rest rank by
+    # repeat_count desc, freshest last_used first within a tie.
+    out = bf._render_must_remember([
+        _must("minor", repeats=1),
+        _must("older-tie", repeats=9, last_used=OLD),
+        _must("major", "incident", repeats=9),
+        _must("directive", "operator_explicit", repeats=1),
+    ])
+    assert out.index("directive") < out.index("major")
+    assert out.index("major") < out.index("older-tie")  # tie -> freshest first
+    assert out.index("older-tie") < out.index("minor")
     # Freshness is load-bearing (TOUCH-driven forgetting): every line shows
-    # the last-touched day + repeat count next to the importance.
+    # the last-touched day + repeat count.
     assert "**[incident]**" in out
-    assert f"(importance 9.0 · last {NOW[:10]} · 1×)" in out
+    assert f"(last {NOW[:10]} · 9×)" in out
 
 
 def test_render_must_remember_empty() -> None:

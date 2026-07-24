@@ -87,7 +87,7 @@ def test_compute_state_with_entries(tmp_path: Path) -> None:
     bstore.save_atomic(STORE_SKILLS, [skill])
     bstore.save_atomic(STORE_MUST_REMEMBER, [
         MustRememberEntry(text="m", created_at=NOW, last_used=NOW, source="x",
-                          kind="decision", importance=1.0),
+                          kind="decision"),
     ])
     bstore.save_atomic(STORE_TOPICS, [topic])
     payload = compute_state(cfg, store)
@@ -137,7 +137,7 @@ def test_compute_state_over_overflow_and_detail_counts(tmp_path: Path) -> None:
     bstore.save_atomic(STORE_MUST_REMEMBER, [
         MustRememberEntry(text="a directive well over ten chars",
                           created_at=NOW, last_used=NOW, source="x",
-                          kind="decision", importance=1.0),
+                          kind="decision"),
     ])
     payload = compute_state(cfg, store)
     for name in (STORE_SKILLS, STORE_TOPICS):

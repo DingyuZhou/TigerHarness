@@ -182,7 +182,7 @@ tiger-memory --config my-config.yaml init
 tiger-memory --config my-config.yaml rebuild
 
 # Pin a must_remember entry directly.
-# NOTE: --kind defaults to operator_explicit (importance 5.0) — the most
+# NOTE: --kind defaults to operator_explicit — the most
 # forget-protected kind. A bare `tiger-memory pin "..."` therefore writes an
 # operator_explicit directive; pass `--kind preference` for an ordinary note.
 tiger-memory --config my-config.yaml pin "Operator prefers tabular diffs" --kind preference
@@ -204,7 +204,7 @@ executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
 |---|---|
 | `init` | create the empty store + validate the config |
 | `rebuild` | fresh-start: drop the retired legacy surface (first run), run `check --fix` as the per-persona format gate, regenerate the briefing |
-| `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `operator_explicit`** (importance 5.0, the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
+| `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `operator_explicit`** (the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
 | `migrate-to-topics [--apply]` | **one-off, idempotent** (ADR 0007): retire `diary.md` / `fuzzy.md` / `emotional.md` (+ `.rejected` sidecars) from `journal/` to `<root>/retired/` and create an empty `topics.md`. **Dry-run is the default** (preview only); `--apply` performs it |
 | `state` | JSON snapshot of the three stores: per store `count`, `chars` (rendered-index chars for skills/topics, entry chars for must_remember), `max`, `over_overflow`, plus `details_over_overflow` for skills/topics |
 | `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks); each prompt embeds the persona's current topic routing list and must-remember item list (for `TOUCH:` blocks) |
@@ -299,7 +299,7 @@ When a surface crosses its `overflow_limit`, the sweep stages a compaction
    hard-trimmed by keep-rank/freshness, never accepted oversized. For
    must_remember the deterministic drop order is: stale normal entries
    first (oldest `last_used` first), then fresh normal entries by
-   keep-rank (lowest importance/recency first), and only as the very
+   keep-rank (lowest recurrence/recency first), and only as the very
    last resort a *stale* `operator_explicit` directive (logged as a
    warning). A *fresh* `operator_explicit` is never dropped, and fresh
    topics are never force-dropped: a surface that cannot shrink without

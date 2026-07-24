@@ -122,7 +122,7 @@ def _dedup_must_remember(
 ) -> tuple[list[MustRememberEntry], int]:
     """Merge EXACT duplicate memos (same kind + whitespace/case-normalized
     text) into their first occurrence, summing ``repeat_count`` and keeping
-    the freshest ``last_used`` / highest importance. Deterministic and
+    the freshest ``last_used``. Deterministic and
     loss-free — dropping an identical copy loses nothing, and the repeat
     signal is preserved. Sweeps re-capture the same directive verbatim
     session after session, so this is the cheap first shrink."""
@@ -138,7 +138,6 @@ def _dedup_must_remember(
         else:
             first.repeat_count += e.repeat_count
             first.last_used = max(first.last_used, e.last_used)
-            first.importance = max(first.importance, e.importance)
             dropped += 1
     return survivors, dropped
 
@@ -543,7 +542,7 @@ def _apply_must_remember(
         new_entries.append(
             MustRememberEntry(
                 text=memo, created_at=now, last_used=now, source="compact",
-                kind=kind, importance=1.0,
+                kind=kind,
             )
         )
     with bstore.store_lock(STORE_MUST_REMEMBER):
@@ -599,7 +598,7 @@ def _mr_drop_order(
     """The deterministic forget order for must_remember convergence.
 
     1. stale normal entries, oldest ``last_used`` first;
-    2. fresh normal entries, lowest (importance, recency) first;
+    2. fresh normal entries, lowest (repeat_count, recency) first;
     3. stale ``operator_explicit`` directives, oldest first (last resort).
 
     Fresh ``operator_explicit`` entries are absent — never droppable.
@@ -613,7 +612,7 @@ def _mr_drop_order(
     )
     fresh_normal = sorted(
         (e for e in normal if not stale(e)),
-        key=lambda e: (float(e.importance), e.last_used),
+        key=lambda e: (e.repeat_count, e.last_used),
     )
     stale_protected = sorted(
         (

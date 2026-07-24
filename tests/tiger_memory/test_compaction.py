@@ -95,12 +95,12 @@ def _memo(
     text: str = "memo",
     *,
     kind: str = "preference",
-    importance: float = 1.0,
+    repeats: int = 1,
     last: str = NOW,
 ) -> MustRememberEntry:
     return MustRememberEntry(
         text=text, created_at="2026-01-01T00:00:00Z", last_used=last,
-        source="test", kind=kind, importance=importance,
+        source="test", kind=kind, repeat_count=repeats,
     )
 
 
@@ -514,7 +514,7 @@ def test_apply_must_remember_forced_trim_drops_lowest_first(tmp_path):
         f"KIND: decision\nMEMO: {'b' * 20}\n"
     ))
     report = cp.compact_apply(cfg, store, now=NOW)
-    # 12 + 20 + 20 = 52 > 40: equal importance/recency → first-listed drops
+    # 12 + 20 + 20 = 52 > 40: equal recurrence/recency → first-listed drops
     # first; one drop reaches 32 ≤ 40.
     assert report.forced_trims == [STORE_MUST_REMEMBER]
     assert report.still_over == []
@@ -960,16 +960,15 @@ def test_plan_then_apply_roundtrip_must_remember(tmp_path):
 
 
 def test_dedup_must_remember_merges_exact_normalized_dupes():
-    a = _memo("Never  bill the API rail.", kind="decision", importance=1.0,
+    a = _memo("Never  bill the API rail.", kind="decision", repeats=2,
               last="2026-01-02T00:00:00Z")
-    b = _memo("never bill the API   rail.", kind="decision", importance=3.0,
+    b = _memo("never bill the API   rail.", kind="decision", repeats=3,
               last="2026-03-02T00:00:00Z")
     c = _memo("Never bill the API rail.", kind="incident")  # different kind
     survivors, dropped = cp._dedup_must_remember([a, b, c])
     assert survivors == [a, c] and dropped == 1
-    assert a.repeat_count == 2
+    assert a.repeat_count == 5  # reinforcement counts sum on merge
     assert a.last_used == "2026-03-02T00:00:00Z"
-    assert a.importance == 3.0
 
 
 def test_dedup_skills_merges_exact_normalized_dupes():
@@ -1039,8 +1038,8 @@ def test_apply_stale_downgrades_protected_to_decision(tmp_path):
     cfg, store, bstore = make_env(tmp_path, memory={
         "must_remember": {"max_length": 2000, "overflow_limit": 3000},
     })
-    op_stale = _memo("stale directive", kind="operator_explicit", importance=5.0)
-    op_live = _memo("live directive", kind="operator_explicit", importance=5.0)
+    op_stale = _memo("stale directive", kind="operator_explicit")
+    op_live = _memo("live directive", kind="operator_explicit")
     bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale, op_live])
     staging = _stage(store, [
         _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,
@@ -1072,8 +1071,8 @@ def test_apply_stale_downgraded_entry_is_trimmable(tmp_path):
         "must_remember": {"max_length": 20, "overflow_limit": 30},
     })
     op_stale = _memo("this old directive is very long indeed",
-                     kind="operator_explicit", importance=5.0)
-    op_live = _memo("keep me", kind="operator_explicit", importance=5.0)
+                     kind="operator_explicit")
+    op_live = _memo("keep me", kind="operator_explicit")
     bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale, op_live])
     staging = _stage(store, [
         _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,
@@ -1124,8 +1123,8 @@ def test_plan_mr_prompt_carries_forget_eligible_annotation(tmp_path):
 def test_mr_drop_order_stale_normal_then_fresh_then_stale_protected():
     stale_old = _memo("stale old", last="2026-01-01T00:00:00Z")
     stale_new = _memo("stale newer", last="2026-03-01T00:00:00Z")
-    fresh_low = _memo("fresh low", importance=1.0, last=NOW)
-    fresh_high = _memo("fresh high", importance=9.0, last=NOW)
+    fresh_low = _memo("fresh low", repeats=1, last=NOW)
+    fresh_high = _memo("fresh high", repeats=9, last=NOW)
     op_stale = _memo("op stale", kind="operator_explicit",
                      last="2026-02-01T00:00:00Z")
     op_fresh = _memo("op fresh", kind="operator_explicit", last=NOW)
@@ -1145,13 +1144,13 @@ def test_apply_mr_trim_drops_stale_downgraded_before_fresh_memo(tmp_path):
     """The stale-first drop order, end to end: a STALE-downgraded directive
     keeps its old last_used, so when the bound forces a trim it drops
     BEFORE the fresh card-minted memo — even though the downgraded entry's
-    importance (5.0) is higher than the fresh memo's (1.0)."""
+    repeat_count (5) is higher than the fresh memo's (1)."""
     cfg, store, bstore = make_env(tmp_path, memory={
         "must_remember": {"max_length": 30, "overflow_limit": 40,
                           "forget_days": 30},
     })
     op_stale = _memo("very old big directive text here",
-                     kind="operator_explicit", importance=5.0,
+                     kind="operator_explicit", repeats=5,
                      last="2026-01-01T00:00:00Z")
     bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale])
     staging = _stage(store, [

@@ -872,15 +872,17 @@ def test_pin_writes_must_remember(tmp_path: Path, capsys) -> None:
     entries = BoundedStore(cfg, store).load(STORE_MUST_REMEMBER)
     assert len(entries) == 1
     assert entries[0].kind == KIND_OPERATOR_EXPLICIT
-    assert entries[0].importance == 5.0
+    assert entries[0].repeat_count == 1
+    assert not hasattr(entries[0], "importance")  # no importance scalar
     assert "pinned" in capsys.readouterr().out
 
 
-def test_pin_preference_lower_importance(tmp_path: Path) -> None:
+def test_pin_preference_kind(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     store = Store(cfg.store.root)
     lc.pin(cfg, store, memo="use uv", kind="preference")
-    assert BoundedStore(cfg, store).load(STORE_MUST_REMEMBER)[0].importance == 1.0
+    (entry,) = BoundedStore(cfg, store).load(STORE_MUST_REMEMBER)
+    assert entry.kind == "preference" and entry.repeat_count == 1
 
 
 def test_pin_unknown_kind(tmp_path: Path, capsys) -> None:
@@ -1041,7 +1043,6 @@ def test_ingest_touch_refreshes_last_used_and_repeat(tmp_path: Path) -> None:
     old = MustRememberEntry(
         text="targeted git add, never -A", created_at="2026-01-01T00:00:00Z",
         last_used="2026-01-01T00:00:00Z", source="pin", kind=KIND_PREFERENCE,
-        importance=1.0,
     )
     bstore.save_atomic(STORE_MUST_REMEMBER, [old])
     c = lc.Candidates(
@@ -1075,7 +1076,7 @@ def test_plan_embeds_must_remember_touch_list(tmp_path: Path, monkeypatch) -> No
     bstore = BoundedStore(cfg, store)
     memo = MustRememberEntry(
         text="never push main", created_at=NOW, last_used=NOW,
-        source="pin", kind=KIND_OPERATOR_EXPLICIT, importance=5.0,
+        source="pin", kind=KIND_OPERATOR_EXPLICIT,
     )
     bstore.save_atomic(STORE_MUST_REMEMBER, [memo])
     monkeypatch.setattr(

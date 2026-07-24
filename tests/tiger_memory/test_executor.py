@@ -139,7 +139,6 @@ def test_ingest_extraction_reports_touches(tmp_path):
     old = MustRememberEntry(
         text="standing rule", created_at="2026-01-01T00:00:00Z",
         last_used="2026-01-01T00:00:00Z", source="pin", kind="preference",
-        importance=1.0,
     )
     bstore.save_atomic(STORE_MUST_REMEMBER, [old])
     bundle = (
