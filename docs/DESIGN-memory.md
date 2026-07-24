@@ -89,9 +89,9 @@ it is the rendered surfaces (§7).
 
 | Store | Entry store (source of truth) | Loaded at session start | Bounds (chars, `max` / must-compact) |
 |---|---|---|---|
-| `skills` | `journal/skills.md` | `skill_index.md` — index only; per-skill detail files on demand | index 1000 / 1500; per-skill detail 3000 / 4500 |
-| `must_remember` | `journal/must_remember.md` | the whole (small) store | 1000 / 1500 |
-| `topics` | `journal/topics.md` | `topic_index.md` — index only; per-topic detail files on demand | index 1000 / 1500; per-topic detail 3000 / 4500 |
+| `skills` | `journal/skills.md` | `skill_index.md` — index only; per-skill detail files on demand | index 2000 / 3000; per-skill detail 4000 / 6000 |
+| `must_remember` | `journal/must_remember.md` | the whole (small) store | 2000 / 3000 |
+| `topics` | `journal/topics.md` | `topic_index.md` — index only; per-topic detail files on demand | index 2000 / 3000; per-topic detail 4000 / 6000 |
 
 Every bound is a two-number pair (`*_max_length` + `*_overflow_limit`)
 giving **hysteresis**: a surface may drift above `max`; crossing the
@@ -126,14 +126,31 @@ skills/topics and the flat entry length for must_remember;
   `decision` / `incident`), `importance`, `repeat_count` (a fact seen N
   times outranks a one-off), source + date.
 - Loads whole at session start, so it must stay small: bounds tightened by
-  ADR 0007 to **1000 / 1500** chars (from 8000/10000).
+  ADR 0007 (from 8000/10000), now **2000 / 3000** chars (Operator-set
+  2026-07-23).
 - `pin --kind operator_explicit` writes importance 5.0; extracted entries
   start at 1.0.
-- **Protection**: `operator_explicit` entries are never dropped by
-  compaction — cards carry them over verbatim (§6), and the store-level
-  `bounded_store.forget` guard refuses to drop them. A must_remember
-  surface that cannot get under `max` without touching protected content
-  stays over-max and is reported (`still_over`), never silently violated.
+- **Freshness — the TOUCH mechanism.** The extraction prompt embeds the
+  persona's current must-remember items (one line each: id, kind, memo —
+  `indexes.render_must_remember_touch_list`, filled into
+  `{must_remember_index}`). The extraction card's `@@MUST_REMEMBER@@`
+  section may contain `TOUCH: <id>` blocks — zero or more, mixed freely
+  with the `KIND:`/`MEMO:` blocks — marking existing items this session
+  *related to* (followed it, was constrained by it, subject came up again).
+  Ingest refreshes a touched item's `last_used` and bumps its
+  `repeat_count`; unknown ids are ignored (the item may have been
+  compacted away between plan and ingest). Touches are reported in
+  `IngestResult.touched` — they are refreshes, not additions. An item
+  untouched for `must_remember.forget_days` (default 30, must be ≥ 0)
+  becomes **forget-eligible** at compaction (§6).
+- **Protection**: a *fresh* `operator_explicit` entry is never dropped by
+  compaction — cards carry protected entries over verbatim (§6), and the
+  store-level `bounded_store.forget` guard refuses to drop them. A *stale*
+  `operator_explicit` (untouched past `forget_days`) may be dropped by the
+  deterministic convergence only as the very last resort, and the drop is
+  logged (§6.3) — never silently. A must_remember surface that cannot get
+  under `max` without touching fresh protected content stays over-max and
+  is reported (`still_over`), never silently violated.
 
 ### 4.3 Topics — durable project knowledge, filed by subject
 
@@ -191,15 +208,25 @@ the driver's.
 
 ### 6.1 `compact-plan` (non-AI)
 
-Scans the three stores. First the **deterministic pre-pass**: topics stale
-beyond `forget_days` are dropped oldest-first while the topic index is over
-`index_max_length` (never touching a topic inside the window). Then, for
+Scans the three stores. First the **deterministic pre-passes**: exact
+duplicate memos (same kind + whitespace/case-normalized text) and exact
+duplicate skills are merged loss-free into their first occurrence (repeat
+and usage counters summed — sweeps re-capture the same directive verbatim,
+so this alone is often enough); then topics stale beyond `forget_days`
+are dropped oldest-first while the topic index is over `index_max_length`
+(never touching a topic inside the window). Then, for
 every surface still **at/over its overflow limit**, it writes one prompt
 under `<root>/.compact-staging/` (templates `compact_*.md` in
-`summarizers/prompts/default/v1/`) plus `manifest.json`:
+`summarizers/prompts/default/v1/`) plus `manifest.json`. In the
+must_remember prompt, an item untouched for more than
+`must_remember.forget_days` is annotated **`[forget-eligible]`** with its
+age — the sweep's TOUCH mechanism has not refreshed it, so the card is
+told to drop it unless it is still clearly valuable despite its age. The
+manifest:
 
 ```json
 {"generated_at": "...", "dropped_stale_topics": ["..."],
+ "deduped_skills": 0, "deduped_must_remember": 0,
  "targets": [{"kind": "...", "key": "...", "prompt_path": "...", "card_path": "..."}]}
 ```
 
@@ -213,10 +240,15 @@ One sub-agent per staged prompt reads `<key>.prompt.md` and writes
 `<key>.card.md` — the compacted replacement, per the prompt's embedded
 strict marker contract:
 
-- `@@MUST_REMEMBER@@` — `KIND:` / `MEMO:` blocks. The prompt shows the
-  protected `operator_explicit` entries separately with a budget for the
-  rest; any `operator_explicit` block in a *card* is ignored, and the
-  protected entries are carried over verbatim by the apply.
+- `@@MUST_REMEMBER@@` — `KIND:` / `MEMO:` blocks, plus optional
+  `STALE: <id>` blocks. The prompt shows the protected
+  `operator_explicit` entries separately (with their ids) alongside the
+  team mission; the card may mark one `STALE:` when it fails that
+  relevance check, which DOWNGRADES it to `decision` (rejoining the
+  normal pool) — never a direct drop. Any `operator_explicit`
+  `KIND:` block in a *card* is ignored (a compaction cannot mint
+  operator directives), and the still-protected entries are carried
+  over verbatim by the apply.
 - `@@SKILLS@@` — `NAME:` / `TRIGGER:` / `PROCEDURE:` blocks; a **full
   replacement roster** (merge/forget by rewriting). `usage_count` /
   `created_at` / `last_used` are carried over by case-insensitive name
@@ -235,11 +267,17 @@ the sweep's subsequent `rebuild`). Returns an `ApplyReport`
 
 - **Convergence is guaranteed deterministically**: after each apply, a
   surface still over its `max` is hard-trimmed by keep-rank / freshness
-  rules (`forced_trims`) — a card is never accepted oversized.
+  rules (`forced_trims`) — a card is never accepted oversized. For
+  must_remember the drop order (`_mr_drop_order`) is: **(1)** stale normal
+  entries (untouched past `forget_days`), oldest `last_used` first —
+  the TOUCH mechanism kept everything that still comes up fresh; **(2)**
+  fresh normal entries, lowest (importance, recency) first; **(3)** only
+  as the very last resort, a *stale* `operator_explicit` directive,
+  oldest first — each such drop is logged as a warning, never silent.
 - **Protections beat convergence**: content that may not be trimmed
-  (operator-explicit directives, fresh topics) is never force-dropped; a
-  surface that cannot shrink without touching it lands in `still_over` and
-  stays flagged for the next sweep.
+  (*fresh* operator-explicit directives, fresh topics) is never
+  force-dropped; a surface that cannot shrink without touching it lands
+  in `still_over` and stays flagged for the next sweep.
 - Applied targets' prompt + card files are deleted; **malformed cards are
   kept** (reported, surface stays flagged, next sweep retries). A
   `skipped_no_card` target simply re-stages next sweep. Missing manifest →
@@ -261,7 +299,7 @@ with a `.fingerprint` no-op shortcut over the three journal store files):
   only after a session goes idle, so **if the Operator references something
   you don't recognise, check memory first, then check for
   unprocessed/active sessions, before claiming ignorance**;
-- `must_remember.md` — the whole (≤ ~1000 chars) store, rendered;
+- `must_remember.md` — the whole (≤ ~2000 chars) store, rendered;
 - `skill_index.md` + read-only detail copies under `briefing/skills/`;
 - `topic_index.md` + read-only detail copies under `briefing/topics/`;
 - `MANIFEST.md` — the inventory.
@@ -274,24 +312,25 @@ not O(store).
 ## 8. Config schema (the `memory:` block)
 
 `tiger_memory/config.py` parses and validates this block; every key is
-optional (these are the defaults, Operator-set 2026-07-22).
+optional (these are the defaults, Operator-set 2026-07-23).
 
 ```yaml
 memory:
   length_unit: characters        # CONFIRMED: characters, never tokens
   skills:
-    index_max_length: 1000       # the rendered skill index (chars)
-    index_overflow_limit: 1500
-    detail_max_length: 3000      # each skill's detail file (chars)
-    detail_overflow_limit: 4500
+    index_max_length: 2000       # the rendered skill index (chars)
+    index_overflow_limit: 3000
+    detail_max_length: 4000      # each skill's detail file (chars)
+    detail_overflow_limit: 6000
   must_remember:
-    max_length: 1000             # chars; loads whole, so kept small
-    overflow_limit: 1500
+    max_length: 2000             # chars; loads whole, so kept small
+    overflow_limit: 3000
+    forget_days: 30              # untouched (no TOUCH) for => forget-eligible (>= 0)
   topics:
-    index_max_length: 1000       # the rendered topic index (chars)
-    index_overflow_limit: 1500
-    detail_max_length: 3000      # each topic's detail file (chars)
-    detail_overflow_limit: 4500
+    index_max_length: 2000       # the rendered topic index (chars)
+    index_overflow_limit: 3000
+    detail_max_length: 4000      # each topic's detail file (chars)
+    detail_overflow_limit: 6000
     fresh_days: 7                # touched within => protected from forget/merge
     forget_days: 60              # untouched for => forget-eligible (>= fresh_days)
 
@@ -305,7 +344,8 @@ memory_extract:                  # per-section word budgets for extraction
 
 Validation is fail-fast at load time: `length_unit` must be `characters`
 (token units are rejected); every bound pair must satisfy
-`0 < max < overflow_limit` (the hysteresis band); `fresh_days >= 0`;
+`0 < max < overflow_limit` (the hysteresis band);
+`must_remember.forget_days >= 0`; for topics `fresh_days >= 0` and
 `forget_days >= fresh_days` (a topic cannot be simultaneously
 protected-fresh and forget-eligible).
 
@@ -330,11 +370,11 @@ protected-fresh and forget-eligible).
 | `entries.py` | the three entry schemas (`SkillEntry` / `MustRememberEntry` / `TopicEntry`), `topic_slug`, validation + frontmatter bridge |
 | `frontmatter.py` | the YAML-frontmatter parser/writer under the entry stores |
 | `bounded_store.py` | crash-safe store I/O, `index_chars` / `detail_chars` / `length_chars`, `is_over_overflow` / `is_detail_over_overflow`, per-store lock, the guarded `forget` (`ForgetGuardError` / `StoreLockHeld`) |
-| `indexes.py` | pure renderers — the single source of what a persona loads: skill/topic index, detail bodies, detail filenames, the topic routing list |
+| `indexes.py` | pure renderers — the single source of what a persona loads: skill/topic index, detail bodies, detail filenames, the topic routing list, the must-remember touch list |
 | `skills.py` | `log1p(usage)` importance + skills keep-rank |
 | `ranking.py` | shared recency / date-math helpers |
 | `lifecycle.py` | extraction (`parse_extraction` / `extract_candidates` / `ingest_candidates` with topic routing), staging (`plan_extraction`, stacks, chunk map/reduce), `rebuild` (drop legacy surface → `check_all --fix` → briefing), `pin`, `team_mission_text` |
-| `executor.py` | staged-card ingest glue (`ingest_extraction` → `IngestResult(skills_added, must_remember_added, topics_added)`) |
+| `executor.py` | staged-card ingest glue (`ingest_extraction` → `IngestResult(skills_added, must_remember_added, topics_added, touched)` — `touched` counts must-remember items whose freshness the bundle's `TOUCH:` blocks refreshed) |
 | `compaction.py` | staged compaction (§6): `compact_plan` (deterministic stale-topic forget + prompt staging) and `compact_apply` (card validation, deterministic convergence, `ApplyReport`) |
 | `migrate_topics.py` | one-off, idempotent `migrate-to-topics`: retire diary/fuzzy/emotional files to `<root>/retired/`, create `topics.md` |
 | `check.py` | `tiger-memory check [--fix]` format gate + quarantine, three frontmatter stores |

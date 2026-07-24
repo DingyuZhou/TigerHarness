@@ -31,7 +31,7 @@ import logging
 import re
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,7 +53,10 @@ from .entries import (
     TopicEntry,
     topic_slug,
 )
-from .indexes import render_topic_routing_list
+from .indexes import (
+    render_must_remember_touch_list,
+    render_topic_routing_list,
+)
 from .prefilter import filter_transcript
 from .skills import refresh_importance
 from .sources import (
@@ -119,14 +122,22 @@ class TopicCandidate:
 
 @dataclass
 class Candidates:
-    """Parsed extraction candidates for the three stores (typed, unscored)."""
+    """Parsed extraction candidates for the three stores (typed, unscored).
+
+    ``touches`` carries the ids of existing must-remember items the bundle
+    marked as related to this session (``TOUCH:`` blocks) — ingest refreshes
+    their ``last_used`` freshness anchor rather than adding anything.
+    """
 
     skills: list[SkillEntry]
     must_remember: list[MustRememberEntry]
     topics: list[TopicCandidate]
+    touches: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
-        return not (self.skills or self.must_remember or self.topics)
+        return not (
+            self.skills or self.must_remember or self.topics or self.touches
+        )
 
     def total(self) -> int:
         return len(self.skills) + len(self.must_remember) + len(self.topics)
@@ -217,7 +228,13 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
             )
         )
     must: list[MustRememberEntry] = []
+    touches: list[str] = []
     for b in _section_blocks(sections[STORE_MUST_REMEMBER]):
+        if "TOUCH" in b:
+            touched_id = (b["TOUCH"] or "").strip()
+            if touched_id:
+                touches.append(touched_id)
+            continue
         kind = (b.get("KIND") or "").lower()
         memo = b.get("MEMO")
         if kind not in VALID_KINDS or not memo:
@@ -258,7 +275,9 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
             topics.append(
                 TopicCandidate(slug=slug, name=name, summary=summary, detail=detail)
             )
-    return Candidates(skills=skills, must_remember=must, topics=topics)
+    return Candidates(
+        skills=skills, must_remember=must, topics=topics, touches=touches
+    )
 
 
 # ----- extraction (the model touch point) -----------------------------------
@@ -271,6 +290,7 @@ def extract_candidates(
     *,
     now: str | None = None,
     topic_index: str = "",
+    must_remember_index: str = "",
 ) -> Candidates:
     """Run the extraction prompt over *rec* and parse the typed candidates.
 
@@ -291,7 +311,8 @@ def extract_candidates(
         )
     content = _clip(content, cfg.budgets.max_prompt_content_chars)
     prompt = _fill_extract_prompt(
-        cfg, _prompts_root(cfg), rec, content, topic_index=topic_index
+        cfg, _prompts_root(cfg), rec, content, topic_index=topic_index,
+        must_remember_index=must_remember_index,
     )
     try:
         raw = summarizer.summarize(
@@ -403,7 +424,8 @@ def ingest_candidates(
     over its overflow limit (the hysteresis trigger).
     """
     now = now or iso_now()
-    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 0}
+    added = {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 0,
+             "touched": 0}
     if candidates.is_empty():
         return added
     per_store: dict[str, list[BaseEntry]] = {
@@ -427,9 +449,29 @@ def ingest_candidates(
         )
         bstore.save_atomic(STORE_TOPICS, merged)
         added[STORE_TOPICS] = landed
+    if candidates.touches:
+        # Freshness touches: the bundle marked these existing must-remember
+        # items as related to this session — refresh their forget-eligibility
+        # anchor (and repeat signal). Unknown ids are ignored (the item may
+        # have been compacted away between plan and ingest).
+        entries = bstore.load(STORE_MUST_REMEMBER)
+        by_id = {e.id: e for e in entries}
+        touched = 0
+        for tid in dict.fromkeys(candidates.touches):
+            entry = by_id.get(tid)
+            if entry is None:
+                continue
+            entry.last_used = now
+            if isinstance(entry, MustRememberEntry):  # pragma: no branch
+                entry.repeat_count += 1
+            touched += 1
+        if touched:
+            bstore.save_atomic(STORE_MUST_REMEMBER, entries)
+        added["touched"] = touched
     log.info(
-        "ingest: +%d skills, +%d must_remember, +%d topic detail(s)",
-        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added[STORE_TOPICS],
+        "ingest: +%d skills, +%d must_remember (%d touched), +%d topic detail(s)",
+        added[STORE_SKILLS], added[STORE_MUST_REMEMBER], added["touched"],
+        added[STORE_TOPICS],
     )
     return added
 
@@ -449,12 +491,10 @@ def extract_and_ingest(
     """
     now = now or iso_now()
     bstore = BoundedStore(cfg, store)
-    topic_entries = [
-        e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
-    ]
     candidates = extract_candidates(
         cfg, summarizer, rec, now=now,
-        topic_index=render_topic_routing_list(topic_entries),
+        topic_index=_topic_routing_index(cfg, store),
+        must_remember_index=_mr_touch_index(cfg, store),
     )
     return ingest_candidates(bstore, cfg, candidates, now=now)
 
@@ -607,7 +647,8 @@ def _pack_stacks(
 
 
 def _fill_extract_prompt(
-    cfg: Config, prompts_root: Path, rec, content: str, *, topic_index: str
+    cfg: Config, prompts_root: Path, rec, content: str, *,
+    topic_index: str, must_remember_index: str = "",
 ) -> str:
     """Fill the 3-store extraction prompt for one transcript (or reduced
     digest concatenation). The ``@@SKILLS@@`` / ``@@MUST_REMEMBER@@`` /
@@ -628,6 +669,9 @@ def _fill_extract_prompt(
         topic_summary_max_words=cfg.memory_extract.topic_summary_words,
         topic_detail_max_words=cfg.memory_extract.topic_detail_words,
         topic_index=topic_index,
+        must_remember_index=(
+            must_remember_index or "(no must-remember items yet)"
+        ),
         content=content,
     )
 
@@ -639,6 +683,16 @@ def _topic_routing_index(cfg: Config, store: Store) -> str:
         e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
     ]
     return render_topic_routing_list(entries)
+
+
+def _mr_touch_index(cfg: Config, store: Store) -> str:
+    """The persona's current must-remember touch list, off the store."""
+    bstore = BoundedStore(cfg, store)
+    entries = [
+        e for e in bstore.load(STORE_MUST_REMEMBER)
+        if isinstance(e, MustRememberEntry)
+    ]
+    return render_must_remember_touch_list(entries)
 
 
 def _per_chunk_words(cfg: Config, n_chunks: int) -> int:
@@ -841,7 +895,7 @@ def _compute_incremental_slice(
 
 def _stage_record(
     cfg: Config, staging: Path, prompts_root: Path, rec, content: str,
-    *, topic_index: str,
+    *, topic_index: str, must_remember_index: str,
 ) -> dict:
     """Stage one EXTRACT record and return its manifest item.
 
@@ -868,7 +922,8 @@ def _stage_record(
         prompt_path = staging / f"{rec.conversation_uuid}.prompt.md"
         prompt_path.write_text(
             _fill_extract_prompt(
-                cfg, prompts_root, rec, content, topic_index=topic_index
+                cfg, prompts_root, rec, content, topic_index=topic_index,
+                must_remember_index=must_remember_index,
             ),
             encoding="utf-8",
         )
@@ -925,6 +980,7 @@ def plan_extraction(
 
     prompts_root = _prompts_root(cfg)
     topic_index = _topic_routing_index(cfg, store)
+    must_remember_index = _mr_touch_index(cfg, store)
     items: list[dict] = []
     weighted: list[tuple[str, int]] = []
     processed = 0
@@ -944,7 +1000,8 @@ def plan_extraction(
             continue  # nothing new, or active-but-under-threshold
         content = sliced.prompt_content
         item = _stage_record(
-            cfg, staging, prompts_root, rec, content, topic_index=topic_index
+            cfg, staging, prompts_root, rec, content, topic_index=topic_index,
+            must_remember_index=must_remember_index,
         )
         # The high-water mark this slice advances the cursor to once its card is
         # ingested (the on_slice_ingested hook reads these off the manifest).
@@ -1243,6 +1300,7 @@ def build_reduce_prompt(cfg: Config, store: Store, item: dict) -> str | None:
         _fill_extract_prompt(
             cfg, _prompts_root(cfg), rec, content,
             topic_index=_topic_routing_index(cfg, store),
+            must_remember_index=_mr_touch_index(cfg, store),
         ),
         encoding="utf-8",
     )

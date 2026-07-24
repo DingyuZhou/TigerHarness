@@ -141,8 +141,11 @@ b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
      three markers present, each on its own line, in that order; a
      section is either well-formed blocks or the literal `NONE`; every
      `@@TOPICS@@` block routes to an existing slug from the embedded
-     list or is `TOPIC: NEW` with NAME + SUMMARY + DETAIL); and **write
-     that bundle to a card file**
+     list or is `TOPIC: NEW` with NAME + SUMMARY + DETAIL; the
+     `@@MUST_REMEMBER@@` section may also carry `TOUCH: <id>` blocks
+     marking embedded existing items this session relied on -- touching
+     keeps them fresh, and an item untouched past its forget window
+     becomes forgettable); and **write that bundle to a card file**
      `<store>/.sweep-staging/<uuid>.extract.md`. **Do NOT ingest** and do
      NOT run any `tiger-memory` command -- the driver glues all cards in
      one step. Return only a short confirmation (e.g. `carded 5 uuids`).

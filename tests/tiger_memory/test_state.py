@@ -73,8 +73,8 @@ def test_compute_state_empty(tmp_path: Path) -> None:
     assert "details_over_overflow" not in mr
     assert skills["details_over_overflow"] == 0
     assert topics["details_over_overflow"] == 0
-    # Default bounds (ADR 0007 Operator-set): all three max at 1000.
-    assert skills["max"] == 1000 and topics["max"] == 1000 and mr["max"] == 1000
+    # Default bounds (ADR 0007 Operator-set, revised 2026-07-23): max 2000.
+    assert skills["max"] == 2000 and topics["max"] == 2000 and mr["max"] == 2000
     assert payload["lock"] == {"held": False, "pid": None}
 
 

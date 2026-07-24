@@ -18,7 +18,7 @@ is stable.
 """
 from __future__ import annotations
 
-from .entries import SkillEntry, TopicEntry, topic_slug
+from .entries import MustRememberEntry, SkillEntry, TopicEntry, topic_slug
 
 # Detail files land under these briefing subdirectories.
 SKILLS_DETAIL_DIR = "skills"
@@ -138,6 +138,22 @@ def render_topic_routing_list(entries: list[TopicEntry]) -> str:
         lines.append(
             f"- `{e.slug}` — {e.name} (last {e.last_used[:10]}): {e.summary}"
         )
+    return "\n".join(lines)
+
+
+def render_must_remember_touch_list(entries: list[MustRememberEntry]) -> str:
+    """The compact must-remember list embedded in the extraction prompt.
+
+    This is what lets a sweep summarizer TOUCH items the session relates to
+    (refreshing their ``last_used`` freshness anchor): one line per item —
+    id (the address to emit), kind, memo. An item nobody touches for
+    ``must_remember.forget_days`` becomes forget-eligible at compaction.
+    """
+    if not entries:
+        return "(no must-remember items yet)"
+    lines = []
+    for e in entries:
+        lines.append(f"- `{e.id}` [{e.kind}] {e.text}")
     return "\n".join(lines)
 
 

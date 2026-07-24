@@ -377,7 +377,8 @@ def _cmd_ingest_extraction(cfg: Config, store: Store, uuid: str) -> int:
         return 1
     print(f"ingested {result.conversation_uuid} (+{result.total_added} entries: "
           f"{result.skills_added} skills, {result.must_remember_added} "
-          f"must_remember, {result.topics_added} topic detail(s))")
+          f"must_remember, {result.topics_added} topic detail(s); "
+          f"{result.touched} touched)")
     return 0
 
 

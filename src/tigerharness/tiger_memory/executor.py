@@ -30,6 +30,9 @@ class IngestResult:
     skills_added: int
     must_remember_added: int
     topics_added: int
+    #: Existing must-remember items whose freshness this bundle refreshed
+    #: (``TOUCH:`` blocks) — not additions, so not part of ``total_added``.
+    touched: int = 0
 
     @property
     def total_added(self) -> int:
@@ -66,4 +69,5 @@ def ingest_extraction(
         skills_added=added[STORE_SKILLS],
         must_remember_added=added[STORE_MUST_REMEMBER],
         topics_added=added[STORE_TOPICS],
+        touched=added["touched"],
     )

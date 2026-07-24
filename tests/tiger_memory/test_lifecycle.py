@@ -574,7 +574,8 @@ def test_ingest_writes_three_stores(tmp_path: Path) -> None:
     store.init_layout()
     c = lc.parse_extraction(_FULL_BUNDLE, now=NOW, source="x")
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert added == {STORE_SKILLS: 1, STORE_MUST_REMEMBER: 2, STORE_TOPICS: 1}
+    assert added == {STORE_SKILLS: 1, STORE_MUST_REMEMBER: 2, STORE_TOPICS: 1,
+                     'touched': 0}
     bstore = BoundedStore(cfg, store)
     assert len(bstore.load(STORE_SKILLS)) == 1
     assert len(bstore.load(STORE_MUST_REMEMBER)) == 2
@@ -591,7 +592,8 @@ def test_ingest_empty_is_noop(tmp_path: Path) -> None:
     store.init_layout()
     empty = lc.parse_extraction(_EMPTY_BUNDLE, now=NOW, source="x")
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, empty)
-    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 0}
+    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 0,
+                     'touched': 0}
 
 
 def test_ingest_reingest_routes_into_same_topic(tmp_path: Path) -> None:
@@ -620,7 +622,8 @@ def test_ingest_topics_only(tmp_path: Path) -> None:
         topics=[lc.TopicCandidate(slug="", name="Solo", summary="s", detail="d")],
     )
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 1}
+    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 0, STORE_TOPICS: 1,
+                     'touched': 0}
     assert not BoundedStore(cfg, store).load(STORE_SKILLS)
 
 
@@ -639,7 +642,8 @@ def test_ingest_no_topics_skips_topic_store(tmp_path: Path) -> None:
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
-    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 1, STORE_TOPICS: 0}
+    assert added == {STORE_SKILLS: 0, STORE_MUST_REMEMBER: 1, STORE_TOPICS: 0,
+                     'touched': 0}
     assert BoundedStore(cfg, store).load(STORE_TOPICS) == []
 
 
@@ -1001,3 +1005,93 @@ def test_discover_runs_adapters(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     # No real transcripts on disk → discover yields nothing, but exercises the loop.
     assert lc._discover(cfg) == []
+
+
+# ----- must_remember freshness touches (TOUCH blocks) -------------------------
+
+
+def test_parse_touch_blocks() -> None:
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        TOUCH: abc123
+
+        KIND: decision
+        MEMO: a real new memo
+
+        TOUCH: def456
+
+        TOUCH:
+        @@TOPICS@@
+        NONE
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert c.touches == ["abc123", "def456"]  # empty TOUCH value dropped
+    assert len(c.must_remember) == 1
+    assert not c.is_empty()          # touches alone make a bundle non-empty
+
+
+def test_ingest_touch_refreshes_last_used_and_repeat(tmp_path: Path) -> None:
+    from tigerharness.tiger_memory.entries import MustRememberEntry
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    bstore = BoundedStore(cfg, store)
+    old = MustRememberEntry(
+        text="targeted git add, never -A", created_at="2026-01-01T00:00:00Z",
+        last_used="2026-01-01T00:00:00Z", source="pin", kind=KIND_PREFERENCE,
+        importance=1.0,
+    )
+    bstore.save_atomic(STORE_MUST_REMEMBER, [old])
+    c = lc.Candidates(
+        skills=[], must_remember=[], topics=[],
+        touches=[old.id, old.id, "unknown-id"],   # dup + unknown are safe
+    )
+    added = lc.ingest_candidates(bstore, cfg, c, now=NOW)
+    assert added["touched"] == 1
+    (loaded,) = bstore.load(STORE_MUST_REMEMBER)
+    assert loaded.last_used == NOW               # freshness refreshed
+    assert loaded.repeat_count == 2              # dup touch counted once
+    assert loaded.created_at == "2026-01-01T00:00:00Z"
+
+
+def test_ingest_touch_only_unknown_id_saves_nothing(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    bstore = BoundedStore(cfg, store)
+    c = lc.Candidates(skills=[], must_remember=[], topics=[], touches=["nope"])
+    added = lc.ingest_candidates(bstore, cfg, c, now=NOW)
+    assert added["touched"] == 0
+    assert not (store.paths.journal / "must_remember.md").exists()
+
+
+def test_plan_embeds_must_remember_touch_list(tmp_path: Path, monkeypatch) -> None:
+    from tigerharness.tiger_memory.entries import MustRememberEntry
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    bstore = BoundedStore(cfg, store)
+    memo = MustRememberEntry(
+        text="never push main", created_at=NOW, last_used=NOW,
+        source="pin", kind=KIND_OPERATOR_EXPLICIT, importance=5.0,
+    )
+    bstore.save_atomic(STORE_MUST_REMEMBER, [memo])
+    monkeypatch.setattr(
+        lc, "_discover", lambda c, **kw: [_rec(content="abc", activity_mtime=0.0)]
+    )
+    items = lc.plan_extraction(cfg, store)
+    assert len(items) == 1
+    staged = Path(items[0]["prompt_path"]).read_text(encoding="utf-8")
+    assert f"`{memo.id}` [operator_explicit] never push main" in staged
+    assert "{must_remember_index}" not in staged
+
+
+def test_fill_extract_prompt_defaults_mr_placeholder(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    rec = _rec()
+    filled = lc._fill_extract_prompt(
+        cfg, lc._prompts_root(cfg), rec, "content", topic_index="(none)"
+    )
+    assert "(no must-remember items yet)" in filled

@@ -53,7 +53,7 @@ PROCEDURE: <the lesson / steps, <= {procedure_max_words} words>
 
 If none, write exactly `NONE` under the marker.
 
-### @@MUST_REMEMBER@@ — external directives (0 to 5)
+### @@MUST_REMEMBER@@ — external directives (0 to 5) + freshness touches
 Requirements from outside that make the work land better. One block per
 item, blank line between:
 
@@ -68,7 +68,24 @@ MEMO: <= {memo_max_words} words; one sentence; specific>
 - **decision**: a factual / architectural / strategic decision.
 - **incident**: a bug, near-miss, or expensive lesson.
 
-If none, write exactly `NONE` under the marker.
+**Touch what this session relied on.** Your current must-remember items:
+
+{must_remember_index}
+
+If this session's work RELATED to an existing item above (you followed
+it, it constrained the work, the subject came up again), emit a touch
+block so its freshness is refreshed — items untouched for a long time
+become forgettable:
+
+```
+TOUCH: <id from the list above>
+```
+
+Zero or more `TOUCH:` blocks, mixed freely with the KIND/MEMO blocks.
+Do not re-emit an existing item as a new memo — touch it instead.
+
+If no new items and nothing to touch, write exactly `NONE` under the
+marker.
 
 ### @@TOPICS@@ — durable project knowledge, filed by topic (0 to 3)
 A topic is a named, growing body of knowledge about one subject (a

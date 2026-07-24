@@ -206,22 +206,29 @@ class SkillsStoreConfig:
     ``detail_max_length`` / ``detail_overflow_limit``.
     """
 
-    index_max_length: int = 1000
-    index_overflow_limit: int = 1500
-    detail_max_length: int = 3000
-    detail_overflow_limit: int = 4500
+    index_max_length: int = 2000
+    index_overflow_limit: int = 3000
+    detail_max_length: int = 4000
+    detail_overflow_limit: int = 6000
 
 
 @dataclass(frozen=True)
 class MustRememberStoreConfig:
-    """Bound for the must-remember store — length-based (design §4.2).
+    """Bound + freshness for the must-remember store (design §4.2, ADR 0007).
 
-    Tightened to 1000/1500 by the topic-store revamp (ADR 0007): the store
-    loads whole at session start, so it must stay small.
+    Tightened by the topic-store revamp: the store loads whole at session
+    start, so it must stay small (Operator-set 2000/3000, 2026-07-23).
+
+    ``forget_days``: sweeps TOUCH items related to the session they process
+    (refreshing ``last_used``); an item not touched for this long is
+    forget-eligible when compaction needs the space. Stale normal items drop
+    first; a stale ``operator_explicit`` drops only as the last resort,
+    after the relevance check and every stale normal item.
     """
 
-    max_length: int = 1000
-    overflow_limit: int = 1500
+    max_length: int = 2000
+    overflow_limit: int = 3000
+    forget_days: int = 30
 
 
 @dataclass(frozen=True)
@@ -240,10 +247,10 @@ class TopicsStoreConfig:
     topics are dropped oldest-first before any AI compaction is staged.
     """
 
-    index_max_length: int = 1000
-    index_overflow_limit: int = 1500
-    detail_max_length: int = 3000
-    detail_overflow_limit: int = 4500
+    index_max_length: int = 2000
+    index_overflow_limit: int = 3000
+    detail_max_length: int = 4000
+    detail_overflow_limit: int = 6000
     fresh_days: int = 7
     forget_days: int = 60
 
@@ -579,19 +586,19 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     skills_raw = memory_raw.get("skills") or {}
     skills = SkillsStoreConfig(
         index_max_length=_cfg_int(
-            skills_raw.get("index_max_length", 1000),
+            skills_raw.get("index_max_length", 2000),
             "memory.skills.index_max_length",
         ),
         index_overflow_limit=_cfg_int(
-            skills_raw.get("index_overflow_limit", 1500),
+            skills_raw.get("index_overflow_limit", 3000),
             "memory.skills.index_overflow_limit",
         ),
         detail_max_length=_cfg_int(
-            skills_raw.get("detail_max_length", 3000),
+            skills_raw.get("detail_max_length", 4000),
             "memory.skills.detail_max_length",
         ),
         detail_overflow_limit=_cfg_int(
-            skills_raw.get("detail_overflow_limit", 4500),
+            skills_raw.get("detail_overflow_limit", 6000),
             "memory.skills.detail_overflow_limit",
         ),
     )
@@ -611,10 +618,13 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     mr_raw = memory_raw.get("must_remember") or {}
     must_remember = MustRememberStoreConfig(
         max_length=_cfg_int(
-            mr_raw.get("max_length", 1000), "memory.must_remember.max_length"
+            mr_raw.get("max_length", 2000), "memory.must_remember.max_length"
         ),
         overflow_limit=_cfg_int(
-            mr_raw.get("overflow_limit", 1500), "memory.must_remember.overflow_limit"
+            mr_raw.get("overflow_limit", 3000), "memory.must_remember.overflow_limit"
+        ),
+        forget_days=_cfg_int(
+            mr_raw.get("forget_days", 30), "memory.must_remember.forget_days"
         ),
     )
     _validate_bound(
@@ -623,23 +633,28 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
         must_remember.max_length,
         must_remember.overflow_limit,
     )
+    if must_remember.forget_days < 0:
+        raise ConfigError(
+            f"memory.must_remember.forget_days must be ≥ 0; "
+            f"got {must_remember.forget_days}."
+        )
 
     tp_raw = memory_raw.get("topics") or {}
     topics = TopicsStoreConfig(
         index_max_length=_cfg_int(
-            tp_raw.get("index_max_length", 1000),
+            tp_raw.get("index_max_length", 2000),
             "memory.topics.index_max_length",
         ),
         index_overflow_limit=_cfg_int(
-            tp_raw.get("index_overflow_limit", 1500),
+            tp_raw.get("index_overflow_limit", 3000),
             "memory.topics.index_overflow_limit",
         ),
         detail_max_length=_cfg_int(
-            tp_raw.get("detail_max_length", 3000),
+            tp_raw.get("detail_max_length", 4000),
             "memory.topics.detail_max_length",
         ),
         detail_overflow_limit=_cfg_int(
-            tp_raw.get("detail_overflow_limit", 4500),
+            tp_raw.get("detail_overflow_limit", 6000),
             "memory.topics.detail_overflow_limit",
         ),
         fresh_days=_cfg_int(

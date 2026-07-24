@@ -44,19 +44,21 @@ def test_memory_defaults_when_block_absent(minimal_config_yaml: Path) -> None:
     assert isinstance(m, MemoryConfig)
     assert m.length_unit == "characters"
     # Skills are index-LENGTH bounded now (no max_count anywhere).
-    assert m.skills.index_max_length == 1000
-    assert m.skills.index_overflow_limit == 1500
-    assert m.skills.detail_max_length == 3000
-    assert m.skills.detail_overflow_limit == 4500
+    assert m.skills.index_max_length == 2000
+    assert m.skills.index_overflow_limit == 3000
+    assert m.skills.detail_max_length == 4000
+    assert m.skills.detail_overflow_limit == 6000
     assert not hasattr(m.skills, "max_count")
-    # Must-remember tightened to 1000/1500 by the revamp.
-    assert m.must_remember.max_length == 1000
-    assert m.must_remember.overflow_limit == 1500
+    # Must-remember tightened to 2000/3000 by the revamp (Operator-set
+    # 2026-07-23), with the TOUCH-driven forget window.
+    assert m.must_remember.max_length == 2000
+    assert m.must_remember.overflow_limit == 3000
+    assert m.must_remember.forget_days == 30
     # Topics: index + per-topic detail bounds + freshness windows.
-    assert m.topics.index_max_length == 1000
-    assert m.topics.index_overflow_limit == 1500
-    assert m.topics.detail_max_length == 3000
-    assert m.topics.detail_overflow_limit == 4500
+    assert m.topics.index_max_length == 2000
+    assert m.topics.index_overflow_limit == 3000
+    assert m.topics.detail_max_length == 4000
+    assert m.topics.detail_overflow_limit == 6000
     assert m.topics.fresh_days == 7
     assert m.topics.forget_days == 60
     # Diary/fuzzy stores are gone.
@@ -121,12 +123,12 @@ def test_memory_partial_override_keeps_defaults(tmp_path: Path) -> None:
     m = load_config(cfg).memory
     assert m.skills.index_max_length == 700
     # Untouched -> defaults.
-    assert m.skills.index_overflow_limit == 1500
-    assert m.skills.detail_max_length == 3000
-    assert m.must_remember.max_length == 1000
+    assert m.skills.index_overflow_limit == 3000
+    assert m.skills.detail_max_length == 4000
+    assert m.must_remember.max_length == 2000
     assert m.topics.fresh_days == 2
     assert m.topics.forget_days == 60
-    assert m.topics.index_max_length == 1000
+    assert m.topics.index_max_length == 2000
 
 
 def test_removed_store_keys_are_ignored(tmp_path: Path) -> None:
@@ -161,7 +163,7 @@ def test_removed_store_keys_are_ignored(tmp_path: Path) -> None:
     assert not hasattr(m, "diary")
     assert not hasattr(m, "fuzzy")
     # And the live stores keep their defaults.
-    assert m.must_remember.max_length == 1000
+    assert m.must_remember.max_length == 2000
     assert m.topics.forget_days == 60
 
 
@@ -363,3 +365,25 @@ def test_rejects_non_numeric_memory_value_with_config_error(
     cfg = _write_cfg(tmp_path, block)
     with pytest.raises(ConfigError, match=field.replace(".", r"\.")):
         load_config(cfg)
+
+
+def test_mr_forget_days_negative_rejected(tmp_path: Path) -> None:
+    cfg = _write_cfg(
+        tmp_path, "memory:\n  must_remember:\n    forget_days: -1\n"
+    )
+    with pytest.raises(ConfigError, match="forget_days"):
+        load_config(cfg)
+
+
+def test_mr_forget_days_override_and_non_int(tmp_path: Path) -> None:
+    cfg = _write_cfg(
+        tmp_path, "memory:\n  must_remember:\n    forget_days: 45\n"
+    )
+    assert load_config(cfg).memory.must_remember.forget_days == 45
+    bad_dir = tmp_path / "bad"
+    bad_dir.mkdir()
+    bad = _write_cfg(
+        bad_dir, "memory:\n  must_remember:\n    forget_days: soon\n"
+    )
+    with pytest.raises(ConfigError, match="forget_days"):
+        load_config(bad)

@@ -1089,3 +1089,124 @@ def test_apply_stale_downgraded_entry_is_trimmable(tmp_path):
     texts = [e.text for e in bstore.load(STORE_MUST_REMEMBER)]
     assert texts == ["keep me"]        # downgraded entry trimmed to converge
     assert report.forced_trims == [cp.STORE_MUST_REMEMBER]
+
+
+# ----- must_remember freshness: AGE annotation + stale-first drop order --------
+
+
+def test_render_mr_blocks_marks_forget_eligible():
+    fresh = _memo("fresh memo", last=NOW)
+    stale = _memo("stale memo", last="2026-05-01T00:00:00Z")  # ~83 days
+    text = cp._render_mr_blocks([fresh, stale], now=NOW, forget_days=30)
+    assert "AGE: untouched" not in text.split("stale memo")[0]
+    assert "[forget-eligible]" in text
+    # Without the window args, no annotation at all.
+    assert "forget-eligible" not in cp._render_mr_blocks([stale])
+
+
+def test_plan_mr_prompt_carries_forget_eligible_annotation(tmp_path):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 20, "overflow_limit": 30,
+                          "forget_days": 30},
+    })
+    stale = _memo("an old untouched memo, long enough to overflow the bound",
+                  last="2026-01-01T00:00:00Z")
+    bstore.save_atomic(STORE_MUST_REMEMBER, [stale])
+    manifest = cp.compact_plan(cfg, store, now=NOW)
+    (target,) = [
+        t for t in manifest["targets"] if t["kind"] == cp.KIND_MUST_REMEMBER
+    ]
+    prompt = Path(target["prompt_path"]).read_text(encoding="utf-8")
+    assert "[forget-eligible]" in prompt
+    assert "untouched for over\n{forget_days}" not in prompt  # placeholder filled
+
+
+def test_mr_drop_order_stale_normal_then_fresh_then_stale_protected():
+    stale_old = _memo("stale old", last="2026-01-01T00:00:00Z")
+    stale_new = _memo("stale newer", last="2026-03-01T00:00:00Z")
+    fresh_low = _memo("fresh low", importance=1.0, last=NOW)
+    fresh_high = _memo("fresh high", importance=9.0, last=NOW)
+    op_stale = _memo("op stale", kind="operator_explicit",
+                     last="2026-02-01T00:00:00Z")
+    op_fresh = _memo("op fresh", kind="operator_explicit", last=NOW)
+    order = cp._mr_drop_order(
+        [op_fresh, fresh_high, stale_new, op_stale, stale_old, fresh_low],
+        NOW, 30,
+    )
+    assert [e.text for e in order] == [
+        "stale old", "stale newer",      # stale normal, oldest first
+        "fresh low", "fresh high",       # fresh normal, keep-rank order
+        "op stale",                      # stale protected: last resort
+    ]
+    assert op_fresh not in order          # fresh protected never droppable
+
+
+def test_apply_mr_trim_drops_stale_downgraded_before_fresh_memo(tmp_path):
+    """The stale-first drop order, end to end: a STALE-downgraded directive
+    keeps its old last_used, so when the bound forces a trim it drops
+    BEFORE the fresh card-minted memo — even though the downgraded entry's
+    importance (5.0) is higher than the fresh memo's (1.0)."""
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 30, "overflow_limit": 40,
+                          "forget_days": 30},
+    })
+    op_stale = _memo("very old big directive text here",
+                     kind="operator_explicit", importance=5.0,
+                     last="2026-01-01T00:00:00Z")
+    bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale])
+    staging = _stage(store, [
+        _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,
+                "must_remember"),
+    ])
+    _card(staging, "must_remember", (
+        "@@MUST_REMEMBER@@\n"
+        f"STALE: {op_stale.id}\n"
+        "\n"
+        "KIND: preference\nMEMO: fresh survivor\n"
+    ))
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["must_remember"]
+    texts = [e.text for e in bstore.load(STORE_MUST_REMEMBER)]
+    assert texts == ["fresh survivor"]
+    assert report.forced_trims == [cp.STORE_MUST_REMEMBER]
+
+
+def test_apply_mr_stale_protected_dropped_as_last_resort(tmp_path, caplog):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 20, "overflow_limit": 30,
+                          "forget_days": 30},
+    })
+    op_stale = _memo("very old operator directive nobody touched",
+                     kind="operator_explicit", last="2026-01-01T00:00:00Z")
+    op_fresh = _memo("live rule", kind="operator_explicit", last=NOW)
+    bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale, op_fresh])
+    staging = _stage(store, [
+        _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,
+                "must_remember"),
+    ])
+    _card(staging, "must_remember", "@@MUST_REMEMBER@@\nNONE\n")
+    with caplog.at_level(logging.WARNING):
+        report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["must_remember"]
+    texts = [e.text for e in bstore.load(STORE_MUST_REMEMBER)]
+    assert texts == ["live rule"]         # stale protected dropped, fresh kept
+    assert cp.STORE_MUST_REMEMBER not in report.still_over
+    assert "last resort" in caplog.text
+
+
+def test_apply_mr_fresh_protected_never_dropped_still_over(tmp_path):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 10, "overflow_limit": 15,
+                          "forget_days": 30},
+    })
+    op1 = _memo("fresh directive one", kind="operator_explicit", last=NOW)
+    op2 = _memo("fresh directive two", kind="operator_explicit", last=NOW)
+    bstore.save_atomic(STORE_MUST_REMEMBER, [op1, op2])
+    staging = _stage(store, [
+        _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,
+                "must_remember"),
+    ])
+    _card(staging, "must_remember", "@@MUST_REMEMBER@@\nNONE\n")
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert cp.STORE_MUST_REMEMBER in report.still_over
+    assert len(bstore.load(STORE_MUST_REMEMBER)) == 2   # both survive

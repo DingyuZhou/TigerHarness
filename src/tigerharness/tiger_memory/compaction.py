@@ -168,8 +168,19 @@ def _dedup_skills(entries: list[SkillEntry]) -> tuple[list[SkillEntry], int]:
 
 
 def _render_mr_blocks(
-    entries: list[MustRememberEntry], *, with_ids: bool = False
+    entries: list[MustRememberEntry],
+    *,
+    with_ids: bool = False,
+    now: str | None = None,
+    forget_days: int | None = None,
 ) -> str:
+    """Render memo blocks for a compaction prompt.
+
+    When *now* + *forget_days* are given, an item whose ``last_used`` is
+    older than the forget window is annotated ``[forget-eligible]`` with its
+    age — the sweep's TOUCH mechanism has not refreshed it, so the card
+    author should drop it unless it is still clearly valuable.
+    """
     if not entries:
         return "(none)"
     out = []
@@ -179,6 +190,12 @@ def _render_mr_blocks(
             lines.append(f"ID: {e.id}")
         lines.append(f"KIND: {e.kind}")
         lines.append(f"MEMO: {e.text}")
+        if now is not None and forget_days is not None:
+            age = days_between(e.last_used, now)
+            if age > forget_days:
+                lines.append(
+                    f"AGE: untouched {int(age)} days [forget-eligible]"
+                )
         out.append("\n".join(lines))
     return "\n\n".join(out)
 
@@ -344,6 +361,7 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
         )
         from .lifecycle import team_mission_text
         mission = team_mission_text(cfg).strip() or "(no charter mission found)"
+        forget_days = cfg.memory.must_remember.forget_days
         prompt_path = staging / "must_remember.prompt.md"
         prompt_path.write_text(
             _fill(
@@ -351,8 +369,13 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
                 agent_name=cfg.agent.name,
                 current_chars=bstore.length_chars(must),
                 max_chars=max(0, budget),
-                protected=_render_mr_blocks(protected, with_ids=True),
-                entries=_render_mr_blocks(compactable),
+                forget_days=forget_days,
+                protected=_render_mr_blocks(
+                    protected, with_ids=True, now=now, forget_days=forget_days
+                ),
+                entries=_render_mr_blocks(
+                    compactable, now=now, forget_days=forget_days
+                ),
                 mission=mission,
             ),
             encoding="utf-8",
@@ -544,22 +567,62 @@ def _apply_must_remember(
                 "directive(s) to decision", len(downgraded),
             )
         merged: list[MustRememberEntry] = protected + downgraded + new_entries
-        # Deterministic convergence: trim lowest-importance, oldest
-        # non-protected entries until under max (never protected ones).
+        # Deterministic convergence, in the ADR 0007 drop order: stale
+        # normal entries first (oldest untouched first — the sweep's TOUCH
+        # mechanism kept everything that still comes up fresh), then fresh
+        # normal entries by keep-rank, and only as the very last resort a
+        # STALE protected directive (untouched past forget_days). A fresh
+        # operator_explicit is never dropped.
         max_len = cfg.memory.must_remember.max_length
         if bstore.length_chars(merged) > max_len:
             report.forced_trims.append(STORE_MUST_REMEMBER)
-            droppable = sorted(
-                (e for e in merged if e.kind != KIND_OPERATOR_EXPLICIT),
-                key=lambda e: (float(e.importance), e.last_used),
-            )
-            for victim in droppable:
+            for victim in _mr_drop_order(
+                merged, now, cfg.memory.must_remember.forget_days
+            ):
                 if bstore.length_chars(merged) <= max_len:
                     break
+                if victim.kind == KIND_OPERATOR_EXPLICIT:
+                    log.warning(
+                        "compact-apply: forgetting stale operator directive "
+                        "%r (untouched past forget_days; last resort)",
+                        victim.id,
+                    )
                 merged.remove(victim)
         if bstore.length_chars(merged) > max_len:
             report.still_over.append(STORE_MUST_REMEMBER)
         bstore.save_atomic(STORE_MUST_REMEMBER, merged)
+
+
+def _mr_drop_order(
+    entries: list[MustRememberEntry], now: str, forget_days: int
+) -> list[MustRememberEntry]:
+    """The deterministic forget order for must_remember convergence.
+
+    1. stale normal entries, oldest ``last_used`` first;
+    2. fresh normal entries, lowest (importance, recency) first;
+    3. stale ``operator_explicit`` directives, oldest first (last resort).
+
+    Fresh ``operator_explicit`` entries are absent — never droppable.
+    """
+    def stale(e: MustRememberEntry) -> bool:
+        return days_between(e.last_used, now) > forget_days
+
+    normal = [e for e in entries if e.kind != KIND_OPERATOR_EXPLICIT]
+    stale_normal = sorted(
+        (e for e in normal if stale(e)), key=lambda e: e.last_used
+    )
+    fresh_normal = sorted(
+        (e for e in normal if not stale(e)),
+        key=lambda e: (float(e.importance), e.last_used),
+    )
+    stale_protected = sorted(
+        (
+            e for e in entries
+            if e.kind == KIND_OPERATOR_EXPLICIT and stale(e)
+        ),
+        key=lambda e: e.last_used,
+    )
+    return stale_normal + fresh_normal + stale_protected
 
 
 def _apply_skills(

@@ -34,11 +34,13 @@ Sources (Claude transcripts, Slack threads, journal worklogs, docs)
     v
 Extraction (lifecycle.py): a finished session -> a strict
   @@SKILLS@@ / @@MUST_REMEMBER@@ / @@TOPICS@@ bundle, in-persona
-  (the prompt embeds the persona's current topic routing list)
+  (the prompt embeds the persona's current topic routing list
+   + must-remember items, so the bundle can TOUCH what it relied on)
     |
     v
 Ingest (executor.py + lifecycle.py): bundle blocks -> the three stores
-  (topics route to an existing slug or mint a NEW topic)
+  (topics route to an existing slug or mint a NEW topic; TOUCH blocks
+   refresh existing must-remember items' freshness)
     |
     v
 Compaction (compaction.py), staged, ONLY for surfaces over their
@@ -65,9 +67,9 @@ preventing compact-every-session thrash.
 
 | Store | Holds | Loaded at session start | Bounds (chars, defaults) |
 |---|---|---|---|
-| `skills` | learned, reusable lessons (name + trigger + procedure) | the **index only**; per-skill detail files (`briefing/skills/`) on demand | index 1000 / 1500; per-skill detail 3000 / 4500 |
-| `must_remember` | external directives (`operator_explicit` / `preference` / `decision` / `incident`) | whole store (kept small) | 1000 / 1500 |
-| `topics` | durable project knowledge, filed by subject; dated detail bodies | the **index only** (freshest first); per-topic detail files (`briefing/topics/`) on demand | index 1000 / 1500; per-topic detail 3000 / 4500; `fresh_days` 7, `forget_days` 60 |
+| `skills` | learned, reusable lessons (name + trigger + procedure) | the **index only**; per-skill detail files (`briefing/skills/`) on demand | index 2000 / 3000; per-skill detail 4000 / 6000 |
+| `must_remember` | external directives (`operator_explicit` / `preference` / `decision` / `incident`) | whole store (kept small) | 2000 / 3000; `forget_days` 30 |
+| `topics` | durable project knowledge, filed by subject; dated detail bodies | the **index only** (freshest first); per-topic detail files (`briefing/topics/`) on demand | index 2000 / 3000; per-topic detail 4000 / 6000; `fresh_days` 7, `forget_days` 60 |
 
 On-disk, all three are YAML-frontmatter entry stores under the persona
 store's `journal/` dir (`skills.md`, `must_remember.md`, `topics.md`). The
@@ -95,7 +97,7 @@ compaction may merge near-duplicate topics or tighten summaries.
 | `check.py` | the `check [--fix]` format gate + quarantine |
 | `skills.py` | usage-based skill importance + skills keep-rank |
 | `lifecycle.py` | extraction + routing ingest, in-session staging (plan / stacks / map-reduce), `rebuild`, `pin`, charter mission sourcing |
-| `executor.py` | staged-card ingest glue (`IngestResult`: skills / must_remember / topics added) |
+| `executor.py` | staged-card ingest glue (`IngestResult`: skills / must_remember / topics added + `touched` — must-remember items refreshed by `TOUCH:` blocks) |
 | `compaction.py` | staged compaction: `compact-plan` / `compact-apply`, deterministic convergence, protections |
 | `migrate_topics.py` | one-off `migrate-to-topics` (diary/fuzzy retirement) |
 | `sweep.py` | team-sweep gating (claim / done / complete / release) |
@@ -136,18 +138,19 @@ summarizer:
 memory:
   length_unit: characters        # CONFIRMED: characters, never tokens
   skills:
-    index_max_length: 1000
-    index_overflow_limit: 1500
-    detail_max_length: 3000
-    detail_overflow_limit: 4500
+    index_max_length: 2000
+    index_overflow_limit: 3000
+    detail_max_length: 4000
+    detail_overflow_limit: 6000
   must_remember:
-    max_length: 1000             # chars; loads whole, so kept small
-    overflow_limit: 1500
+    max_length: 2000             # chars; loads whole, so kept small
+    overflow_limit: 3000
+    forget_days: 30              # untouched (no TOUCH) for => forget-eligible (>= 0)
   topics:
-    index_max_length: 1000
-    index_overflow_limit: 1500
-    detail_max_length: 3000
-    detail_overflow_limit: 4500
+    index_max_length: 2000
+    index_overflow_limit: 3000
+    detail_max_length: 4000
+    detail_overflow_limit: 6000
     fresh_days: 7                # touched within => protected from forget/merge
     forget_days: 60              # untouched for => forget-eligible (>= fresh_days)
 
@@ -165,7 +168,8 @@ rebuild:
 
 Validation is fail-fast at load: `length_unit` must be `characters` (token
 units rejected); every bound pair must satisfy `0 < max < overflow_limit`;
-`fresh_days >= 0`; `forget_days >= fresh_days`.
+`must_remember.forget_days >= 0`; for topics `fresh_days >= 0` and
+`forget_days >= fresh_days`.
 
 ## Usage
 
@@ -203,7 +207,7 @@ executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
 | `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `operator_explicit`** (importance 5.0, the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
 | `migrate-to-topics [--apply]` | **one-off, idempotent** (ADR 0007): retire `diary.md` / `fuzzy.md` / `emotional.md` (+ `.rejected` sidecars) from `journal/` to `<root>/retired/` and create an empty `topics.md`. **Dry-run is the default** (preview only); `--apply` performs it |
 | `state` | JSON snapshot of the three stores: per store `count`, `chars` (rendered-index chars for skills/topics, entry chars for must_remember), `max`, `over_overflow`, plus `details_over_overflow` for skills/topics |
-| `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks); each prompt embeds the persona's current topic routing list |
+| `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks); each prompt embeds the persona's current topic routing list and must-remember item list (for `TOUCH:` blocks) |
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
 | `build-reduce-prompts` | reduce step (ADR 0006 Part 1): assemble `<uuid>.prompt.md` from a map_reduce item's staged chunk digests |
 | `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free). Exit 0 clean / 1 ≥1 malformed card / 2 no plan manifest |
@@ -233,7 +237,27 @@ whole-line section markers, in order (see
 ```
 
 A skill block is `NAME:` / `TRIGGER:` / `PROCEDURE:`; a must-remember block
-is `KIND:` / `MEMO:`. A topic block routes durable project knowledge —
+is `KIND:` / `MEMO:`.
+
+**Must-remember freshness (TOUCH).** The prompt also embeds the persona's
+current must-remember items — one line per item: id, kind, memo (filled
+into `{must_remember_index}`). If the session's work *related to* an
+existing item (the extractor followed it, it constrained the work, the
+subject came up again), the `@@MUST_REMEMBER@@` section carries a touch
+block instead of a re-emitted memo:
+
+```
+TOUCH: <id from the embedded list>
+```
+
+Zero or more `TOUCH:` blocks, mixed freely with the `KIND:`/`MEMO:`
+blocks. Ingest refreshes a touched item's `last_used` (and bumps its
+`repeat_count`); unknown ids are ignored. Touches are counted in
+`IngestResult.touched` (not in `total_added`). An item untouched for
+`must_remember.forget_days` (default 30) becomes forget-eligible at
+compaction.
+
+A topic block routes durable project knowledge —
 the prompt embeds the persona's existing topics (freshest first) and asks
 the extractor to **route to an existing topic whenever one fits**:
 
@@ -262,16 +286,26 @@ When a surface crosses its `overflow_limit`, the sweep stages a compaction
    (operator-explicit entries shown as protected, carried over verbatim),
    merge/forget `skills`, shrink the `topic_roster` (forget / merge /
    tighter summaries — fresh topics protected), or rewrite one
-   `topic_detail` / `skill_detail` body under its `max`.
+   `topic_detail` / `skill_detail` body under its `max`. In the
+   must_remember prompt, an item untouched for more than
+   `must_remember.forget_days` is annotated **`[forget-eligible]`** with
+   its age — no sweep TOUCHed it — and the card is told to drop it unless
+   it is still clearly valuable despite its age.
 2. **Card sub-agents** (Task tool, subscription-billed) each write one
    `<key>.card.md` per the prompt's embedded strict contract.
 3. **`compact-apply`** (non-AI) validates each card, applies it atomically
    to the entry store, and **guarantees convergence
    deterministically** — a surface still over `max` after its card is
-   hard-trimmed by keep-rank/freshness, never accepted oversized. Protected
-   content is never force-dropped: a surface that cannot shrink without it
-   is reported in `still_over` and retried next sweep. Malformed cards are
-   reported and kept (exit 1); applied prompt+card files are deleted.
+   hard-trimmed by keep-rank/freshness, never accepted oversized. For
+   must_remember the deterministic drop order is: stale normal entries
+   first (oldest `last_used` first), then fresh normal entries by
+   keep-rank (lowest importance/recency first), and only as the very
+   last resort a *stale* `operator_explicit` directive (logged as a
+   warning). A *fresh* `operator_explicit` is never dropped, and fresh
+   topics are never force-dropped: a surface that cannot shrink without
+   them is reported in `still_over` and retried next sweep. Malformed
+   cards are reported and kept (exit 1); applied prompt+card files are
+   deleted.
 
 ## Session start (the briefing)
 
@@ -314,8 +348,8 @@ tiger-memory --config <persona-config> rebuild                      # regenerate
   disk (and in git history) — and creates an empty `topics.md`. Idempotent:
   a re-run is a no-op.
 - `must_remember.md` stays in place; a store near the old 8000-char bound
-  will be aggressively compacted down to the new 1000/1500 on its first
-  over-bound compaction — that is the intended shrink, and
+  will be aggressively compacted down to the new 2000/3000 on its first
+  over-bound compaction — that is the intended shrink, and fresh
   `operator_explicit` entries keep their forget protection.
 - Old config keys for the retired stores (`memory.diary.*`,
   `memory.fuzzy.*`) no longer do anything (unknown `memory:` keys are

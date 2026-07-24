@@ -125,3 +125,34 @@ def test_ingest_extraction_has_no_summarizer_kwarg() -> None:
     # point is pure parse+merge and takes no summarizer.
     params = inspect.signature(ingest_extraction).parameters
     assert "summarizer" not in params
+
+
+def test_ingest_extraction_reports_touches(tmp_path):
+    cfg = _cfg(tmp_path)
+    from tigerharness.tiger_memory.store import Store
+    store = Store(cfg.store.root)
+    store.init_layout()
+    from tigerharness.tiger_memory.entries import (
+        STORE_MUST_REMEMBER, MustRememberEntry,
+    )
+    bstore = BoundedStore(cfg, store)
+    old = MustRememberEntry(
+        text="standing rule", created_at="2026-01-01T00:00:00Z",
+        last_used="2026-01-01T00:00:00Z", source="pin", kind="preference",
+        importance=1.0,
+    )
+    bstore.save_atomic(STORE_MUST_REMEMBER, [old])
+    bundle = (
+        "@@SKILLS@@\nNONE\n"
+        "@@MUST_REMEMBER@@\n"
+        f"TOUCH: {old.id}\n"
+        "@@TOPICS@@\nNONE\n"
+    )
+    result = ingest_extraction(
+        store, cfg, conversation_uuid="u-touch", source="test",
+        bundle_text=bundle, now="2026-07-23T00:00:00Z",
+    )
+    assert result.touched == 1
+    assert result.total_added == 0
+    (loaded,) = bstore.load(STORE_MUST_REMEMBER)
+    assert loaded.last_used == "2026-07-23T00:00:00Z"

@@ -55,18 +55,20 @@ budgets:
 memory:
   length_unit: characters
   skills:                     # learned, reusable lessons
-    index_max_length: 1000    # the name+trigger index (session-start load)
-    index_overflow_limit: 1500
-    detail_max_length: 3000   # each skill's procedure detail file
-    detail_overflow_limit: 4500
+    index_max_length: 2000    # the name+trigger index (session-start load)
+    index_overflow_limit: 3000
+    detail_max_length: 4000   # each skill's procedure detail file
+    detail_overflow_limit: 6000
   must_remember:              # external directives; loaded whole
-    max_length: 1000
-    overflow_limit: 1500
+    max_length: 2000
+    overflow_limit: 3000
+    forget_days: 30           # sweeps TOUCH related items; untouched for N
+                              # days: forget-eligible when compaction needs it
   topics:                     # named bodies of durable project knowledge
-    index_max_length: 1000    # slug + freshness + summary index (fresh first)
-    index_overflow_limit: 1500
-    detail_max_length: 3000   # each topic's dated detail body
-    detail_overflow_limit: 4500
+    index_max_length: 2000    # slug + freshness + summary index (fresh first)
+    index_overflow_limit: 3000
+    detail_max_length: 4000   # each topic's dated detail body
+    detail_overflow_limit: 6000
     fresh_days: 7             # touched within N days: protected from forget/merge
     forget_days: 60           # untouched for N days: forget-eligible
 

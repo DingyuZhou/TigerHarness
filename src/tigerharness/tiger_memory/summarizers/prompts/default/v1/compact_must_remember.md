@@ -35,6 +35,10 @@ silently deleted. When in doubt, keep it protected: do not mark it.
 - Tighten wording; drop filler. Keep memos one sentence, specific.
 - Drop entries that no longer matter (superseded decisions, resolved
   incidents, stale preferences). Prefer dropping old + low-importance.
+- Entries annotated `[forget-eligible]` have gone untouched for over
+  {forget_days} days — no sweep found them related to any session. Drop
+  them (or, for protected ones, mark them STALE) unless one is still
+  clearly valuable despite its age.
 
 ## Output contract — STRICT
 

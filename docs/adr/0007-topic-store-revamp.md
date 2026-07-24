@@ -34,9 +34,12 @@ and all related code**.
 
 | Store | Durable state | Session-load surface | Default max / must-compact |
 |---|---|---|---|
-| `skills` | `journal/skills.md` (frontmatter entries) | rendered skill index (`briefing/skill_index.md`) + per-skill detail files (`briefing/skills/<slug>-<id>.md`) | index 1000 / 1500; detail 3000 / 4500 |
-| `must_remember` | `journal/must_remember.md` (flat entry store) | loaded whole | 1000 / 1500 |
-| `topics` | `journal/topics.md` (frontmatter entries; each entry's body is the topic's dated detail) | rendered topic index (`briefing/topic_index.md`) + per-topic detail files (`briefing/topics/<slug>.md`) | index 1000 / 1500; detail 3000 / 4500 |
+| `skills` | `journal/skills.md` (frontmatter entries) | rendered skill index (`briefing/skill_index.md`) + per-skill detail files (`briefing/skills/<slug>-<id>.md`) | index 2000 / 3000; detail 4000 / 6000 |
+| `must_remember` | `journal/must_remember.md` (flat entry store) | loaded whole | 2000 / 3000 |
+| `topics` | `journal/topics.md` (frontmatter entries; each entry's body is the topic's dated detail) | rendered topic index (`briefing/topic_index.md`) + per-topic detail files (`briefing/topics/<slug>.md`) | index 2000 / 3000; detail 4000 / 6000 |
+
+(Bounds as amended 2026-07-23; the directive's original 1000/1500 +
+3000/4500 proved too strict on the live roster.)
 
 All bounds are characters (vendor-neutral, unchanged rule). `max` /
 `overflow_limit` keep their existing hysteresis semantics: content may
@@ -137,6 +140,24 @@ copies preserve the data); create an empty `topics.md`; leave
 unchanged, the new index/detail surfaces are rendered projections, and
 the tightened must_remember bound is enforced by the first over-bound
 compaction, not by the migration. Then `rebuild`. Idempotent.
+
+## Amendment (2026-07-23): must_remember freshness — the TOUCH mechanism
+
+Operator follow-up after the first live rollout. must_remember needed the
+same freshness signal topics get from routing:
+
+- The extraction prompt embeds the persona's current must-remember items
+  (id / kind / memo). A card's `@@MUST_REMEMBER@@` section may emit
+  `TOUCH: <id>` blocks for items this session related to; ingest
+  refreshes a touched item's `last_used` (and bumps `repeat_count`)
+  instead of duplicating it.
+- New `memory.must_remember.forget_days` (default 30): an item nobody
+  touched for that long is **forget-eligible** when compaction needs the
+  space. `compact-plan` annotates such items `[forget-eligible]` in the
+  compaction prompt; the deterministic convergence trim drops stale
+  normal items first (oldest untouched first), then fresh normal items
+  by keep-rank, and a stale `operator_explicit` only as the very last
+  resort (logged). A fresh `operator_explicit` is never dropped.
 
 ## Consequences
 

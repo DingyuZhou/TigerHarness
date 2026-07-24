@@ -340,7 +340,8 @@ def test_topic_only_ingest_never_touches_other_stores(tmp_path: Path) -> None:
                                summary="sum", detail="det")],
     )
     added = ingest_candidates(bs, bs.cfg, cands, now=NOW)
-    assert added == {"skills": 0, "must_remember": 0, "topics": 1}
+    assert added == {"skills": 0, "must_remember": 0, "topics": 1,
+                     "touched": 0}
     journal = bs.store.paths.journal
     assert (journal / "topics.md").exists()
     assert not (journal / "skills.md").exists()

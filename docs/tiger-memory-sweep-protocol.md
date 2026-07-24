@@ -77,7 +77,9 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
         three stores (`skills.md` / `must_remember.md` / `topics.md`). The
         prompt also embeds the persona's **existing-topic routing list**
         (slug + summary, freshest first), so the sub-agent can route new
-        knowledge into existing topics.
+        knowledge into existing topics, **and** the persona's **current
+        must-remember items** (id + kind + memo), so the sub-agent can
+        TOUCH the ones the session relied on.
       - **Writes**: a bundle **card**
         `<store>/.sweep-staging/<uuid>.extract.md` per uuid — and nothing
         else. It does **not** ingest and runs no `tiger-memory` command.
@@ -90,6 +92,16 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
         short confirmation** (e.g. "carded N uuids"). The bulky bundle must
         never be returned to you (B8 fresh-window) — it lives only in the
         card. A `NONE`/`NONE`/`NONE` card is a valid, expected outcome.
+      - **`@@MUST_REMEMBER@@` freshness touches**: besides new
+        `KIND:`/`MEMO:` blocks, the section may include `TOUCH: <id>`
+        blocks (zero or more, mixed freely) — one per existing item from
+        the embedded list that this session *relied on* (followed it, was
+        constrained by it, the subject came up again). The sub-agent
+        should touch those items rather than re-emit them as new memos:
+        ingest refreshes a touched item's freshness (`last_used` +
+        `repeat_count`), and an item nobody touches for
+        `must_remember.forget_days` becomes forget-eligible at
+        compaction. Unknown ids are ignored at ingest.
       - **The `@@TOPICS@@` grammar**: one block per topic touched —
         `TOPIC:` (an existing slug from the embedded routing list, or
         exactly `NEW`), `NAME:` (required for `NEW`), `SUMMARY:` (required
