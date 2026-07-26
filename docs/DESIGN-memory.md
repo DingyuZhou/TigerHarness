@@ -108,8 +108,9 @@ skills/topics and the flat entry length for must_remember;
   a `usage_count`, and an `importance` scalar (`log1p(usage_count)`,
   `skills.skill_importance` — monotonic in usage, no continuous
   time-decay; recency is a keep-rank tie-break).
-- **Index**: one compact block per skill (name, trigger, one-line lesson,
-  pointer to its detail file), ordered importance-desc
+- **Index**: one compact block per skill (name, trigger, and the pointer
+  to its detail file — the lesson itself lives only in the detail),
+  ordered importance-desc
   (`indexes.render_skill_index`). Bounded by `index_max_length` /
   `index_overflow_limit` — the skills store is now **index-length bounded,
   not count bounded** (the old `max_count` is gone).
@@ -193,9 +194,10 @@ skills/topics and the flat entry length for must_remember;
   window is protected from forget/merge during compaction.
 - **Forget** (`forget_days`, default 60; must be ≥ `fresh_days`, else
   `ConfigError`): a topic not touched for this long is forget-eligible.
-  When the topic index is over `max`, `compact-plan`'s deterministic
-  pre-pass drops stale topics **oldest-first** — no AI judgement needed for
-  "not refreshed in two months".
+  When the topic index is at/over its `overflow_limit` (the hysteresis
+  trigger), `compact-plan`'s deterministic pre-pass drops stale topics
+  **oldest-first** until the index is back at or under `max` — no AI
+  judgement needed for "not refreshed in two months".
 - **Merge**: compaction may fold near-duplicate topics into one (union of
   details, one summary, newest `last_used`, summed touches) via the
   `@@TOPIC_ROSTER@@` card actions (§6).
@@ -213,9 +215,12 @@ Scans the three stores. First the **deterministic pre-passes**: exact
 duplicate memos (same kind + whitespace/case-normalized text) and exact
 duplicate skills are merged loss-free into their first occurrence (repeat
 and usage counters summed — sweeps re-capture the same directive verbatim,
-so this alone is often enough); then topics stale beyond `forget_days`
-are dropped oldest-first while the topic index is over `index_max_length`
-(never touching a topic inside the window). Then, for
+so this alone is often enough); then, **only when the topic index is
+at/over its `overflow_limit`** (hysteresis — the pre-pass never fires
+inside the `max ≤ n < overflow_limit` band), topics stale beyond
+`forget_days` are dropped oldest-first until the index is back at or
+under `index_max_length` (never touching a topic inside the stale
+window). Then, for
 every surface still **at/over its overflow limit**, it writes one prompt
 under `<root>/.compact-staging/` (templates `compact_*.md` in
 `summarizers/prompts/default/v1/`) plus `manifest.json`. In the
@@ -232,8 +237,20 @@ manifest:
 ```
 
 Target kinds: `must_remember`, `skills` (the index roster), `topic_roster`,
-`topic_detail` (carries `slug`), `skill_detail` (carries `entry_id`). An
-empty `targets` list means nothing needs compacting.
+`topic_detail` (carries `slug`), `skill_detail` (carries `entry_id`). The
+`must_remember` and `skills` targets also carry `snapshot_ids` — the ids
+of the entries their prompt saw at plan time (see §6.3). An empty
+`targets` list means nothing needs compacting.
+
+**The deferral rule.** When a roster/index target is staged (`skills` or
+`topic_roster`), that surface's per-detail targets (`skill_detail` /
+`topic_detail`) are **deferred to the next sweep**, not staged in the
+same run: a roster merge folds one entry's body into another, so a
+detail card authored against the pre-merge body would clobber the
+merged-in knowledge, and the skills index card is a full replacement
+roster, so a same-run detail rewrite would either dangle or be
+overwritten. The still-oversized detail simply re-stages next sweep
+against the settled store (the deferral is logged).
 
 ### 6.2 Card sub-agents (Task tool, subscription-billed)
 
@@ -275,6 +292,23 @@ the sweep's subsequent `rebuild`). Returns an `ApplyReport`
   fresh normal entries, lowest (repeat_count, recency) first; **(3)** only
   as the very last resort, a *stale* `operator_explicit` directive,
   oldest first — each such drop is logged as a warning, never silent.
+  For a `topic_detail` card the ladder is: drop oldest **dated sections**
+  first, then oldest lines, then a hard truncate that keeps the **newest
+  tail** — so a detail card cannot be accepted oversized either;
+  `still_over` remains reachable there only through config pathologies
+  (e.g. a `detail_max_length` smaller than the rendering overhead).
+- **Snapshot survival + freshness carry-over**: a replacement card (the
+  `must_remember` / `skills` kinds) replaces only the **plan-time
+  snapshot** its prompt saw — the `snapshot_ids` recorded in the
+  manifest. Entries written between plan and apply (a `pin`, a
+  concurrent ingest) **survive** the replacement (the deterministic trim
+  still enforces the bound over the merged result). And a memo or skill
+  the card *kept* inherits its predecessor's identity and signals — a
+  memo by (kind + whitespace/case-normalized text) keeps its `id`,
+  `created_at`, `last_used`, and `repeat_count`; a skill by
+  case-insensitive name keeps its `id`, `usage_count`, `created_at`, and
+  `last_used` — so compaction never resets the TOUCH clock, the keep-rank,
+  or an id-addressed detail filename of a surviving entry.
 - **Protections beat convergence**: content that may not be trimmed
   (*fresh* operator-explicit directives, fresh topics) is never
   force-dropped; a surface that cannot shrink without touching it lands
@@ -384,9 +418,8 @@ protected-fresh and forget-eligible).
 | `sweep.py` | team-sweep gating (claim / done / complete / release) |
 | `cursor.py` | per-session high-water-mark cursors (`.sweep-cursors.json`, ADR 0006 Part 2) |
 | `prefilter.py` | transcript pre-filter (drop tool results / system reminders before staging) |
-| `metrics.py` | lightweight rebuild instrumentation stamped into `state.json` |
 | `store.py` | on-disk layout (`Paths`) + crash-safe serialization (`atomic_write`, `atomic_swap_dir`, state helpers) |
-| `sources/` | source adapters (claude_code, slack_thread, docs, journal_worklog, auto_memory) |
+| `sources/` | source adapters: `ClaudeTranscriptAdapter` (both `claude_code` and, via the threads.json map, `slack_thread`) and `JournalWorklogAdapter` are the live sweep-path adapters; `DocsAdapter` exists but is dropped by `_build_adapters`; `auto_memory` has no adapter |
 | `summarizers/` | the prompt-template tree (`prompts/default/v1/` — `extract_memory.md`, `chunk_condense.md`, the `compact_*.md` set) + the pluggable in-process backends |
 | `cli.py` | `init` / `rebuild` / `pin` / `migrate-to-topics` / `state` / `plan` / `ingest-extraction` / `build-reduce-prompts` / `ingest-staged` / `compact-plan` / `compact-apply` / `sweep-*` / `check` |
 

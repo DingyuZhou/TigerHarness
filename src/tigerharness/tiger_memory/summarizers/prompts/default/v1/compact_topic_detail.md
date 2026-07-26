@@ -23,7 +23,8 @@ Current body size: {current_chars} characters. Target: **at most
 ## Output contract — STRICT
 
 Emit exactly this marker on its own line, then the FULL rewritten body
-(nothing else):
+(nothing else). There is NO `NONE` option for this card — always emit
+the rewritten body:
 
 ```
 @@TOPIC_DETAIL@@

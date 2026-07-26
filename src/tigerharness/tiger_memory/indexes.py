@@ -18,7 +18,13 @@ is stable.
 """
 from __future__ import annotations
 
-from .entries import MustRememberEntry, SkillEntry, TopicEntry, topic_slug
+from .entries import (
+    EntryError,
+    MustRememberEntry,
+    SkillEntry,
+    TopicEntry,
+    topic_slug,
+)
 
 # Detail files land under these briefing subdirectories.
 SKILLS_DETAIL_DIR = "skills"
@@ -32,9 +38,16 @@ def skill_detail_filename(entry: SkillEntry) -> str:
     """Stable, human-readable, collision-free detail filename for one skill.
 
     Skill names are not unique until compaction merges near-duplicates, so
-    the entry id is part of the name.
+    the entry id is part of the name. A name with no sluggable characters
+    (blocked at extraction since ADR 0007, but a pre-existing store may
+    carry one) falls back to a bare id filename rather than poisoning
+    every rebuild with an EntryError.
     """
-    return f"{topic_slug(entry.name)}-{entry.id}.md"
+    try:
+        slug = topic_slug(entry.name)
+    except EntryError:
+        slug = "skill"
+    return f"{slug}-{entry.id}.md"
 
 
 def topic_detail_filename(entry: TopicEntry) -> str:

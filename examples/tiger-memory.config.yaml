@@ -8,8 +8,9 @@ agent:
   role: "A research assistant specializing in technical topics."
 
 store:
-  # Where to persist the memory store (the three bounded stores +
-  # briefing live under journal/ here). Auto-appends the agent slug.
+  # Where to persist the memory store (the three bounded stores live
+  # under <root>/journal/; the rendered session-start briefing under
+  # <root>/briefing/). Auto-appends the agent slug.
   root: ~/.local/share/tiger-memory/researcher
 
 sources:
@@ -20,7 +21,8 @@ sources:
     project_path: ~/.claude/projects/-home-user-myproject/
 
 summarizer:
-  # Choices: anthropic, mock (for testing without API spend).
+  # The only registered backend is `anthropic` (a mock exists but is
+  # test-internal — reserved for the --mock CLI flag, not registered).
   # Used only by the in-process extraction path; the live subscription
   # path stages prompts for Task sub-agents instead. Vendor-neutral.
   backend: anthropic

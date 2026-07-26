@@ -29,7 +29,7 @@ self-prunes instead of growing forever.
 ## Architecture
 
 ```
-Sources (Claude transcripts, Slack threads, journal worklogs, docs)
+Sources (Claude transcripts, Slack-bridge threads, journal worklogs)
     |
     v
 Extraction (lifecycle.py): a finished session -> a strict
@@ -82,7 +82,8 @@ an existing topic (appending a dated bullet to its detail body, bumping its
 touch count and freshness) or creates a new one; the index orders topics
 most-recently-touched first; a topic touched within `fresh_days` is
 protected from forget/merge; a topic untouched for `forget_days` is dropped
-deterministically (oldest first) when the index is over its bound; and
+deterministically (oldest first, until the index is back at or under
+`max`) once the index is at/over its `overflow_limit`; and
 compaction may merge near-duplicate topics or tighten summaries.
 
 ## Key modules
@@ -103,7 +104,7 @@ compaction may merge near-duplicate topics or tighten summaries.
 | `sweep.py` | team-sweep gating (claim / done / complete / release) |
 | `cursor.py` | per-session incremental-sweep cursors (ADR 0006 Part 2) |
 | `briefing.py` | assemble the session-start briefing (indexes + details + notice) |
-| `sources/` | source adapters (claude_code, slack_thread, docs, journal_worklog, auto_memory) |
+| `sources/` | source adapters. Live on the sweep path: `ClaudeTranscriptAdapter` (both `claude_code` and, via the threads.json map, `slack_thread`) and `JournalWorklogAdapter`. `DocsAdapter` exists but `lifecycle._build_adapters` drops `docs` sources; `auto_memory` has no adapter at all |
 | `summarizers/` | the prompt templates (`prompts/default/v1/`) + pluggable in-process backends |
 | `state.py` | per-store JSON state snapshot |
 
@@ -207,7 +208,7 @@ executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
 | `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `operator_explicit`** (the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
 | `migrate-to-topics [--apply]` | **one-off, idempotent** (ADR 0007): retire `diary.md` / `fuzzy.md` / `emotional.md` (+ `.rejected` sidecars) from `journal/` to `<root>/retired/` and create an empty `topics.md`. **Dry-run is the default** (preview only); `--apply` performs it |
 | `state` | JSON snapshot of the three stores: per store `count`, `chars` (rendered-index chars for skills/topics, entry chars for must_remember), `max`, `over_overflow`, plus `details_over_overflow` for skills/topics |
-| `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks); each prompt embeds the persona's current topic routing list and must-remember item list (for `TOUCH:` blocks) |
+| `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks); a **still-active** session is also staged once its post-cursor prefiltered slice exceeds `budgets.active_slice_threshold_chars` (cut at a whole-turn boundary, holding back the live tail turn whenever a completed boundary exists; ADR 0006 Part 2). Each prompt embeds the persona's current topic routing list and must-remember item list (for `TOUCH:` blocks) |
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
 | `build-reduce-prompts` | reduce step (ADR 0006 Part 1): assemble `<uuid>.prompt.md` from a map_reduce item's staged chunk digests |
 | `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free). Exit 0 clean / 1 ≥1 malformed card / 2 no plan manifest |
@@ -270,7 +271,10 @@ DETAIL: <the new durable facts from THIS session — always required>
 
 Existing slug → the detail is appended (dated) to the topic body, its
 freshness and touch count update. `NEW` → a topic is minted. A malformed
-*bundle* (missing/out-of-order markers) is rejected before any write; an
+*bundle* (missing or out-of-order markers, or a **duplicated standalone
+marker** — a bundle must emit each marker exactly once; a duplicate,
+e.g. an echoed contract sample, makes the split ambiguous and the whole
+bundle MALFORMED) is rejected before any write; an
 individual malformed *block* is skipped. `NONE` for a store is a valid,
 expected outcome — most sessions add little.
 
@@ -279,9 +283,11 @@ expected outcome — most sessions add little.
 When a surface crosses its `overflow_limit`, the sweep stages a compaction
 (same subscription-rail shape as extraction; no in-process model call):
 
-1. **`compact-plan`** (non-AI) first drops topics stale beyond
-   `forget_days` oldest-first while the topic index is over `max` (no AI
-   needed for "not refreshed in months"), then writes one prompt per
+1. **`compact-plan`** (non-AI) first runs the deterministic stale-topic
+   pre-pass — only once the topic index is **at/over its
+   `overflow_limit`** (hysteresis), topics stale beyond `forget_days`
+   drop oldest-first until the index is back at or under `max` (no AI
+   needed for "not refreshed in months") — then writes one prompt per
    still-over surface under `.compact-staging/`: tighten `must_remember`
    (operator-explicit entries shown as protected, carried over verbatim),
    merge/forget `skills`, shrink the `topic_roster` (forget / merge /
@@ -290,7 +296,12 @@ When a surface crosses its `overflow_limit`, the sweep stages a compaction
    must_remember prompt, an item untouched for more than
    `must_remember.forget_days` is annotated **`[forget-eligible]`** with
    its age — no sweep TOUCHed it — and the card is told to drop it unless
-   it is still clearly valuable despite its age.
+   it is still clearly valuable despite its age. **Deferral rule:** when
+   the `skills` index or `topic_roster` target is staged, that surface's
+   per-detail targets are deferred to the next sweep (a roster merge
+   would clobber a same-run detail rewrite; a full index replacement
+   would dangle it) — the oversized detail re-stages against the settled
+   store.
 2. **Card sub-agents** (Task tool, subscription-billed) each write one
    `<key>.card.md` per the prompt's embedded strict contract.
 3. **`compact-apply`** (non-AI) validates each card, applies it atomically
@@ -303,7 +314,14 @@ When a surface crosses its `overflow_limit`, the sweep stages a compaction
    last resort a *stale* `operator_explicit` directive (logged as a
    warning). A *fresh* `operator_explicit` is never dropped, and fresh
    topics are never force-dropped: a surface that cannot shrink without
-   them is reported in `still_over` and retried next sweep. Malformed
+   them is reported in `still_over` and retried next sweep. **Snapshot
+   survival:** a replacement card (`must_remember` / `skills`) replaces
+   only the plan-time snapshot its prompt saw (the manifest's
+   `snapshot_ids`) — entries written between plan and apply survive; and
+   a kept memo (matched by kind + normalized text) or kept skill
+   (matched by name) inherits its predecessor's id and
+   freshness/usage signals, so compaction never resets the TOUCH clock
+   or keep-rank of a survivor. Malformed
    cards are reported and kept (exit 1); applied prompt+card files are
    deleted.
 
@@ -458,19 +476,17 @@ specialist with *only* worklog activity and no Slack threads is still swept —
 its new worklog entries surface at `tiger-memory plan` time through this
 source. See [`tiger-memory-sweep-protocol.md`](tiger-memory-sweep-protocol.md).
 
-## The auto_memory source (legacy)
+## The auto_memory and docs source kinds (config-only, no live adapter)
 
-One more source kind the config validator accepts is `auto_memory`. It
-concatenates the `*.md` files under a `path:` directory into a single
-synthetic record (Claude Code's auto-memory dir), extracted like any other
-source. It is retained for backward compatibility; new setups should prefer
-the explicit sources above.
-
-```yaml
-sources:
-  - kind: auto_memory
-    path: ~/.claude/projects/<slug>/memory/
-```
+The config validator also accepts `auto_memory` and `docs` as source
+kinds — **for forward-compatibility only**. Neither carries a live
+adapter on the sweep path: `lifecycle._build_adapters` builds adapters
+only for `claude_code` (which also covers `slack_thread` sessions via
+the threads.json map) and `journal_worklog`; a configured `auto_memory`
+or `docs` source is silently inert (a `DocsAdapter` class still exists
+in `sources/` but nothing constructs it). Listing them does not break a
+config, but they contribute nothing to extraction — use the live source
+kinds above.
 
 ## Adding a new summarizer vendor
 

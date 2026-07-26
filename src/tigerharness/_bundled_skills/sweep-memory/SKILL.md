@@ -243,9 +243,10 @@ d. **Compact what outgrew its bound** (staged, same sub-agent shape as
    $TM --config "<target.config_path>" compact-plan
    ```
 
-   Non-AI. It first runs the deterministic stale-topic forget (topics
-   not refreshed within `forget_days` drop oldest-first while the topic
-   index is over its `max`), then stages one prompt per surface still
+   Non-AI. It first runs the deterministic stale-topic forget (only once
+   the topic index is at/over its `overflow_limit`, topics not refreshed
+   within `forget_days` drop oldest-first until the index is back at or
+   under its `max`), then stages one prompt per surface still
    at/over its `overflow_limit` under `<store>/.compact-staging/` and
    prints a manifest (`targets`: kind / key / `prompt_path` /
    `card_path`). **`targets: []` -> skip straight to step e** (the
@@ -263,8 +264,11 @@ d. **Compact what outgrew its bound** (staged, same sub-agent shape as
    ```
 
    Non-AI, one process. It validates every card, applies them atomically
-   (operator-explicit directives are carried over verbatim -- a card can
-   never drop them; fresh topics are protected from forget/merge), and
+   (fresh operator-explicit directives are carried over verbatim -- a
+   card cannot drop them, only mark one STALE for a downgrade; a stale
+   one, untouched past `forget_days`, may be forgotten by the
+   deterministic trim as a logged last resort; fresh topics are
+   protected from forget/merge), and
    deterministically trims any surface a card left over its `max`. It
    prints `{"applied": [...], "skipped_no_card": [...], "malformed":
    [...], "forced_trims": [...], "still_over": [...]}`; exit `1` means a
@@ -318,8 +322,11 @@ process several `targets` concurrently (each its own plan -> stacks ->
   each skill's procedure is a separate detail file read on demand.
 - **`must_remember`** -- external directives (`operator_explicit` /
   `preference` / `decision` / `incident`). Length-bounded (characters).
-  `operator_explicit` directives are protected: compaction carries them
-  over verbatim and can never drop one.
+  `operator_explicit` directives are protected: compaction carries
+  **fresh** ones over verbatim. One untouched past `forget_days` may be
+  relevance-downgraded (STALE -> `decision`) or, as a logged last
+  resort, forgotten by the deterministic trim -- sweeps TOUCH items that
+  come up, which is what keeps live directives fresh.
 - **`topics`** -- named, growing bodies of durable project knowledge.
   The rendered **topic index** (slug + freshness + one-line summary,
   freshest first) is length-bounded and is the only topic surface loaded
@@ -344,7 +351,8 @@ process several `targets` concurrently (each its own plan -> stacks ->
   one.
 - **Bounded + self-pruning.** Every surface has a `max` +
   `overflow_limit` (hysteresis); compaction only stages over the
-  overflow limit, never drops an `operator_explicit` directive, and
+  overflow limit, never drops a *fresh* `operator_explicit` directive
+  (a stale one goes only as a logged last resort), and
   never forgets/merges a fresh topic.
 - **Subscription-safe** -> the executor is always the Task sub-agent
   (extraction AND compaction).

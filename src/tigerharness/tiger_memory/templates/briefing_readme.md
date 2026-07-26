@@ -52,9 +52,12 @@ Every surface is bounded (characters, never tokens). When an index or a
 detail file outgrows its must-compact bound, the sweep stages a
 compaction: summaries tighten, near-duplicate topics merge, and topics
 that have not been refreshed for a long time are forgotten from the
-index. Operator-explicit directives are never dropped by compaction, and
-fresh topics (touched within the fresh window) are never forgotten or
-merged away.
+index. Fresh operator-explicit directives are carried over verbatim by
+compaction; one untouched past its forget window may be relevance-
+downgraded (marked STALE, rejoining the normal pool) or, as a logged
+last resort, forgotten. Sweeps TOUCH items that come up in a session —
+that is what keeps live rules fresh and protected. Fresh topics
+(touched within the fresh window) are never forgotten or merged away.
 
 ## When you learn something worth remembering
 

@@ -18,8 +18,11 @@ that still earn a line.
   covering both; procedures may combine).
 - **Drop** skills that stopped earning their line: lowest importance,
   longest unused, superseded by a better skill.
-- **Tighten** names and triggers — the index renders one line per skill
-  from NAME + TRIGGER, so shorter is smaller.
+- **Tighten** triggers — the index renders one line per skill from NAME
+  + TRIGGER, so shorter is smaller. Keep a kept skill's NAME unchanged
+  when you can: usage history carries over by name, and a renamed skill
+  restarts its keep-rank. (A merged skill naturally takes one
+  survivor's name.)
 - Keep every skill's PROCEDURE complete enough to act on (<=
   {procedure_max_words} words each).
 

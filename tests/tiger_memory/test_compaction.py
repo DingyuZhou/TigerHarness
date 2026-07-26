@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -324,21 +325,21 @@ def test_plan_stages_every_target_kind(tmp_path):
     manifest = cp.compact_plan(cfg, store, now=NOW)
     assert manifest["dropped_stale_topics"] == []  # over-bound but nothing stale
     targets = {t["kind"]: t for t in manifest["targets"]}
-    assert set(targets) == {
-        "topic_roster", "topic_detail", "skills", "skill_detail", "must_remember",
-    }
-    assert len(manifest["targets"]) == 5
+    # Detail targets are DEFERRED whenever their index-level target is also
+    # staged (a roster merge / index replacement would clobber or dangle a
+    # same-run detail rewrite) — so this plan stages the three index-level
+    # kinds only; the oversized details re-stage next sweep.
+    assert set(targets) == {"topic_roster", "skills", "must_remember"}
+    assert len(manifest["targets"]) == 3
 
-    # Manifest shape: keys, staged paths, extra addressing fields.
+    # Manifest shape: keys, staged paths, snapshot ids on replacement kinds.
     staging = store.root / cp.STAGING_DIR_NAME
     for t in manifest["targets"]:
         assert Path(t["prompt_path"]).parent == staging
         assert Path(t["prompt_path"]).exists()
         assert t["card_path"] == str(staging / f"{t['key']}{cp.CARD_SUFFIX}")
-    assert targets["topic_detail"]["slug"] == "long-topic"
-    assert targets["topic_detail"]["key"] == "topic_detail.long-topic"
-    assert targets["skill_detail"]["entry_id"] == s_big.id
-    assert targets["skill_detail"]["key"] == f"skill_detail.{s_big.id}"
+    assert set(targets["skills"]["snapshot_ids"]) == {s_hot.id, s_big.id}
+    assert set(targets["must_remember"]["snapshot_ids"]) == {op.id, pref.id}
     on_disk = json.loads((staging / "manifest.json").read_text())
     assert on_disk == manifest
 
@@ -351,9 +352,6 @@ def test_plan_stages_every_target_kind(tmp_path):
     skills_prompt = Path(targets["skills"]["prompt_path"]).read_text()
     assert skills_prompt.index("Hot Skill") < skills_prompt.index("Big Skill")
 
-    # Detail prompts embed the full body/procedure.
-    assert "D" * 300 in Path(targets["topic_detail"]["prompt_path"]).read_text()
-    assert "P" * 300 in Path(targets["skill_detail"]["prompt_path"]).read_text()
 
     # must_remember prompt: mission text, protected block, remaining budget
     # (max_length 30 minus the 9-char protected memo = 21).
@@ -362,6 +360,38 @@ def test_plan_stages_every_target_kind(tmp_path):
     assert "MEMO: OP-KEEP!!" in mr_prompt
     assert "x" * 35 in mr_prompt
     assert "at most 21" in mr_prompt
+
+
+def test_plan_stages_detail_kinds_when_indexes_fit(tmp_path):
+    """Detail targets stage (with slug/entry_id addressing and full embedded
+    bodies) when the indexes themselves are under bound — no deferral."""
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "skills": {
+            "index_max_length": 4000, "index_overflow_limit": 6000,
+            "detail_max_length": 200, "detail_overflow_limit": 260,
+        },
+        "topics": {
+            "index_max_length": 4000, "index_overflow_limit": 6000,
+            "detail_max_length": 200, "detail_overflow_limit": 260,
+        },
+    })
+    t_long = _topic(
+        "Long Topic", last=FRESH,
+        text="## 2026-07-01\n- " + "D" * 300,
+    )
+    bstore.save_atomic(STORE_TOPICS, [t_long])
+    s_big = _skill("Big Skill", trigger="t", proc="P" * 300)
+    bstore.save_atomic(STORE_SKILLS, [s_big])
+
+    manifest = cp.compact_plan(cfg, store, now=NOW)
+    targets = {t["kind"]: t for t in manifest["targets"]}
+    assert set(targets) == {"topic_detail", "skill_detail"}
+    assert targets["topic_detail"]["slug"] == "long-topic"
+    assert targets["topic_detail"]["key"] == "topic_detail.long-topic"
+    assert targets["skill_detail"]["entry_id"] == s_big.id
+    assert targets["skill_detail"]["key"] == f"skill_detail.{s_big.id}"
+    assert "D" * 300 in Path(targets["topic_detail"]["prompt_path"]).read_text()
+    assert "P" * 300 in Path(targets["skill_detail"]["prompt_path"]).read_text()
 
 
 def test_plan_must_remember_no_charter_no_protected(tmp_path):
@@ -800,7 +830,11 @@ def test_apply_topic_detail_trims_oldest_sections(tmp_path):
     assert t.text == s2 + s3
 
 
-def test_apply_topic_detail_single_section_cannot_trim(tmp_path):
+def test_apply_topic_detail_single_oversized_section_hard_trims(tmp_path):
+    """Convergence must not depend on the card's formatting discipline: a
+    body with no droppable dated sections still gets line-dropped and, at
+    the very end, hard-truncated (newest tail kept) — never accepted
+    oversized forever."""
     body = "## 2026-07-01\n- " + "x" * 300
     cfg, store, bstore, staging, _ = _topic_detail_env(tmp_path, "alpha", memory={
         "topics": {"detail_max_length": 100, "detail_overflow_limit": 150},
@@ -809,12 +843,14 @@ def test_apply_topic_detail_single_section_cannot_trim(tmp_path):
     _card(staging, "topic_detail.alpha", "@@TOPIC_DETAIL@@\n" + body)
     report = cp.compact_apply(cfg, store, now=NOW)
     assert report.forced_trims == ["topic_detail.alpha"]
-    assert report.still_over == ["topic_detail.alpha"]
+    assert report.still_over == []
     [t] = bstore.load(STORE_TOPICS)
-    assert t.text == body  # nothing droppable: one section stays whole
+    assert bstore.detail_chars(t) <= 100
+    assert t.text.startswith("…")
+    assert t.text.endswith("x")          # the newest tail survives
 
 
-def test_apply_topic_detail_trim_exhausts_to_last_section_still_over(tmp_path):
+def test_apply_topic_detail_trim_exhausts_sections_then_lines(tmp_path):
     s1 = "## 2026-05-01\n- " + "a" * 200 + "\n\n"
     s2 = "## 2026-07-01\n- " + "b" * 200
     cfg, store, bstore, staging, _ = _topic_detail_env(tmp_path, "alpha", memory={
@@ -823,9 +859,42 @@ def test_apply_topic_detail_trim_exhausts_to_last_section_still_over(tmp_path):
     bstore.save_atomic(STORE_TOPICS, [_topic("Alpha")])
     _card(staging, "topic_detail.alpha", "@@TOPIC_DETAIL@@\n" + s1 + s2)
     report = cp.compact_apply(cfg, store, now=NOW)
-    assert report.still_over == ["topic_detail.alpha"]
+    assert report.still_over == []
     [t] = bstore.load(STORE_TOPICS)
-    assert t.text == s2  # trimmed down to the newest section, still over
+    assert bstore.detail_chars(t) <= 100
+    assert "a" not in t.text             # oldest section dropped first
+    assert t.text.endswith("b")          # newest content survives the trim
+
+
+def test_apply_topic_detail_bullets_only_body_converges(tmp_path):
+    """A headings-free card (bullets only) used to wedge over-max forever —
+    the line-drop fallback now converges it."""
+    body = "\n".join(f"- fact {i} " + "z" * 40 for i in range(10))
+    cfg, store, bstore, staging, _ = _topic_detail_env(tmp_path, "alpha", memory={
+        "topics": {"detail_max_length": 150, "detail_overflow_limit": 200},
+    })
+    bstore.save_atomic(STORE_TOPICS, [_topic("Alpha")])
+    _card(staging, "topic_detail.alpha", "@@TOPIC_DETAIL@@\n" + body)
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.still_over == []
+    [t] = bstore.load(STORE_TOPICS)
+    assert bstore.detail_chars(t) <= 150
+    assert "fact 9" in t.text            # latest bullets survive
+
+
+def test_apply_topic_detail_none_card_is_malformed(tmp_path):
+    """`NONE` is a valid sibling-card verdict but would erase a topic's whole
+    history here — rejected as malformed, store untouched."""
+    cfg, store, bstore, staging, _ = _topic_detail_env(tmp_path, "alpha", memory={
+        "topics": {"detail_max_length": 100, "detail_overflow_limit": 150},
+    })
+    original = _topic("Alpha")
+    bstore.save_atomic(STORE_TOPICS, [original])
+    _card(staging, "topic_detail.alpha", "@@TOPIC_DETAIL@@\nNONE\n")
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert [m["key"] for m in report.malformed] == ["topic_detail.alpha"]
+    [t] = bstore.load(STORE_TOPICS)
+    assert t.text == original.text
 
 
 # ----- compact_apply: skill_detail ---------------------------------------------------
@@ -1193,6 +1262,56 @@ def test_apply_mr_stale_protected_dropped_as_last_resort(tmp_path, caplog):
     assert "last resort" in caplog.text
 
 
+def test_apply_stale_backticked_id_still_downgrades(tmp_path):
+    """The prompt displays ids backticked; a card echoing the displayed
+    form must still resolve — a silently-missed STALE would leave the
+    directive protected and hand the decision to the deterministic trim."""
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 2000, "overflow_limit": 3000},
+    })
+    op_stale = _memo("stale directive", kind="operator_explicit")
+    bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale])
+    staging = _stage(store, [
+        _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,
+                "must_remember"),
+    ])
+    _card(staging, "must_remember", (
+        "@@MUST_REMEMBER@@\n"
+        f"STALE: `{op_stale.id}`\n"
+    ))
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["must_remember"]
+    [e] = bstore.load(STORE_MUST_REMEMBER)
+    assert e.kind == "decision" and e.id == op_stale.id
+
+
+def test_apply_roster_backticked_refs_resolve(tmp_path):
+    """Backtick-echoed TOPIC/INTO/FROM addresses still resolve — forget,
+    merge, and summary all land instead of degrading to no-ops."""
+    cfg, store, bstore, staging, _ = _roster_env(tmp_path)
+    alpha = _topic("Alpha", last="2026-07-01T00:00:00Z",
+                   text="## 2026-06-01\n- a", touch=2)
+    beta = _topic("Beta", last=NOT_FRESH, text="## 2026-05-01\n- b", touch=3)
+    delta = _topic("Delta", last=NOT_FRESH)
+    zeta = _topic("Zeta", last=NOT_FRESH)
+    bstore.save_atomic(STORE_TOPICS, [alpha, beta, delta, zeta])
+    _card(staging, "topic_roster", (
+        "@@TOPIC_ROSTER@@\n"
+        "ACTION: forget\nTOPIC: `delta`\n"
+        "\n"
+        "ACTION: merge\nINTO: `alpha`\nFROM: `beta`\n"
+        "\n"
+        "ACTION: summary\nTOPIC: `zeta`\nSUMMARY: zeta refreshed\n"
+    ))
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["topic_roster"]
+    by_slug = {t.slug: t for t in bstore.load(STORE_TOPICS)}
+    assert set(by_slug) == {"alpha", "zeta"}       # delta forgotten, beta merged
+    assert "- b" in by_slug["alpha"].text
+    assert by_slug["alpha"].touch_count == 5       # 2 + beta's 3
+    assert by_slug["zeta"].summary == "zeta refreshed"
+
+
 def test_apply_mr_fresh_protected_never_dropped_still_over(tmp_path):
     cfg, store, bstore = make_env(tmp_path, memory={
         "must_remember": {"max_length": 10, "overflow_limit": 15,
@@ -1209,3 +1328,213 @@ def test_apply_mr_fresh_protected_never_dropped_still_over(tmp_path):
     report = cp.compact_apply(cfg, store, now=NOW)
     assert cp.STORE_MUST_REMEMBER in report.still_over
     assert len(bstore.load(STORE_MUST_REMEMBER)) == 2   # both survive
+
+
+# ----- plan-time snapshot: post-plan writes survive the replacement card -------
+
+
+def test_apply_mr_post_plan_pin_survives_replacement(tmp_path):
+    """The card replaces only what its prompt SAW (the plan-time snapshot):
+    a pin landed between plan and apply is NOT in snapshot_ids and must
+    survive the wholesale replacement."""
+    cfg, store, bstore = make_env(tmp_path)
+    old = _memo("old junk seen by the plan")
+    pin = _memo("pinned after the plan", kind="decision")
+    bstore.save_atomic(STORE_MUST_REMEMBER, [old, pin])
+    staging = store.root / cp.STAGING_DIR_NAME
+    staging.mkdir(parents=True)
+    t = _target(staging, cp.KIND_MUST_REMEMBER, "must_remember",
+                snapshot_ids=[old.id])
+    _stage(store, [t])
+    _card(staging, "must_remember",
+          "@@MUST_REMEMBER@@\nKIND: preference\nMEMO: compacted memo\n")
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["must_remember"]
+    entries = bstore.load(STORE_MUST_REMEMBER)
+    assert [e.text for e in entries] == ["compacted memo", "pinned after the plan"]
+    survivor = entries[1]
+    assert survivor.id == pin.id                    # untouched, not re-minted
+
+
+def test_apply_skills_post_plan_write_survives_and_kept_id_carries(tmp_path):
+    """Same snapshot rule for skills — plus id carry-over: a kept skill
+    (name match within the snapshot) keeps its OLD id, because detail
+    filenames and future detail targets are id-addressed."""
+    cfg, store, bstore = make_env(tmp_path)
+    kept = _skill("Deploy Fix", usage=5,
+                  created="2026-01-01T00:00:00Z", last="2026-05-01T00:00:00Z")
+    post = _skill("Post Plan Skill", trigger="pt", proc="pp")
+    bstore.save_atomic(STORE_SKILLS, [kept, post])
+    staging = store.root / cp.STAGING_DIR_NAME
+    staging.mkdir(parents=True)
+    t = _target(staging, cp.KIND_SKILLS, "skills", snapshot_ids=[kept.id])
+    _stage(store, [t])
+    _card(staging, "skills",
+          "@@SKILLS@@\nNAME: Deploy Fix\nTRIGGER: nt\nPROCEDURE: np\n")
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["skills"]
+    by_name = {e.name: e for e in bstore.load(STORE_SKILLS)}
+    assert set(by_name) == {"Deploy Fix", "Post Plan Skill"}
+    assert by_name["Deploy Fix"].id == kept.id      # OLD id kept (id-addressed)
+    assert by_name["Deploy Fix"].usage_count == 5
+    assert by_name["Deploy Fix"].procedure == "np"
+    assert by_name["Post Plan Skill"].id == post.id  # post-plan write survives
+
+
+# ----- must_remember freshness carry-over (kept memos keep the TOUCH clock) ----
+
+
+def test_apply_mr_kept_memo_inherits_identity_and_freshness(tmp_path):
+    """A card memo matching a snapshot entry (kind + normalized text)
+    inherits id / created_at / last_used / repeat_count — compaction must
+    not reset the TOUCH clock of a surviving memo."""
+    cfg, store, bstore = make_env(tmp_path)
+    kept = _memo("Targeted git add, never -A", repeats=7,
+                 last="2026-05-01T00:00:00Z")
+    dropped = _memo("obsolete memo", kind="decision")
+    bstore.save_atomic(STORE_MUST_REMEMBER, [kept, dropped])
+    staging = store.root / cp.STAGING_DIR_NAME
+    staging.mkdir(parents=True)
+    t = _target(staging, cp.KIND_MUST_REMEMBER, "must_remember",
+                snapshot_ids=[kept.id, dropped.id])
+    _stage(store, [t])
+    # Whitespace/case differences still match the normalized key.
+    _card(staging, "must_remember",
+          "@@MUST_REMEMBER@@\nKIND: preference\nMEMO: targeted GIT add,  never -A\n")
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["must_remember"]
+    [e] = bstore.load(STORE_MUST_REMEMBER)
+    assert e.id == kept.id
+    assert e.created_at == "2026-01-01T00:00:00Z"   # _memo helper's created_at
+    assert e.last_used == "2026-05-01T00:00:00Z"    # TOUCH clock NOT reset
+    assert e.repeat_count == 7
+    assert e.text == "targeted GIT add,  never -A"  # card's wording wins
+
+
+def test_apply_mr_duplicate_card_memos_inherit_only_once(tmp_path):
+    """The by_key map pops on inherit: two identical card memos cannot BOTH
+    claim the snapshot entry's identity — the second mints fresh."""
+    cfg, store, bstore = make_env(tmp_path)
+    kept = _memo("same memo", repeats=4, last="2026-05-01T00:00:00Z")
+    bstore.save_atomic(STORE_MUST_REMEMBER, [kept])
+    staging = store.root / cp.STAGING_DIR_NAME
+    staging.mkdir(parents=True)
+    t = _target(staging, cp.KIND_MUST_REMEMBER, "must_remember",
+                snapshot_ids=[kept.id])
+    _stage(store, [t])
+    _card(staging, "must_remember", (
+        "@@MUST_REMEMBER@@\n"
+        "KIND: preference\nMEMO: same memo\n"
+        "\n"
+        "KIND: preference\nMEMO: same memo\n"
+    ))
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.applied == ["must_remember"]
+    first, second = bstore.load(STORE_MUST_REMEMBER)
+    assert first.id == kept.id and first.repeat_count == 4      # inherited once
+    assert second.id != kept.id and second.repeat_count == 1    # minted fresh
+    assert second.created_at == NOW and second.last_used == NOW
+
+
+# ----- topic_detail convergence: header overhead alone can defeat the trim -----
+
+
+def test_apply_topic_detail_still_over_when_header_alone_exceeds_max(tmp_path):
+    """When the rendered header (name + summary line) alone exceeds the
+    detail max, even the hard truncate cannot converge — the surface is
+    reported still_over rather than silently accepted."""
+    cfg, store, bstore, staging, _ = _topic_detail_env(tmp_path, "alpha", memory={
+        "topics": {"detail_max_length": 100, "detail_overflow_limit": 150},
+    })
+    bstore.save_atomic(STORE_TOPICS, [_topic("Alpha", summary="S" * 200)])
+    _card(staging, "topic_detail.alpha", "@@TOPIC_DETAIL@@\n- tiny body\n")
+    report = cp.compact_apply(cfg, store, now=NOW)
+    assert report.forced_trims == ["topic_detail.alpha"]
+    assert report.still_over == ["topic_detail.alpha"]
+    [t] = bstore.load(STORE_TOPICS)
+    assert t.text.startswith("…")            # truncate ran; keep floor of 1 char
+
+
+# ----- plan pre-passes back off when a live session holds the store lock -------
+
+
+def _live_lock(store, store_name: str) -> Path:
+    """Simulate a live holder (our own PID) on one store's lock."""
+    lock = store.paths.journal / f".{store_name}.lock"
+    lock.write_text(f"{os.getpid()} 0")
+    return lock
+
+
+def test_plan_stale_forget_skipped_when_topics_locked(tmp_path, caplog):
+    old1 = _topic("Old One", last=STALE_1)
+    old2 = _topic("Old Two", last=STALE_2)
+    fresh = _topic("Fresh Topic", last=FRESH)
+    full = len(indexes.render_topic_index([old1, old2, fresh]))
+    cfg, store, bstore = make_env(tmp_path, memory={"topics": {
+        "index_max_length": full - 1, "index_overflow_limit": full,
+    }})
+    bstore.save_atomic(STORE_TOPICS, [old1, old2, fresh])
+    before = (store.paths.journal / "topics.md").read_text()
+    _live_lock(store, STORE_TOPICS)
+    with caplog.at_level(logging.WARNING, "tigerharness.tiger_memory.compaction"):
+        manifest = cp.compact_plan(cfg, store, now=NOW)
+    assert "locked by a live session" in caplog.text
+    assert manifest["dropped_stale_topics"] == []            # pre-pass skipped
+    assert (store.paths.journal / "topics.md").read_text() == before
+    # Still over: the roster target stages against the unmutated store.
+    assert [t["kind"] for t in manifest["targets"]] == ["topic_roster"]
+
+
+def test_plan_skills_dedup_skipped_when_skills_locked(tmp_path, caplog):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "skills": {"index_max_length": 4000, "index_overflow_limit": 6000},
+    })
+    bstore.save_atomic(STORE_SKILLS, [
+        _skill("Dup", "t", "p"), _skill("dup", "T", "P"),
+    ])
+    before = (store.paths.journal / "skills.md").read_text()
+    _live_lock(store, STORE_SKILLS)
+    with caplog.at_level(logging.WARNING, "tigerharness.tiger_memory.compaction"):
+        manifest = cp.compact_plan(cfg, store, now=NOW)
+    assert "locked by a live session" in caplog.text
+    assert manifest["deduped_skills"] == 0                   # reverted count
+    assert manifest["targets"] == []
+    assert (store.paths.journal / "skills.md").read_text() == before
+    assert len(bstore.load(STORE_SKILLS)) == 2               # nothing merged
+
+
+def test_plan_mr_dedup_skipped_when_must_remember_locked(tmp_path, caplog):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "must_remember": {"max_length": 4000, "overflow_limit": 6000},
+    })
+    bstore.save_atomic(STORE_MUST_REMEMBER, [
+        _memo("same memo"), _memo("same  MEMO"),
+    ])
+    before = (store.paths.journal / "must_remember.md").read_text()
+    _live_lock(store, STORE_MUST_REMEMBER)
+    with caplog.at_level(logging.WARNING, "tigerharness.tiger_memory.compaction"):
+        manifest = cp.compact_plan(cfg, store, now=NOW)
+    assert "locked by a live session" in caplog.text
+    assert manifest["deduped_must_remember"] == 0            # reverted count
+    assert manifest["targets"] == []
+    assert (store.paths.journal / "must_remember.md").read_text() == before
+    assert len(bstore.load(STORE_MUST_REMEMBER)) == 2
+
+
+# ----- deferral: index staged with NO oversized details defers nothing ---------
+
+
+def test_plan_skills_index_staged_without_oversized_details(tmp_path, caplog):
+    cfg, store, bstore = make_env(tmp_path, memory={
+        "skills": {
+            "index_max_length": 100, "index_overflow_limit": 120,
+            "detail_max_length": 4000, "detail_overflow_limit": 6000,
+        },
+    })
+    bstore.save_atomic(STORE_SKILLS, [
+        _skill("Skill One", trigger="T" * 80), _skill("Skill Two"),
+    ])
+    with caplog.at_level(logging.INFO, "tigerharness.tiger_memory.compaction"):
+        manifest = cp.compact_plan(cfg, store, now=NOW)
+    assert [t["kind"] for t in manifest["targets"]] == ["skills"]
+    assert "deferring" not in caplog.text        # no detail was over-bound

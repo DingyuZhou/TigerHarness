@@ -94,13 +94,16 @@ flow mirroring plan/ingest-staged:
   pre-passes need no AI: topics stale beyond `forget_days` are dropped
   outright when the index is over `max`.
 - Sub-agents (Task tool, subscription-billed) write one
-  `<surface>.compacted.md` card each, per the prompt's embedded strict
+  `<key>.card.md` card each (at the manifest's exact `card_path`), per
+  the prompt's embedded strict
   contract.
 - `tiger-memory compact-apply` (non-AI): validates each card, applies
-  atomically, regenerates indexes, and **guarantees convergence
+  it atomically to the entry store, and **guarantees convergence
   deterministically** — a card still over `max` is hard-trimmed by
   keep-rank/recency, never accepted oversized. Malformed cards are
   reported and skipped (surface stays flagged; next sweep retries).
+  compact-apply does **not** regenerate the briefing's rendered
+  indexes — the sweep's subsequent `rebuild` step does.
 
 The sweep skill's per-persona step becomes: `plan` → card sub-agents →
 `ingest-staged` → `compact-plan` → compact sub-agents (if any) →
@@ -109,7 +112,8 @@ The sweep skill's per-persona step becomes: `plan` → card sub-agents →
 ### Briefing / session-start load
 
 `briefing/` now contains `README.md`, `UNPROCESSED.md`,
-`must_remember.md` (≤ ~1000 chars), `skill_index.md`, `topic_index.md`,
+`must_remember.md` (small — bounded by the amended 2000/3000-char
+must_remember limits), `skill_index.md`, `topic_index.md`,
 and read-only copies of the detail files under `briefing/skills/` and
 `briefing/topics/`. The README instructs: **initial load is the three
 small files only**; open a detail file only when its index line is

@@ -78,9 +78,12 @@ def migrate_store(cfg: Config, store: Store, *, apply: bool) -> MigrationReport:
         for name in to_retire:
             src = journal / name
             dest = retired_dir / name
-            if dest.exists():
-                # A previous partial run already moved one; keep both.
-                dest = retired_dir / f"{src.stem}.again{src.suffix}"
+            n = 1
+            while dest.exists():
+                # A previous partial run already moved one; keep EVERY copy —
+                # rename() would silently replace an existing destination.
+                dest = retired_dir / f"{src.stem}.again{n}{src.suffix}"
+                n += 1
             src.rename(dest)
             log.info("migrate-to-topics: retired %s -> %s", src, dest)
 

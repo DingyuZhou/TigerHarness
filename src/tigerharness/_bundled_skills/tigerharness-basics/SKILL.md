@@ -14,7 +14,7 @@ rules win.
 
 ## The CLI at a glance
 
-Five sub-commands (run `tigerharness --help`):
+Six sub-commands (run `tigerharness --help`):
 
 - `tigerharness init` — scaffold a team and/or persona; also installs
   and refreshes these bundled skills.
@@ -23,6 +23,10 @@ Five sub-commands (run `tigerharness --help`):
 - `tigerharness journal` (alias: `j`) — the file-based subscription
   backend: schedule and inspect tasks. Driving them is **skill-only**
   (the `drive-journal` skill), never CLI-driven.
+- `tigerharness autodrive` (alias: `ad`) — the background process that
+  drives the journal on a fixed interval via the agent SDK (the
+  Operator-authorized exception to the human-only drive rule); managed
+  through the `journal-autodrive` skill.
 - `tigerharness tiger-memory` (alias: `tm`) — persistent per-persona
   memory (three bounded stores): rebuild, pin, inspect.
 - `tigerharness slack-bridge` (alias: `sb`) — send Slack messages from
@@ -162,7 +166,7 @@ maintained by the tooling.
 - `.claude/settings.json` — generated; wires
   `TIGERHARNESS_PERSONAS_CONFIG` for every session.
 - `.claude/skills/<name>/SKILL.md` — the bundled skills
-  (`drive-journal`, `journal-new`, `slack-notify`,
+  (`drive-journal`, `journal-autodrive`, `journal-new`, `slack-notify`,
   `workflow-append-steps`, `tigerharness-basics`, `sweep-memory`).
   Generated; refreshed by `--refresh-skills`; hand-edits preserved.
 - `memories/<Name>/` — per-persona tiger-memory config + store.

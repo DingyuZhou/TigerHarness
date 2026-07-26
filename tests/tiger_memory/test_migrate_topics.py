@@ -122,5 +122,11 @@ def test_partial_rerun_collision_keeps_both_copies(tmp_path):
     assert report.topics_created is False
     retired_dir = store.root / mt.RETIRED_DIR_NAME
     assert (retired_dir / "diary.md").read_text() == "first"
-    assert (retired_dir / "diary.again.md").read_text() == "second"
+    assert (retired_dir / "diary.again1.md").read_text() == "second"
     assert not (store.paths.journal / "diary.md").exists()
+    # A THIRD generation must not silently replace the second (rename()
+    # overwrites an existing destination) — every copy gets a unique name.
+    (store.paths.journal / "diary.md").write_text("third")
+    mt.migrate_store(cfg, store, apply=True)
+    assert (retired_dir / "diary.again1.md").read_text() == "second"
+    assert (retired_dir / "diary.again2.md").read_text() == "third"

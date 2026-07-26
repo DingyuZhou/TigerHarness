@@ -162,6 +162,20 @@ def _split_sections(text: str) -> dict[str, str]:
             pos[stripped] = i
     if any(m not in pos for m in _MARKERS):
         raise ExtractionParseError("missing one or more section markers")
+    counts = {m: 0 for m in _MARKERS}
+    for line in lines:
+        stripped = line.strip()
+        if stripped in _MARKERS:
+            counts[stripped] += 1
+    if any(c > 1 for c in counts.values()):
+        # A standalone duplicate (e.g. the card echoed the prompt's contract
+        # sample before its real output) makes the split ambiguous — real
+        # content could land in a bogus section and be dropped block-by-block
+        # while the cursor advances. Malformed is the safe verdict: the card
+        # stays put and is re-asked.
+        raise ExtractionParseError(
+            "duplicate standalone section marker (ambiguous bundle)"
+        )
     i_s, i_m, i_t = pos[MARK_SKILLS], pos[MARK_MUST_REMEMBER], pos[MARK_TOPICS]
     if not (i_s < i_m < i_t):
         raise ExtractionParseError("section markers out of order")
@@ -170,6 +184,16 @@ def _split_sections(text: str) -> dict[str, str]:
         STORE_MUST_REMEMBER: "\n".join(lines[i_m + 1:i_t]).strip(),
         STORE_TOPICS: "\n".join(lines[i_t + 1:]).strip(),
     }
+
+
+def clean_ref(raw: str | None) -> str:
+    """Normalize an id/slug reference echoed from a prompt listing.
+
+    Prompt listings display addresses backticked (`` `slug` ``); a card that
+    copies the displayed form must still resolve, so surrounding whitespace
+    and backticks are stripped.
+    """
+    return (raw or "").strip().strip("`").strip()
 
 
 def _section_blocks(section: str) -> list[dict[str, str]]:
@@ -220,6 +244,14 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
         name, trigger, proc = b.get("NAME"), b.get("TRIGGER"), b.get("PROCEDURE")
         if not (name and trigger and proc):
             continue
+        try:
+            # Same sluggability gate the NEW-topic branch has: a NAME with no
+            # ASCII alphanumerics would persist fine but poison every later
+            # index/detail render (detail filenames slug the name). Drop the
+            # block, never the bundle.
+            topic_slug(name)
+        except EntryError:
+            continue
         skills.append(
             SkillEntry(
                 text=proc, created_at=now, last_used=now, source=source,
@@ -231,10 +263,16 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
     touches: list[str] = []
     for b in _section_blocks(sections[STORE_MUST_REMEMBER]):
         if "TOUCH" in b:
-            touched_id = (b["TOUCH"] or "").strip()
+            # The prompt displays ids backticked (`abc123`); tolerate a card
+            # that echoes the displayed form — a silently-missed touch would
+            # let a live item drift to forget-eligible.
+            touched_id = clean_ref(b["TOUCH"])
             if touched_id:
                 touches.append(touched_id)
-            continue
+            if not (b.get("KIND") or b.get("MEMO")):
+                continue
+            # A sloppy card merged a memo and a touch into one block (no
+            # blank line) — keep BOTH rather than silently dropping the memo.
         kind = (b.get("KIND") or "").lower()
         memo = b.get("MEMO")
         if kind not in VALID_KINDS or not memo:
@@ -828,12 +866,20 @@ def _boundary_marker(turns: list[_Turn], boundary: _Turn, rec) -> tuple[str, int
     """The new cursor (last_event_at, processed_events) after a slice ending at
     *boundary*. With no parseable boundary timestamp (e.g. a worklog record),
     fall back to the record's last event + the full turn count so the count
-    guard still has a value."""
+    guard still has a value.
+
+    The count is POSITIONAL (timestamped turns up to and including the
+    boundary), not timestamp-filtered: an active-slice hold-back turn that
+    happens to SHARE the boundary's timestamp must not be counted as
+    processed — a timestamp-filtered count would include it, the next
+    sweep's guard would then agree, and the turn would be skipped forever.
+    With the positional count the guard trips instead (stored < recomputed),
+    forcing a safe full re-pass that re-extracts the tied tail.
+    """
     if boundary.event_at is None:
         return rec.last_event_at.isoformat(), len(turns)
-    count = sum(
-        1 for t in turns if t.event_at is not None and t.event_at <= boundary.event_at
-    )
+    idx = turns.index(boundary)
+    count = sum(1 for t in turns[:idx + 1] if t.event_at is not None)
     return boundary.event_at.isoformat(), count
 
 
@@ -859,9 +905,27 @@ def _compute_incremental_slice(
     cursor = load_cursor(store, rec.conversation_uuid)
     cut = _parse_iso(cursor.last_event_at) if cursor is not None else None
     if cursor is not None and cut is not None:
-        pre = [t for t in turns if t.event_at is not None and t.event_at <= cut]
-        if len(pre) != cursor.processed_events:
-            cut = None  # event-filter changed underneath us — re-process in full
+        if not any(t.event_at is not None for t in turns):
+            # Timestamp-less record (e.g. a worklog blob rendered as one
+            # unheadered turn): the stored cursor used the fallback count of
+            # ALL turns against the record's own end timestamp. Recomputing
+            # `pre` by timestamp would always yield 0 and trip the guard,
+            # re-ingesting the identical content every sweep (duplicate
+            # entries, touch inflation — forever). Nothing is new iff the
+            # record's end timestamp and turn count both still match.
+            if (
+                rec.last_event_at <= cut
+                and cursor.processed_events == len(turns)
+            ):
+                return None
+            cut = None  # record grew/changed — re-process in full
+        else:
+            pre = [
+                t for t in turns
+                if t.event_at is not None and t.event_at <= cut
+            ]
+            if len(pre) != cursor.processed_events:
+                cut = None  # event-filter changed underneath us — full re-pass
 
     if cut is None:
         pre_turns: list[_Turn] = []

@@ -55,6 +55,19 @@ def test_skill_detail_filename_slugs_name_and_appends_id():
     assert indexes.skill_detail_filename(e) == "my-skill-abc123def456.md"
 
 
+def test_skill_detail_filename_unsluggable_name_falls_back():
+    """A name with no sluggable characters (blocked at extraction since
+    ADR 0007, but a pre-existing store may carry one) falls back to the
+    bare `skill-<id>.md` shape instead of raising and bricking rebuild."""
+    e = _skill("日本語", id="abc123def456")
+    assert indexes.skill_detail_filename(e) == "skill-abc123def456.md"
+    assert indexes.skill_detail_filename(
+        _skill("!!!", id="feedc0ffee42")
+    ) == "skill-feedc0ffee42.md"
+    # The index renderer survives such an entry too (it embeds the filename).
+    assert "skill-abc123def456.md" in indexes.render_skill_index([e])
+
+
 def test_topic_detail_filename_is_slug():
     t = _topic("Deploy Pipeline")
     assert t.slug == "deploy-pipeline"

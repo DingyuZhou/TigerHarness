@@ -4,8 +4,10 @@ You are **{agent_name}**, compacting your own must-remember store. It has
 grown past its must-compact bound and must be rewritten tighter, keeping
 what still earns its place.
 
-Current size: {current_chars} characters. Target: **at most {max_chars}
-characters** (measured over the rewritten memos + kinds).
+Current size (protected entries included): {current_chars} characters.
+Target for YOUR replacement set — the non-protected part only, the
+protected entries' budget is already accounted: **at most {max_chars}
+characters of memo text**.
 
 ## Protected entries (kept automatically — do NOT rewrite them)
 

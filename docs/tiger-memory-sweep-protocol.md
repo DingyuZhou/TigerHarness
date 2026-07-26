@@ -1,11 +1,12 @@
 # tiger-memory team sweep — in-session sub-agent protocol (B1/B3)
 
-> **Status:** wired & shipped. The full Python + CLI stack this protocol
-> drives is shipped and tested (see `history/tiger-memory-rework.md`, B1/B3
-> sections), and the bridge wiring + convenience CLIs that activate it are
-> live (see "Wiring + status"). The only outstanding item is an
-> end-to-end live sweep run in a real persona session for final
-> acceptance.
+> **Status:** wired, shipped & live-verified. The full Python + CLI stack
+> this protocol drives is shipped and tested (see
+> `history/tiger-memory-rework.md`, B1/B3 sections), the bridge wiring +
+> convenience CLIs that activate it are live (see "Wiring + status"), and
+> the protocol was verified live on Shohoku on 2026-07-23 (topic-store
+> migration + first staged compaction) and again via an end-to-end
+> sandbox walkthrough on 2026-07-25.
 
 This is the vendor-neutral contract an **interactive persona session**
 executes to keep the whole team's tiger-memory fresh on the
@@ -70,16 +71,17 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
    b. For each **stack**, spawn **one constrained sub-agent** (Task tool)
       — the B7 trust boundary. Stacks are independent, so run the
       sub-agents in parallel (a sane concurrency cap). Each sub-agent:
-      - **Reads**: each `<uuid>.prompt.md` in its stack (the prompt embeds
-        the prefiltered transcript — staged in full up to the
-        `max_staged_content_chars` ceiling, clipped only beyond it — so the
-        bulky content never enters *your* context) **and** the persona's
-        three stores (`skills.md` / `must_remember.md` / `topics.md`). The
-        prompt also embeds the persona's **existing-topic routing list**
-        (slug + summary, freshest first), so the sub-agent can route new
-        knowledge into existing topics, **and** the persona's **current
-        must-remember items** (id + kind + memo), so the sub-agent can
-        TOUCH the ones the session relied on.
+      - **Reads**: ONLY its staged prompt files — each `<uuid>.prompt.md`
+        in its stack, and nothing else. The prompt already embeds
+        everything the sub-agent needs: the prefiltered transcript —
+        staged in full up to the `max_staged_content_chars` ceiling;
+        beyond the ceiling the item becomes `kind="map_reduce"` (lossless
+        chunking, see below), never clipped — plus the persona's
+        **existing-topic routing list** (slug + summary, freshest first),
+        so the sub-agent can route new knowledge into existing topics,
+        and the persona's **current must-remember items** (id + kind +
+        memo), so the sub-agent can TOUCH the ones the session relied on.
+        The sub-agent does not read the persona's store files.
       - **Writes**: a bundle **card**
         `<store>/.sweep-staging/<uuid>.extract.md` per uuid — and nothing
         else. It does **not** ingest and runs no `tiger-memory` command.
@@ -87,7 +89,10 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
         in character**; read the prompt; emit ONLY the
         `@@SKILLS@@/@@MUST_REMEMBER@@/@@TOPICS@@` bundle per the prompt's
         output contract; **self-validate** (all three markers present, each
-        on its own line, in that order; each section is well-formed blocks
+        on its own line, in that order, and **each marker exactly once** —
+        a bundle with a duplicated standalone marker is MALFORMED at
+        ingest, the contract-echo protection, so never echo the prompt's
+        contract sample into the card; each section is well-formed blocks
         or the literal `NONE`); write it to the card; then **return only a
         short confirmation** (e.g. "carded N uuids"). The bulky bundle must
         never be returned to you (B8 fresh-window) — it lives only in the
@@ -239,24 +244,26 @@ The Python + CLI stack above is **complete and 100%-tested**, and the
 bridge wiring + convenience CLIs that activate it have **shipped**:
 
 1. **Trigger — done (config flag).** `TeamBridgeContext.
-   tiger_memory_trigger` (`bridge.py:113`) selects the mechanism. Default
-   `"rebuild"` keeps the legacy `tiger-memory rebuild --background`
-   (`claude -p`, API-billed) so existing deploys are unchanged; setting it
-   to `"off"` suppresses the daemon trigger (`bridge.py:475`) so the
-   in-session sweep protocol — driven by the persona's `sweep-memory`
-   skill over the gating CLIs below — owns the rebuild on the
-   subscription rail. The two coexist behind the flag exactly as planned.
+   tiger_memory_trigger` (`bridge.py:115`) selects the mechanism. Default
+   `"rebuild"` fires `_trigger_tiger_memory_rebuild` (`bridge.py:587`,
+   dispatched at `bridge.py:565`): a detached, plain `tiger-memory
+   rebuild` — since the topic-store revamp (ADR 0007) that verb is pure
+   Python (format gate + briefing regenerate), **no model call, no
+   flags**, so the trigger is cheap and billing-neutral. Setting the flag
+   to `"off"` suppresses the daemon trigger entirely, so the in-session
+   sweep protocol — driven by the persona's `sweep-memory` skill over the
+   gating CLIs below — owns the whole refresh on the subscription rail.
+   Either way, extraction never runs from the daemon.
 2. **Convenience CLIs — done (shipped).** `tiger-memory sweep-plan`
    (wraps `maybe_sweep_roster` for the team's memories root —
    `cfg.store.root.parent` — and prints the decision + targets),
    `sweep-done`, `sweep-complete`, and `sweep-release` are in
    `tiger_memory.cli`, so the interactive session drives gating without
    inline Python.
-3. **Live verification — outstanding.** Run an end-to-end sweep in a real
-   persona session — confirm the sub-agent (a) bills to the subscription,
-   (b) writes the store directly, (c) returns only a short confirmation,
-   and (d) its own transcript is excluded next sweep (B7). This is the
-   acceptance for "subscription-safe rebuild is LIVE". (The related
+3. **Live verification — done.** Verified live on Shohoku on 2026-07-23
+   (the topic-store migration + the roster's first staged compaction ran
+   through this protocol in a real persona session) and re-verified via
+   an end-to-end sandbox walkthrough on 2026-07-25. (The related
    per-persona journal-memory transport — the bridge stamping
    `TIGERHARNESS_SLACK_THREAD_TS` into each turn's subprocess env so the
    driver's fat transcript is suppressed — was deployed and live-verified

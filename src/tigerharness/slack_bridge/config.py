@@ -21,7 +21,7 @@ log = logging.getLogger("tigerharness.slack_bridge.config")
 
 
 # tiger-memory rebuild trigger modes for a new thread:
-#   "rebuild" -- legacy: fire `tiger-memory rebuild --background`
+#   "rebuild" -- fire a plain `tiger-memory rebuild` (format gate + briefing)
 #                (a detached `claude -p`, API-billed). The default, so
 #                existing deployments are unchanged.
 #   "off"     -- daemon fires nothing; the in-session sweep protocol
@@ -64,7 +64,7 @@ class BridgeConfig:
     # Optional: path to the agent's system prompt file.
     agent_prompt_path: str = ""
     # Optional: path to tiger-memory.config.yaml. When set, the bridge
-    # fires `tiger-memory rebuild --background` on each new thread.
+    # fires a plain `tiger-memory rebuild` on each new thread.
     tiger_memory_config_path: str = ""
     # Optional: path to tiger-memory CLI binary.
     tiger_memory_cli: str = ""

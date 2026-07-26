@@ -179,10 +179,11 @@ def test_inline_marker_echo_in_memo_does_not_missplit() -> None:
     assert cands.topics == []  # the topics section is still the real NONE
 
 
-def test_stray_duplicate_standalone_marker_degrades_to_noise() -> None:
-    """A second whole-line ``@@TOPICS@@`` inside the topics section: the FIRST
-    standalone occurrence anchors the split; the stray line is just junk in
-    the section body — both real blocks still parse."""
+def test_stray_duplicate_standalone_marker_is_malformed() -> None:
+    """A second whole-line ``@@TOPICS@@`` anywhere makes the split ambiguous
+    — since the contract-echo hardening, duplicates are rejected loudly
+    (card kept + re-asked) instead of first-wins parsing, which could
+    silently swallow a whole echoed bundle."""
     topics = dedent(
         """\
         TOPIC: NEW
@@ -198,8 +199,8 @@ def test_stray_duplicate_standalone_marker_degrades_to_noise() -> None:
         DETAIL: more detail
         """
     )
-    cands = parse_extraction(_bundle(topics=topics), now=NOW, source="test")
-    assert [c.name for c in cands.topics] == ["Real Topic", "After Stray"]
+    with pytest.raises(ExtractionParseError, match="duplicate standalone"):
+        parse_extraction(_bundle(topics=topics), now=NOW, source="test")
 
 
 def test_marker_with_surrounding_whitespace_still_recognized() -> None:

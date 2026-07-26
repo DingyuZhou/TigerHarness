@@ -30,7 +30,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .bounded_store import BoundedStore
+from .bounded_store import BoundedStore, StoreLockHeld
 from .config import Config
 from .entries import (
     KIND_DECISION,
@@ -224,6 +224,25 @@ def _render_roster(
     return "\n".join(out)
 
 
+def _locked_save(bstore: BoundedStore, store_name: str, entries) -> bool:
+    """Persist a plan pre-pass mutation under the per-store lock.
+
+    Returns False (mutation NOT persisted) when a live session holds the
+    lock — the pre-pass is an optimization, so plan proceeds with the
+    unmutated store rather than clobbering a concurrent apply's write.
+    """
+    try:
+        with bstore.store_lock(store_name):
+            bstore.save_atomic(store_name, entries)
+        return True
+    except StoreLockHeld:
+        log.warning(
+            "compact-plan: %s locked by a live session; skipping this "
+            "wake's pre-pass save", store_name,
+        )
+        return False
+
+
 def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
     """Stage one compaction prompt per over-bound surface; return the manifest.
 
@@ -250,12 +269,14 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
     if bstore.is_over_overflow(STORE_TOPICS, topics):
         survivors, dropped_stale = _forget_stale_topics(bstore, topics, now)
         if dropped_stale:
-            bstore.save_atomic(STORE_TOPICS, survivors)
-            log.info(
-                "compact-plan: forgot %d stale topic(s): %s",
-                len(dropped_stale), ", ".join(dropped_stale),
-            )
-            topics = survivors
+            if _locked_save(bstore, STORE_TOPICS, survivors):
+                log.info(
+                    "compact-plan: forgot %d stale topic(s): %s",
+                    len(dropped_stale), ", ".join(dropped_stale),
+                )
+                topics = survivors
+            else:
+                dropped_stale = []
     if bstore.is_over_overflow(STORE_TOPICS, topics):
         prompt_path = staging / "topic_roster.prompt.md"
         prompt_path.write_text(
@@ -273,7 +294,20 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
             encoding="utf-8",
         )
         targets.append(_target(KIND_TOPIC_ROSTER, "topic_roster", prompt_path))
-    for t in topics:
+    roster_staged = any(t["kind"] == KIND_TOPIC_ROSTER for t in targets)
+    if roster_staged:
+        # Detail targets are DEFERRED whenever the roster itself is being
+        # compacted: a roster merge folds one topic's body into another, and
+        # a detail card authored against the pre-merge body would overwrite
+        # the merged-in knowledge. The still-oversized detail re-stages next
+        # sweep against the settled store.
+        deferred = [t.slug for t in topics if bstore.is_detail_over_overflow(t)]
+        if deferred:
+            log.info(
+                "compact-plan: deferring %d topic detail target(s) behind "
+                "the roster compaction: %s", len(deferred), ", ".join(deferred),
+            )
+    for t in ([] if roster_staged else topics):
         if bstore.is_detail_over_overflow(t):
             key = f"topic_detail.{t.slug}"
             prompt_path = staging / f"{key}.prompt.md"
@@ -295,13 +329,21 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
 
     # --- skills: exact-dup merge, then index target + detail targets ---
     skills = [e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)]
+    original_skills = list(skills)
     skills, deduped_skills = _dedup_skills(skills)
     if deduped_skills:
         for e in skills:
             refresh_importance(e, now, cfg)
-        bstore.save_atomic(STORE_SKILLS, skills)
-        log.info("compact-plan: merged %d exact-duplicate skill(s)", deduped_skills)
+        if _locked_save(bstore, STORE_SKILLS, skills):
+            log.info(
+                "compact-plan: merged %d exact-duplicate skill(s)",
+                deduped_skills,
+            )
+        else:
+            skills, deduped_skills = original_skills, 0
+    skills_index_staged = False
     if bstore.is_over_overflow(STORE_SKILLS, skills):
+        skills_index_staged = True
         prompt_path = staging / "skills.prompt.md"
         prompt_path.write_text(
             _fill(
@@ -320,8 +362,26 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
             ),
             encoding="utf-8",
         )
-        targets.append(_target(KIND_SKILLS, "skills", prompt_path))
-    for s in skills:
+        targets.append(
+            _target(
+                KIND_SKILLS, "skills", prompt_path,
+                snapshot_ids=[s.id for s in skills],
+            )
+        )
+    if skills_index_staged:
+        deferred_skills = [
+            s.id for s in skills if bstore.is_detail_over_overflow(s)
+        ]
+        if deferred_skills:
+            # Same deferral rule as topics: the index card is a full
+            # replacement roster (procedures authored at plan time), so a
+            # detail rewrite applied in the same run would either dangle or
+            # be overwritten. Re-stages next sweep against the settled store.
+            log.info(
+                "compact-plan: deferring %d skill detail target(s) behind "
+                "the index compaction", len(deferred_skills),
+            )
+    for s in ([] if skills_index_staged else skills):
         if bstore.is_detail_over_overflow(s):
             key = f"skill_detail.{s.id}"
             prompt_path = staging / f"{key}.prompt.md"
@@ -346,12 +406,15 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
         e for e in bstore.load(STORE_MUST_REMEMBER)
         if isinstance(e, MustRememberEntry)
     ]
+    original_must = list(must)
     must, deduped_mr = _dedup_must_remember(must)
     if deduped_mr:
-        bstore.save_atomic(STORE_MUST_REMEMBER, must)
-        log.info(
-            "compact-plan: merged %d exact-duplicate memo(s)", deduped_mr
-        )
+        if _locked_save(bstore, STORE_MUST_REMEMBER, must):
+            log.info(
+                "compact-plan: merged %d exact-duplicate memo(s)", deduped_mr
+            )
+        else:
+            must, deduped_mr = original_must, 0
     if bstore.is_over_overflow(STORE_MUST_REMEMBER, must):
         protected = [e for e in must if e.kind == KIND_OPERATOR_EXPLICIT]
         compactable = [e for e in must if e.kind != KIND_OPERATOR_EXPLICIT]
@@ -379,7 +442,12 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
             ),
             encoding="utf-8",
         )
-        targets.append(_target(KIND_MUST_REMEMBER, "must_remember", prompt_path))
+        targets.append(
+            _target(
+                KIND_MUST_REMEMBER, "must_remember", prompt_path,
+                snapshot_ids=[e.id for e in must],
+            )
+        )
 
     manifest = {
         "generated_at": now,
@@ -425,6 +493,18 @@ def _section_after_marker(text: str, marker: str) -> str:
 def _blocks(section: str) -> list[dict[str, str]]:
     from .lifecycle import _section_blocks
     return _section_blocks(section)
+
+
+def _ref(raw: str | None) -> str:
+    """Backtick/whitespace-tolerant id/slug reference.
+
+    Compaction prompts display addresses backticked (`` `slug` ``); a card
+    echoing the displayed form must still resolve — a silently-missed lookup
+    would turn the model's judgement into a no-op and hand the decision to
+    the deterministic trim instead.
+    """
+    from .lifecycle import clean_ref
+    return clean_ref(raw)
 
 
 # ----- apply -------------------------------------------------------------------
@@ -504,9 +584,15 @@ def _apply_one(
 ) -> None:
     kind = item["kind"]
     if kind == KIND_MUST_REMEMBER:
-        _apply_must_remember(bstore, cfg, text, now, report)
+        _apply_must_remember(
+            bstore, cfg, text, now, report,
+            snapshot_ids=set(item.get("snapshot_ids") or []),
+        )
     elif kind == KIND_SKILLS:
-        _apply_skills(bstore, cfg, text, now, report)
+        _apply_skills(
+            bstore, cfg, text, now, report,
+            snapshot_ids=set(item.get("snapshot_ids") or []),
+        )
     elif kind == KIND_TOPIC_ROSTER:
         _apply_topic_roster(bstore, cfg, text, now, report)
     elif kind == KIND_TOPIC_DETAIL:
@@ -518,7 +604,8 @@ def _apply_one(
 
 
 def _apply_must_remember(
-    bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport
+    bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport,
+    *, snapshot_ids: set[str] = frozenset(),
 ) -> None:
     section = _section_after_marker(text, MARK_MUST_REMEMBER)
     new_entries: list[MustRememberEntry] = []
@@ -529,7 +616,7 @@ def _apply_must_remember(
             # names an operator_explicit entry judged no longer relevant to
             # the live mission. It is DOWNGRADED (to `decision`, rejoining
             # the normal decay pool) — never directly dropped.
-            stale_ids.add((b["STALE"] or "").strip())
+            stale_ids.add(_ref(b["STALE"]))
             continue
         kind = (b.get("KIND") or "").lower()
         memo = b.get("MEMO")
@@ -552,8 +639,15 @@ def _apply_must_remember(
         ]
         protected: list[MustRememberEntry] = []
         downgraded: list[MustRememberEntry] = []
+        post_plan: list[MustRememberEntry] = []
         for e in current:
             if e.kind != KIND_OPERATOR_EXPLICIT:
+                # The card replaces only what its prompt SAW (the plan-time
+                # snapshot). Anything written between plan and apply — a pin,
+                # a concurrent ingest — survives; the trim below still
+                # enforces the bound.
+                if snapshot_ids and e.id not in snapshot_ids:
+                    post_plan.append(e)
                 continue
             if e.id in stale_ids:
                 e.kind = KIND_DECISION
@@ -565,7 +659,26 @@ def _apply_must_remember(
                 "compact-apply: relevance-check downgraded %d operator "
                 "directive(s) to decision", len(downgraded),
             )
-        merged: list[MustRememberEntry] = protected + downgraded + new_entries
+        # Freshness carry-over: a memo the card KEPT (same kind + normalized
+        # text as a snapshot entry) inherits that entry's identity and
+        # signals — compaction must not reset the TOUCH clock or the repeat
+        # count of a surviving memo.
+        by_key = {
+            (e.kind, " ".join(e.text.split()).lower()): e
+            for e in current
+            if e.kind != KIND_OPERATOR_EXPLICIT
+            and (not snapshot_ids or e.id in snapshot_ids)
+        }
+        for e in new_entries:
+            old = by_key.pop((e.kind, " ".join(e.text.split()).lower()), None)
+            if old is not None:
+                e.id = old.id
+                e.created_at = old.created_at
+                e.last_used = old.last_used
+                e.repeat_count = old.repeat_count
+        merged: list[MustRememberEntry] = (
+            protected + downgraded + new_entries + post_plan
+        )
         # Deterministic convergence, in the ADR 0007 drop order: stale
         # normal entries first (oldest untouched first — the sweep's TOUCH
         # mechanism kept everything that still comes up fresh), then fresh
@@ -625,7 +738,8 @@ def _mr_drop_order(
 
 
 def _apply_skills(
-    bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport
+    bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport,
+    *, snapshot_ids: set[str] = frozenset(),
 ) -> None:
     section = _section_after_marker(text, MARK_SKILLS)
     new_entries: list[SkillEntry] = []
@@ -643,17 +757,31 @@ def _apply_skills(
         current = [
             e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)
         ]
-        # Carry usage/recency forward for kept skills (matched by name,
-        # case-insensitive) so compaction does not reset the keep-rank.
-        by_name = {e.name.strip().lower(): e for e in current}
+        # Carry identity + usage/recency forward for kept skills (matched by
+        # name, case-insensitive, within the plan-time snapshot) so
+        # compaction does not reset the keep-rank — and does not re-mint ids
+        # (detail filenames and future detail targets are id-addressed).
+        by_name = {
+            e.name.strip().lower(): e
+            for e in current
+            if not snapshot_ids or e.id in snapshot_ids
+        }
         for e in new_entries:
-            old = by_name.get(e.name.strip().lower())
+            old = by_name.pop(e.name.strip().lower(), None)
             if old is not None:
+                e.id = old.id
                 e.usage_count = old.usage_count
                 e.created_at = old.created_at
                 e.last_used = old.last_used
             refresh_importance(e, now, cfg)
-        merged: list[SkillEntry] = list(new_entries)
+        # Skills written between plan and apply (concurrent ingest) survive
+        # the card's replacement roster — the trim below still enforces the
+        # bound.
+        post_plan = [
+            e for e in current
+            if snapshot_ids and e.id not in snapshot_ids
+        ]
+        merged: list[SkillEntry] = list(new_entries) + post_plan
         max_len = cfg.memory.skills.index_max_length
         if bstore.index_chars(STORE_SKILLS, merged) > max_len:
             report.forced_trims.append(STORE_SKILLS)
@@ -682,7 +810,7 @@ def _apply_topic_roster(
         for d in directives:
             action = (d.get("ACTION") or "").lower()
             if action == "forget":
-                slug = (d.get("TOPIC") or "").strip()
+                slug = _ref(d.get("TOPIC"))
                 victim = by_slug.get(slug)
                 if victim is None:
                     continue
@@ -694,12 +822,12 @@ def _apply_topic_roster(
                 topics.remove(victim)
                 del by_slug[slug]
             elif action == "merge":
-                into_slug = (d.get("INTO") or "").strip()
+                into_slug = _ref(d.get("INTO"))
                 into = by_slug.get(into_slug)
                 if into is None:
                     continue
                 for from_slug in (d.get("FROM") or "").split():
-                    src = by_slug.get(from_slug.strip())
+                    src = by_slug.get(_ref(from_slug))
                     if src is None or src is into:
                         continue
                     if _is_fresh(src, now, cfgt.fresh_days):
@@ -717,7 +845,7 @@ def _apply_topic_roster(
                 if summary:
                     into.summary = summary
             elif action == "summary":
-                slug = (d.get("TOPIC") or "").strip()
+                slug = _ref(d.get("TOPIC"))
                 summary = (d.get("SUMMARY") or "").strip()
                 target = by_slug.get(slug)
                 if target is not None and summary:
@@ -763,6 +891,13 @@ def _apply_topic_detail(
     body = _section_after_marker(text, MARK_TOPIC_DETAIL)
     if not body:
         raise CompactionParseError("empty topic detail body")
+    if body.strip().upper() == "NONE":
+        # Sibling card contracts teach "write exactly NONE", but a topic
+        # detail card has no NONE option — accepting it would replace the
+        # topic's whole history with the literal string. Malformed instead.
+        raise CompactionParseError(
+            "topic detail card has no NONE option — emit the full rewritten body"
+        )
     with bstore.store_lock(STORE_TOPICS):
         topics = [
             e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
@@ -786,6 +921,16 @@ def _apply_topic_detail(
                 sections = sections[1:]
                 if bstore.detail_chars(target) <= max_len:
                     break
+        # Last resort for a card whose body has no droppable dated sections
+        # (bullets-only, malformed headings, or one giant section): trim
+        # oldest lines from the top, then hard-truncate — the convergence
+        # guarantee must not depend on the card's formatting discipline.
+        while bstore.detail_chars(target) > max_len and "\n" in target.text:
+            target.text = target.text.split("\n", 1)[1].lstrip("\n")
+        if bstore.detail_chars(target) > max_len:
+            overshoot = bstore.detail_chars(target) - max_len
+            keep = max(1, len(target.text) - overshoot - 1)
+            target.text = "…" + target.text[-keep:]
         if bstore.detail_chars(target) > max_len:
             report.still_over.append(f"topic_detail.{slug}")
         bstore.save_atomic(STORE_TOPICS, topics)

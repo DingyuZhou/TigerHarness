@@ -81,8 +81,10 @@ become forgettable:
 TOUCH: <id from the list above>
 ```
 
-Zero or more `TOUCH:` blocks, mixed freely with the KIND/MEMO blocks.
-Do not re-emit an existing item as a new memo — touch it instead.
+Zero or more `TOUCH:` blocks. Each `TOUCH:` line must be its OWN block
+(blank line before and after — never inside a KIND/MEMO block), and one
+id per block. Do not re-emit an existing item as a new memo — touch it
+instead.
 
 If no new items and nothing to touch, write exactly `NONE` under the
 marker.

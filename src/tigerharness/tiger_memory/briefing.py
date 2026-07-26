@@ -246,7 +246,7 @@ def _render_manifest(
         f"- topics: {len(topics)} indexed "
         f"(details under `{indexes.TOPICS_DETAIL_DIR}/`)",
         "",
-        "## Read order (initial load = these three small files ONLY)",
+        "## Read order (initial load = the notice + three small indexes ONLY)",
         f"1. `{NOTICE_NAME}` — the unprocessed-session rule.",
         f"2. `{MUST_REMEMBER_NAME}` — external directives (load-bearing).",
         f"3. `{SKILL_INDEX_NAME}` — reusable lessons (index only).",

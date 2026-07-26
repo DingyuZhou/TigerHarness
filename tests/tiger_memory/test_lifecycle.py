@@ -185,10 +185,11 @@ def test_parse_inline_echoed_marker_does_not_split() -> None:
     assert "@@SKILLS@@" in c.topics[0].detail
 
 
-def test_parse_duplicate_standalone_marker_first_wins() -> None:
-    # A second standalone occurrence of an earlier marker (e.g. echoed as a
-    # whole line late in the bundle) is ignored — the FIRST occurrence of each
-    # marker defines the split, so the sections stay in order.
+def test_parse_duplicate_standalone_marker_is_malformed() -> None:
+    # A second standalone occurrence of any marker makes the split ambiguous
+    # (the classic case: the card echoed the prompt's contract sample before
+    # its real output — first-wins would drop ALL real content while the
+    # cursor advanced). Malformed is the safe verdict: the card is re-asked.
     bundle = dedent("""\
         @@SKILLS@@
         NONE
@@ -199,9 +200,26 @@ def test_parse_duplicate_standalone_marker_first_wins() -> None:
         NONE
         @@SKILLS@@
     """)
-    c = lc.parse_extraction(bundle, now=NOW, source="x")
-    assert len(c.must_remember) == 1
-    assert c.topics == []
+    with pytest.raises(lc.ExtractionParseError, match="duplicate standalone"):
+        lc.parse_extraction(bundle, now=NOW, source="x")
+
+
+def test_parse_contract_echo_bundle_is_malformed() -> None:
+    # The exact F3 shape: a card that echoes the whole three-marker contract
+    # sample first, then emits the real bundle. First-wins parsing would
+    # return zero candidates "successfully" and lose the card silently.
+    echo = "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@TOPICS@@\nNONE\n"
+    real = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        KIND: operator_explicit
+        MEMO: never lose this
+        @@TOPICS@@
+        NONE
+    """)
+    with pytest.raises(lc.ExtractionParseError, match="duplicate standalone"):
+        lc.parse_extraction(echo + real, now=NOW, source="x")
 
 
 def test_parse_skips_malformed_blocks() -> None:
@@ -270,6 +288,33 @@ def test_parse_topic_new_unsluggable_name_dropped() -> None:
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert [t.name for t in c.topics] == ["Survivor Topic"]
+
+
+def test_parse_skill_unsluggable_name_dropped() -> None:
+    """A skill NAME with no sluggable characters would persist fine but
+    poison every later index/detail render (detail filenames slug the
+    name) — the block is dropped at parse time, never the bundle."""
+    bundle = dedent("""\
+        @@SKILLS@@
+        NAME: 日本語
+        TRIGGER: non-latin name
+        PROCEDURE: dropped, not crashed
+
+        NAME: !!!
+        TRIGGER: symbols only
+        PROCEDURE: dropped, not crashed
+
+        NAME: Survivor Skill
+        TRIGGER: the good sibling
+        PROCEDURE: still lands
+
+        @@MUST_REMEMBER@@
+        NONE
+        @@TOPICS@@
+        NONE
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert [s.name for s in c.skills] == ["Survivor Skill"]
 
 
 def test_parse_topic_existing_requires_detail() -> None:
@@ -1032,6 +1077,50 @@ def test_parse_touch_blocks() -> None:
     assert c.touches == ["abc123", "def456"]  # empty TOUCH value dropped
     assert len(c.must_remember) == 1
     assert not c.is_empty()          # touches alone make a bundle non-empty
+
+
+def test_clean_ref_strips_backticks_and_whitespace() -> None:
+    # Prompt listings display addresses backticked (`slug`); a card that
+    # echoes the displayed form must still resolve.
+    assert lc.clean_ref("`abc123`") == "abc123"
+    assert lc.clean_ref("  `topic-slug`  ") == "topic-slug"
+    assert lc.clean_ref("plain") == "plain"
+    assert lc.clean_ref("  spaced  ") == "spaced"
+    assert lc.clean_ref(None) == ""
+    assert lc.clean_ref("  ``  ") == ""
+
+
+def test_parse_touch_backticked_id_resolves() -> None:
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        TOUCH: `abc123`
+        @@TOPICS@@
+        NONE
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert c.touches == ["abc123"]  # backticked echo of the prompt listing
+
+
+def test_parse_touch_merged_with_memo_keeps_both() -> None:
+    # A sloppy card merged a memo and a touch into ONE block (no blank
+    # line between them): the touch registers AND the memo lands — the
+    # memo must not be silently dropped.
+    bundle = dedent("""\
+        @@SKILLS@@
+        NONE
+        @@MUST_REMEMBER@@
+        TOUCH: abc123
+        KIND: decision
+        MEMO: memo sharing the touch block
+        @@TOPICS@@
+        NONE
+    """)
+    c = lc.parse_extraction(bundle, now=NOW, source="x")
+    assert c.touches == ["abc123"]
+    assert [m.text for m in c.must_remember] == ["memo sharing the touch block"]
+    assert c.must_remember[0].kind == "decision"
 
 
 def test_ingest_touch_refreshes_last_used_and_repeat(tmp_path: Path) -> None:

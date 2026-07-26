@@ -134,6 +134,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0bc91d13201769b6327e762bc9763db3c8b97c7923d3830171effedad9e56691",
     },
     "tigerharness-basics": {
+        # 2026-07-25 (critique round): pre autodrive-mention ship -- said
+        #   "Five sub-commands" (autodrive/ad missing) and omitted
+        #   journal-autodrive from the bundled-skills list.
+        "6ff9e36ae47785865c6b39fc7528fd5dd8209370b3871b781f987d508118bbd5",
         # 2026-07-23 (topic-store revamp, ADR 0007): anzai: pre topic-store
         #   ship -- store roster still said emotional/meditation.
         "d32ae9739696c3f199088396143922b663edbd0a75fc07a6163b85e378d6f604",
@@ -151,6 +155,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-07-25 (critique round): pre operator-directive truth-fix ship
+        #   -- still claimed compaction "can never drop" an operator_explicit
+        #   (stale ones may be downgraded or, as a logged last resort,
+        #   forgotten) and mis-stated the stale-topic pre-pass trigger.
+        "f64719b4f36d568861eeccc17e620d3ea66aa637f674b37e6d5c9fd2131a38a4",
         # 2026-07-23 (TOUCH amendment): anzai: pre must_remember-freshness
         #   ship -- before TOUCH blocks joined the card contract.
         "8e073a798fe4e9c57085b9c4223de0b45889d51cc529a683e8e69b3eec69b52c",
@@ -189,8 +198,8 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "f64719b4f36d568861eeccc17e620d3ea66aa637f674b37e6d5c9fd2131a38a4",
-    "tigerharness-basics": "6ff9e36ae47785865c6b39fc7528fd5dd8209370b3871b781f987d508118bbd5",
+    "sweep-memory": "80150fa5f7fe64176b141f1b9b01c67e53472f703ec5605a41b4a9d3310bb0c8",
+    "tigerharness-basics": "18edd37b7e38be4a75a1a55d057fd9e92d18b5be08ab09e81c356ad541d29560",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }
 
