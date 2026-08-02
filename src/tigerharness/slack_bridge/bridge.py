@@ -587,8 +587,14 @@ class SlackBridge:
 def _trigger_tiger_memory_rebuild(
     persona: PersonaSlot, tiger_memory_cli: str, thread_key: str
 ) -> None:
-    """Fire `tiger-memory rebuild --background` for the active persona's
-    memory config, if configured. Detached child; never blocks dispatch."""
+    """Fire `tiger-memory rebuild` for the active persona's memory config,
+    if configured. Detached child; never blocks dispatch.
+
+    Since the topic-store revamp (ADR 0007) `rebuild` is pure Python (format
+    gate + briefing regenerate — no model call, no extraction) and takes no
+    flags; the retired ``--background`` flag would be rejected by argparse,
+    which under DEVNULL made this trigger a silent no-op on every dispatch.
+    """
     if not persona.tiger_memory_config_path:
         return
     cli = tiger_memory_cli or shutil.which("tiger-memory")
@@ -601,8 +607,7 @@ def _trigger_tiger_memory_rebuild(
         return
     try:
         subprocess.Popen(
-            [cli, "--config", persona.tiger_memory_config_path,
-             "rebuild", "--background"],
+            [cli, "--config", persona.tiger_memory_config_path, "rebuild"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

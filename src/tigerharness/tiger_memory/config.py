@@ -117,7 +117,9 @@ class MemoryExtractConfig:
 
     skill_procedure_words: int = 120
     memo_words: int = 25
-    reaction_words: int = 40
+    topic_summary_words: int = 25
+    topic_detail_words: int = 80
+    team_event_words: int = 15
     max_output_words: int = 600
 
 
@@ -136,10 +138,11 @@ class RebuildConfig:
 
 @dataclass(frozen=True)
 class BriefingConfig:
-    """Session-start briefing assembly (bounded-store revamp, design §6).
+    """Session-start briefing assembly (design §6; ADR 0007).
 
-    The diary is loaded WHOLE at session start (forgetting, not a display cap,
-    keeps it bounded), so there is no top-N knob.
+    The initial load is index-only (must_remember + skill index + topic
+    index); detail files sit alongside and load on demand, so there is no
+    top-N knob.
     """
 
 
@@ -195,76 +198,102 @@ VALID_LENGTH_UNIT = "characters"
 
 @dataclass(frozen=True)
 class SkillsStoreConfig:
-    """Bound for the skills store — count-based (design §4.1)."""
+    """Bounds for the skills store (ADR 0007) — all lengths in characters.
 
-    max_count: int = 40
-    overflow_limit: int = 50
+    The *index* (the rendered name+trigger+one-line listing, the only part
+    loaded at session start) is bounded by ``index_max_length`` /
+    ``index_overflow_limit``. Each skill's *detail* (its procedure body,
+    a separate briefing file loaded on demand) is bounded per-skill by
+    ``detail_max_length`` / ``detail_overflow_limit``.
+    """
+
+    index_max_length: int = 2000
+    index_overflow_limit: int = 3000
+    detail_max_length: int = 4000
+    detail_overflow_limit: int = 6000
 
 
 @dataclass(frozen=True)
 class MustRememberStoreConfig:
-    """Bound for the must-remember store — length-based (design §4.2)."""
+    """Bound + freshness for the must-remember store (design §4.2, ADR 0007).
 
-    max_length: int = 8000
-    overflow_limit: int = 10000
+    Tightened by the topic-store revamp: the store loads whole at session
+    start, so it must stay small (Operator-set 2000/3000, 2026-07-23).
 
-
-@dataclass(frozen=True)
-class DiaryDecayConfig:
-    """Signed-weight decay rate for the emotional log (design §4.3)."""
-
-    magnitude_per_day: float = 0.1
-
-
-@dataclass(frozen=True)
-class DiaryStoreConfig:
-    """Bound + signed-weight cap + decay for the diary store (design §4.3).
-
-    The diary is loaded WHOLE each session, so it is bounded tighter than the
-    other length-based stores and kept small by forgetting (not a display cap):
-    ``max_length`` 6000 (the target forgetting compacts back below),
-    ``overflow_limit`` 8000 (the hysteresis trigger). The Operator's numbers
-    (raised from 4000/6000 alongside associative reinforcement, 2026-06-22).
+    ``forget_days``: sweeps TOUCH items related to the session they process
+    (refreshing ``last_used``); an item not touched for this long is
+    forget-eligible when compaction needs the space. Stale normal items drop
+    first; a stale ``operator_explicit`` drops only as the last resort,
+    after the relevance check and every stale normal item.
     """
 
-    max_length: int = 6000
-    overflow_limit: int = 8000
-    weight_cap: float = 10.0
-    #: Recency window (days): diary items dated within ``fresh_days`` of "now"
-    #: are kept verbatim by meditation (never fuzzed), regardless of weight —
-    #: incl. 0-weight (the 4-store model, brief §A.2). Default 7.
+    max_length: int = 2000
+    overflow_limit: int = 3000
+    forget_days: int = 30
+
+
+@dataclass(frozen=True)
+class TopicsStoreConfig:
+    """Bounds + freshness knobs for the topics store (ADR 0007).
+
+    The *index* (slug + freshness + summary per topic — the only part loaded
+    at session start) is bounded by ``index_max_length`` /
+    ``index_overflow_limit``. Each topic's *detail* body (dated appended
+    facts, a separate briefing file loaded on demand) is bounded per-topic by
+    ``detail_max_length`` / ``detail_overflow_limit``.
+
+    ``fresh_days``: a topic touched within this window is protected from
+    forget/merge during compaction. ``forget_days``: a topic NOT touched for
+    this long is forget-eligible; when the index is over its bound, stale
+    topics are dropped oldest-first before any AI compaction is staged.
+    """
+
+    index_max_length: int = 2000
+    index_overflow_limit: int = 3000
+    detail_max_length: int = 4000
+    detail_overflow_limit: int = 6000
     fresh_days: int = 7
-    #: Associative reinforcement (2026-06-22). When True, ingest runs the
-    #: evocation pass: one batched summarizer call judges what each new diary
-    #: note recalls, reinforces those old items, and appends a concise recall
-    #: reference. Default False: enabling it adds a model call at ingest, so it
-    #: is a deliberate, per-deployment (subscription-rail) opt-in.
-    evocation_enabled: bool = False
-    decay: DiaryDecayConfig = field(default_factory=DiaryDecayConfig)
+    forget_days: int = 60
 
 
 @dataclass(frozen=True)
-class FuzzyStoreConfig:
-    """Bound for the NEW fuzzy store — length-based (4-store model, brief §store roster).
+class TeamEventsConfig:
+    """Knobs for the team-wide event log (ADR 0008) — one shared file at
+    ``<team>/memories/team/events.md``, appended by every persona's sweep
+    ingest and read lazily (pointer-only; never part of a briefing load).
 
-    ``fuzzy.md`` holds coarsened, grouped memory aged out of BOTH the diary and
-    must_remember. It loads whole at session start, so it is length-bounded
-    (characters); meditation re-summarises it under ``max_length`` every cycle so
-    it CONVERGES rather than grows. ``overflow_limit`` gives the same hysteresis
-    band as the other length-based stores.
+    ``recent_days``: daily sections younger than this are never compacted
+    (the Operator's uncompacted window). ``year_after_days``: a month
+    section whose year has ended longer ago than this folds into a year
+    section. ``month_max_chars`` / ``year_max_chars``: target size of one
+    folded section (the deterministic trim bound). ``max_length`` /
+    ``overflow_limit``: hysteresis bounds over the rendered **folded
+    tiers only** (month + year sections) — a size backstop that drops the
+    oldest year/month sections; the daily window is exempt from both the
+    measurement and the drops (bounded instead by real activity + the
+    per-append event cap). Defaults are sized so the full legitimate
+    month inventory (up to ~26 month sections live before a year fold at
+    ``year_after_days=400``) fits under ``max_length`` at the sanctioned
+    ``month_max_chars`` — the coherence the loader validates.
+    ``enabled: false`` keeps the card contract intact but drops the
+    section at ingest (no team log is written).
     """
 
-    max_length: int = 4000
-    overflow_limit: int = 6000
+    enabled: bool = True
+    recent_days: int = 30
+    year_after_days: int = 400
+    month_max_chars: int = 700
+    year_max_chars: int = 1000
+    max_length: int = 24000
+    overflow_limit: int = 30000
 
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    """The ``memory:`` block (design §7).
+    """The ``memory:`` block (design §7; stores per ADR 0007).
 
     ``length_unit`` is CONFIRMED final: ``characters``, never tokens.
-    The store bounds and decay rate are sensible defaults the Operator
-    approved tuning later (design §10.2).
+    The store bounds are Operator-set defaults (2026-07-22 directive).
     """
 
     length_unit: str = VALID_LENGTH_UNIT
@@ -272,12 +301,8 @@ class MemoryConfig:
     must_remember: MustRememberStoreConfig = field(
         default_factory=MustRememberStoreConfig
     )
-    diary: DiaryStoreConfig = field(
-        default_factory=DiaryStoreConfig
-    )
-    fuzzy: FuzzyStoreConfig = field(
-        default_factory=FuzzyStoreConfig
-    )
+    topics: TopicsStoreConfig = field(default_factory=TopicsStoreConfig)
+    team_events: TeamEventsConfig = field(default_factory=TeamEventsConfig)
 
 
 @dataclass(frozen=True)
@@ -496,7 +521,9 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
     memory_extract = MemoryExtractConfig(
         skill_procedure_words=int(extract_raw.get("skill_procedure_words", 120)),
         memo_words=int(extract_raw.get("memo_words", 25)),
-        reaction_words=int(extract_raw.get("reaction_words", 40)),
+        topic_summary_words=int(extract_raw.get("topic_summary_words", 25)),
+        topic_detail_words=int(extract_raw.get("topic_detail_words", 80)),
+        team_event_words=int(extract_raw.get("team_event_words", 15)),
         max_output_words=int(extract_raw.get("max_output_words", 600)),
     )
 
@@ -572,25 +599,6 @@ def _cfg_int(value: Any, field: str) -> int:
         raise ConfigError(f"{field} must be an integer; got {value!r}.") from None
 
 
-def _cfg_float(value: Any, field: str) -> float:
-    """``float(value)`` but a non-numeric value raises the contracted ``ConfigError``."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        raise ConfigError(f"{field} must be a number; got {value!r}.") from None
-
-
-def _cfg_bool(value: Any, field: str) -> bool:
-    """Coerce a YAML bool; a non-bool raises the contracted ``ConfigError``.
-
-    Strict (no ``"true"``/``1`` truthiness) so a typo can't silently flip a
-    feature gate on or off.
-    """
-    if isinstance(value, bool):
-        return value
-    raise ConfigError(f"{field} must be true or false; got {value!r}.")
-
-
 def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     """Parse + validate the ``memory:`` block (design §7).
 
@@ -598,7 +606,9 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     vendor-neutrality invariants: ``length_unit`` must be ``characters``
     (token units are rejected, design §8), bounds must be positive with
     ``overflow_limit > max`` (the hysteresis band, design §4), and the
-    emotional ``weight_cap`` / decay rate must be positive.
+    topics freshness windows must be coherent (``forget_days`` must sit at
+    or above ``fresh_days`` — a topic cannot be simultaneously protected
+    and forget-eligible).
     """
     length_unit = str(memory_raw.get("length_unit", VALID_LENGTH_UNIT))
     if length_unit != VALID_LENGTH_UNIT:
@@ -610,22 +620,46 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
 
     skills_raw = memory_raw.get("skills") or {}
     skills = SkillsStoreConfig(
-        max_count=_cfg_int(skills_raw.get("max_count", 40), "memory.skills.max_count"),
-        overflow_limit=_cfg_int(
-            skills_raw.get("overflow_limit", 50), "memory.skills.overflow_limit"
+        index_max_length=_cfg_int(
+            skills_raw.get("index_max_length", 2000),
+            "memory.skills.index_max_length",
+        ),
+        index_overflow_limit=_cfg_int(
+            skills_raw.get("index_overflow_limit", 3000),
+            "memory.skills.index_overflow_limit",
+        ),
+        detail_max_length=_cfg_int(
+            skills_raw.get("detail_max_length", 4000),
+            "memory.skills.detail_max_length",
+        ),
+        detail_overflow_limit=_cfg_int(
+            skills_raw.get("detail_overflow_limit", 6000),
+            "memory.skills.detail_overflow_limit",
         ),
     )
     _validate_bound(
-        "memory.skills", "max_count", skills.max_count, skills.overflow_limit
+        "memory.skills",
+        "index_max_length",
+        skills.index_max_length,
+        skills.index_overflow_limit,
+    )
+    _validate_bound(
+        "memory.skills",
+        "detail_max_length",
+        skills.detail_max_length,
+        skills.detail_overflow_limit,
     )
 
     mr_raw = memory_raw.get("must_remember") or {}
     must_remember = MustRememberStoreConfig(
         max_length=_cfg_int(
-            mr_raw.get("max_length", 8000), "memory.must_remember.max_length"
+            mr_raw.get("max_length", 2000), "memory.must_remember.max_length"
         ),
         overflow_limit=_cfg_int(
-            mr_raw.get("overflow_limit", 10000), "memory.must_remember.overflow_limit"
+            mr_raw.get("overflow_limit", 3000), "memory.must_remember.overflow_limit"
+        ),
+        forget_days=_cfg_int(
+            mr_raw.get("forget_days", 30), "memory.must_remember.forget_days"
         ),
     )
     _validate_bound(
@@ -634,73 +668,141 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
         must_remember.max_length,
         must_remember.overflow_limit,
     )
+    if must_remember.forget_days < 0:
+        raise ConfigError(
+            f"memory.must_remember.forget_days must be ≥ 0; "
+            f"got {must_remember.forget_days}."
+        )
 
-    el_raw = memory_raw.get("diary") or {}
-    decay_raw = el_raw.get("decay") or {}
-    diary = DiaryStoreConfig(
-        max_length=_cfg_int(
-            el_raw.get("max_length", 6000), "memory.diary.max_length"
+    tp_raw = memory_raw.get("topics") or {}
+    topics = TopicsStoreConfig(
+        index_max_length=_cfg_int(
+            tp_raw.get("index_max_length", 2000),
+            "memory.topics.index_max_length",
         ),
-        overflow_limit=_cfg_int(
-            el_raw.get("overflow_limit", 8000), "memory.diary.overflow_limit"
+        index_overflow_limit=_cfg_int(
+            tp_raw.get("index_overflow_limit", 3000),
+            "memory.topics.index_overflow_limit",
         ),
-        weight_cap=_cfg_float(
-            el_raw.get("weight_cap", 10.0), "memory.diary.weight_cap"
+        detail_max_length=_cfg_int(
+            tp_raw.get("detail_max_length", 4000),
+            "memory.topics.detail_max_length",
+        ),
+        detail_overflow_limit=_cfg_int(
+            tp_raw.get("detail_overflow_limit", 6000),
+            "memory.topics.detail_overflow_limit",
         ),
         fresh_days=_cfg_int(
-            el_raw.get("fresh_days", 7), "memory.diary.fresh_days"
+            tp_raw.get("fresh_days", 7), "memory.topics.fresh_days"
         ),
-        evocation_enabled=_cfg_bool(
-            el_raw.get("evocation_enabled", False),
-            "memory.diary.evocation_enabled",
-        ),
-        decay=DiaryDecayConfig(
-            magnitude_per_day=_cfg_float(
-                decay_raw.get("magnitude_per_day", 0.1),
-                "memory.diary.decay.magnitude_per_day",
-            ),
+        forget_days=_cfg_int(
+            tp_raw.get("forget_days", 60), "memory.topics.forget_days"
         ),
     )
     _validate_bound(
-        "memory.diary",
-        "max_length",
-        diary.max_length,
-        diary.overflow_limit,
+        "memory.topics",
+        "index_max_length",
+        topics.index_max_length,
+        topics.index_overflow_limit,
     )
-    if diary.weight_cap <= 0:
+    _validate_bound(
+        "memory.topics",
+        "detail_max_length",
+        topics.detail_max_length,
+        topics.detail_overflow_limit,
+    )
+    if topics.fresh_days < 0:
         raise ConfigError(
-            f"memory.diary.weight_cap must be > 0; "
-            f"got {diary.weight_cap}."
+            f"memory.topics.fresh_days must be ≥ 0; got {topics.fresh_days}."
         )
-    if diary.decay.magnitude_per_day < 0:
+    if topics.forget_days < topics.fresh_days:
         raise ConfigError(
-            f"memory.diary.decay.magnitude_per_day must be ≥ 0; "
-            f"got {diary.decay.magnitude_per_day}."
-        )
-    if diary.fresh_days < 0:
-        raise ConfigError(
-            f"memory.diary.fresh_days must be ≥ 0; got {diary.fresh_days}."
+            f"memory.topics.forget_days ({topics.forget_days}) must be ≥ "
+            f"fresh_days ({topics.fresh_days}); a topic cannot be both "
+            "protected-fresh and forget-eligible."
         )
 
-    fz_raw = memory_raw.get("fuzzy") or {}
-    fuzzy = FuzzyStoreConfig(
+    tev_raw = memory_raw.get("team_events") or {}
+    team_events = TeamEventsConfig(
+        enabled=bool(tev_raw.get("enabled", True)),
+        recent_days=_cfg_int(
+            tev_raw.get("recent_days", 30), "memory.team_events.recent_days"
+        ),
+        year_after_days=_cfg_int(
+            tev_raw.get("year_after_days", 400),
+            "memory.team_events.year_after_days",
+        ),
+        month_max_chars=_cfg_int(
+            tev_raw.get("month_max_chars", 700),
+            "memory.team_events.month_max_chars",
+        ),
+        year_max_chars=_cfg_int(
+            tev_raw.get("year_max_chars", 1000),
+            "memory.team_events.year_max_chars",
+        ),
         max_length=_cfg_int(
-            fz_raw.get("max_length", 4000), "memory.fuzzy.max_length"
+            tev_raw.get("max_length", 24000), "memory.team_events.max_length"
         ),
         overflow_limit=_cfg_int(
-            fz_raw.get("overflow_limit", 6000), "memory.fuzzy.overflow_limit"
+            tev_raw.get("overflow_limit", 30000),
+            "memory.team_events.overflow_limit",
         ),
     )
     _validate_bound(
-        "memory.fuzzy", "max_length", fuzzy.max_length, fuzzy.overflow_limit
+        "memory.team_events",
+        "max_length",
+        team_events.max_length,
+        team_events.overflow_limit,
     )
+    if team_events.recent_days < 0:
+        raise ConfigError(
+            f"memory.team_events.recent_days must be ≥ 0; "
+            f"got {team_events.recent_days}."
+        )
+    if team_events.year_after_days < team_events.recent_days:
+        raise ConfigError(
+            f"memory.team_events.year_after_days "
+            f"({team_events.year_after_days}) must be ≥ recent_days "
+            f"({team_events.recent_days}); a section cannot fold to a year "
+            "while still inside the daily window."
+        )
+    if team_events.month_max_chars <= 0 or team_events.year_max_chars <= 0:
+        raise ConfigError(
+            "memory.team_events.month_max_chars and year_max_chars must be "
+            f"> 0; got {team_events.month_max_chars} / "
+            f"{team_events.year_max_chars}."
+        )
+    # Coherence: the legitimate folded-month inventory should fit under
+    # the backstop, or sanctioned folds get backstop-dropped before their
+    # year fold can ever form (audit: bounds finding 2). Worst case,
+    # months live until ~year_after_days past their year end plus the
+    # current partial year: year_after_days/30 + 13 month sections. A
+    # WARNING, not an error — an incoherent config degrades (oldest folds
+    # trim early) but stays convergent, and hard-failing here would brick
+    # existing team configs at load time on upgrade.
+    month_inventory = team_events.year_after_days // 30 + 13
+    fold_budget = (
+        month_inventory * team_events.month_max_chars
+        + 5 * team_events.year_max_chars
+    )
+    if fold_budget > team_events.max_length:
+        log.warning(
+            "memory.team_events.max_length (%d) is smaller than the "
+            "folded-tier inventory it may need to hold (~%d month sections "
+            "x %d + 5 years x %d = %d); the oldest folded sections will be "
+            "backstop-trimmed early. Raise max_length/overflow_limit or "
+            "lower the fold targets.",
+            team_events.max_length, month_inventory,
+            team_events.month_max_chars, team_events.year_max_chars,
+            fold_budget,
+        )
 
     return MemoryConfig(
         length_unit=length_unit,
         skills=skills,
         must_remember=must_remember,
-        diary=diary,
-        fuzzy=fuzzy,
+        topics=topics,
+        team_events=team_events,
     )
 
 

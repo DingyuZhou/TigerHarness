@@ -296,6 +296,50 @@ def test_boundary_falls_back_when_no_timestamps(tmp_path, monkeypatch) -> None:
     assert item["cursor_events"] == 1
 
 
+def test_worklog_unchanged_record_skips_not_reingests(tmp_path, monkeypatch) -> None:
+    """Timestamp-less record (worklog blob, no turn headers) with a cursor:
+    when the record's end timestamp and turn count both still match the
+    stored fallback cursor, nothing is new — skip. Recomputing pre by
+    timestamp would always yield 0 and trip the guard, re-ingesting the
+    identical content every sweep forever."""
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    content = "just some worklog prose\nno headers here\n"
+    save_cursor(store, "conv-1", Cursor("2026-06-29T09:00:00+00:00", 1))
+    rec = _rec(content, last="2026-06-29T09:00:00Z")
+    assert _plan(cfg, store, rec, monkeypatch) == []
+
+
+def test_worklog_grown_record_forces_full_repass(tmp_path, monkeypatch) -> None:
+    # Same shape, but the record's end timestamp moved past the cursor:
+    # the blob grew → full re-pass, cursor advances to the new end.
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    content = "worklog prose\nwith a new appended line\n"
+    save_cursor(store, "conv-1", Cursor("2026-06-29T09:00:00+00:00", 1))
+    item = _plan(cfg, store, _rec(content, last="2026-06-29T10:00:00Z"),
+                 monkeypatch)[0]
+    assert "new appended line" in _staged(item)
+    assert item["cursor_event_at"] == "2026-06-29T10:00:00+00:00"
+    assert item["cursor_events"] == 1
+
+
+def test_worklog_turn_count_mismatch_forces_full_repass(tmp_path, monkeypatch) -> None:
+    # End timestamp matches but the turn count changed underneath the
+    # cursor (record reshaped) → full re-pass, never a silent skip.
+    cfg = _cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    content = "worklog prose\nno headers here\n"
+    save_cursor(store, "conv-1", Cursor("2026-06-29T09:00:00+00:00", 2))
+    item = _plan(cfg, store, _rec(content, last="2026-06-29T09:00:00Z"),
+                 monkeypatch)[0]
+    assert "worklog prose" in _staged(item)
+    assert item["cursor_events"] == 1
+
+
 # ===== Q3 active-session trigger ===========================================
 
 
@@ -340,14 +384,48 @@ def test_active_cut_is_whole_turn_boundary(tmp_path, monkeypatch) -> None:
     content = _turns([
         ("2026-06-29T00:00:00Z", "user", "A" * 40),
         ("2026-06-29T00:05:00Z", "assistant", "B" * 40),    # completed sum > 50
-        ("2026-06-29T00:10:00Z", "user", "TAIL"),
+        # NB: sentinel must not be a substring of the extract prompt template
+        # (which contains e.g. "DETAIL:"), so not plain "TAIL".
+        ("2026-06-29T00:10:00Z", "user", "LIVETAIL"),
     ])
     rec = _rec(content, active=True, last="2026-06-29T00:10:00Z")
     item = _plan(cfg, store, rec, monkeypatch)[0]
     staged = _staged(item)
     assert "A" * 40 in staged and "B" * 40 in staged        # whole completed turns
-    assert "TAIL" not in staged                             # cut before the live tail
+    assert "LIVETAIL" not in staged                         # cut before the live tail
     assert item["cursor_event_at"] == "2026-06-29T00:05:00+00:00"
+
+
+def test_active_holdback_sharing_boundary_ts_not_counted(tmp_path, monkeypatch) -> None:
+    """The boundary count is POSITIONAL: a held-back live-tail turn that
+    happens to SHARE the boundary's timestamp is NOT counted as processed.
+    A timestamp-filtered count would include it, the next sweep's guard
+    would then agree, and the tied tail would be skipped forever."""
+    cfg = _active_cfg(tmp_path)
+    store = Store(cfg.store.root)
+    store.init_layout()
+    content = _turns([
+        ("2026-06-29T00:00:00Z", "user", "X" * 80),          # completed, > 50
+        ("2026-06-29T00:05:00Z", "assistant", "DONEPART"),   # boundary
+        ("2026-06-29T00:05:00Z", "user", "LIVETAIL"),        # tail, ties the ts
+    ])
+    rec = _rec(content, active=True, last="2026-06-29T00:05:00Z")
+    item = _plan(cfg, store, rec, monkeypatch)[0]
+    assert "LIVETAIL" not in _staged(item)                   # tail held back
+    assert item["cursor_event_at"] == "2026-06-29T00:05:00+00:00"
+    assert item["cursor_events"] == 2                        # NOT 3: tied tail excluded
+
+    # Advance the cursor as ingest would; the idle pass recomputes pre by
+    # timestamp (3 turns <= cut) != stored 2 → the guard trips → full
+    # re-pass that re-extracts the tied tail rather than skipping it.
+    save_cursor(store, "conv-1",
+                Cursor(item["cursor_event_at"], item["cursor_events"]))
+    item2 = _plan(cfg, store, _rec(content, last="2026-06-29T00:05:00Z"),
+                  monkeypatch)[0]
+    staged2 = _staged(item2)
+    assert "LIVETAIL" in staged2 and "X" * 80 in staged2
+    assert lc._OVERLAP_OPEN not in staged2                   # full pass, no overlap
+    assert item2["cursor_events"] == 3
 
 
 def test_active_single_giant_turn_extracts_not_waits(tmp_path, monkeypatch) -> None:

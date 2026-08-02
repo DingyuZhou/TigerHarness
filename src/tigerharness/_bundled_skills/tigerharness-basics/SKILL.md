@@ -14,7 +14,7 @@ rules win.
 
 ## The CLI at a glance
 
-Five sub-commands (run `tigerharness --help`):
+Six sub-commands (run `tigerharness --help`):
 
 - `tigerharness init` — scaffold a team and/or persona; also installs
   and refreshes these bundled skills.
@@ -23,6 +23,10 @@ Five sub-commands (run `tigerharness --help`):
 - `tigerharness journal` (alias: `j`) — the file-based subscription
   backend: schedule and inspect tasks. Driving them is **skill-only**
   (the `drive-journal` skill), never CLI-driven.
+- `tigerharness autodrive` (alias: `ad`) — the background process that
+  drives the journal on a fixed interval via the agent SDK (the
+  Operator-authorized exception to the human-only drive rule); managed
+  through the `journal-autodrive` skill.
 - `tigerharness tiger-memory` (alias: `tm`) — persistent per-persona
   memory (three bounded stores): rebuild, pin, inspect.
 - `tigerharness slack-bridge` (alias: `sb`) — send Slack messages from
@@ -95,22 +99,27 @@ Don't hand-run gate commands outside a drive; scaffold with the
 ## `tigerharness tiger-memory` (alias: `tm`)
 
 Per-persona persistent memory: **three bounded stores** (`skills` /
-`must_remember` / `emotional`) that self-prune via meditation. Each
-persona's store and config live under `memories/<Name>/`; pass the
-config explicitly or via env:
+`must_remember` / `topics`) that self-prune via staged compaction
+(ADR 0007). Only the small indexes load at session start; per-skill and
+per-topic detail files load on demand. Each persona's store and config
+live under `memories/<Name>/`; pass the config explicitly or via env:
 
     tigerharness tm --config memories/<Name>/tiger-memory.config.yaml rebuild
     tigerharness tm --config ... pin "Operator prefers tabular diffs" --kind preference
     tigerharness tm --config ... state
 
 Common verbs: `init` (create empty store + validate config), `rebuild`
-(fresh-start: drop the retired surface, regenerate the session-start
-briefing — the session-start hook), `pin` (write a `must_remember`
-entry; `--kind owner_explicit|preference|decision|incident`), `state`
-(JSON snapshot of the three stores). The in-session sub-agent executor
-(`plan` stages extraction prompts, `ingest-extraction` writes back one
-bundle over stdin, `ingest-staged` glues every staged `.extract.md`
-card in one process) and the `sweep-*` family back the in-session and
+(format gate + regenerate the session-start briefing — the
+session-start hook), `pin` (write a `must_remember` entry; `--kind
+operator_explicit|preference|decision|incident`), `state` (JSON snapshot
+of the three stores), `migrate-to-topics` (one-off: retire a pre-ADR-0007
+diary/fuzzy surface). The in-session sub-agent executor (`plan` stages
+extraction prompts, `ingest-extraction` writes back one bundle over
+stdin, `ingest-staged` glues every staged `.extract.md` card in one
+process, `compact-plan` / `compact-apply` stage + apply bound
+compactions, `team-events-compact-plan` / `team-events-compact-apply`
+fold the team-wide event log's aged-out periods — ADR 0008) and the
+`sweep-*` family back the in-session and
 team-sweep protocols — driven by the `sweep-memory` skill, like the
 journal gates. Deep dive: `docs/tiger-memory.md` and the canonical
 design `docs/DESIGN-memory.md` in the tigerharness repo.
@@ -159,7 +168,7 @@ maintained by the tooling.
 - `.claude/settings.json` — generated; wires
   `TIGERHARNESS_PERSONAS_CONFIG` for every session.
 - `.claude/skills/<name>/SKILL.md` — the bundled skills
-  (`drive-journal`, `journal-new`, `slack-notify`,
+  (`drive-journal`, `journal-autodrive`, `journal-new`, `slack-notify`,
   `workflow-append-steps`, `tigerharness-basics`, `sweep-memory`).
   Generated; refreshed by `--refresh-skills`; hand-edits preserved.
 - `memories/<Name>/` — per-persona tiger-memory config + store.

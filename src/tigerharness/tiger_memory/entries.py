@@ -1,33 +1,37 @@
-"""Entry schemas for the three bounded memory stores (design §4).
+"""Entry schemas for the three bounded memory stores (ADR 0007).
 
-The memory revamp (design §4) replaces the old rollup/RAG surface with
-exactly three per-persona stores, each a list of small markdown entries
-with a YAML frontmatter carrying the structured fields:
+The topic-store revamp (ADR 0007) keeps exactly three per-persona stores,
+each a list of small markdown entries with a YAML frontmatter carrying the
+structured fields:
 
-- **skills** (§4.1): a learned, invokable lesson — ``name``, ``trigger``,
-  ``procedure``, ``usage_count``, ``importance``.
-- **must_remember** (§4.2): an external directive — ``kind``
+- **skills** (design §4.1): a learned, invokable lesson — ``name``,
+  ``trigger``, ``procedure``, ``usage_count``, ``importance``. Loaded via a
+  small rendered index; each skill's detail is a separate briefing file.
+- **must_remember** (design §4.2): an external directive — ``kind``
   (``operator_explicit`` / ``preference`` / ``decision`` / ``incident``),
   ``importance``.
-- **emotional** (§4.3): a persona reaction — a signed ``weight`` in
-  ``[-weight_cap, +weight_cap]`` and a ``reaction`` string.
+- **topics** (ADR 0007): a named, growing body of project knowledge —
+  ``name``, ``slug``, ``summary``, ``touch_count``; the entry ``text`` is
+  the topic's dated detail body. Only the topic index (slug + summary +
+  freshness) loads at session start; details are separate briefing files.
 
 Every entry shares a **base** shape: ``id``, ``text``, ``created_at``,
-``last_used``, ``source``. The per-store subclasses add their fields.
+``last_used``, ``source``. The per-store subclasses add their fields. For a
+topic, ``last_used`` doubles as ``last_touched`` — the freshness anchor that
+orders the index and drives forget-eligibility.
 
-These dataclasses are the *frozen cross-seat interface* (plan §1): Rukawa
-scores against them, Miyagi reads/writes them. They are pure data +
-validation — no I/O (that is ``store.py``), no scoring (that is
-``emotional.py`` / ``skills.py``). Validation is fail-fast: a malformed
-entry raises ``EntryError`` so a bad write is caught at construction, never
-silently persisted.
+These dataclasses are the frozen cross-module interface. They are pure data
++ validation — no I/O (that is ``store.py``), no scoring (that is
+``skills.py``). Validation is fail-fast: a malformed entry raises
+``EntryError`` so a bad write is caught at construction, never silently
+persisted.
 
 Length is measured in CHARACTERS, never tokens (vendor-neutral, design §8).
 """
 from __future__ import annotations
 
 import logging
-import math
+import re
 import uuid as _uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -43,18 +47,11 @@ class EntryError(ValueError):
 
 STORE_SKILLS = "skills"
 STORE_MUST_REMEMBER = "must_remember"
-STORE_DIARY = "diary"
-#: The three ENTRY-based stores (typed entries; driven by BoundedStore). The
-#: fuzzy store is deliberately NOT here — it is free-text, not an entry list.
-STORE_NAMES = (STORE_SKILLS, STORE_MUST_REMEMBER, STORE_DIARY)
-
-#: The NEW 4th store (4-store model): coarsened, grouped free-text aged out of
-#: diary + must_remember; length-bounded; loaded whole at session start. Handled
-#: by :mod:`fuzzy_store` (not the entry machinery).
-STORE_FUZZY = "fuzzy"
-#: All four stores in session-start load order (skills, must_remember, diary,
-#: fuzzy) — for the briefing view and the format-check gate.
-ALL_STORE_NAMES = (*STORE_NAMES, STORE_FUZZY)
+STORE_TOPICS = "topics"
+#: The three ENTRY-based stores (typed entries; driven by BoundedStore).
+#: The diary and fuzzy stores are RETIRED (ADR 0007) — there is no
+#: free-text store any more.
+STORE_NAMES = (STORE_SKILLS, STORE_MUST_REMEMBER, STORE_TOPICS)
 
 # must_remember kinds (design §4.2). ``operator_explicit`` is the elevated
 # directive the forget-guard protects until the relevance-check runs (§5).
@@ -200,17 +197,17 @@ class SkillEntry(BaseEntry):
 class MustRememberEntry(BaseEntry):
     """An external directive (design §4.2).
 
-    ``kind`` is one of ``VALID_KINDS``. ``operator_explicit`` directives start
-    elevated; meditation's relevance-check may downgrade a stale one to a
-    normal kind (``decision``), after which it rejoins the decay pool (§4.2).
+    ``kind`` is one of ``VALID_KINDS``. ``operator_explicit`` directives are
+    protected by kind; the compaction relevance-check may downgrade a stale
+    one to a normal kind (``decision``), after which it rejoins the normal
+    pool. There is NO importance scalar — salience is ``repeat_count``
+    (recurrence) + ``last_used`` (the TOUCH-refreshed freshness anchor).
     """
 
     kind: str = KIND_PREFERENCE
-    importance: float = 0.0
     #: Reinforcement count — how many times this fact has recurred across
-    #: sessions (the 4-store importance signal, brief §store roster). Starts at
-    #: 1; the meditation merge increments it (and derives ``importance`` from it)
-    #: so a repeated directive ranks higher, not lower.
+    #: sessions (re-extracted, deduped into, or TOUCHed by a sweep). Starts
+    #: at 1; a repeated directive ranks higher, not lower.
     repeat_count: int = 1
 
     def __post_init__(self) -> None:
@@ -223,10 +220,6 @@ class MustRememberEntry(BaseEntry):
                 f"must_remember.kind must be one of {VALID_KINDS}; "
                 f"got {self.kind!r}."
             )
-        if isinstance(self.importance, bool) or not isinstance(
-            self.importance, (int, float)
-        ):
-            raise EntryError("must_remember.importance must be a number.")
         if isinstance(self.repeat_count, bool) or not isinstance(
             self.repeat_count, int
         ) or self.repeat_count < 1:
@@ -236,58 +229,78 @@ class MustRememberEntry(BaseEntry):
         fm = super().frontmatter()
         fm.update({
             "kind": self.kind,
-            "importance": float(self.importance),
             "repeat_count": self.repeat_count,
         })
         return fm
 
 
-# ----- emotional (§4.3) ----------------------------------------------------
+# ----- topics (ADR 0007) ----------------------------------------------------
+
+# Slug shape enforced on write: lowercase, digits, single-hyphen separated.
+_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def topic_slug(name: str) -> str:
+    """Derive the canonical topic slug from a human topic *name*.
+
+    Lowercased; runs of non-alphanumerics collapse to single hyphens; leading
+    and trailing hyphens are stripped. An empty result (a name with no
+    alphanumerics at all) raises ``EntryError`` — a topic must be addressable.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if not slug:
+        raise EntryError(f"topic name {name!r} yields an empty slug.")
+    return slug
 
 
 @dataclass
-class DiaryEntry(BaseEntry):
-    """A dated diary note with a signed emotional weight (design §4.3).
+class TopicEntry(BaseEntry):
+    """A named, growing body of project knowledge (ADR 0007).
 
-    ``weight`` is a signed float in ``[-weight_cap, +weight_cap]``: positive
-    = liked / *for*, negative = disliked / *against*, ``0`` = neutral. The
-    cap is enforced at validation time against ``weight_cap`` (default 10.0,
-    matching the CONFIRMED hard cap of design §4.3). The note itself is the
-    entry ``text`` — what happened / why / learned / could-do-better — with the
-    valence folded into the text + the sign of ``weight`` (the former separate
-    ``reaction`` field is dropped, per the diary redesign).
+    ``slug`` is the stable address the sweep contract routes new details to;
+    ``summary`` is the one-to-two-sentence index line (the ONLY part loaded
+    at session start); the entry ``text`` is the detail body — dated ``##
+    YYYY-MM-DD`` sections of appended facts. ``last_used`` is the freshness
+    anchor (`last_touched`): it orders the index and, past
+    ``topics.forget_days``, makes the topic forget-eligible. ``touch_count``
+    grows every time a sweep routes new material here — a repeat signal for
+    compaction's keep-ranking.
     """
 
-    weight: float = 0.0
+    name: str = ""
+    slug: str = ""
+    summary: str = ""
+    touch_count: int = 1
 
     def __post_init__(self) -> None:
-        self.store_name = STORE_DIARY
+        self.store_name = STORE_TOPICS
+        if not self.slug and self.name.strip():
+            self.slug = topic_slug(self.name)
 
-    def validate(self, weight_cap: float = 10.0) -> None:
+    def validate(self) -> None:
         super().validate()
-        if isinstance(self.weight, bool) or not isinstance(
-            self.weight, (int, float)
-        ):
-            raise EntryError("diary.weight must be a signed number.")
-        # A non-finite weight (NaN / ±inf) is a non-value: ``abs(nan) > cap``
-        # is False, so it would slip past the cap check below and poison the
-        # keep-rank ordering that decides irreversible forgetting (design
-        # §4.3: a signed scalar with a hard cap, never a non-value). Reject it
-        # explicitly here — the schema gate — so it can never be persisted.
-        if not math.isfinite(self.weight):
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise EntryError("topic.name must be a non-empty string.")
+        if not isinstance(self.slug, str) or not _SLUG_RE.match(self.slug):
             raise EntryError(
-                f"diary.weight must be finite (no NaN/inf); "
-                f"got {self.weight}."
+                f"topic.slug must be a lowercase hyphenated slug; "
+                f"got {self.slug!r}."
             )
-        if abs(self.weight) > weight_cap:
-            raise EntryError(
-                f"diary.weight magnitude must be ≤ weight_cap "
-                f"({weight_cap}); got {self.weight}."
-            )
+        if not isinstance(self.summary, str) or not self.summary.strip():
+            raise EntryError("topic.summary must be a non-empty string.")
+        if isinstance(self.touch_count, bool) or not isinstance(
+            self.touch_count, int
+        ) or self.touch_count < 1:
+            raise EntryError("topic.touch_count must be an int >= 1.")
 
     def frontmatter(self) -> dict[str, Any]:
         fm = super().frontmatter()
-        fm.update({"weight": float(self.weight)})
+        fm.update({
+            "name": self.name,
+            "slug": self.slug,
+            "summary": self.summary,
+            "touch_count": self.touch_count,
+        })
         return fm
 
 
@@ -297,7 +310,7 @@ class DiaryEntry(BaseEntry):
 _ENTRY_CLASSES: dict[str, type[BaseEntry]] = {
     STORE_SKILLS: SkillEntry,
     STORE_MUST_REMEMBER: MustRememberEntry,
-    STORE_DIARY: DiaryEntry,
+    STORE_TOPICS: TopicEntry,
 }
 
 
@@ -357,18 +370,20 @@ def entry_from_frontmatter(
             **base_kwargs,
         )
     if cls is MustRememberEntry:
+        # A legacy ``importance`` key in old frontmatter is simply ignored
+        # (unknown keys are forward-tolerant); the next save drops it.
         return MustRememberEntry(
             kind=normalize_kind(str(fm.get("kind", KIND_PREFERENCE))),
-            importance=_coerce_float(
-                fm.get("importance", 0.0), "must_remember.importance"
-            ),
             repeat_count=_coerce_int(
                 fm.get("repeat_count", 1), "must_remember.repeat_count"
             ),
             **base_kwargs,
         )
-    # Only DiaryEntry remains.
-    return DiaryEntry(
-        weight=_coerce_float(fm.get("weight", 0.0), "diary.weight"),
+    # Only TopicEntry remains.
+    return TopicEntry(
+        name=str(fm.get("name", "")),
+        slug=str(fm.get("slug", "")),
+        summary=str(fm.get("summary", "")),
+        touch_count=_coerce_int(fm.get("touch_count", 1), "topic.touch_count"),
         **base_kwargs,
     )

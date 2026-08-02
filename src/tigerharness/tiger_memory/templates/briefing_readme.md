@@ -1,7 +1,9 @@
 # Briefing — how to use this memory
 
 You are **{agent_name}**. This briefing is your persistent, bounded
-memory. Read these files at the start of every session, in this order:
+memory. The initial load is deliberately small — **read the three small
+index files below, and nothing else, at session start**; open detail
+files only when their index line matters to the work at hand.
 
 ## 1. `UNPROCESSED.md` — the unprocessed-session rule
 
@@ -22,55 +24,57 @@ entry shows its `kind`:
 - **incident** — a bug, near-miss, or expensive lesson worth never re-learning
 
 If a request conflicts with anything here, **surface the conflict**
-rather than acting on it. Operator directives start elevated but are not
-immortal: meditation downgrades one that no longer serves the live
-mission.
+rather than acting on it.
 
-## 3. `skill_index.md` — your learned, reusable skills
+## 3. `skill_index.md` — your learned, reusable skills (index only)
 
-An index of skills you have learned: a name, *when to use* it, and a
-one-line lesson. This is **progressive disclosure** — only the index is
-loaded into context. When a skill's trigger applies, read the full skill
-(its procedure) from `skills.md` in the journal store, then apply it.
-This skill system is **ours**, persona-private — not Claude's
-`.claude/skills/`.
+One line per skill: a name and *when to use it*. This is **progressive
+disclosure** — only the index loads. When a skill's trigger applies, read
+its full procedure from the file the index points to under `skills/`,
+then apply it. This skill system is **ours**, persona-private — not
+Claude's `.claude/skills/`.
 
-## 4. `diary.md` — your dated diary, strongest feelings first
+## 4. `topic_index.md` — your project knowledge, by topic (index only)
 
-How past work felt to you, as {agent_name}: a signed weight (+ = liked,
-− = disliked; magnitude = strength), as dated `- (±N) note` bullets. Strong
-feelings survive; near-neutral ones decay and are forgotten. This is
-what makes the memory *yours*.
+One block per topic: name, slug, when it was last touched, and a concise
+summary — **freshest topics first**. A topic is a growing body of durable
+knowledge about one subject. When a topic is relevant, read its dated
+detail file at `topics/<slug>.md`. Never load every detail file "just in
+case" — the index tells you which ones matter.
 
-## 5. `fuzzy.md` — your coarsened older memory (the gist)
+## 5. `MANIFEST.md` — the inventory + read order
 
-The long-term, low-resolution layer. Older diary notes and must-remember
-facts that have aged out of the sharp stores are **grouped and summarised**
-here — you keep the gist even after the detail fades. It is bounded and
-re-summarised each meditation, so it converges rather than grows. Nothing is
-deleted: memory loses granularity, not existence — and a fact that recurs
-re-sharpens back into the sharp stores.
+## 6. The team event log — LAZY, never load at session start
 
-## 6. `MANIFEST.md` — the inventory + read order
+`../../team/events.md` is the **team-wide** event log: one dated line
+per thing each team member did (newest first; older periods compacted
+to month/year summaries). It is not part of this briefing and is
+**never** loaded at session start. Open it only when the session
+actually needs cross-team awareness — picking up work you don't
+recognise, "who touched X before?", a handoff. It may not exist yet on
+a young team.
 
 ---
 
-## Forgetting is a feature (but nothing is deleted)
+## Forgetting is a feature
 
-Every store is bounded. When a store overflows, **meditation** runs (in
-character, on the subscription rail): it merges near-duplicates,
-relevance-checks operator directives against the live mission, compacts
-verbose entries, and — instead of dropping the lowest-ranked — **coarsens
-them into `fuzzy.md`** (recoverable). Recent diary notes (within the fresh
-window) always stay verbatim. Memory stays focused on what helps the team now
-without ever silently losing what you were told.
+Every surface is bounded (characters, never tokens). When an index or a
+detail file outgrows its must-compact bound, the sweep stages a
+compaction: summaries tighten, near-duplicate topics merge, and topics
+that have not been refreshed for a long time are forgotten from the
+index. Fresh operator-explicit directives are carried over verbatim by
+compaction; one untouched past its forget window may be relevance-
+downgraded (marked STALE, rejoining the normal pool) or, as a logged
+last resort, forgotten. Sweeps TOUCH items that come up in a session —
+that is what keeps live rules fresh and protected. Fresh topics
+(touched within the fresh window) are never forgotten or merged away.
 
 ## When you learn something worth remembering
 
 Pin a directive directly:
 `tiger-memory pin "<memo>" --kind <operator_explicit|preference|decision|incident>`.
-Skills and diary notes are extracted automatically by the sweep
-when a session goes idle.
+Skills and topic details are extracted automatically by the sweep when a
+session goes idle.
 
 ---
 

@@ -1,201 +1,112 @@
 # tiger-memory
 
 ## At a glance
-- **What:** per-persona persistent memory built on **four bounded,
-  self-pruning stores** — `skills`, `must_remember`, `diary`, `fuzzy` — with a
-  session-start briefing, in-persona extraction, and a meditation
-  compaction engine (forgetting is first-class).
+- **What:** per-persona persistent memory built on **three bounded,
+  self-pruning stores** — `skills`, `must_remember`, `topics` — with an
+  index-only session-start briefing, in-persona extraction, and a staged
+  compaction flow (forgetting is first-class).
 - **When you need it:** configuring or inspecting a persona's memory. For the
   team-wide refresh protocol see
   [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md); for the
-  rationale see [DESIGN-memory.md](DESIGN-memory.md).
-- **Must-not-miss:** stores are **bounded** and **forgetting is
-  irreversible** (no safety net). Never hand-edit a store file; let the
-  sweep + meditation prune it. Length is measured in **characters**, never
-  tokens.
-
-Persistent memory management for Claude Code agents: four bounded stores,
-a Python-rebuilt session-start briefing, and a meditation engine that
-merges, relevance-downgrades, compacts, and forgets so memory stays focused
-on what helps the team now.
+  rationale see [DESIGN-memory.md](DESIGN-memory.md) and
+  [ADR 0007](adr/0007-topic-store-revamp.md).
+- **Must-not-miss:** stores are **bounded** and forgetting is real (a
+  forgotten topic leaves only git history / `retired/` copies behind). Never
+  hand-edit a store file; let the sweep + compaction prune it. Length is
+  measured in **characters**, never tokens. Session start loads **indexes
+  only** — open a detail file only when its index line matters.
 
 ## What it does
 
 Turns an agent's *finished* conversation sessions into entries in three
 bounded per-persona stores, in-character, then assembles a session-start
-briefing the agent reads at the start of each session. Because every store
-is bounded, crossing a store's `overflow_limit` triggers **meditation**,
-which compacts and forgets to bring the store back under `max` — so memory
+briefing the agent reads at the start of each session. Because every
+surface is bounded, crossing its `overflow_limit` ("must compact") makes it
+a mandatory target for **staged compaction** on the next sweep, which
+merges, tightens, and forgets to bring it back under `max` — so memory
 self-prunes instead of growing forever.
 
 ## Architecture
 
 ```
-Sources (Claude transcripts, Slack threads, journal worklogs, docs)
+Sources (Claude transcripts, Slack-bridge threads, journal worklogs)
     |
     v
 Extraction (lifecycle.py): a finished session -> a strict
-  @@SKILLS@@ / @@MUST_REMEMBER@@ / @@DIARY@@ bundle, in-persona
+  @@SKILLS@@ / @@MUST_REMEMBER@@ / @@TOPICS@@ bundle, in-persona
+  (the prompt embeds the persona's current topic routing list
+   + must-remember items, so the bundle can TOUCH what it relied on)
     |
     v
-Ingest (bounded_store.py): bundle blocks -> the three stores
-    |              \
-    |               v
-    |          Meditation (meditation.py), per store, ONLY when over
-    |          overflow_limit: merge -> relevance-downgrade -> compact ->
-    |          guarded-forget, back under max
-    v
-Stores (journal/skills.md + must_remember.md + diary.md)
+Ingest (executor.py + lifecycle.py): bundle blocks -> the three stores
+  (topics route to an existing slug or mint a NEW topic; TOUCH blocks
+   refresh existing must-remember items' freshness)
     |
     v
-Briefing (briefing.py): skill INDEX + full must_remember + full diary
-  view + unprocessed-session notice
+Compaction (compaction.py), staged, ONLY for surfaces at/over their
+  overflow_limit: compact-plan (non-AI) -> card sub-agents ->
+  compact-apply (non-AI, deterministic convergence)
     |
     v
-Agent reads briefing/ at session start
+Stores (journal/skills.md + must_remember.md + topics.md)
+    |
+    v
+Briefing (briefing.py): must_remember + skill INDEX + topic INDEX
+  + detail files on demand + unprocessed-session notice
+    |
+    v
+Agent reads the three small index files at session start
 ```
 
-## The four bounded stores
+## The three bounded stores
 
-Each store has a scalar, an ordering rule, and a **two-number bound**
-(`max` + `overflow_limit`). The two numbers give **hysteresis**: a store may
-drift up to `overflow_limit`, and only *then* does meditation fire and
-compact it back under `max` — preventing meditate-every-session thrash.
+Each surface has a **two-number bound** (`max` + `overflow_limit`, both in
+characters) giving **hysteresis**: it may drift up to `overflow_limit`, and
+only *then* is a compaction staged that brings it back under `max` —
+preventing compact-every-session thrash.
 
-| Store | Holds | Bound | Scalar / ordering |
+| Store | Holds | Loaded at session start | Bounds (chars, defaults) |
 |---|---|---|---|
-| `skills` | learned, reusable lessons (name + trigger + procedure) | count (`max_count`) | `importance = log1p(usage_count)`; no time-decay; recency tie-break |
-| `must_remember` | external directives (`operator_explicit` / `preference` / `decision` / `incident`) | characters (`max_length`) | importance = **reinforcement repeat-count** (recurrence); `operator_explicit` / `decision` protected until relevance-downgrade |
-| `diary` | the persona's dated, weighted work-log | characters (`max_length`) | dated bullets `- (±N) note`; signed `weight` in `[-10, +10]` decays from the bullet date; ranked by `|weight|`; `fresh_days` window kept verbatim; **loaded whole** |
-| `fuzzy` | coarsened, grouped older memory aged out of diary + must_remember | characters (`max_length`) | FREE TEXT (no entry schema); re-summarised each meditation so it **converges**; **loaded whole** |
+| `skills` | learned, reusable lessons (name + trigger + procedure) | the **index only**; per-skill detail files (`briefing/skills/`) on demand | index 2000 / 3000; per-skill detail 4000 / 6000 |
+| `must_remember` | external directives (`operator_explicit` / `preference` / `decision` / `incident`) | whole store (kept small) | 2000 / 3000; `forget_days` 30 |
+| `topics` | durable project knowledge, filed by subject; dated detail bodies | the **index only** (freshest first); per-topic detail files (`briefing/topics/`) on demand | index 2000 / 3000; per-topic detail 4000 / 6000; `fresh_days` 7, `forget_days` 60 |
 
-On-disk, the three ENTRY stores are one markdown file each under the persona
-store's `journal/` dir (`skills.md`, `must_remember.md`, `diary.md`), each entry a
-YAML-frontmatter block + body. The **fuzzy** store (`fuzzy.md`) is free text, not
-an entry list — it is written by meditation (steady state) and, one-off, by the
-legacy→4-store **migration** that seeds it from the diary overflow. Don't
-hand-edit these — meditation owns pruning, and **forgetting never deletes**: aged
-items are coarsened into `fuzzy.md` (recoverable), not dropped.
+On-disk, all three are YAML-frontmatter entry stores under the persona
+store's `journal/` dir (`skills.md`, `must_remember.md`, `topics.md`). The
+indexes and detail files the persona actually reads are **projections**,
+regenerated deterministically from the stores by `rebuild` — bounds are
+measured over exactly those rendered strings. Don't hand-edit any of it.
 
-The migration seed upholds the same *no-silent-loss* discipline. The dropped diary
-overflow is ordered **newest-first** (so the fuzzy bound's tail-trim drops the
-*oldest* gist, not the most recent). When the seed exceeds `fuzzy.max_length` and a
-summarizer is supplied it is **coarsened** to fit (`fuzzy_recompact`, the
-subscription-rail model call) — genuinely no-drop. The **default** (no summarizer)
-is deterministic: it seeds raw, and if the seed still over-runs the bound the
-residual IS trimmed — but **never silently**. `regenerate_store` records the
-dropped-char count (`RegenResult.fuzzy_trimmed_chars`) and emits a per-persona
-`WARNING`, so an operator always sees a partial loss at migration time instead of
-discovering it later; a trimmed residual is recoverable from the migration task's
-`regen` artifacts (it is gone from `fuzzy.md`). Net: with a summarizer the seed is
-no-drop; without one it is never-silent. Verify by reading the seed tests in
-`tests/tiger_memory/test_regenerate_diary.py`, or by running the migration and
-grepping the logs for `... TRIMMED`.
-
-### Verify the 4-store model
-
-```bash
-# 1. all four stores valid + bounded (skills, must_remember, diary, fuzzy):
-tiger-memory --config <cfg> check          # exit 0 = green; --fix re-bounds fuzzy
-
-# 2. the operator rename is complete (no stray legacy kind):
-grep -rn owner_explicit src/tigerharness/tiger_memory   # only the legacy read-shim
-
-# 3. fuzzy converges + nothing is hard-dropped: the named tests
-#    (incl. the migration-seed no-silent-drop guarantee)
-uv run python -m pytest tests/tiger_memory/test_meditate_persona.py \
-    tests/tiger_memory/test_fuzzy_store.py \
-    tests/tiger_memory/test_regenerate_diary.py
-```
-
-A store written before the `owner_explicit` -> `operator_explicit` rename still
-loads: `entries.normalize_kind` maps the legacy value on read (no silent loss).
-
-## Associative reinforcement (the recall-graph seed)
-
-When a finished session produces a new **diary** note, the system can judge
-whether that note *evokes* (联想 — "calls to mind") **0, 1, or at most 2**
-existing memories — in any of the three sharp stores — and **reinforce** each
-evoked old item so it is less likely to be forgotten, the way human memory
-strengthens on associative recall. A **concise recall reference** to the evoked
-item(s) is appended to the new note's text — a minimal, human-findable pointer
-(`… ↪ recalls: skill "…"; diary 2026-06-19 "…"`), the seed of a memory-recall
-graph. It is *not* a structured graph field and adds *no* id/schema/format change
-to the compact diary store.
-
-How an evoked item is reinforced:
-
-| Evoked store | Reinforcement |
-|---|---|
-| `diary` | weight magnitude **+1 toward its existing sign**, clamped to `weight_cap` (a hub bullet saturates at ±cap), AND `last_used` reset to the evoking event's time — re-dating the bullet so its recency is restored |
-| `must_remember` | `repeat_count += 1` (importance = repeat-count) |
-| `skills` | `usage_count += 1` (importance re-derived, log-shaped — diminishing returns) |
-
-The new note itself is **never** reinforced (no self-bump); only the old items it
-evokes. The judgment is **one batched summarizer call per ingest** (all of that
-ingest's new diary notes against the current stores as candidate context),
-hooked between ingest and meditation — separate from meditation's merge (which
-collapses near-duplicates; evocation keeps both and strengthens the old one).
-Pure mutations live in `reinforce.py`; the pass + prompt/parse in `evocation.py`.
-
-**Enabling it (a rail decision).** The pass is gated by
-`memory.diary.evocation_enabled` (**default `false`**). Turning it on adds a
-model call at ingest, so it is a deliberate, per-deployment choice: in the
-in-process path (`extract_and_ingest`) it uses the session's summarizer; for the
-staged production sweep, a summarizer must be threaded into `ingest_extraction`
-(today `ingest-staged` is non-AI glue, so wiring the call there is the explicit
-step that opts that path onto a model rail). With the flag off, ingest behaves
-exactly as before.
-
-The diary store's size was raised to `max_length` **6000** / `overflow_limit`
-**8000** (from 4000/6000) alongside this feature, to give the references and
-reinforced recency room before forgetting fires.
-
-> Known limitation: a brand-new note byte-identical in text **and** weight **and**
-> day to a pre-existing bullet can be mis-partitioned (the pass keys new-vs-old by
-> that signature, since diary bullets have no id). The effect is benign
-> misattribution, never a crash, and is vanishingly rare for free-text notes.
-
-**Turning it on, concretely.** (1) Set `memory.diary.evocation_enabled: true`
-(per-persona, or once in the team defaults so all personas inherit it). (2) Make a
-summarizer reach the ingest path: the in-process path (`extract_and_ingest`)
-already runs the pass when the flag is on; the **staged** production path
-(`ingest-staged` → `ingest_extraction`) only runs it when a built summarizer is
-passed in — wiring that call is the explicit opt-in that moves staged ingest onto
-a model rail. With the flag off (default), neither path calls the model.
-
-**Verifying.** The behaviour is unit-pinned in `tests/tiger_memory/test_reinforce.py`
-(the mutations + reference), `test_evocation.py` (the batched pass + every
-error/clamp branch), `test_evocation_wiring.py` (both drivers, flag on/off), and
-`test_b2_evocation_qa.py` (the reference survives the format gate; counts stay
-bounded). `tiger-memory check` stays exit-0 across all four stores (the diary
-format is unchanged). Because the feature is default-off, a verifier sees **no**
-change until they enable the flag and supply a summarizer (the real backend, or a
-deterministic stub in tests).
+Topic lifecycle in one paragraph: extraction **routes** new knowledge into
+an existing topic (appending a dated bullet to its detail body, bumping its
+touch count and freshness) or creates a new one; the index orders topics
+most-recently-touched first; a topic touched within `fresh_days` is
+protected from forget/merge; a topic untouched for `forget_days` is dropped
+deterministically (oldest first, until the index is back at or under
+`max`) once the index is at/over its `overflow_limit`; and
+compaction may merge near-duplicate topics or tighten summaries.
 
 ## Key modules
 
 | Module | Purpose |
 |---|---|
-| `cli.py` | CLI. Writers: `init`, `rebuild`, `pin`, `import-legacy` (one-off legacy seed). Reader: `state`. In-session executor (subscription rail): `plan` (stage extraction prompts + pack stacks), `ingest-extraction` (one bundle via stdin), `ingest-staged` (single-process glue of all `.extract.md` cards). Team-sweep gating: `sweep-plan`, `sweep-done`, `sweep-complete`, `sweep-release` |
-| `import_legacy.py` | the one-off legacy import: reader (`read_legacy`), persona-driven re-author (`reauthor`), backdated seeding scorer (`score_seed_candidates`), seed-writer + idempotency guards (`seed_entries` / `already_imported` / `mark_imported`), orchestrator (`import_legacy_run`) |
+| `cli.py` | CLI — see "CLI verbs" below |
 | `config.py` | YAML config loading + validation (the `memory:` block) |
-| `entries.py` | the three entry schemas + validation + frontmatter bridge |
-| `bounded_store.py` | crash-safe store I/O, length/count, overflow detection, per-store lock, the guarded `forget` |
-| `diary.py` | signed-weight clamp + decay + diary keep-rank |
-| `diary_format.py` | the single dated-bullet serialize / parse / validate |
+| `entries.py` | the three entry schemas (`SkillEntry` / `MustRememberEntry` / `TopicEntry`) + `topic_slug` + frontmatter bridge |
+| `bounded_store.py` | crash-safe store I/O, index/detail/entry character measurement, overflow detection, per-store lock, the guarded `forget` |
+| `indexes.py` | pure renderers: skill/topic index, detail files, the topic routing list — the single source of what a persona loads |
 | `check.py` | the `check [--fix]` format gate + quarantine |
-| `migrate_emotional_to_diary.py` | the one-off legacy -> diary migration |
 | `skills.py` | usage-based skill importance + skills keep-rank |
-| `meditation.py` | the compaction engine (merge → relevance-downgrade → compact → guarded-forget) |
-| `reinforce.py` | pure associative-reinforcement mutations + the concise recall-reference builder |
-| `evocation.py` | the batched evocation pass (gated): judge what each new diary note recalls, reinforce it, append the reference |
-| `lifecycle.py` | extraction, in-session staging, fresh-start `rebuild`, `pin`, charter mission sourcing |
-| `sweep.py` | team-sweep gating + post-ingest `meditate_all_stores` |
-| `briefing.py` | assemble the session-start briefing from the four stores |
-| `sources/` | source adapters (claude_code, slack_thread, docs, journal_worklog) |
-| `summarizers/` | LLM summarization backends (anthropic, mock) — the only model call |
-| `state.py` | per-store JSON state snapshot (count / chars / max / over_overflow) |
+| `lifecycle.py` | extraction + routing ingest, in-session staging (plan / stacks / map-reduce), `rebuild`, `pin`, charter mission sourcing |
+| `executor.py` | staged-card ingest glue (`IngestResult`: skills / must_remember / topics added + `touched` — must-remember items refreshed by `TOUCH:` blocks) |
+| `compaction.py` | staged compaction: `compact-plan` / `compact-apply`, deterministic convergence, protections |
+| `migrate_topics.py` | one-off `migrate-to-topics` (diary/fuzzy retirement) |
+| `sweep.py` | team-sweep gating (claim / done / complete / release) |
+| `cursor.py` | per-session incremental-sweep cursors (ADR 0006 Part 2) |
+| `briefing.py` | assemble the session-start briefing (indexes + details + notice) |
+| `sources/` | source adapters. Live on the sweep path: `ClaudeTranscriptAdapter` (both `claude_code` and, via the threads.json map, `slack_thread`) and `JournalWorklogAdapter`. `DocsAdapter` exists but `lifecycle._build_adapters` drops `docs` sources; `auto_memory` has no adapter at all |
+| `summarizers/` | the prompt templates (`prompts/default/v1/`) + pluggable in-process backends |
+| `state.py` | per-store JSON state snapshot |
 
 ## Configuration
 
@@ -220,39 +131,55 @@ sources:
     # include_unattributed: false        # opt-in to also include local claude-p sessions
 
 summarizer:
-  # Pluggable — "anthropic" is the default. The ONLY model call: the
-  # extraction judgement + meditation's similarity/staleness/compaction
-  # judgements. See "Adding a new summarizer vendor" below.
   backend: anthropic
   model: claude-opus-4-7
-  prompts: default/v1
+  prompts: default/v1      # the prompt-template tree (extraction + compaction)
 
-# The four bounded stores (every key optional — these are the defaults).
+# The three bounded stores (every key optional — these are the defaults).
 memory:
   length_unit: characters        # CONFIRMED: characters, never tokens
   skills:
-    max_count: 40
-    overflow_limit: 50
+    index_max_length: 2000
+    index_overflow_limit: 3000
+    detail_max_length: 4000
+    detail_overflow_limit: 6000
   must_remember:
-    max_length: 8000             # chars
-    overflow_limit: 10000
-  diary:
-    max_length: 4000             # chars (loaded whole; kept small by forgetting)
-    overflow_limit: 6000
-    weight_cap: 10               # hard cap: |weight| <= 10
-    decay:
-      magnitude_per_day: 0.1
+    max_length: 2000             # chars; loads whole, so kept small
+    overflow_limit: 3000
+    forget_days: 30              # untouched (no TOUCH) for => forget-eligible (>= 0)
+  topics:
+    index_max_length: 2000
+    index_overflow_limit: 3000
+    detail_max_length: 4000
+    detail_overflow_limit: 6000
+    fresh_days: 7                # touched within => protected from forget/merge
+    forget_days: 60              # untouched for => forget-eligible (>= fresh_days)
+  team_events:                   # the team-wide event log (ADR 0008)
+    enabled: true
+    recent_days: 30              # daily sections younger than this never compact
+    year_after_days: 400         # a month folds into its year this long after year end
+    month_max_chars: 700         # target size of one folded month section
+    year_max_chars: 1000         # target size of one folded year section
+    max_length: 24000            # size backstop over the FOLDED tiers (month+year)
+    overflow_limit: 30000
+
+memory_extract:                  # per-section word budgets for extraction
+  skill_procedure_words: 120
+  memo_words: 25
+  topic_summary_words: 25
+  topic_detail_words: 80
+  team_event_words: 15
+  max_output_words: 600
 
 rebuild:
   trigger: lazy
   idle_threshold_hours: 1
-
-# (diary loads whole — no top-N briefing knob)
 ```
 
 Validation is fail-fast at load: `length_unit` must be `characters` (token
-units rejected); every store bound must satisfy `0 < max < overflow_limit`;
-`weight_cap > 0`; `magnitude_per_day >= 0`.
+units rejected); every bound pair must satisfy `0 < max < overflow_limit`;
+`must_remember.forget_days >= 0`; for topics `fresh_days >= 0` and
+`forget_days >= fresh_days`.
 
 ## Usage
 
@@ -260,24 +187,25 @@ units rejected); every store bound must satisfy `0 < max < overflow_limit`;
 # Initialize the memory store + validate config
 tiger-memory --config my-config.yaml init
 
-# Fresh-start rebuild: drop the retired surface (first run), regenerate the
-# session-start briefing (skill index + must_remember + full diary + notice)
+# Fresh-start rebuild: drop the retired legacy surface (first run), run the
+# format gate, regenerate the session-start briefing (indexes + details)
 tiger-memory --config my-config.yaml rebuild
 
 # Pin a must_remember entry directly.
-# NOTE: --kind defaults to operator_explicit (importance 5.0) — the most
+# NOTE: --kind defaults to operator_explicit — the most
 # forget-protected kind. A bare `tiger-memory pin "..."` therefore writes an
 # operator_explicit directive; pass `--kind preference` for an ordinary note.
 tiger-memory --config my-config.yaml pin "Operator prefers tabular diffs" --kind preference
 tiger-memory --config my-config.yaml pin "Never force-push main" --kind operator_explicit
 
-# JSON snapshot of the four stores (count / chars / max / over_overflow)
+# JSON snapshot of the three stores (count / chars / max / over_overflow)
 tiger-memory --config my-config.yaml state
 ```
 
-Extraction itself is driven by the team sweep, not by hand — see the
-[sweep protocol](tiger-memory-sweep-protocol.md). The in-session executor
-verbs (`plan` / `ingest-extraction` / `ingest-staged`) are driven by the
+Extraction and compaction are driven by the team sweep, not by hand — see
+the [sweep protocol](tiger-memory-sweep-protocol.md). The in-session
+executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
+`ingest-staged` / `compact-plan` / `compact-apply`) are driven by the
 `sweep-memory` skill, not run manually.
 
 ## CLI verbs (the live set)
@@ -285,25 +213,31 @@ verbs (`plan` / `ingest-extraction` / `ingest-staged`) are driven by the
 | Verb | What it does |
 |---|---|
 | `init` | create the empty store + validate the config |
-| `rebuild` | fresh-start: drop the retired legacy surface (first run), regenerate the briefing |
-| `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `operator_explicit`** (importance 5.0, the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
-| `import-legacy [--mock] [--force]` | **one-off, idempotent** seed of the three stores from the old `must_memorize.md` pins + the daily/weekly/monthly rollups (reads/snapshots only — never deletes). MUST run **before** `rebuild` (which drops the legacy files). `--mock` uses the deterministic mock summarizer (no live model); `--force` re-seeds (drops prior `import-legacy` entries first) |
-| `state` | JSON snapshot of the four stores |
-| `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks) |
+| `rebuild` | fresh-start: drop the retired legacy surface (first run), run `check --fix` as the per-persona format gate, regenerate the briefing |
+| `pin <memo> --kind <k>` | write one `must_remember` entry. `--kind` **defaults to `operator_explicit`** (the most forget-protected kind), so a bare `pin` is a protected directive — pass `--kind preference` for an ordinary note |
+| `migrate-to-topics [--apply]` | **one-off, idempotent** (ADR 0007): retire `diary.md` / `fuzzy.md` / `emotional.md` (+ `.rejected` sidecars) from `journal/` to `<root>/retired/` and create an empty `topics.md`. **Dry-run is the default** (preview only); `--apply` performs it |
+| `state` | JSON snapshot of the three stores: per store `count`, `chars` (rendered-index chars for skills/topics, entry chars for must_remember), `max`, `over_overflow`, plus `details_over_overflow` for skills/topics |
+| `plan [--max-sessions N]` | stage one extraction prompt per idle, unprocessed transcript + a manifest (items + stacks); a **still-active** session is also staged once its post-cursor prefiltered slice exceeds `budgets.active_slice_threshold_chars` (cut at a whole-turn boundary, holding back the live tail turn whenever a completed boundary exists; ADR 0006 Part 2). Each prompt embeds the persona's current topic routing list and must-remember item list (for `TOUCH:` blocks) |
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
-| `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free) |
-| `sweep-plan` / `sweep-done` / `sweep-complete` / `sweep-release` | team-sweep gating (non-AI) |
-| `check [--fix]` | validate the 3 stores' on-disk format; exit non-zero if any invalid. `--fix` repairs mechanical drift + quarantines non-mechanical to `<store>.rejected.md` (no silent loss — the quarantined block stays in the sidecar for the persona's next in-character meditation to re-author; it is not auto-restored). Runs as the per-persona gate at the end of every `rebuild` and in CI / pre-commit |
-| `migrate-emotional-to-diary [--apply]` | one-off legacy `emotional.md` -> dated-bullet `diary.md`. **`--dry-run` is the default** (preview only); `--apply` snapshots `emotional.md.bak`, writes `diary.md`, marks done (idempotent), takes the diary store-lock and refuses if a sweep holds it |
+| `build-reduce-prompts` | reduce step (ADR 0006 Part 1): assemble `<uuid>.prompt.md` from a map_reduce item's staged chunk digests |
+| `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free). Exit 0 clean / 1 ≥1 malformed card / 2 no plan manifest |
+| `compact-plan` | non-AI: run the deterministic stale-topic forget, then stage one compaction prompt per surface at/over its `overflow_limit` under `.compact-staging/` + `manifest.json` (empty `targets` = nothing to do) |
+| `compact-apply` | non-AI: validate + apply every staged `<key>.card.md` in ONE process; deterministic convergence trim; protected content (operator-explicit, fresh topics) never force-dropped. Exit 0 clean / 1 ≥1 malformed card / 2 no compaction manifest |
+| `team-events-compact-plan` | non-AI, **team-level** (ADR 0008): run the size backstop, then stage one fold prompt per aged-out team-event period under `memories/team/.compact-staging/` (empty `targets` = nothing aged out) |
+| `team-events-compact-apply` | non-AI: validate + apply every staged team-events fold card in ONE process (deterministic trim; post-plan appends survive). Exit 0 clean / 1 ≥1 malformed card / 2 no manifest |
+| `sweep-plan` / `sweep-done` / `sweep-complete [--token]` / `sweep-release [--token]` | team-sweep gating (non-AI). `sweep-done` renews the claim lease and stamps the durable per-persona `done_at` map (the roster walk is least-recently-swept first); with `--token`, complete/release are refused (exit 3) when another session now owns the claim |
+| `check [--fix]` | validate the 3 stores' on-disk format; exit non-zero if any invalid. `--fix` repairs mechanical drift + quarantines non-mechanical to `<store>.rejected.md` (no silent loss). Runs automatically inside every `rebuild` |
 
-The retired verbs `bootstrap`, `search`, `drill`, `tree`, `raw`,
-`resummarize`, and `ingest-summary` no longer exist — they belonged to the
-chronological-rollup / summary-RAG surface that was removed.
+The retired verbs `import-legacy` and `migrate-emotional-to-diary` were
+removed by ADR 0007 along with the diary/fuzzy stores; the older rollup-era
+verbs (`bootstrap`, `search`, `drill`, `tree`, `raw`, `resummarize`,
+`ingest-summary`) are long gone.
 
 ## The extraction contract
 
-Extraction turns one finished session into a strict bundle with three
-whole-line section markers, in order (see
+Extraction turns one finished session into a strict bundle with four
+whole-line section markers, in order (contract v3 — `@@TEAM_EVENTS@@`
+added by [ADR 0008](adr/0008-team-event-log.md); see
 `summarizers/prompts/default/v1/extract_memory.md`):
 
 ```
@@ -311,169 +245,205 @@ whole-line section markers, in order (see
 <skill blocks, or NONE>
 @@MUST_REMEMBER@@
 <must-remember blocks, or NONE>
-@@DIARY@@
-<diary blocks, or NONE>
+@@TOPICS@@
+<topic blocks, or NONE>
+@@TEAM_EVENTS@@
+<EVENT: lines, or NONE>
 ```
 
 A skill block is `NAME:` / `TRIGGER:` / `PROCEDURE:`; a must-remember block
-is `KIND:` / `MEMO:`; a diary block is `WEIGHT:` / `TEXT:` (the
-note is one line; its date is the session date). A malformed *bundle* (missing/out-of-order markers) is rejected
-before any write; an individual malformed *block* is skipped. `NONE` for a
-store is a valid, expected outcome — most sessions add little.
+is `KIND:` / `MEMO:`.
 
-## Meditation (the compaction engine)
+**Must-remember freshness (TOUCH).** The prompt also embeds the persona's
+current must-remember items — one line per item: id, kind, memo (filled
+into `{must_remember_index}`). If the session's work *related to* an
+existing item (the extractor followed it, it constrained the work, the
+subject came up again), the `@@MUST_REMEMBER@@` section carries a touch
+block instead of a re-emitted memo:
 
-When a store crosses its `overflow_limit`, the sweep runs `meditate` over
-it (per store, under a per-store lock), strictly in order:
+```
+TOUCH: <id from the embedded list>
+```
 
-1. **merge** near-duplicates — merging raises the survivor's scalar
-   (importance / emotional magnitude), clamped;
-2. *(must_remember only)* **relevance-check** each `operator_explicit`
-   directive against the live charter Mission and **downgrade** stale ones to
-   `decision` — this runs *before* any forget;
-3. **compact** verbose survivors (the summarizer rewrites a body shorter);
-4. **forget** the lowest-keep-ranked entries until under `max`, via the
-   guarded `forget`.
+Zero or more `TOUCH:` blocks, mixed freely with the `KIND:`/`MEMO:`
+blocks. Ingest refreshes a touched item's `last_used` (and bumps its
+`repeat_count`); unknown ids are ignored. Touches are counted in
+`IngestResult.touched` (not in `total_added`). An item untouched for
+`must_remember.forget_days` (default 30) becomes forget-eligible at
+compaction.
 
-Forgetting is irreversible and has no safety net, so the engine logs every
-mutation at INFO, defaults the LLM judgement to the **safe** answer on a
-garbled verdict, and **never** drops a still-relevant `operator_explicit`
-directive (the forget-guard; if it cannot get under `max` without one, it
-leaves the store intact and warns). The full design and the ratified
-forget-guard semantics are in [DESIGN-memory.md](DESIGN-memory.md) §5.
+A topic block routes durable project knowledge —
+the prompt embeds the persona's existing topics (freshest first) and asks
+the extractor to **route to an existing topic whenever one fits**:
 
-The broad acceptance/verification suite for the revamp invariants (forget
-order with nothing safe to drop, decay boundaries, relevance-downgrade
-ordering, concurrent meditation, character-length edges, idempotency, and
-malformed-input handling) is
-`tests/tiger_memory/test_memory_revamp_qa_defense.py`.
+```
+TOPIC: <an existing slug from the embedded list, or exactly NEW>
+NAME: <required when TOPIC is NEW>
+SUMMARY: <required for NEW; for an existing topic only when the old summary no longer fits>
+DETAIL: <the new durable facts from THIS session — always required>
+```
+
+Existing slug → the detail is appended (dated) to the topic body, its
+freshness and touch count update. `NEW` → a topic is minted. A malformed
+*bundle* (missing or out-of-order markers, or a **duplicated standalone
+marker** — a bundle must emit each marker exactly once; a duplicate,
+e.g. an echoed contract sample, makes the split ambiguous and the whole
+bundle MALFORMED) is rejected before any write; an
+individual malformed *block* is skipped. `NONE` for a store is a valid,
+expected outcome — most sessions add little.
+
+The `@@TEAM_EVENTS@@` section carries 0–3 `EVENT: <verb-first, past
+tense, ≤ ~15 words>` lines — what the persona actually DID this session,
+without its own name (ingest prefixes it — attribution is structural).
+EVENT items are parsed line-wise (no blank line needed between them);
+they feed the team-wide event log below, never a persona store.
+
+## The team event log (ADR 0008) — lazy, team-wide, self-compacting
+
+One file per team, beside the per-persona stores:
+`<team>/memories/team/events.md` — a dated who-did-what ledger:
+
+```
+## 2026-08-01
+- Anzai planned the QA pass for the topic store.
+- Ayako reviewed PR #12. (x3)
+
+## 2026-07
+- Mitsui shipped the reliability fixes for the sweep planner.
+```
+
+- **Write path:** each persona's `ingest-staged` appends its bundle's
+  `EVENT:` lines under the session's END day (name prefixed, exact
+  same-day repeats collapse to `(xN)`), under a cross-persona file
+  lock, capped at 3 events per card. A lock held through the ~2s
+  retry window drops that append with a logged warning — the log is
+  awareness, not the ledger of record (the persona stores captured
+  the session either way).
+- **Read path — LAZY only:** no briefing ever loads it; the briefing
+  README carries a pointer. Open it only when a session needs
+  cross-team awareness ("who touched X before?").
+- **Compaction — age-tiered, staged:** day sections whose whole month
+  is older than `recent_days` (default 30) fold into one `## YYYY-MM`
+  section; month sections whose year ended more than `year_after_days`
+  (default 400) ago fold into one `## YYYY` section. Folds are staged
+  by `team-events-compact-plan` (non-AI), carded by Task sub-agents
+  (subscription rail, strict `@@TEAM_EVENTS@@` bullet contract), and
+  applied by `team-events-compact-apply` (non-AI; bullets appended
+  between plan and apply survive; an oversized card is hard-trimmed).
+  A deterministic size backstop (`max_length` / `overflow_limit`,
+  measured over the FOLDED tiers only — month + year sections) drops
+  the oldest year/month sections; the daily window is exempt from
+  both the measurement and the drops (bounded by real activity plus
+  the per-append cap), so the backstop is always convergent. The driver runs the fold once per completed sweep,
+  before `sweep-complete`, while still holding the claim.
+- **Config:** the `memory.team_events` block — `enabled`,
+  `recent_days`, `year_after_days`, `month_max_chars`,
+  `year_max_chars`, `max_length`, `overflow_limit` (all optional;
+  keep them team-uniform via the team defaults file). The extraction
+  word budget is `memory_extract.team_event_words` (default 15).
+
+## Compaction (staged — replaces meditation)
+
+When a surface crosses its `overflow_limit`, the sweep stages a compaction
+(same subscription-rail shape as extraction; no in-process model call):
+
+1. **`compact-plan`** (non-AI) first runs the deterministic stale-topic
+   pre-pass — only once the topic index is **at/over its
+   `overflow_limit`** (hysteresis), topics stale beyond `forget_days`
+   drop oldest-first until the index is back at or under `max` (no AI
+   needed for "not refreshed in months") — then writes one prompt per
+   still-over surface under `.compact-staging/`: tighten `must_remember`
+   (operator-explicit entries shown as protected, carried over verbatim),
+   merge/forget `skills`, shrink the `topic_roster` (forget / merge /
+   tighter summaries — fresh topics protected), or rewrite one
+   `topic_detail` / `skill_detail` body under its `max`. In the
+   must_remember prompt, an item untouched for more than
+   `must_remember.forget_days` is annotated **`[forget-eligible]`** with
+   its age — no sweep TOUCHed it — and the card is told to drop it unless
+   it is still clearly valuable despite its age. **Deferral rule:** when
+   the `skills` index or `topic_roster` target is staged, that surface's
+   per-detail targets are deferred to the next sweep (a roster merge
+   would clobber a same-run detail rewrite; a full index replacement
+   would dangle it) — the oversized detail re-stages against the settled
+   store.
+2. **Card sub-agents** (Task tool, subscription-billed) each write one
+   `<key>.card.md` per the prompt's embedded strict contract.
+3. **`compact-apply`** (non-AI) validates each card, applies it atomically
+   to the entry store, and **guarantees convergence
+   deterministically** — a surface still over `max` after its card is
+   hard-trimmed by keep-rank/freshness, never accepted oversized. For
+   must_remember the deterministic drop order is: stale normal entries
+   first (oldest `last_used` first), then fresh normal entries by
+   keep-rank (lowest recurrence/recency first), and only as the very
+   last resort a *stale* `operator_explicit` directive (logged as a
+   warning). A *fresh* `operator_explicit` is never dropped, and fresh
+   topics are never force-dropped: a surface that cannot shrink without
+   them is reported in `still_over` and retried next sweep. **Snapshot
+   survival:** a replacement card (`must_remember` / `skills`) replaces
+   only the plan-time snapshot its prompt saw (the manifest's
+   `snapshot_ids`) — entries written between plan and apply survive; and
+   a kept memo (matched by kind + normalized text) or kept skill
+   (matched by name) inherits its predecessor's id and
+   freshness/usage signals, so compaction never resets the TOUCH clock
+   or keep-rank of a survivor. Malformed
+   cards are reported and kept (exit 1); applied prompt+card files are
+   deleted.
 
 ## Session start (the briefing)
 
-`tiger-memory rebuild` assembles `briefing/` from the four stores:
+`tiger-memory rebuild` assembles `briefing/`:
 
-- the **full must_remember** store (highest-importance first);
-- the **full diary** — loaded whole, strongest feelings first by `|weight|`
-  (forgetting, not a display cap, keeps it bounded);
-- the **skill index** — name + trigger + one line per skill; only the index
-  loads, the persona reads the full skill on demand;
-- the **unprocessed-session notice** (`UNPROCESSED.md`): memory is built
-  only after a session goes idle, so a still-active session may not be
-  reflected yet. **Rule:** if the Operator references something you don't
-  recognise, check this memory first, then check for unprocessed/active
-  sessions, before claiming ignorance.
+- `README.md` — the read order + rules (read this first);
+- `UNPROCESSED.md` — the unprocessed-session notice: memory is built only
+  after a session goes idle, so a still-active session may not be reflected
+  yet. **Rule:** if the Operator references something you don't recognise,
+  check this memory first, then check for unprocessed/active sessions,
+  before claiming ignorance;
+- `must_remember.md` — the whole (small) directives store;
+- `skill_index.md` — one line-block per skill (name + trigger); the full
+  procedure lives in `briefing/skills/<slug>-<id>.md`, read on demand;
+- `topic_index.md` — one block per topic (name, slug, freshness, summary),
+  **freshest first**; the dated detail lives in `briefing/topics/<slug>.md`,
+  read on demand;
+- `MANIFEST.md` — the inventory.
 
-## Migrating a roster from the old memory model
+**Initial load = the three small files only** (`must_remember.md`,
+`skill_index.md`, `topic_index.md`) plus the notice. Never load every
+detail file "just in case" — the index tells you which ones matter. The
+briefing is assembled atomically (temp-dir swap) with a fingerprint no-op
+shortcut over the three journal stores.
 
-A persona config written for the **old** chronological-rollup model still
-loads (unknown keys are ignored), but it carries retired keys and lacks the
-`memory:` block, so it falls back to defaults. To migrate a persona's
-`memories/<persona>/tiger-memory.config.yaml` (or the team-level
-`configs/tiger-memory.defaults.yaml`) to the new model:
+## Migrating a persona from the 4-store (diary/fuzzy) model
 
-**1. Remove the retired keys** (they no longer have any effect):
-
-- `budgets.must_memorize_rows` (and any rollup word budgets such as
-  `short_summary_words` / `detailed_summary_words` / `*_rollup_*` /
-  `longer_memory_words`)
-- `budgets.repeat_detection_similarity`
-- the whole `decay:` block (the per-kind `days_per_point` table)
-- the whole `embedder:` block (RAG is retired)
-- `rebuild.resummarize_window_days`
-- `briefing.walking` (and `briefing.resident_layers`)
-
-`budgets.max_prompt_content_chars` / `max_staged_content_chars` /
-`sweep_stack_content_chars` / `sweep_stack_max_items` are **kept** (still
-live for extraction + sweep stacking).
-
-**2. Add the `memory:` block** (optional — omit it to take the defaults
-in §7 of the design). To tune, add the keys you want:
-
-```yaml
-memory:
-  skills:        { max_count: 40, overflow_limit: 50 }
-  must_remember: { max_length: 8000, overflow_limit: 10000 }
-  diary:
-    max_length: 4000
-    overflow_limit: 6000
-    weight_cap: 10
-    decay: { magnitude_per_day: 0.1 }
-```
-
-Optionally also add `memory_extract:` (per-section word budgets) and
-(the diary now loads whole — no top-N knob).
-
-**3. Seed from the old memory (one-off).** Before the fresh start drops the
-legacy files, run the one-off import to carry the old memory forward:
-`tiger-memory --config <persona-config> import-legacy`. It reads (and only
-reads — no deletion) each persona's old `must_memorize.md` pins + the
-daily/weekly/monthly rollups, re-authors them **in character** into the new
-`skills` / `must_remember` / `diary` shapes, backdates them to their
-source dates (an old diary note enters already-decayed; a skill's
-`last_used` = its source date), and appends them to the three stores tagged
-`source: import-legacy`. It is **idempotent** (a durable `.state.json`
-`legacy_import` marker plus a detect-existing-seed fallback make a re-run a
-no-op); pass `--force` to deliberately re-seed and `--mock` to run without a
-live model. The verbose per-session `archive/` and `journal/` shorts are NOT
-imported — only the pins + rollups.
-
-**4. Fresh-start the store.** Migration is a **fresh start** (no converter,
-design §10.6): run `tiger-memory --config <persona-config> rebuild` once.
-The first rebuild drops the legacy on-disk surface (old rollup summaries,
-`must_memorize.md`, `longer_memory.md`, the `archive/` dir) and regenerates
-the briefing; the three new stores then (re)build incrementally as the team
-sweep extracts new sessions.
-
-> **Ordering (critical).** `import-legacy` must run **before** `rebuild` —
-> `rebuild` deletes the legacy files, so running it first is irrecoverable
-> (the old memory is gone before it can be seeded). On a team that tracks
-> live persona configs in git, also do the roster-YAML migration **with the
-> branch merge**, not before — editing a live config to the new schema while
-> `main` still runs the old code would desync the config from the deployed
-> code. The new code ignores the retired keys, and the old code ignores the
-> `memory:` block. The full safe order is:
->
-> **merge the code → migrate the configs → `import-legacy` (seed) →
-> `rebuild` (fresh start) → ongoing sweep.**
-
-### Migrating `emotional.md` → `diary.md` (3-store model)
-
-A persona already on the 3-store model has an `emotional.md` (frontmatter:
-`weight` + `reaction` + body). The diary redesign replaces it with the compact
-dated-bullet `diary.md`. The one-off converter:
+ADR 0007 retired the `diary` and `fuzzy` stores. For each existing persona
+store:
 
 ```bash
-tiger-memory --config <persona-config> migrate-emotional-to-diary           # dry-run
-tiger-memory --config <persona-config> migrate-emotional-to-diary --apply    # perform it
+tiger-memory --config <persona-config> migrate-to-topics            # dry-run (preview)
+tiger-memory --config <persona-config> migrate-to-topics --apply    # perform it
+tiger-memory --config <persona-config> rebuild                      # regenerate briefing
 ```
 
-- **`--dry-run` is the default**: it parses + previews
-  (`source_blocks` / `converted` / `kept` / `forgotten` / `no_loss`), writing
-  nothing. Run it on every persona first, and **CONFIRM `no_loss: true`** (i.e. `source_blocks == kept + forgotten`) before `--apply`.
-- **`--apply`** snapshots `emotional.md` → `emotional.md.bak`, writes the
-  validated `diary.md`, removes `emotional.md`, and marks a durable
-  `diary_migrated` state marker (**idempotent** — a re-run is a no-op). It
-  takes the diary store-lock and **refuses if a live sweep holds it**.
-- **Map**: each old entry's body → the bullet note (the `reaction`'s valence is
-  folded into the weight sign); `weight` → `(±N)`; the entry date →
-  the `## YYYY-MM-DD` header. A converted file over `max_length` is bounded by a
-  forget pass (lowest `|weight|` first) — **no silent loss** (every source
-  block is counted: `source_blocks == converted == kept + forgotten`).
-- **Rollback**: restore `emotional.md.bak` → `emotional.md`, delete `diary.md`,
-  remove the `diary_migrated` marker from `.state.json`.
+- **Dry-run is the default**; `--apply` moves `diary.md` / `fuzzy.md` /
+  `emotional.md` (+ `.rejected` sidecars) from `journal/` to
+  `<root>/retired/` — nothing loads them any more, but the content stays on
+  disk (and in git history) — and creates an empty `topics.md`. Idempotent:
+  a re-run is a no-op.
+- `must_remember.md` stays in place; a store near the old 8000-char bound
+  will be aggressively compacted down to the new 2000/3000 on its first
+  over-bound compaction — that is the intended shrink, and fresh
+  `operator_explicit` entries keep their forget protection.
+- Old config keys for the retired stores (`memory.diary.*`,
+  `memory.fuzzy.*`) no longer do anything (unknown `memory:` keys are
+  ignored by the loader) — remove them to keep configs honest.
+- **Quiesce sweeps before rolling out the new code**: staged `.extract.md`
+  cards in the old v1 (`@@DIARY@@`) format are unparseable by the new
+  ingest. Complete or release any in-flight sweep and drain the staging
+  dirs first; un-swept transcripts are unaffected (the next sweep stages
+  v2 prompts).
 
-Safe order: **dry-run all personas → review the previews → `--apply` per
-persona when no sweep is running → `tiger-memory check` to confirm valid.** The
-live `--apply` over a real roster is the Operator's call.
-
-> **Verify forgetting kept it bounded.** After a sweep/meditation, a diary
-> is in-bound iff its character length is `<= max_length` (4000) AND
-> `tiger-memory check` exits 0 — the bound is enforced by forgetting, so
-> this is the check a verifier runs, not an assumption.
-
-`tigerharness init` already scaffolds new personas with the new model (no
-retired keys), so this migration only applies to configs created before the
-revamp.
+`tigerharness init` already scaffolds new personas on the topic model, so
+this migration only applies to stores created before ADR 0007.
 
 ## Per-persona filtering (multi-bridge integration)
 
@@ -570,26 +540,25 @@ specialist with *only* worklog activity and no Slack threads is still swept —
 its new worklog entries surface at `tiger-memory plan` time through this
 source. See [`tiger-memory-sweep-protocol.md`](tiger-memory-sweep-protocol.md).
 
-## The auto_memory source (legacy)
+## The auto_memory and docs source kinds (config-only, no live adapter)
 
-One more source kind the config validator accepts is `auto_memory`. It
-concatenates the `*.md` files under a `path:` directory into a single
-synthetic record (Claude Code's auto-memory dir), extracted like any other
-source. It is retained for backward compatibility; new setups should prefer
-the explicit sources above.
-
-```yaml
-sources:
-  - kind: auto_memory
-    path: ~/.claude/projects/<slug>/memory/
-```
+The config validator also accepts `auto_memory` and `docs` as source
+kinds — **for forward-compatibility only**. Neither carries a live
+adapter on the sweep path: `lifecycle._build_adapters` builds adapters
+only for `claude_code` (which also covers `slack_thread` sessions via
+the threads.json map) and `journal_worklog`; a configured `auto_memory`
+or `docs` source is silently inert (a `DocsAdapter` class still exists
+in `sources/` but nothing constructs it). Listing them does not break a
+config, but they contribute nothing to extraction — use the live source
+kinds above.
 
 ## Adding a new summarizer vendor
 
-Tiger-memory's summarizer is vendor-agnostic by design — it is the single
-model touch point (the extraction judgement + meditation's
-similarity/staleness/compaction judgements). The `anthropic` backend is
-pre-registered; plug in any other vendor in three steps:
+The production sweep path is model-free glue — its AI steps run as staged
+Task sub-agents, so no summarizer backend is invoked there. The pluggable
+summarizer registry remains for the in-process convenience path
+(`extract_and_ingest`) and tests. The `anthropic` backend is pre-registered;
+plug in any other vendor in three steps:
 
 **1. Implement `Summarizer`** (see [`summarizers/base.py`](../src/tigerharness/tiger_memory/summarizers/base.py)):
 
@@ -625,8 +594,7 @@ register_summarizer("openai", _build_openai)
 ```
 
 Call `register_summarizer()` at import time — typically from your project's
-top-level `__init__.py` or a startup hook. The registration must run before
-`tiger-memory rebuild`/`ingest-staged` is invoked.
+top-level `__init__.py` or a startup hook.
 
 **3. Use it in any persona's config:**
 
@@ -641,8 +609,3 @@ If the backend name isn't registered, you get a `SummarizerError` listing
 every registered backend. If your factory returns something that isn't a
 `Summarizer` subclass, the registry catches that at lookup time and raises
 `SummarizerError` with the actual type name.
-
-**Future: entry-point-based registration.** Python's
-`[project.entry-points."tigerharness.summarizers"]` mechanism would let
-plugins register without anyone explicitly importing them — on the roadmap
-if demand picks up. The in-process call is sufficient for single-org use.

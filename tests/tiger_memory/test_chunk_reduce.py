@@ -304,7 +304,7 @@ def test_build_reduce_prompt_assembles_single_sourced_contract(tmp_path, monkeyp
     assert path.endswith("conv-1.prompt.md")             # same name the single path uses
     text = Path(path).read_text()
     # the reduce prompt IS the single-sourced 3-store extract contract...
-    assert "@@SKILLS@@" in text and "@@MUST_REMEMBER@@" in text and "@@DIARY@@" in text
+    assert "@@SKILLS@@" in text and "@@MUST_REMEMBER@@" in text and "@@TOPICS@@" in text
     # ...filled with EVERY chunk digest — no middle dropped (acceptance #1).
     for i in range(len(item["digest_paths"])):
         assert f"SENTINEL_{i}" in text

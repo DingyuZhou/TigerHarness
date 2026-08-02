@@ -1,10 +1,11 @@
-"""``tiger-memory state`` payload computation (bounded-store revamp).
+"""``tiger-memory state`` payload computation (topic-store revamp, ADR 0007).
 
 Reads the on-disk store and returns a JSON-serialisable snapshot of the three
-bounded stores (``skills`` / ``must_remember`` / ``diary``): per-store
-entry counts, character length, and whether each is at/over its overflow
-limit (the meditation trigger). The retired rollup/archive/``longer_memory``
-counters are gone (design §3).
+bounded stores (``skills`` / ``must_remember`` / ``topics``): per-store
+entry counts, character length (index length for skills/topics — the
+session-start load surface), whether each is at/over its overflow limit
+(the compaction trigger), and how many detail files are over their own
+bound.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from typing import Any
 
 from .bounded_store import BoundedStore
 from .config import Config
-from .entries import STORE_NAMES, STORE_SKILLS
+from .entries import STORE_MUST_REMEMBER, STORE_NAMES
 from .store import Store
 
 log = logging.getLogger("tigerharness.tiger_memory.state")
@@ -28,15 +29,22 @@ def compute_state(cfg: Config, store: Store) -> dict[str, Any]:
     for name in STORE_NAMES:
         entries = bstore.load(name)
         count = bstore.count(entries)
-        chars = bstore.length_chars(entries)
-        stores[name] = {
+        if name == STORE_MUST_REMEMBER:
+            chars = bstore.length_chars(entries)
+        else:
+            chars = bstore.index_chars(name, entries)
+        payload: dict[str, Any] = {
             "count": count,
             "chars": chars,
             "max": bstore.max_bound(name),
             "over_overflow": bstore.is_over_overflow(name, entries),
-            # Skills are count-bounded; the length-based stores compact on chars.
-            "bound_unit": "count" if name == STORE_SKILLS else "characters",
+            "bound_unit": "characters",
         }
+        if name != STORE_MUST_REMEMBER:
+            payload["details_over_overflow"] = sum(
+                1 for e in entries if bstore.is_detail_over_overflow(e)
+            )
+        stores[name] = payload
     saved = store.read_state() or {}
     return {
         "agent": cfg.agent.name,

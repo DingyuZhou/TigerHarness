@@ -1,8 +1,10 @@
-"""Tests for the bounded-store substrate (design §4, §5; plan §1+§2 dev-1).
+"""Tests for the bounded-store substrate (design §4, §5; ADR 0007).
 
-Covers persistence (load/save_atomic + crash-safety), measurement
-(length_chars/is_over_overflow hysteresis), the per-store lock, and the
-forget-guard (the no-safety-net correctness anchor)."""
+Covers persistence (load/save_atomic + crash-safety) for the three stores
+(skills / must_remember / topics), the ADR-0007 measurement API
+(index_chars / detail_chars / is_over_overflow hysteresis / max bounds),
+the per-store lock, and the forget-guard (the no-safety-net correctness
+anchor)."""
 from __future__ import annotations
 
 import os
@@ -11,6 +13,7 @@ from textwrap import dedent
 
 import pytest
 
+from tigerharness.tiger_memory import indexes
 from tigerharness.tiger_memory.bounded_store import (
     BoundedStore,
     ForgetGuardError,
@@ -18,16 +21,23 @@ from tigerharness.tiger_memory.bounded_store import (
     _split_blocks,
 )
 from tigerharness.tiger_memory.config import load_config
-from tigerharness.tiger_memory import entries as E
 from tigerharness.tiger_memory.entries import (
-    DiaryEntry,
     EntryError,
     MustRememberEntry,
     SkillEntry,
+    TopicEntry,
 )
 from tigerharness.tiger_memory.store import Store
 
 NOW = "2026-06-17T00:00:00Z"
+
+# Fixture bounds (deliberately small + distinct per store so every bound
+# assertion below is unambiguous about which knob it read).
+SKILLS_INDEX_MAX, SKILLS_INDEX_OVERFLOW = 200, 300
+SKILLS_DETAIL_MAX, SKILLS_DETAIL_OVERFLOW = 300, 450
+MR_MAX, MR_OVERFLOW = 40, 60
+TOPICS_INDEX_MAX, TOPICS_INDEX_OVERFLOW = 220, 320
+TOPICS_DETAIL_MAX, TOPICS_DETAIL_OVERFLOW = 350, 500
 
 
 @pytest.fixture
@@ -50,15 +60,20 @@ def bounded(tmp_path: Path) -> BoundedStore:
               prompts: default/v1
             memory:
               skills:
-                max_count: 3
-                overflow_limit: 5
+                index_max_length: {SKILLS_INDEX_MAX}
+                index_overflow_limit: {SKILLS_INDEX_OVERFLOW}
+                detail_max_length: {SKILLS_DETAIL_MAX}
+                detail_overflow_limit: {SKILLS_DETAIL_OVERFLOW}
               must_remember:
-                max_length: 40
-                overflow_limit: 60
-              diary:
-                max_length: 40
-                overflow_limit: 60
-                weight_cap: 10
+                max_length: {MR_MAX}
+                overflow_limit: {MR_OVERFLOW}
+              topics:
+                index_max_length: {TOPICS_INDEX_MAX}
+                index_overflow_limit: {TOPICS_INDEX_OVERFLOW}
+                detail_max_length: {TOPICS_DETAIL_MAX}
+                detail_overflow_limit: {TOPICS_DETAIL_OVERFLOW}
+                fresh_days: 7
+                forget_days: 60
             """
         )
     )
@@ -81,11 +96,55 @@ def _mr(kind: str = "preference", text: str = "memo") -> MustRememberEntry:
     )
 
 
-def _emo(weight: float = 1.0, text: str = "did x") -> DiaryEntry:
-    return DiaryEntry(
+def _topic(
+    name: str = "Topic Store Revamp",
+    summary: str = "the revamp plan",
+    text: str = "## 2026-06-17\n- did x",
+) -> TopicEntry:
+    return TopicEntry(
         text=text, created_at=NOW, last_used=NOW, source="extract",
-        weight=weight,
+        name=name, summary=summary,
     )
+
+
+# -- padding helpers: build entries whose RENDERED surface hits an exact
+# -- character target, so bound-edge assertions are byte-precise.
+
+
+def _skills_at_index_chars(bounded: BoundedStore, target: int) -> list[SkillEntry]:
+    s = _skill("Pad")
+    base = bounded.index_chars("skills", [s])
+    assert base < target, "fixture bound too small for the padding helper"
+    s.trigger += "x" * (target - base)
+    assert bounded.index_chars("skills", [s]) == target
+    return [s]
+
+
+def _topics_at_index_chars(bounded: BoundedStore, target: int) -> list[TopicEntry]:
+    t = _topic("T", summary="s")
+    base = bounded.index_chars("topics", [t])
+    assert base < target, "fixture bound too small for the padding helper"
+    t.summary += "x" * (target - base)
+    assert bounded.index_chars("topics", [t]) == target
+    return [t]
+
+
+def _skill_at_detail_chars(bounded: BoundedStore, target: int) -> SkillEntry:
+    s = _skill("Pad")
+    base = bounded.detail_chars(s)
+    assert base < target, "fixture bound too small for the padding helper"
+    s.procedure += "x" * (target - base)
+    assert bounded.detail_chars(s) == target
+    return s
+
+
+def _topic_at_detail_chars(bounded: BoundedStore, target: int) -> TopicEntry:
+    t = _topic("T", summary="s")
+    base = bounded.detail_chars(t)
+    assert base < target, "fixture bound too small for the padding helper"
+    t.text += "x" * (target - base)
+    assert bounded.detail_chars(t) == target
+    return t
 
 
 # ----- load / save roundtrip ----------------------------------------------
@@ -93,6 +152,7 @@ def _emo(weight: float = 1.0, text: str = "did x") -> DiaryEntry:
 
 def test_load_absent_store_is_empty(bounded: BoundedStore) -> None:
     assert bounded.load("skills") == []
+    assert bounded.load("topics") == []
 
 
 def test_save_load_roundtrip_all_stores(bounded: BoundedStore) -> None:
@@ -107,16 +167,22 @@ def test_save_load_roundtrip_all_stores(bounded: BoundedStore) -> None:
     assert [e.kind for e in gm] == ["operator_explicit", "preference"]
     assert [e.id for e in gm] == [m1.id, m2.id]
 
-    e1 = _emo(-4.0, "annoyed")
-    bounded.save_atomic("diary", [e1])
-    ge = bounded.load("diary")
-    assert ge[0].weight == -4.0
+    t = _topic()
+    bounded.save_atomic("topics", [t])
+    gt = bounded.load("topics")
+    assert len(gt) == 1
+    assert gt[0].id == t.id
+    assert gt[0].name == "Topic Store Revamp"
+    assert gt[0].slug == "topic-store-revamp"  # auto-derived, persisted
+    assert gt[0].summary == "the revamp plan"
+    assert gt[0].touch_count == 1
+    assert gt[0].text == "## 2026-06-17\n- did x"
 
 
 def test_save_empty_then_load(bounded: BoundedStore) -> None:
-    bounded.save_atomic("skills", [_skill()])
-    bounded.save_atomic("skills", [])  # clear
-    assert bounded.load("skills") == []
+    bounded.save_atomic("topics", [_topic()])
+    bounded.save_atomic("topics", [])  # clear
+    assert bounded.load("topics") == []
 
 
 def test_save_validates_entries(bounded: BoundedStore) -> None:
@@ -128,25 +194,31 @@ def test_save_validates_entries(bounded: BoundedStore) -> None:
     assert not (bounded.store.paths.journal / "skills.md").exists()
 
 
-def test_save_validates_emotional_against_config_cap(
-    bounded: BoundedStore,
-) -> None:
-    # cfg weight_cap is 10; this entry is fine at 10 but a >10 must fail.
-    bounded.save_atomic("diary", [_emo(10.0)])
-    with pytest.raises(EntryError, match="weight_cap"):
-        bounded.save_atomic("diary", [_emo(10.5)])
+def test_save_validates_topic_entries(bounded: BoundedStore) -> None:
+    bad = _topic()
+    bad.summary = "  "  # invalid
+    with pytest.raises(EntryError, match="summary"):
+        bounded.save_atomic("topics", [bad])
+    assert not (bounded.store.paths.journal / "topics.md").exists()
+    # A hand-set malformed slug is also refused at save time.
+    bad2 = _topic()
+    bad2.slug = "Not A Slug"
+    with pytest.raises(EntryError, match="slug"):
+        bounded.save_atomic("topics", [bad2])
 
 
 def test_save_rejects_cross_store_entry(bounded: BoundedStore) -> None:
     with pytest.raises(EntryError, match="belongs to store"):
         bounded.save_atomic("skills", [_mr()])
+    with pytest.raises(EntryError, match="belongs to store"):
+        bounded.save_atomic("topics", [_skill()])
 
 
 def test_unknown_store_name_paths_raise(bounded: BoundedStore) -> None:
     with pytest.raises(EntryError, match="unknown store_name"):
         bounded.load("nope")
     with pytest.raises(EntryError, match="unknown store_name"):
-        bounded.save_atomic("nope", [])
+        bounded.save_atomic("diary", [])  # retired store is unknown now
 
 
 def test_load_skips_unparseable_blocks(bounded: BoundedStore) -> None:
@@ -161,6 +233,48 @@ def test_load_skips_unparseable_blocks(bounded: BoundedStore) -> None:
     assert len(got) == 1 and got[0].name == "Good"
 
 
+def test_load_replaces_non_utf8_bytes(
+    bounded: BoundedStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-UTF8 byte degrades to a replaced (then skipped) block with a
+    warning — it never raises and never denies the good sibling entries."""
+    good = _skill("Good")
+    bounded.save_atomic("skills", [good])
+    path = bounded.store.paths.journal / "skills.md"
+    path.write_bytes(
+        path.read_bytes() + b"\n<!-- tiger-memory-entry -->\n\xff\xfe junk\n"
+    )
+    with caplog.at_level("WARNING", "tigerharness.tiger_memory.bounded_store"):
+        got = bounded.load("skills")
+    assert len(got) == 1 and got[0].name == "Good"
+    assert any("non-UTF8" in r.message for r in caplog.records)
+
+
+def test_load_skips_corrupt_field_block(bounded: BoundedStore) -> None:
+    """A topic block whose touch_count is non-numeric is skipped; the good
+    sibling still loads (lenient read, no-safety-net store)."""
+    a, b = _topic("Keep Me", "kept"), _topic("Corrupt Me", "corrupted")
+    bounded.save_atomic("topics", [a, b])
+    path = bounded.store.paths.journal / "topics.md"
+    text = path.read_text()
+    assert text.count("touch_count: 1") == 2
+    # Corrupt only the SECOND block's numeric field.
+    head, _, tail = text.rpartition("touch_count: 1")
+    path.write_text(head + "touch_count: not-an-int" + tail)
+    got = bounded.load("topics")
+    assert [e.name for e in got] == ["Keep Me"]
+
+
+def test_load_skips_schema_invalid_block(bounded: BoundedStore) -> None:
+    """A block that parses but fails validate() (empty summary) is dropped at
+    load time — symmetric with save_atomic's validation (QI-1)."""
+    t = _topic("Solo", "real summary")
+    bounded.save_atomic("topics", [t])
+    path = bounded.store.paths.journal / "topics.md"
+    path.write_text(path.read_text().replace("summary: real summary", "summary: ''"))
+    assert bounded.load("topics") == []
+
+
 # ----- crash-safety (atomic write) ----------------------------------------
 
 
@@ -172,68 +286,165 @@ def test_atomic_write_no_tmp_leftover(bounded: BoundedStore) -> None:
 
 
 def test_save_overwrites_atomically(bounded: BoundedStore) -> None:
-    bounded.save_atomic("skills", [_skill("First")])
-    bounded.save_atomic("skills", [_skill("Second")])
-    got = bounded.load("skills")
+    bounded.save_atomic("topics", [_topic("First")])
+    bounded.save_atomic("topics", [_topic("Second")])
+    got = bounded.load("topics")
     assert len(got) == 1 and got[0].name == "Second"
 
 
-# ----- measurement ---------------------------------------------------------
-
-
-def test_length_chars_counts_characters(bounded: BoundedStore) -> None:
-    e = _emo(1.0)  # text "did x"; diary length is the serialized file (header + bullet)
-    assert bounded.length_chars([e]) == len(
-        f"## {e.last_used[:10]}\n- (+1) {e.text}\n"
-    )
+# ----- measurement: _entry_chars / length_chars / count ---------------------
 
 
 def test_length_chars_skill_counts_prose_fields(bounded: BoundedStore) -> None:
     s = _skill("Z", text="body")
-    expected = (
-        len("body") + len("Z") + len("when Z") + len("do Z")
-    )
+    expected = len("body") + len("Z") + len("when Z") + len("do Z")
     assert bounded.length_chars([s]) == expected
+
+
+def test_length_chars_topic_counts_summary_not_slug(bounded: BoundedStore) -> None:
+    """_entry_chars counts a topic's text + name + summary; the slug is an
+    address, not prose, and is NOT counted."""
+    t = _topic("My Name", summary="short summary", text="## d\n- body")
+    expected = len("## d\n- body") + len("My Name") + len("short summary")
+    assert bounded.length_chars([t]) == expected
+
+
+def test_length_chars_must_remember_text_only(bounded: BoundedStore) -> None:
+    m = _mr("preference", "x" * 17)
+    assert bounded.length_chars([m]) == 17
+
+
+def test_length_chars_sums_entries(bounded: BoundedStore) -> None:
+    ms = [_mr("preference", "x" * 10), _mr("decision", "y" * 5)]
+    assert bounded.length_chars(ms) == 15
+    assert bounded.length_chars([]) == 0
 
 
 def test_count(bounded: BoundedStore) -> None:
     assert bounded.count([_skill("a"), _skill("b")]) == 2
+    assert bounded.count([]) == 0
 
 
-def test_is_over_overflow_skills_count_based(bounded: BoundedStore) -> None:
-    # overflow_limit = 5
-    skills = [_skill(f"s{i}") for i in range(4)]
-    assert bounded.is_over_overflow("skills", skills) is False
-    skills.append(_skill("s4"))  # now 5 == overflow_limit -> True
-    assert bounded.is_over_overflow("skills", skills) is True
+# ----- measurement: index_chars ---------------------------------------------
 
 
-def test_is_over_overflow_length_based(bounded: BoundedStore) -> None:
-    # must_remember overflow_limit = 60 chars.
-    small = [_mr("preference", "x" * 10)]
-    assert bounded.is_over_overflow("must_remember", small) is False
-    big = [_mr("preference", "x" * 60)]
-    assert bounded.is_over_overflow("must_remember", big) is True
+def test_index_chars_skills_is_rendered_index_length(bounded: BoundedStore) -> None:
+    skills = [_skill("Alpha"), _skill("Beta")]
+    assert bounded.index_chars("skills", skills) == len(
+        indexes.render_skill_index(skills)
+    )
+    # The empty index is the rendered placeholder, not zero.
+    assert bounded.index_chars("skills", []) == len(indexes.render_skill_index([]))
+    assert bounded.index_chars("skills", []) > 0
 
 
-def test_is_over_overflow_emotional(bounded: BoundedStore) -> None:
-    # emotional overflow_limit = 60; weight is config-capped at 10.
-    big = [_emo(1.0, "y" * 60)]
-    assert bounded.is_over_overflow("diary", big) is True
+def test_index_chars_topics_is_rendered_index_length(bounded: BoundedStore) -> None:
+    topics = [_topic("One", "first"), _topic("Two", "second")]
+    assert bounded.index_chars("topics", topics) == len(
+        indexes.render_topic_index(topics)
+    )
+    assert bounded.index_chars("topics", []) == len(indexes.render_topic_index([]))
+    assert bounded.index_chars("topics", []) > 0
+
+
+def test_index_chars_must_remember_raises(bounded: BoundedStore) -> None:
+    with pytest.raises(EntryError, match="no rendered index"):
+        bounded.index_chars("must_remember", [_mr()])
+
+
+# ----- measurement: is_over_overflow (hysteresis edges) ---------------------
+
+
+def test_is_over_overflow_skills_index_edges(bounded: BoundedStore) -> None:
+    just_under = _skills_at_index_chars(bounded, SKILLS_INDEX_OVERFLOW - 1)
+    assert bounded.is_over_overflow("skills", just_under) is False
+    at_limit = _skills_at_index_chars(bounded, SKILLS_INDEX_OVERFLOW)
+    assert bounded.is_over_overflow("skills", at_limit) is True
+
+
+def test_is_over_overflow_topics_index_edges(bounded: BoundedStore) -> None:
+    just_under = _topics_at_index_chars(bounded, TOPICS_INDEX_OVERFLOW - 1)
+    assert bounded.is_over_overflow("topics", just_under) is False
+    at_limit = _topics_at_index_chars(bounded, TOPICS_INDEX_OVERFLOW)
+    assert bounded.is_over_overflow("topics", at_limit) is True
+
+
+def test_is_over_overflow_must_remember_edges(bounded: BoundedStore) -> None:
+    just_under = [_mr("preference", "x" * (MR_OVERFLOW - 1))]
+    assert bounded.is_over_overflow("must_remember", just_under) is False
+    at_limit = [_mr("preference", "x" * MR_OVERFLOW)]
+    assert bounded.is_over_overflow("must_remember", at_limit) is True
 
 
 def test_hysteresis_band_does_not_overflow(bounded: BoundedStore) -> None:
-    """In the max<=n<overflow band, is_over_overflow stays False (no thrash)."""
-    # must_remember: max_length=40, overflow_limit=60. 50 chars is in-band.
-    mid = [_mr("preference", "x" * 50)]
+    """In the max<=n<overflow band, is_over_overflow stays False (no thrash)
+    — for all three stores."""
+    skills = _skills_at_index_chars(bounded, 250)  # 200 <= 250 < 300
+    assert bounded.index_chars("skills", skills) >= bounded.max_bound("skills")
+    assert bounded.is_over_overflow("skills", skills) is False
+
+    topics = _topics_at_index_chars(bounded, 270)  # 220 <= 270 < 320
+    assert bounded.index_chars("topics", topics) >= bounded.max_bound("topics")
+    assert bounded.is_over_overflow("topics", topics) is False
+
+    mid = [_mr("preference", "x" * 50)]  # 40 <= 50 < 60
     assert bounded.length_chars(mid) >= bounded.max_bound("must_remember")
     assert bounded.is_over_overflow("must_remember", mid) is False
 
 
 def test_max_bound(bounded: BoundedStore) -> None:
-    assert bounded.max_bound("skills") == 3
-    assert bounded.max_bound("must_remember") == 40
-    assert bounded.max_bound("diary") == 40
+    assert bounded.max_bound("skills") == SKILLS_INDEX_MAX
+    assert bounded.max_bound("topics") == TOPICS_INDEX_MAX
+    assert bounded.max_bound("must_remember") == MR_MAX
+
+
+# ----- measurement: per-entry detail bounds ---------------------------------
+
+
+def test_detail_chars_is_rendered_detail_length(bounded: BoundedStore) -> None:
+    s = _skill("Alpha")
+    assert bounded.detail_chars(s) == len(indexes.render_skill_detail(s))
+    t = _topic()
+    assert bounded.detail_chars(t) == len(indexes.render_topic_detail(t))
+
+
+def test_detail_chars_must_remember_raises(bounded: BoundedStore) -> None:
+    with pytest.raises(EntryError, match="no detail file"):
+        bounded.detail_chars(_mr())
+
+
+def test_is_detail_over_overflow_skill_edges(bounded: BoundedStore) -> None:
+    just_under = _skill_at_detail_chars(bounded, SKILLS_DETAIL_OVERFLOW - 1)
+    assert bounded.is_detail_over_overflow(just_under) is False
+    at_limit = _skill_at_detail_chars(bounded, SKILLS_DETAIL_OVERFLOW)
+    assert bounded.is_detail_over_overflow(at_limit) is True
+
+
+def test_is_detail_over_overflow_topic_edges(bounded: BoundedStore) -> None:
+    just_under = _topic_at_detail_chars(bounded, TOPICS_DETAIL_OVERFLOW - 1)
+    assert bounded.is_detail_over_overflow(just_under) is False
+    at_limit = _topic_at_detail_chars(bounded, TOPICS_DETAIL_OVERFLOW)
+    assert bounded.is_detail_over_overflow(at_limit) is True
+
+
+def test_is_detail_over_overflow_must_remember_raises(bounded: BoundedStore) -> None:
+    """A must_remember entry has no detail file — the check raises rather
+    than silently measuring against the wrong store's bound."""
+    with pytest.raises(EntryError, match="no detail file"):
+        bounded.is_detail_over_overflow(_mr())
+
+
+def test_detail_max_bound(bounded: BoundedStore) -> None:
+    assert bounded.detail_max_bound(_skill()) == SKILLS_DETAIL_MAX
+    assert bounded.detail_max_bound(_topic()) == TOPICS_DETAIL_MAX
+
+
+def test_detail_max_bound_must_remember_raises(bounded: BoundedStore) -> None:
+    """Symmetric with detail_chars / is_detail_over_overflow: a
+    must_remember entry has no detail file, so asking for its detail bound
+    is a caller bug, not a silent topics-bound fallback."""
+    with pytest.raises(EntryError, match="no detail file"):
+        bounded.detail_max_bound(_mr())
 
 
 # ----- store_lock ----------------------------------------------------------
@@ -298,13 +509,11 @@ def test_store_lock_reraises_non_eexist_oserror(
 
 
 def test_store_lock_independent_per_store(bounded: BoundedStore) -> None:
-    """Locking skills does not block must_remember (per-store granularity)."""
+    """Locking skills does not block topics (per-store granularity)."""
     with bounded.store_lock("skills"):
-        with bounded.store_lock("must_remember"):
+        with bounded.store_lock("topics"):
             assert (bounded.store.paths.journal / ".skills.lock").exists()
-            assert (
-                bounded.store.paths.journal / ".must_remember.lock"
-            ).exists()
+            assert (bounded.store.paths.journal / ".topics.lock").exists()
 
 
 # ----- forget-guard (the no-safety-net anchor) -----------------------------
@@ -344,9 +553,11 @@ def test_forget_ignores_unknown_drop_ids(bounded: BoundedStore) -> None:
 def test_forget_guard_only_applies_to_must_remember(
     bounded: BoundedStore,
 ) -> None:
-    """A skill with an id is freely forgettable — the guard is must_remember-only."""
+    """Skills and topics are freely forgettable — the guard is must_remember-only."""
     s = _skill("Sk")
     assert bounded.forget("skills", [s], [s.id]) == []
+    t = _topic()
+    assert bounded.forget("topics", [t], [t.id]) == []
 
 
 def test_forget_preserves_owner_when_other_dropped(
@@ -364,43 +575,3 @@ def test_forget_preserves_owner_when_other_dropped(
 def test_split_blocks_empty() -> None:
     assert _split_blocks("") == []
     assert _split_blocks("   \n  ") == []
-
-
-def test_save_diary_refuses_unroundtrippable(bounded: BoundedStore) -> None:
-    """validate-on-write: an entry that passes the schema gate but serialises
-    to a malformed diary file (here, a ``last_used`` that is not a valid date)
-    is REFUSED — the diary store can never persist a non-round-tripping file."""
-    bad = DiaryEntry(
-        text="note", created_at=NOW, last_used="not-a-date",
-        source="extract", weight=1.0,
-    )
-    with pytest.raises(EntryError, match="round-trip"):
-        bounded.save_atomic("diary", [bad])
-
-
-def test_diary_decay_anchored_on_bullet_date(bounded: BoundedStore) -> None:
-    """The diary's decay anchor is the bullet's DATE (plan §6, Rukawa b1-dev-2):
-    the compact format persists only the day, so a save->load round-trip sets
-    last_used to that day header, and decay then ages from the bullet's date —
-    not from when it was last touched."""
-    from tigerharness.tiger_memory.diary import decay_entry
-    old = DiaryEntry(
-        text="shipped the substrate", created_at="2026-06-01T12:00:00Z",
-        last_used="2026-06-01T12:00:00Z", source="extract", weight=8.0,
-    )
-    bounded.save_atomic("diary", [old])
-    loaded = bounded.load("diary")[0]
-    # only the DATE survives; last_used is anchored to the bullet's day header.
-    assert loaded.last_used == "2026-06-01T00:00:00Z"
-    # decay ages from that date: 16 days * 0.1/day -> 8.0 - 1.6 = 6.4 (cap 10).
-    assert decay_entry(loaded, "2026-06-17T00:00:00Z", bounded.cfg) == pytest.approx(6.4)
-
-
-def test_diary_higher_weight_harder_to_forget(bounded: BoundedStore) -> None:
-    """The retention guarantee: among same-dated notes, the higher |weight|
-    ranks higher (kept) and the near-neutral one ranks lowest (forgotten first)."""
-    from tigerharness.tiger_memory.diary import diary_keep_rank
-    strong = DiaryEntry(text="a", created_at=NOW, last_used=NOW, source="x", weight=9.0)
-    weak = DiaryEntry(text="b", created_at=NOW, last_used=NOW, source="x", weight=0.5)
-    # keep-rank sorts ascending -> the weak (lowest |weight|) sorts first (forgotten first).
-    assert diary_keep_rank(weak, NOW, bounded.cfg) < diary_keep_rank(strong, NOW, bounded.cfg)

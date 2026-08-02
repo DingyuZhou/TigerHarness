@@ -134,6 +134,17 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0bc91d13201769b6327e762bc9763db3c8b97c7923d3830171effedad9e56691",
     },
     "tigerharness-basics": {
+        # 2026-08-01 (team event log, ADR 0008): ayako: pre team-events
+        #   ship -- tiger-memory verb list without the
+        #   team-events-compact-plan/apply pair.
+        "18edd37b7e38be4a75a1a55d057fd9e92d18b5be08ab09e81c356ad541d29560",
+        # 2026-07-25 (critique round): pre autodrive-mention ship -- said
+        #   "Five sub-commands" (autodrive/ad missing) and omitted
+        #   journal-autodrive from the bundled-skills list.
+        "6ff9e36ae47785865c6b39fc7528fd5dd8209370b3871b781f987d508118bbd5",
+        # 2026-07-23 (topic-store revamp, ADR 0007): anzai: pre topic-store
+        #   ship -- store roster still said emotional/meditation.
+        "d32ae9739696c3f199088396143922b663edbd0a75fc07a6163b85e378d6f604",
         # 2026-06-17 (b5-doc-draft): anzai: tiger-memory CLI verb list -> live set
         #   (init/rebuild/pin/state/plan/ingest-extraction/ingest-staged/sweep-*);
         #   dropped search/drill/tree/raw/bootstrap/resummarize/ingest-summary.
@@ -148,6 +159,26 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-08-02 (audit hardening): ayako: pre token/lease/LRU ship --
+        #   no --token on the closers, no lease-renewal note, no
+        #   ingested==0 anomaly check, no locked report keys.
+        "d336c010f76710472b8bdebdbe2c275b199591c52a38483a7643ca02905e48bc",
+        # 2026-08-01 (team event log, ADR 0008): ayako: pre contract-v3
+        #   ship -- three-marker bundle, no @@TEAM_EVENTS@@ section, no
+        #   close-step team-events fold.
+        "80150fa5f7fe64176b141f1b9b01c67e53472f703ec5605a41b4a9d3310bb0c8",
+        # 2026-07-25 (critique round): pre operator-directive truth-fix ship
+        #   -- still claimed compaction "can never drop" an operator_explicit
+        #   (stale ones may be downgraded or, as a logged last resort,
+        #   forgotten) and mis-stated the stale-topic pre-pass trigger.
+        "f64719b4f36d568861eeccc17e620d3ea66aa637f674b37e6d5c9fd2131a38a4",
+        # 2026-07-23 (TOUCH amendment): anzai: pre must_remember-freshness
+        #   ship -- before TOUCH blocks joined the card contract.
+        "8e073a798fe4e9c57085b9c4223de0b45889d51cc529a683e8e69b3eec69b52c",
+        # 2026-07-23 (topic-store revamp, ADR 0007): anzai: pre topic-store
+        #   ship -- the last 4-store-era bundle (@@DIARY@@ contract, in-sweep
+        #   meditation) before topics + staged compaction replaced them.
+        "6818e4e7c349bf4b2ce32bb1041df4c10b6170512a76387a566eaca912aaf3da",
         # 2026-07-22 (idle-maintenance): ayako: pre drive-tail ship -- before
         #   the executor-context relax (agent drives may run the sweep; plain
         #   daemons still cannot).
@@ -179,8 +210,8 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "6818e4e7c349bf4b2ce32bb1041df4c10b6170512a76387a566eaca912aaf3da",
-    "tigerharness-basics": "d32ae9739696c3f199088396143922b663edbd0a75fc07a6163b85e378d6f604",
+    "sweep-memory": "d7adf9aa9a3e5aa17959ffff0f2ac2d686a54298770b66ecf7b549a95ad17cf2",
+    "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }
 
@@ -374,8 +405,22 @@ summarizer:
 
 rebuild:
   idle_threshold_hours: 1
-  resummarize_window_days: 7
   rebuild_timeout_minutes: 60
+
+# Team-wide event log (ADR 0008): a lazy, dated who-did-what ledger at
+# memories/team/events.md, appended by every persona's sweep ingest.
+# These are the package defaults -- spelled out so team-level tuning is
+# a one-line edit. All lengths are characters.
+memory:
+  team_events:
+    enabled: true
+    recent_days: 30        # daily sections younger than this never compact
+    year_after_days: 400   # a month folds into its year this long after year end
+    month_max_chars: 700   # target size of one folded month section
+    year_max_chars: 1000   # target size of one folded year section
+    max_length: 24000      # size backstop over the FOLDED tiers (month+year
+                           # sections only; the daily window is exempt)
+    overflow_limit: 30000  # (hysteresis: backstop trims only at/over this)
 """
 
 _MEMORY_CONFIG_TEMPLATE = """\
@@ -617,6 +662,12 @@ memories/*/state.json
 # in-session memory sweep stages and then consumes (each `tiger-memory plan`
 # rmtrees + rebuilds it). It embeds raw transcript content -- never commit it.
 memories/*/.sweep-staging/
+# Live coordination state, mutated by every sweep -- committing it lets a
+# branch merge/revert resurrect an old claim or roll cursors back. The
+# store files, not these, are the durable ledger (a cursor rollback only
+# re-processes, never skips).
+memories/.tiger-memory-sweep.json
+memories/*/.sweep-cursors.json
 # archive/ and journal/ are version-controlled (memory summaries).
 # .gitkeep files inside them ensure the empty dirs are tracked.
 """

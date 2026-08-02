@@ -1,8 +1,7 @@
 """Bounded-store substrate for the memory revamp (design §4, §5; plan §1+§2).
 
-This is the durable layer the scoring (Rukawa) and glue (Miyagi) seats build
-on. It owns, for the three bounded stores (``skills`` / ``must_remember`` /
-``emotional``):
+This is the durable layer the scoring and glue layers build on. It owns,
+for the three bounded stores (``skills`` / ``must_remember`` / ``topics``):
 
 - **persistence** — ``load`` / ``save_atomic`` over a list of typed entries
   (``entries.py``), crash-safe via temp-file + ``os.replace``;
@@ -15,45 +14,48 @@ on. It owns, for the three bounded stores (``skills`` / ``must_remember`` /
   (design §5 invariant; the no-safety-net correctness anchor, plan §2.4).
 
 On-disk layout: one markdown file per store under the store's journal dir
-(``skills.md`` / ``must_remember.md`` / ``diary.md``). Each file is a
+(``skills.md`` / ``must_remember.md`` / ``topics.md``). Each file is a
 sequence of entries, every entry a YAML-frontmatter block (structured
 fields) followed by its body text, blocks separated by a sentinel line. The
-whole file is rewritten atomically on every ``save_atomic`` — meditation
+whole file is rewritten atomically on every ``save_atomic`` — compaction
 operates on the entire store at once, so a whole-file swap is both correct
 and the simplest thing that is crash-safe.
 
-The bound is read per store from the ``memory:`` config block: skills are
-**count-based** (``max_count`` / ``overflow_limit``); must_remember and
-diary are **length-based** in characters (``max_length`` /
-``overflow_limit``). ``is_over_overflow`` returns True only at/above
-``overflow_limit`` — never inside the ``max <= n < overflow_limit``
-hysteresis band (design §4 no-thrash; plan §4 Kogure R1#2).
+Bounds (ADR 0007) are all **characters** from the ``memory:`` config block,
+measured over what a persona actually loads: skills and topics are bounded
+on their RENDERED INDEX (:mod:`indexes`), since only the index loads at
+session start, plus a per-entry detail bound for each skill/topic detail
+file; must_remember is bounded on total entry length. ``is_over_overflow``
+returns True only at/above ``overflow_limit`` — never inside the ``max <=
+n < overflow_limit`` hysteresis band (design §4 no-thrash).
 """
 from __future__ import annotations
 
 import errno
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from . import diary_format, frontmatter
+from . import frontmatter, indexes
 from .config import Config
 from .entries import (
     KIND_OPERATOR_EXPLICIT,
-    STORE_DIARY,
+    STORE_MUST_REMEMBER,
     STORE_NAMES,
     STORE_SKILLS,
+    STORE_TOPICS,
     BaseEntry,
-    DiaryEntry,
     EntryError,
     MustRememberEntry,
+    SkillEntry,
+    TopicEntry,
     entry_from_frontmatter,
-    new_id,
 )
-from .store import Store, _pid_alive
+from .store import Store, _pid_alive, reclaim_lockfile, release_lockfile
 
 log = logging.getLogger("tigerharness.tiger_memory.bounded_store")
 
@@ -148,15 +150,15 @@ class BoundedStore:
                 store_name,
                 path,
             )
-        if store_name == STORE_DIARY:
-            return self._load_diary(text, path)
         out: list[BaseEntry] = []
         for block in _split_blocks(text):
             fm, body = frontmatter.parse(block)
             if not fm:
                 continue
             try:
-                entry = entry_from_frontmatter(store_name, fm, body.rstrip("\n"))
+                entry = entry_from_frontmatter(
+                    store_name, fm, _unescape_body(body.rstrip("\n"))
+                )
                 self._validate_entry(entry)
             except EntryError as exc:
                 log.warning(
@@ -169,51 +171,14 @@ class BoundedStore:
             out.append(entry)
         return out
 
-    def _load_diary(self, text: str, path: Path) -> list[BaseEntry]:
-        """Load the diary store from its dated-bullet text (design §4.3).
-
-        The diary diverges from the frontmatter machinery: it is the compact
-        ``## YYYY-MM-DD`` / ``- (±N) note`` format parsed by the single
-        :mod:`diary_format` parser. Lenient by design (the no-safety-net store
-        has no backup): a malformed file logs a warning and loads **empty**
-        rather than raising — ``tiger-memory check --fix`` quarantines the bad
-        content. Each bullet reconstructs a :class:`DiaryEntry` whose
-        ``last_used``/``created_at`` anchor on the bullet's day (the decay
-        anchor); ``id``/``source`` are not persisted in the compact format, so
-        a fresh id and ``source="diary"`` are synthesised.
-        """
-        try:
-            bullets = diary_format.parse(text, self.memory.diary.weight_cap)
-        except diary_format.DiaryFormatError as exc:
-            log.warning(
-                "tiger-memory: diary store file %s is malformed (%s); loading "
-                "empty — run `tiger-memory check --fix` to quarantine + repair.",
-                path,
-                exc,
-            )
-            return []
-        out: list[BaseEntry] = []
-        for b in bullets:
-            ts = f"{b.date}T00:00:00Z"
-            out.append(
-                DiaryEntry(
-                    text=b.text, created_at=ts, last_used=ts,
-                    source="diary", weight=b.weight, id=new_id(),
-                )
-            )
-        return out
-
     def save_atomic(
         self, store_name: str, entries: Sequence[BaseEntry]
     ) -> None:
         """Atomically rewrite *store_name* with *entries* (temp + ``os.replace``).
 
         Every entry is validated before any byte is written, so a malformed
-        entry aborts the whole save (no partial / corrupt store). The diary
-        store serialises via :mod:`diary_format` with a **validate-on-write
-        round-trip** (serialize -> re-parse -> validate) that REFUSES to persist
-        a store that would not round-trip clean; the other two stores use the
-        frontmatter renderer. Uses ``atomic_write`` (write-tmp, fsync, replace).
+        entry aborts the whole save (no partial / corrupt store). Uses
+        ``atomic_write`` (write-tmp, fsync, replace).
         """
         path = self._store_path(store_name)
         for entry in entries:
@@ -224,69 +189,99 @@ class BoundedStore:
                 )
             self._validate_entry(entry)
         self.store.paths.journal.mkdir(parents=True, exist_ok=True)
-        if store_name == STORE_DIARY:
-            text = _diary_text(entries)
-            errs = diary_format.validate(text, self.memory.diary.weight_cap)
-            if errs:
-                raise EntryError(
-                    "diary store would not round-trip clean (refusing to "
-                    f"persist): {errs[0]}"
-                )
-            self.store.atomic_write(path, text)
-            return
         self.store.atomic_write(path, _serialize(entries))
 
     def _validate_entry(self, entry: BaseEntry) -> None:
-        # The diary store's cap is config-driven; everything else
-        # validates with no argument.
-        if entry.store_name == STORE_DIARY:
-            entry.validate(weight_cap=self.memory.diary.weight_cap)
-        else:
-            entry.validate()
+        entry.validate()
 
     # ----- measurement (design §8: characters, never tokens) ------------
 
     def length_chars(self, entries: Iterable[BaseEntry]) -> int:
         """Total length of *entries* in CHARACTERS (design §8).
 
-        For skills/must_remember, the sum of each entry's rendered text + prose
-        fields. For the diary store the bound is the **serialised file** length
-        (day headers + bullets), since that is what is loaded whole each
-        session. Purely vendor-neutral character length — never tokens.
+        The sum of each entry's rendered text + prose fields. Purely
+        vendor-neutral character length — never tokens.
         """
-        entries = list(entries)
-        if entries and entries[0].store_name == STORE_DIARY:
-            return len(_diary_text(entries))
         return sum(_entry_chars(e) for e in entries)
 
     def count(self, entries: Iterable[BaseEntry]) -> int:
-        """Number of entries (the skills store is count-bounded)."""
+        """Number of entries."""
         return sum(1 for _ in entries)
+
+    def index_chars(
+        self, store_name: str, entries: Sequence[BaseEntry]
+    ) -> int:
+        """Rendered-index length for the skills/topics stores (ADR 0007).
+
+        The index is the only session-start load surface for these stores,
+        so it is what the ``index_max_length`` bound measures. Raises
+        ``EntryError`` for must_remember, which has no index.
+        """
+        if store_name == STORE_SKILLS:
+            return len(indexes.render_skill_index(list(entries)))  # type: ignore[arg-type]
+        if store_name == STORE_TOPICS:
+            return len(indexes.render_topic_index(list(entries)))  # type: ignore[arg-type]
+        raise EntryError(f"store {store_name!r} has no rendered index.")
+
+    def detail_chars(self, entry: BaseEntry) -> int:
+        """Rendered detail-file length for one skill/topic entry (ADR 0007)."""
+        if isinstance(entry, SkillEntry):
+            return len(indexes.render_skill_detail(entry))
+        if isinstance(entry, TopicEntry):
+            return len(indexes.render_topic_detail(entry))
+        raise EntryError(
+            f"store {entry.store_name!r} entries have no detail file."
+        )
 
     def is_over_overflow(
         self, store_name: str, entries: Sequence[BaseEntry]
     ) -> bool:
         """True iff *store_name* is AT OR ABOVE its ``overflow_limit``.
 
-        The hysteresis trigger (design §4): meditation fires only here, never
-        inside ``max <= n < overflow_limit`` (no-thrash, plan §4 Kogure R1#2).
-        Skills use count; the length-based stores use character length.
+        The hysteresis trigger (design §4): compaction fires only here, never
+        inside ``max <= n < overflow_limit`` (no-thrash). Skills and topics
+        measure their rendered index; must_remember measures entry length.
         """
         if store_name == STORE_SKILLS:
-            return self.count(entries) >= self.memory.skills.overflow_limit
-        if store_name == "must_remember":
-            limit = self.memory.must_remember.overflow_limit
-        else:  # diary
-            limit = self.memory.diary.overflow_limit
-        return self.length_chars(entries) >= limit
+            return (
+                self.index_chars(store_name, entries)
+                >= self.memory.skills.index_overflow_limit
+            )
+        if store_name == STORE_TOPICS:
+            return (
+                self.index_chars(store_name, entries)
+                >= self.memory.topics.index_overflow_limit
+            )
+        return (
+            self.length_chars(entries)
+            >= self.memory.must_remember.overflow_limit
+        )
+
+    def is_detail_over_overflow(self, entry: BaseEntry) -> bool:
+        """True iff one skill/topic detail file is at/above its overflow bound."""
+        if isinstance(entry, SkillEntry):
+            limit = self.memory.skills.detail_overflow_limit
+        else:
+            limit = self.memory.topics.detail_overflow_limit
+        return self.detail_chars(entry) >= limit
 
     def max_bound(self, store_name: str) -> int:
-        """The ``max`` target a meditation compacts back below (design §4)."""
+        """The ``max`` target a compaction shrinks back below (design §4)."""
         if store_name == STORE_SKILLS:
-            return self.memory.skills.max_count
-        if store_name == "must_remember":
-            return self.memory.must_remember.max_length
-        return self.memory.diary.max_length
+            return self.memory.skills.index_max_length
+        if store_name == STORE_TOPICS:
+            return self.memory.topics.index_max_length
+        return self.memory.must_remember.max_length
+
+    def detail_max_bound(self, entry: BaseEntry) -> int:
+        """The per-entry detail ``max`` a compaction rewrites back below."""
+        if isinstance(entry, SkillEntry):
+            return self.memory.skills.detail_max_length
+        if isinstance(entry, TopicEntry):
+            return self.memory.topics.detail_max_length
+        raise EntryError(
+            f"store {entry.store_name!r} entries have no detail file."
+        )
 
     # ----- per-store lock (design §5) -----------------------------------
 
@@ -313,10 +308,39 @@ class BoundedStore:
         try:
             yield
         finally:
+            # Owner-verified release (audit F4): never unlink a lock that
+            # is no longer ours.
+            release_lockfile(path)
+
+    @contextmanager
+    def store_lock_wait(
+        self, store_name: str, *, retries: int = 40, delay: float = 0.05
+    ) -> Iterator[None]:
+        """Like :meth:`store_lock`, but waits (~2s default) before giving up.
+
+        For SHORT mutations that must not lose to a transient holder —
+        ingest and pin (audit F2): a compact-apply's per-store critical
+        section is fast, so a brief wait almost always wins; only a truly
+        stuck holder raises :class:`StoreLockHeld`, and the caller's card
+        then re-stages next sweep rather than silently losing a write.
+        """
+        last_exc: StoreLockHeld | None = None
+        for _ in range(retries):
+            entered = False
             try:
-                path.unlink()
-            except FileNotFoundError:  # pragma: no cover - best-effort cleanup
-                pass
+                with self.store_lock(store_name):
+                    entered = True
+                    yield
+                return
+            except StoreLockHeld as exc:
+                if entered:
+                    # Raised by the BODY, not by acquisition — never
+                    # retry (re-running the caller's mutation would
+                    # double-apply it).
+                    raise
+                last_exc = exc
+                time.sleep(delay)
+        raise last_exc  # type: ignore[misc]  # retries >= 1 always sets it
 
     def _acquire_store_lock(self, path: Path) -> bool:
         """Try to take *path* as an O_EXCL lock; reclaim a dead holder."""
@@ -328,17 +352,16 @@ class BoundedStore:
         except OSError as exc:
             if exc.errno != errno.EEXIST:
                 raise
-        # Lock exists: reclaim only if the holder PID is dead.
+        # Lock exists: reclaim only if the holder PID is dead — via the
+        # TOCTOU-safe rename reclaim (audit F4), never a bare unlink.
         try:
             holder_pid = int(path.read_text().split()[0])
         except (ValueError, OSError, IndexError):
             holder_pid = -1
         if holder_pid > 0 and _pid_alive(holder_pid):
             return False
-        try:
-            path.unlink()
-        except FileNotFoundError:  # pragma: no cover - raced release
-            pass
+        if not reclaim_lockfile(path):
+            return False  # lost the reclaim race — someone else owns it
         # Retry once after reclaiming the dead/garbage lock.
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -379,7 +402,7 @@ class BoundedStore:
             if entry is None:
                 continue
             if (
-                store_name == "must_remember"
+                store_name == STORE_MUST_REMEMBER
                 and isinstance(entry, MustRememberEntry)
                 and entry.kind == KIND_OPERATOR_EXPLICIT
                 and did not in checked
@@ -395,45 +418,64 @@ class BoundedStore:
 # ----- module-level serialization helpers ----------------------------------
 
 
-def _diary_text(entries: Iterable[BaseEntry]) -> str:
-    """Serialise diary *entries* to the dated-bullet text (no validation).
+# A body line that IS the separator sentinel gets this prefix at serialize
+# time (stripped back off at split time). Without it, an entry whose text
+# quotes the sentinel — entirely plausible on a team that develops
+# tigerharness itself — severs the entry at the next load: the tail becomes
+# a frontmatter-less block that load() silently skips, and the next save
+# makes the truncation permanent (audit: pipeline finding 1).
+_SEP_ESCAPE = "\\"
 
-    Each entry's day is its ``last_used`` date (the decay anchor); the single
-    :mod:`diary_format` serializer groups by day (ascending) and renders the
-    ``- (±N) note`` bullets. Used by ``save_atomic`` (which then validate-on-
-    writes) and ``length_chars`` (which only measures).
-    """
-    bullets = [
-        diary_format.DiaryEntry(
-            date=e.last_used[:10], weight=float(e.weight), text=e.text
-        )
-        for e in entries
-    ]
-    return diary_format.serialize(bullets)
+# Whole-line separator match. A plain substring split also severed entries
+# whose body merely MENTIONED the sentinel inline (same audit finding).
+_SEP_LINE_RE = re.compile(
+    rf"(?m)^{re.escape(_ENTRY_SEP)}[ \t]*$\n?"
+)
 
 
 def _serialize(entries: Sequence[BaseEntry]) -> str:
-    """Render *entries* as one store file (frontmatter blocks + separators)."""
+    """Render *entries* as one store file (frontmatter blocks + separators).
+
+    Body lines equal to the separator sentinel are escaped so a body can
+    never alias the framing.
+    """
     if not entries:
         # An empty store is a valid, parseable, zero-block file.
         return ""
     blocks = []
     for entry in entries:
-        body = entry.text if entry.text.endswith("\n") else entry.text + "\n"
+        body_lines = [
+            _SEP_ESCAPE + line if line.strip() == _ENTRY_SEP else line
+            for line in entry.text.split("\n")
+        ]
+        body = "\n".join(body_lines)
+        body = body if body.endswith("\n") else body + "\n"
         blocks.append(frontmatter.render(entry.frontmatter(), body))
     return (f"\n{_ENTRY_SEP}\n").join(blocks)
+
+
+def _unescape_body(text: str) -> str:
+    """Inverse of the serialize-time sentinel escape."""
+    return "\n".join(
+        line[len(_SEP_ESCAPE):]
+        if line.startswith(_SEP_ESCAPE) and line[len(_SEP_ESCAPE):].strip() == _ENTRY_SEP
+        else line
+        for line in text.split("\n")
+    )
 
 
 def _split_blocks(text: str) -> list[str]:
     """Split a store file back into per-entry blocks (inverse of _serialize).
 
-    Each block is lstripped of the separator's surrounding newlines so the
-    frontmatter ``---`` delimiter lands on the block's first line (which
-    ``frontmatter.parse`` requires).
+    The split matches the separator only as a WHOLE LINE (an inline mention
+    inside a body is content, not framing), and each block is lstripped of
+    the separator's surrounding newlines so the frontmatter ``---``
+    delimiter lands on the block's first line (which ``frontmatter.parse``
+    requires).
     """
     if not text.strip():
         return []
-    return [b.lstrip("\n") for b in text.split(_ENTRY_SEP)]
+    return [b.lstrip("\n") for b in _SEP_LINE_RE.split(text)]
 
 
 def _entry_chars(entry: BaseEntry) -> int:
@@ -445,7 +487,7 @@ def _entry_chars(entry: BaseEntry) -> int:
     """
     total = len(entry.text)
     fm = entry.frontmatter()
-    for key in ("name", "trigger", "procedure"):
+    for key in ("name", "trigger", "procedure", "summary"):
         val = fm.get(key)
         if isinstance(val, str):
             total += len(val)

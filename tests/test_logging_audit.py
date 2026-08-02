@@ -55,14 +55,9 @@ NO_LOGGER_BY_AUDIT = {
                                               # logged by compile_cli)
     "tigerharness.slack_bridge",          # re-exports
     "tigerharness.tiger_memory",          # re-exports
-    "tigerharness.tiger_memory.diary",        # pure signed-weight scoring
-    "tigerharness.tiger_memory.diary_format", # pure dated-bullet serialize/parse
-    "tigerharness.tiger_memory.fuzz_select",  # pure fuzz-candidate selection
     "tigerharness.tiger_memory.frontmatter",  # pure parser/writer
-    "tigerharness.tiger_memory.metrics",      # pure counters
+    "tigerharness.tiger_memory.indexes",      # pure index/detail renderers
     "tigerharness.tiger_memory.ranking",      # pure recency/date math
-    "tigerharness.tiger_memory.reinforce",    # pure reinforcement math; the
-                                              # outcome is logged by evocation
     "tigerharness.tiger_memory.skills",       # pure skill-importance scoring
     "tigerharness.tiger_memory.sources",      # re-exports
     "tigerharness.tiger_memory.sources.base",  # ABC surface

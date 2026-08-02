@@ -1,6 +1,6 @@
 # tiger-memory configuration
 # Full docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
-# Design (the four bounded stores + meditation):
+# Design (the three bounded stores + staged compaction, ADR 0007):
 #   https://github.com/DingyuZhou/TigerHarness/blob/main/docs/DESIGN-memory.md
 
 agent:
@@ -8,8 +8,9 @@ agent:
   role: "A research assistant specializing in technical topics."
 
 store:
-  # Where to persist the memory store (the four bounded stores +
-  # briefing live under journal/ here). Auto-appends the agent slug.
+  # Where to persist the memory store (the three bounded stores live
+  # under <root>/journal/; the rendered session-start briefing under
+  # <root>/briefing/). Auto-appends the agent slug.
   root: ~/.local/share/tiger-memory/researcher
 
 sources:
@@ -20,9 +21,10 @@ sources:
     project_path: ~/.claude/projects/-home-user-myproject/
 
 summarizer:
-  # Choices: anthropic, mock (for testing without API spend).
-  # The summarizer is the ONLY model call: the extraction judgement and
-  # meditation's similarity/staleness/compaction judgements. Vendor-neutral.
+  # The only registered backend is `anthropic` (a mock exists but is
+  # test-internal — reserved for the --mock CLI flag, not registered).
+  # Used only by the in-process extraction path; the live subscription
+  # path stages prompts for Task sub-agents instead. Vendor-neutral.
   backend: anthropic
   model: claude-sonnet-4-6
   prompts: default/v1
@@ -43,42 +45,55 @@ budgets:
   # beyond this is clipped, as a last resort.
   max_staged_content_chars: 300000
 
-# memory: the four bounded stores (design §4) + signed-weight decay.
-# Every key is optional — these are the package defaults (design §7); set
-# only the ones you want to tune. length_unit is CONFIRMED final
-# (characters, never tokens — tokenization is vendor-specific and rejected
-# at load time). Each store carries a two-number bound (max + overflow_limit)
-# giving hysteresis: a store may drift up to overflow_limit, and only THEN
-# does meditation fire and compact it back below max (prevents thrash).
+# memory: the three bounded stores (ADR 0007). Every key is optional —
+# these are the package defaults; set only the ones you want to tune.
+# length_unit is CONFIRMED final (characters, never tokens — tokenization
+# is vendor-specific and rejected at load time). Every surface carries a
+# two-number bound (max + overflow_limit) giving hysteresis: it may drift
+# up to overflow_limit, and only THEN does the sweep stage a compaction
+# that shrinks it back below max (prevents thrash). For skills and topics
+# the bound is measured over the RENDERED INDEX — the only part loaded at
+# session start — plus a per-entry detail bound for each detail file.
 memory:
   length_unit: characters
-  skills:                  # count-bounded (learned, reusable lessons)
-    max_count: 40
-    overflow_limit: 50
-  must_remember:           # length-bounded chars (external directives)
-    max_length: 8000
-    overflow_limit: 10000
-  diary:                   # length-bounded chars; loaded whole, dated bullets
-    max_length: 6000       # raised from 4000 w/ associative reinforcement (2026-06-22)
-    overflow_limit: 8000   # raised from 6000 (hysteresis trigger)
-    weight_cap: 10         # hard cap: |weight| <= 10
-    fresh_days: 7          # recents (<= N days) kept verbatim, never fuzzed
-    evocation_enabled: false  # opt-in: when true, ingest runs the batched
-                              # evocation pass (a model call) -- reinforce what
-                              # each new diary note recalls + append a concise
-                              # recall reference. Off by default (rail choice).
-    decay:
-      magnitude_per_day: 0.1   # how fast |weight| shrinks toward 0
-  fuzzy:                   # NEW 4th store: coarsened, grouped older memory
-    max_length: 4000       # aged-out diary + must_remember items, re-summarised
-    overflow_limit: 6000   # each meditation so it CONVERGES (never grows)
+  skills:                     # learned, reusable lessons
+    index_max_length: 2000    # the name+trigger index (session-start load)
+    index_overflow_limit: 3000
+    detail_max_length: 4000   # each skill's procedure detail file
+    detail_overflow_limit: 6000
+  must_remember:              # external directives; loaded whole
+    max_length: 2000
+    overflow_limit: 3000
+    forget_days: 30           # sweeps TOUCH related items; untouched for N
+                              # days: forget-eligible when compaction needs it
+  topics:                     # named bodies of durable project knowledge
+    index_max_length: 2000    # slug + freshness + summary index (fresh first)
+    index_overflow_limit: 3000
+    detail_max_length: 4000   # each topic's dated detail body
+    detail_overflow_limit: 6000
+    fresh_days: 7             # touched within N days: protected from forget/merge
+    forget_days: 60           # untouched for N days: forget-eligible
+  team_events:                # team-wide event log (ADR 0008): a lazy, dated
+                              # who-did-what ledger at <team>/memories/team/
+                              # events.md, appended by every persona's sweep
+                              # ingest; keep these team-uniform (shared file)
+    enabled: true
+    recent_days: 30           # daily sections younger than this never compact
+    year_after_days: 400      # a month folds into its year this long after year end
+    month_max_chars: 700      # target size of one folded month section
+    year_max_chars: 1000      # target size of one folded year section
+    max_length: 24000         # size backstop over the FOLDED tiers (month+year
+                              # sections only; the daily window is exempt)
+    overflow_limit: 30000
 
 # memory_extract: per-section word budgets for the extraction prompt
 # (optional; defaults shown). max_output_words caps the whole bundle.
 memory_extract:
   skill_procedure_words: 120
   memo_words: 25
-  reaction_words: 40          # diary-note length hint
+  topic_summary_words: 25     # topic index-summary length hint
+  topic_detail_words: 80      # per-session topic detail length hint
+  team_event_words: 15        # per-EVENT line length hint (team event log)
   max_output_words: 600
 
 # briefing: session-start assembly knobs (optional).
