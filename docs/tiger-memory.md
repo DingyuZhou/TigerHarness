@@ -43,7 +43,7 @@ Ingest (executor.py + lifecycle.py): bundle blocks -> the three stores
    refresh existing must-remember items' freshness)
     |
     v
-Compaction (compaction.py), staged, ONLY for surfaces over their
+Compaction (compaction.py), staged, ONLY for surfaces at/over their
   overflow_limit: compact-plan (non-AI) -> card sub-agents ->
   compact-apply (non-AI, deterministic convergence)
     |
@@ -160,8 +160,8 @@ memory:
     year_after_days: 400         # a month folds into its year this long after year end
     month_max_chars: 700         # target size of one folded month section
     year_max_chars: 1000         # target size of one folded year section
-    max_length: 8000             # size backstop over the whole rendered file
-    overflow_limit: 12000
+    max_length: 24000            # size backstop over the FOLDED tiers (month+year)
+    overflow_limit: 30000
 
 memory_extract:                  # per-section word budgets for extraction
   skill_procedure_words: 120
@@ -221,11 +221,11 @@ executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
 | `ingest-extraction --uuid <u>` | write back ONE sub-agent's extraction bundle (stdin) for a planned uuid |
 | `build-reduce-prompts` | reduce step (ADR 0006 Part 1): assemble `<uuid>.prompt.md` from a map_reduce item's staged chunk digests |
 | `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free). Exit 0 clean / 1 ≥1 malformed card / 2 no plan manifest |
-| `compact-plan` | non-AI: run the deterministic stale-topic forget, then stage one compaction prompt per surface over its `overflow_limit` under `.compact-staging/` + `manifest.json` (empty `targets` = nothing to do) |
+| `compact-plan` | non-AI: run the deterministic stale-topic forget, then stage one compaction prompt per surface at/over its `overflow_limit` under `.compact-staging/` + `manifest.json` (empty `targets` = nothing to do) |
 | `compact-apply` | non-AI: validate + apply every staged `<key>.card.md` in ONE process; deterministic convergence trim; protected content (operator-explicit, fresh topics) never force-dropped. Exit 0 clean / 1 ≥1 malformed card / 2 no compaction manifest |
 | `team-events-compact-plan` | non-AI, **team-level** (ADR 0008): run the size backstop, then stage one fold prompt per aged-out team-event period under `memories/team/.compact-staging/` (empty `targets` = nothing aged out) |
 | `team-events-compact-apply` | non-AI: validate + apply every staged team-events fold card in ONE process (deterministic trim; post-plan appends survive). Exit 0 clean / 1 ≥1 malformed card / 2 no manifest |
-| `sweep-plan` / `sweep-done` / `sweep-complete` / `sweep-release` | team-sweep gating (non-AI) |
+| `sweep-plan` / `sweep-done` / `sweep-complete [--token]` / `sweep-release [--token]` | team-sweep gating (non-AI). `sweep-done` renews the claim lease and stamps the durable per-persona `done_at` map (the roster walk is least-recently-swept first); with `--token`, complete/release are refused (exit 3) when another session now owns the claim |
 | `check [--fix]` | validate the 3 stores' on-disk format; exit non-zero if any invalid. `--fix` repairs mechanical drift + quarantines non-mechanical to `<store>.rejected.md` (no silent loss). Runs automatically inside every `rebuild` |
 
 The retired verbs `import-legacy` and `migrate-emotional-to-diary` were
@@ -314,7 +314,11 @@ One file per team, beside the per-persona stores:
 
 - **Write path:** each persona's `ingest-staged` appends its bundle's
   `EVENT:` lines under the session's END day (name prefixed, exact
-  same-day repeats collapse to `(xN)`), under a cross-persona file lock.
+  same-day repeats collapse to `(xN)`), under a cross-persona file
+  lock, capped at 3 events per card. A lock held through the ~2s
+  retry window drops that append with a logged warning — the log is
+  awareness, not the ledger of record (the persona stores captured
+  the session either way).
 - **Read path — LAZY only:** no briefing ever loads it; the briefing
   README carries a pointer. Open it only when a session needs
   cross-team awareness ("who touched X before?").
@@ -326,9 +330,11 @@ One file per team, beside the per-persona stores:
   (subscription rail, strict `@@TEAM_EVENTS@@` bullet contract), and
   applied by `team-events-compact-apply` (non-AI; bullets appended
   between plan and apply survive; an oversized card is hard-trimmed).
-  A deterministic size backstop (`max_length` / `overflow_limit` over
-  the whole file) drops the oldest year/month sections — never the
-  daily window. The driver runs the fold once per completed sweep,
+  A deterministic size backstop (`max_length` / `overflow_limit`,
+  measured over the FOLDED tiers only — month + year sections) drops
+  the oldest year/month sections; the daily window is exempt from
+  both the measurement and the drops (bounded by real activity plus
+  the per-append cap), so the backstop is always convergent. The driver runs the fold once per completed sweep,
   before `sweep-complete`, while still holding the claim.
 - **Config:** the `memory.team_events` block — `enabled`,
   `recent_days`, `year_after_days`, `month_max_chars`,

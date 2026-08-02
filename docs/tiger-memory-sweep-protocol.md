@@ -97,7 +97,8 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
         or the literal `NONE`); write it to the card; then **return only a
         short confirmation** (e.g. "carded N uuids"). The bulky bundle must
         never be returned to you (B8 fresh-window) — it lives only in the
-        card. A `NONE`/`NONE`/`NONE` card is a valid, expected outcome.
+        card. A `NONE`/`NONE`/`NONE`/`NONE` card is a valid, expected
+        outcome.
       - **`@@MUST_REMEMBER@@` freshness touches**: besides new
         `KIND:`/`MEMO:` blocks, the section may include `TOUCH: <id>`
         blocks (zero or more, mixed freely) — one per existing item from
@@ -133,7 +134,11 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
       leave them to re-stage next wake), or `2` (no manifest — a planning
       bug, surface it). A no-card item simply was not extracted this wake;
       the **store**, not the card, is the durable ledger (a re-`plan` wipes
-      the staging dir), so it re-stages next wake.
+      the staging dir), so it re-stages next wake. A `locked` uuid hit a
+      stuck store lock — also re-stages. **Anomaly:** after a completed
+      fan-out, `ingested: 0` with `skipped_no_card > 0` means
+      misnamed/missing cards, not a quiet team (the CLI warns on
+      stderr) — check the staging dir before moving on.
    **Oversized transcripts — the map→reduce path (ADR 0006 Part 1).** Most
    items are `kind="single"` (one `<uuid>.prompt.md`, the flow above). An item
    whose prefiltered content exceeds `max_staged_content_chars` is staged as
@@ -210,9 +215,22 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
      immediately — do NOT leave the claim dangling, or other sessions see
      `busy` until the lease expires.
    - Per-wake cap hit, more remain (`decision.plan.remaining > 0`) →
-     `sweep.release_sweep_claim(team_memories_dir)` (clears the claim,
+     `sweep.release_sweep_claim(team_memories_dir, token=<yours>)` (clears
+     the claim,
      **keeps** progress + the stale watermark) so the next wake resumes
-     the rest.
+     the rest. The roster walk selects personas **least-recently-swept
+     first** (the durable `done_at` map, stamped by
+     `record_persona_done`), so capped wakes rotate through the whole
+     roster — the old fixed-order walk re-swept the same head and starved
+     the tail whenever runs kept resetting. A session with time to spare
+     may immediately re-claim its own token and continue draining.
+
+   Both closers accept the claim token and are REFUSED on a mismatch (a
+   stale driver whose lease was stolen must not clobber the live owner's
+   run — `mark_sweep_complete(..., token=)` / `release_sweep_claim(...,
+   token=)` return ``False``; the CLI exits 3). `record_persona_done`
+   RENEWS the claim lease, so a healthy long multi-persona run is never
+   stolen mid-flight; only a genuinely silent driver loses the claim.
 
 ## Guardrails (all already enforced by the module)
 

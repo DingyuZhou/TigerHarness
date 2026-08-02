@@ -155,11 +155,17 @@ def test_is_stale_boundary_exclusive():
     assert cp._is_stale(_topic("T", last="2026-05-24T11:59:59Z"), NOW, 60)
 
 
-def test_unparseable_last_used_is_fresh_never_stale():
-    # days_between yields 0.0 for garbage timestamps → protected, not stale.
+def test_unparseable_last_used_is_infinitely_old():
+    # Hardening pass: a corrupt freshness anchor is INFINITELY OLD (never
+    # fresh, always stale) — the old 0.0-age reading made the entry
+    # eternally fresh, i.e. immune to forget/merge/trim, a permanent
+    # still_over poison pill. `check --fix` repairs the anchor; until it
+    # does, the entry must not block convergence.
     t = _topic("T", last="not-a-date")
-    assert cp._is_fresh(t, NOW, 7)
-    assert not cp._is_stale(t, NOW, 60)
+    assert not cp._is_fresh(t, NOW, 7)
+    assert cp._is_stale(t, NOW, 60)
+    assert cp._age_days("not-a-date", NOW) == float("inf")
+    assert cp._age_days(None, NOW) == float("inf")
 
 
 # ----- _split_dated_sections ---------------------------------------------------
@@ -354,12 +360,14 @@ def test_plan_stages_every_target_kind(tmp_path):
 
 
     # must_remember prompt: mission text, protected block, remaining budget
-    # (max_length 30 minus the 9-char protected memo = 21).
+    # (max_length 30 minus the 9-char protected memo = 21, floored at the
+    # hardening pass's 200-char minimum so the card author never sees a
+    # nonsense near-zero target).
     mr_prompt = Path(targets["must_remember"]["prompt_path"]).read_text()
     assert "MISSION SENTINEL ALPHA" in mr_prompt
     assert "MEMO: OP-KEEP!!" in mr_prompt
     assert "x" * 35 in mr_prompt
-    assert "at most 21" in mr_prompt
+    assert "at most 200" in mr_prompt
 
 
 def test_plan_stages_detail_kinds_when_indexes_fit(tmp_path):
@@ -405,7 +413,10 @@ def test_plan_must_remember_no_charter_no_protected(tmp_path):
     prompt = Path(target["prompt_path"]).read_text()
     assert "(no charter mission found)" in prompt   # missing charter fallback
     assert "(none)" in prompt                       # no protected entries
-    assert "at most 30" in prompt                   # full budget remains
+    # Hardening pass: the advertised budget is floored at 200 so a card
+    # author is never told "compact to ≤ tiny/zero chars" (the tiny test
+    # bound of 30 lands on the floor).
+    assert "at most 200" in prompt
 
 
 # ----- compact_apply: manifest / dispatch --------------------------------------
@@ -482,6 +493,7 @@ def test_apply_mixed_deletes_only_applied_staging_files(tmp_path):
         "malformed": [{"key": "bad", "error": "missing marker @@MUST_REMEMBER@@"}],
         "forced_trims": [],
         "still_over": [],
+        "locked": [],
     }
     # Applied target's staging files are gone; the others stay for a re-run.
     assert not (staging / "good.prompt.md").exists()
@@ -489,6 +501,9 @@ def test_apply_mixed_deletes_only_applied_staging_files(tmp_path):
     assert (staging / "nocard.prompt.md").exists()
     assert (staging / "bad.prompt.md").exists()
     assert (staging / "bad.card.md").exists()
+    # Hardening pass: the manifest survives while a malformed target still
+    # needs a targeted retry (only a fully-clean apply consumes it).
+    assert (staging / "manifest.json").exists()
 
 
 # ----- compact_apply: must_remember ---------------------------------------------
@@ -1022,7 +1037,9 @@ def test_plan_then_apply_roundtrip_must_remember(tmp_path):
     ]
     assert not Path(target["prompt_path"]).exists()
     assert not Path(target["card_path"]).exists()
-    assert (store.root / cp.STAGING_DIR_NAME / "manifest.json").exists()
+    # Hardening pass: a fully-clean apply consumes the manifest so a
+    # blind re-apply gets the loud exit-2, not a silent "clean" no-op.
+    assert not (store.root / cp.STAGING_DIR_NAME / "manifest.json").exists()
 
 
 # ----- exact-duplicate dedup pre-pass (plan) -----------------------------------
@@ -1107,7 +1124,10 @@ def test_apply_stale_downgrades_protected_to_decision(tmp_path):
     cfg, store, bstore = make_env(tmp_path, memory={
         "must_remember": {"max_length": 2000, "overflow_limit": 3000},
     })
-    op_stale = _memo("stale directive", kind="operator_explicit")
+    # Hardening pass: only a directive untouched past forget_days may be
+    # relevance-downgraded — the STALE'd entry must actually BE stale.
+    op_stale = _memo("stale directive", kind="operator_explicit",
+                     last="2026-01-02T00:00:00Z")
     op_live = _memo("live directive", kind="operator_explicit")
     bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale, op_live])
     staging = _stage(store, [
@@ -1140,7 +1160,7 @@ def test_apply_stale_downgraded_entry_is_trimmable(tmp_path):
         "must_remember": {"max_length": 20, "overflow_limit": 30},
     })
     op_stale = _memo("this old directive is very long indeed",
-                     kind="operator_explicit")
+                     kind="operator_explicit", last="2026-01-02T00:00:00Z")
     op_live = _memo("keep me", kind="operator_explicit")
     bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale, op_live])
     staging = _stage(store, [
@@ -1269,7 +1289,8 @@ def test_apply_stale_backticked_id_still_downgrades(tmp_path):
     cfg, store, bstore = make_env(tmp_path, memory={
         "must_remember": {"max_length": 2000, "overflow_limit": 3000},
     })
-    op_stale = _memo("stale directive", kind="operator_explicit")
+    op_stale = _memo("stale directive", kind="operator_explicit",
+                     last="2026-01-02T00:00:00Z")
     bstore.save_atomic(STORE_MUST_REMEMBER, [op_stale])
     staging = _stage(store, [
         _target(store.root / cp.STAGING_DIR_NAME, cp.KIND_MUST_REMEMBER,

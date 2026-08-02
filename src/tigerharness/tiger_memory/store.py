@@ -38,6 +38,75 @@ from typing import Iterator
 log = logging.getLogger("tigerharness.tiger_memory.store")
 
 
+def reclaim_lockfile(
+    path: Path, *, allow_if_alive_older_than: float | None = None
+) -> bool:
+    """Atomically retire a stale lockfile; ``True`` iff it was retired.
+
+    The naive reclaim (read pid → ``unlink`` → recreate) has a TOCTOU:
+    between the read and the unlink another process may have completed its
+    own reclaim AND acquired a fresh lock at the same path — the unlink
+    then removes a LIVE lock and two holders enter the critical section
+    (audit F4). Here the reclaimer first ``os.rename``s the lockfile to a
+    uniquely-named tombstone — atomic, so exactly one reclaimer wins the
+    right to judge it — and only then inspects the holder:
+
+    - dead / unreadable holder → drop the tombstone (reclaimed);
+    - LIVE holder (we grabbed a fresh lock by mistake) → rename it back.
+      When the rename-back loses (a third process already re-created the
+      path) the tombstone is dropped; the displaced holder's release then
+      no-ops via the owner check in :func:`release_lockfile`, so the
+      damage cannot cascade.
+
+    *allow_if_alive_older_than*: when set, a live holder whose lockfile
+    is older than this many seconds is still reclaimed (the hung-process
+    case age-based locks rely on).
+    """
+    import uuid as _uuid
+    tomb = path.with_name(
+        f"{path.name}.stale.{os.getpid()}.{_uuid.uuid4().hex[:8]}"
+    )
+    try:
+        os.rename(path, tomb)
+    except OSError:
+        return False  # someone else already reclaimed / released it
+    try:
+        holder_pid = int(tomb.read_text().split()[0])
+    except (ValueError, OSError, IndexError):
+        holder_pid = -1
+    if holder_pid > 0 and _pid_alive(holder_pid):
+        age_ok_to_steal = False
+        if allow_if_alive_older_than is not None:
+            try:
+                age = time.time() - tomb.stat().st_mtime
+            except OSError:  # pragma: no cover - tombstone vanished
+                age = 0.0
+            age_ok_to_steal = age > allow_if_alive_older_than
+        if not age_ok_to_steal:
+            try:
+                os.rename(tomb, path)
+            except OSError:  # pragma: no cover - path re-created, back off
+                tomb.unlink(missing_ok=True)
+            return False
+    tomb.unlink(missing_ok=True)
+    return True
+
+
+def release_lockfile(path: Path) -> None:
+    """Unlink *path* only if THIS process is the recorded holder.
+
+    After a (mis)reclaim, blindly unlinking on release would remove the
+    NEW holder's lock and propagate the corruption; the owner check makes
+    a displaced holder's release a harmless no-op (audit F4).
+    """
+    try:
+        holder_pid = int(path.read_text().split()[0])
+    except (ValueError, OSError, IndexError):
+        return
+    if holder_pid == os.getpid():
+        path.unlink(missing_ok=True)
+
+
 # Regex patterns for the retired chronological filename shapes. KEPT (not the
 # generators/globs, which are gone) because ``lifecycle._drop_legacy_surface``
 # still uses these to identify+delete legacy rollup ``.md`` files on migration.
@@ -98,9 +167,17 @@ class Store:
     # ----- atomic write -------------------------------------------------
 
     def atomic_write(self, target: Path, content: str) -> None:
-        """Write *content* to *target* via tmp+rename. Parent dirs must exist."""
+        """Write *content* to *target* via unique-tmp+rename.
+
+        The tmp name is unique per writer: a fixed tmp name lets two
+        concurrent writers truncate each other's in-progress bytes and
+        publish interleaved content through ``os.replace`` (audit F2).
+        """
+        import uuid as _uuid
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp = target.with_name(
+            f"{target.name}.tmp.{os.getpid()}.{_uuid.uuid4().hex[:8]}"
+        )
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
@@ -169,10 +246,9 @@ class Store:
                 stop.set()
                 if refresher is not None:  # pragma: no branch  # refresher always started when acquired
                     refresher.join(timeout=2.0)
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+                # Owner-verified release: after an age-based reclaim our
+                # lockfile may already belong to someone else (audit F4).
+                release_lockfile(lock_path)
 
     def _try_acquire_lock(self, lock_path: Path, timeout_minutes: int) -> bool:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,12 +281,14 @@ class Store:
         stale_by_age = age_sec > timeout_minutes * 60
         stale_by_pid = holder_pid > 0 and not _pid_alive(holder_pid)
         if stale_by_age or stale_by_pid or holder_pid <= 0:
-            # Reclaim. Remove then recurse once.
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-            return self._try_acquire_lock(lock_path, timeout_minutes)
+            # Rename-based reclaim (TOCTOU-safe, audit F4), then recurse
+            # once. A lost reclaim race means someone else owns the call —
+            # fall through to "held".
+            if reclaim_lockfile(
+                lock_path, allow_if_alive_older_than=timeout_minutes * 60
+            ):
+                return self._try_acquire_lock(lock_path, timeout_minutes)
+            return False
 
         return False  # held by live PID
 

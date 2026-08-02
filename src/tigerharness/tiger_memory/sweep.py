@@ -29,8 +29,10 @@ from __future__ import annotations
 import logging
 
 import json
+import os
+import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -75,7 +77,12 @@ def read_sweep_state(team_memories_dir: Path) -> dict:
 def write_sweep_state(team_memories_dir: Path, state: dict) -> None:
     path = sweep_state_path(team_memories_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # Unique tmp name per writer: a FIXED tmp name lets two concurrent
+    # writers truncate each other's in-progress bytes and publish an
+    # interleaved file via os.replace (audit F2/F6).
+    tmp = path.with_name(
+        f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    )
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(path)  # atomic on POSIX
 
@@ -166,28 +173,68 @@ def try_claim_sweep(
     return ClaimResult(True, "claimed")
 
 
-def release_sweep_claim(team_memories_dir: Path) -> None:
+def _token_mismatch(state: dict, token: str | None, verb: str) -> bool:
+    """True when *token* was given and does NOT match the stored claim.
+
+    A driver whose lease was stolen mid-run must not mutate the live
+    owner's claim/progress (audit F6): passing its token makes the
+    mutation conditional. ``token=None`` keeps the legacy unconditional
+    behavior (manual operator use).
+    """
+    if token is None:
+        return False
+    held = state.get("claim_token")
+    if held == token:
+        return False
+    log.warning(
+        "team sweep: %s refused — claim token mismatch "
+        "(yours %s, current %s); another session owns the sweep",
+        verb, token, held,
+    )
+    return True
+
+
+def release_sweep_claim(
+    team_memories_dir: Path, *, token: str | None = None
+) -> bool:
     """Drop the claim WITHOUT advancing the watermark — used when a wake
     finished its per-wake chunk but the roster sweep isn't complete. The
     in-run ``progress`` is preserved so the next wake resumes the rest,
-    and the watermark stays stale so the sweep is still "due"."""
+    and the watermark stays stale so the sweep is still "due".
+
+    With *token*, the release is refused (``False``) unless it matches
+    the stored claim — a stale driver must not clear the live owner's
+    claim."""
     state = read_sweep_state(team_memories_dir)
+    if _token_mismatch(state, token, "sweep-release"):
+        return False
     state.pop("claim_token", None)
     state.pop("claim_at", None)
     write_sweep_state(team_memories_dir, state)
+    return True
 
 
-def mark_sweep_complete(team_memories_dir: Path, now: datetime) -> None:
+def mark_sweep_complete(
+    team_memories_dir: Path, now: datetime, *, token: str | None = None
+) -> bool:
     """Advance the team watermark and end the run: clear the claim AND the
     per-persona progress. The bumped ``last_sweep_at`` is what makes the
-    next trigger inside the floor window a cheap no-op."""
+    next trigger inside the floor window a cheap no-op.
+
+    With *token*, refused (``False``) on a claim mismatch — a stale
+    driver advancing the watermark would skip the live run's remaining
+    personas for a whole floor window. The per-persona ``done_at``
+    freshness map is kept — it orders future roster walks."""
     state = read_sweep_state(team_memories_dir)
+    if _token_mismatch(state, token, "sweep-complete"):
+        return False
     state["last_sweep_at"] = now.isoformat()
     state.pop("claim_token", None)
     state.pop("claim_at", None)
     state.pop("progress", None)
     state.pop("run_started_at", None)
     write_sweep_state(team_memories_dir, state)
+    return True
 
 
 # ----- roster walk + per-persona resumable progress (B3 slice b) -----------
@@ -244,14 +291,48 @@ def sweep_progress(team_memories_dir: Path) -> set[str]:
     return {str(p) for p in prog} if isinstance(prog, list) else set()
 
 
-def record_persona_done(team_memories_dir: Path, persona: str) -> None:
-    """Mark *persona* completed in the current run (idempotent)."""
+def persona_done_at(team_memories_dir: Path) -> dict[str, str]:
+    """Per-persona last-completed timestamps (survives run resets).
+
+    Unlike ``progress`` (in-run bookkeeping, cleared on completion or an
+    abandoned-run reset), ``done_at`` is durable freshness memory: it
+    orders the roster walk least-recently-swept first, so a team whose
+    wakes never finish a full run still rotates through every persona
+    instead of re-sweeping the same head of the roster forever (audit:
+    live roster starvation — 6 personas unswept while the first 3
+    repeated).
+    """
+    raw = read_sweep_state(team_memories_dir).get("done_at")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()}
+
+
+def record_persona_done(
+    team_memories_dir: Path, persona: str, *, now: datetime | None = None
+) -> None:
+    """Mark *persona* completed in the current run (idempotent).
+
+    Also refreshes the claim lease (``claim_at``): a healthy multi-persona
+    run can legitimately exceed the 30-min lease, and without renewal a
+    later session would steal the claim from a LIVE driver mid-run (audit
+    F1). And it stamps the durable ``done_at`` freshness map used to
+    order future roster walks.
+    """
+    now = now or datetime.now(timezone.utc)
     state = read_sweep_state(team_memories_dir)
     prog = state.get("progress")
     prog = list(prog) if isinstance(prog, list) else []
     if persona not in prog:
         prog.append(persona)
     state["progress"] = prog
+    done_at = state.get("done_at")
+    done_at = dict(done_at) if isinstance(done_at, dict) else {}
+    done_at[persona] = now.isoformat()
+    state["done_at"] = done_at
+    if state.get("claim_token"):
+        # Lease renewal: progress IS liveness.
+        state["claim_at"] = now.isoformat()
     write_sweep_state(team_memories_dir, state)
 
 
@@ -270,6 +351,13 @@ def plan_team_sweep(
     done = sweep_progress(team_memories_dir)
     all_targets = enumerate_persona_configs(team_memories_dir)
     pending = [t for t in all_targets if t.name not in done]
+    # Least-recently-completed first (durable done_at map; a persona never
+    # completed sorts oldest). With fixed roster order, a team whose runs
+    # keep getting reset re-sweeps the same first N personas forever and
+    # starves the tail; LRU ordering guarantees rotation ("no persona
+    # left behind", B3). Ties keep roster order (sorted() is stable).
+    done_at = persona_done_at(team_memories_dir)
+    pending.sort(key=lambda t: done_at.get(t.name, ""))
     selected = pending if max_personas is None else pending[:max_personas]
     return SweepPlan(
         targets=selected,

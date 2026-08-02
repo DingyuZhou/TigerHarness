@@ -97,41 +97,35 @@ class TestLockStatRace:
 
 
 class TestLockUnlinkFNFEDuringReclaim:
-    """Lines 282-283: unlink FNFE during stale lock reclaim."""
+    """Hardening pass: reclaim is rename-based (TOCTOU-safe), never a bare
+    unlink — a lost rename race means someone else owns the reclaim."""
 
-    def test_unlink_fnfe_swallowed(self, tmp_path: Path):
+    def test_stale_dead_lock_reclaimed_via_rename(self, tmp_path: Path):
         store = Store(tmp_path / "mem")
         store.init_layout()
         lock_path = tmp_path / "lock"
-
-        # Create stale lock (dead PID)
         lock_path.write_text("999999")
         old_time = time.time() - 3600
         os.utime(lock_path, (old_time, old_time))
-
-        # Patch unlink to raise FNFE — the code swallows it and retries
-        unlink_calls = 0
-        orig_unlink = Path.unlink
-
-        def racing_unlink(self, *a, **kw):
-            nonlocal unlink_calls
-            if str(self) == str(lock_path):
-                unlink_calls += 1
-                if unlink_calls == 1:
-                    # Also actually remove so retry can acquire
-                    try:
-                        orig_unlink(self, *a, **kw)
-                    except FileNotFoundError:
-                        pass
-                    raise FileNotFoundError("raced")
-            return orig_unlink(self, *a, **kw)
-
-        with patch("tigerharness.tiger_memory.store._pid_alive", return_value=False), \
-             patch.object(Path, "unlink", racing_unlink):
+        with patch("tigerharness.tiger_memory.store._pid_alive", return_value=False):
             result = store._try_acquire_lock(lock_path, timeout_minutes=1)
-
         assert result is True
-        assert unlink_calls >= 1
+        # No stale tombstones left behind.
+        assert list(tmp_path.glob("lock.stale.*")) == []
+
+    def test_lost_reclaim_race_returns_held(self, tmp_path: Path):
+        store = Store(tmp_path / "mem")
+        store.init_layout()
+        lock_path = tmp_path / "lock"
+        lock_path.write_text("999999")
+        old_time = time.time() - 3600
+        os.utime(lock_path, (old_time, old_time))
+        # Simulate losing the rename race: the lockfile vanishes between
+        # the staleness check and the reclaim rename.
+        with patch("tigerharness.tiger_memory.store._pid_alive", return_value=False), \
+             patch("tigerharness.tiger_memory.store.reclaim_lockfile", return_value=False):
+            result = store._try_acquire_lock(lock_path, timeout_minutes=1)
+        assert result is False
 
 
 class TestRefreshLoopOSError:

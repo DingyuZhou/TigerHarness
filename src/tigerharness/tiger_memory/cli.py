@@ -180,10 +180,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Advance the team watermark + end the run (all due personas done).")
     p_swc.add_argument("--now", default=None,
                        help="ISO timestamp override (testing/determinism).")
+    p_swc.add_argument("--token", default=None,
+                       help="Claim token from sweep-plan; refused (exit 3) if "
+                            "another session now owns the claim.")
 
-    sub.add_parser(
+    p_swr = sub.add_parser(
         "sweep-release",
         help="Drop the claim WITHOUT advancing the watermark (per-wake cap hit).")
+    p_swr.add_argument("--token", default=None,
+                       help="Claim token from sweep-plan; refused (exit 3) if "
+                            "another session now owns the claim.")
 
     p_chk = sub.add_parser(
         "check",
@@ -240,9 +246,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "sweep-done":
         return _cmd_sweep_done(cfg, args.persona)
     if args.cmd == "sweep-complete":
-        return _cmd_sweep_complete(cfg, now=args.now)
+        return _cmd_sweep_complete(cfg, now=args.now, token=args.token)
     if args.cmd == "sweep-release":
-        return _cmd_sweep_release(cfg)
+        return _cmd_sweep_release(cfg, token=args.token)
     if args.cmd == "check":  # pragma: no branch  # exhaustive
         return _cmd_check(cfg, store, fix=args.fix)
     return 2  # pragma: no cover  # argparse rejects unknown subcommands first
@@ -398,8 +404,17 @@ def _ingest_item_bundle(cfg: Config, store: Store, item: dict, bundle_text: str)
     # The staged prompt(s) embed the (prefiltered) transcript; once ingested
     # they are consumed, so drop them to avoid leaving transcript content at
     # rest. A "single" item has one prompt_path; a "map_reduce" item has chunk
-    # prompts + their digests (ADR 0006 Part 1).
-    for staged in [item.get("prompt_path"), *item.get("chunk_prompts", []),
+    # prompts + their digests (ADR 0006 Part 1) — plus the reduce-built
+    # <uuid>.prompt.md, which the manifest does NOT carry (it is written by
+    # build-reduce-prompts after planning), so unlink it by construction or
+    # digest-derived content stays at rest until the next plan (audit:
+    # pipeline finding 8 / drift finding 8).
+    from .lifecycle import _sweep_staging_dir
+    reduce_prompt = (
+        _sweep_staging_dir(store) / f"{item['conversation_uuid']}.prompt.md"
+    )
+    for staged in [item.get("prompt_path"), str(reduce_prompt),
+                   *item.get("chunk_prompts", []),
                    *item.get("digest_paths", [])]:
         if staged:
             Path(staged).unlink(missing_ok=True)
@@ -420,10 +435,15 @@ def _cmd_ingest_extraction(cfg: Config, store: Store, uuid: str) -> int:
         print(f"uuid {uuid} not in plan manifest", file=sys.stderr)
         return 2
     bundle = sys.stdin.read()
+    from .bounded_store import StoreLockHeld
     try:
         result = _ingest_item_bundle(cfg, store, item, bundle)
     except ExtractionParseError as exc:
         print(f"malformed extraction bundle for {uuid}: {exc}", file=sys.stderr)
+        return 1
+    except StoreLockHeld as exc:
+        print(f"store locked for {uuid}: {exc} — retry shortly "
+              "(cursor untouched)", file=sys.stderr)
         return 1
     print(f"ingested {result.conversation_uuid} (+{result.total_added} entries: "
           f"{result.skills_added} skills, {result.must_remember_added} "
@@ -467,12 +487,14 @@ def _cmd_ingest_staged(cfg: Config, store: Store) -> int:
 
     Exit: 0 = no malformed cards; 1 = ≥1 malformed card; 2 = no plan manifest.
     """
+    from .bounded_store import StoreLockHeld
     from .lifecycle import ExtractionParseError, _sweep_card_path
     manifest = _load_plan_manifest(store)
     if manifest is None:
         return 2
     ingested: list[str] = []
     malformed: list[str] = []
+    locked: list[str] = []
     skipped_no_card = 0
     for item in manifest.get("items", []):
         uuid = item.get("conversation_uuid")
@@ -488,11 +510,30 @@ def _cmd_ingest_staged(cfg: Config, store: Store) -> int:
             print(f"malformed extraction card for {uuid}: {exc}", file=sys.stderr)
             malformed.append(uuid)
             continue
+        except StoreLockHeld as exc:
+            # A stuck lock holder outlasted the ingest wait: keep the card
+            # and the cursor untouched — this uuid re-ingests next sweep
+            # (audit F2/F7 shape: never abort the whole glue mid-run).
+            print(f"store locked for {uuid}: {exc}", file=sys.stderr)
+            locked.append(uuid)
+            continue
         card_path.unlink(missing_ok=True)
         ingested.append(result.conversation_uuid)
+    if not ingested and (skipped_no_card or malformed or locked):
+        # A completed fan-out that ingested NOTHING is an anomaly (misnamed
+        # cards, premature glue, stuck locks) — say so loudly instead of
+        # exiting 0 in silence (audit: drift finding 5; the Operator's
+        # "verify ingested>0" incident).
+        print(
+            "warning: nothing ingested "
+            f"({skipped_no_card} no-card, {len(malformed)} malformed, "
+            f"{len(locked)} locked) — check the staging dir before moving on",
+            file=sys.stderr,
+        )
     print(json.dumps({
         "ingested": len(ingested),
         "malformed": malformed,
+        "locked": locked,
         "skipped_no_card": skipped_no_card,
     }, indent=2))
     return 1 if malformed else 0
@@ -553,16 +594,24 @@ def _cmd_sweep_done(cfg: Config, persona: str) -> int:
     return 0
 
 
-def _cmd_sweep_complete(cfg: Config, *, now: str | None) -> int:
+def _cmd_sweep_complete(cfg: Config, *, now: str | None, token: str | None) -> int:
     from . import sweep
-    sweep.mark_sweep_complete(_team_memories_dir(cfg), _parse_now(now))
+    if not sweep.mark_sweep_complete(
+        _team_memories_dir(cfg), _parse_now(now), token=token
+    ):
+        print("sweep-complete refused: claim token mismatch "
+              "(another session owns the sweep)", file=sys.stderr)
+        return 3
     print("sweep complete; watermark advanced")
     return 0
 
 
-def _cmd_sweep_release(cfg: Config) -> int:
+def _cmd_sweep_release(cfg: Config, *, token: str | None) -> int:
     from . import sweep
-    sweep.release_sweep_claim(_team_memories_dir(cfg))
+    if not sweep.release_sweep_claim(_team_memories_dir(cfg), token=token):
+        print("sweep-release refused: claim token mismatch "
+              "(another session owns the sweep)", file=sys.stderr)
+        return 3
     print("claim released; watermark unchanged")
     return 0
 

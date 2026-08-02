@@ -37,7 +37,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterable
 
-from .bounded_store import BoundedStore
+from .bounded_store import BoundedStore, StoreLockHeld
 from .config import Config
 from .cursor import load_cursor
 from .entries import (
@@ -499,6 +499,12 @@ def ingest_candidates(
              "touched": 0}
     if candidates.is_empty():
         return added
+    # Every ingest write below is a read-modify-write held under the
+    # per-store lock (waiting variant): lockless, a compact-apply or a
+    # concurrent pin interleaving with the RMW silently loses entries —
+    # and the cursor advance downstream makes that loss permanent
+    # (audit F2). A StoreLockHeld after the wait propagates: the card
+    # stays staged, the cursor stays put, the slice re-ingests next sweep.
     per_store: dict[str, list[BaseEntry]] = {
         STORE_SKILLS: list(candidates.skills),
         STORE_MUST_REMEMBER: list(candidates.must_remember),
@@ -506,38 +512,41 @@ def ingest_candidates(
     for store_name, new_entries in per_store.items():
         if not new_entries:
             continue
-        existing = bstore.load(store_name)
-        for entry in new_entries:
-            if isinstance(entry, SkillEntry):
-                refresh_importance(entry, now, cfg)
-        merged = existing + new_entries
-        bstore.save_atomic(store_name, merged)
+        with bstore.store_lock_wait(store_name):
+            existing = bstore.load(store_name)
+            for entry in new_entries:
+                if isinstance(entry, SkillEntry):
+                    refresh_importance(entry, now, cfg)
+            merged = existing + new_entries
+            bstore.save_atomic(store_name, merged)
         added[store_name] = len(new_entries)
     if candidates.topics:
-        existing = bstore.load(STORE_TOPICS)
-        merged, landed = _route_topic_candidates(
-            existing, candidates.topics, now=now, source="extract"
-        )
-        bstore.save_atomic(STORE_TOPICS, merged)
+        with bstore.store_lock_wait(STORE_TOPICS):
+            existing = bstore.load(STORE_TOPICS)
+            merged, landed = _route_topic_candidates(
+                existing, candidates.topics, now=now, source="extract"
+            )
+            bstore.save_atomic(STORE_TOPICS, merged)
         added[STORE_TOPICS] = landed
     if candidates.touches:
         # Freshness touches: the bundle marked these existing must-remember
         # items as related to this session — refresh their forget-eligibility
         # anchor (and repeat signal). Unknown ids are ignored (the item may
         # have been compacted away between plan and ingest).
-        entries = bstore.load(STORE_MUST_REMEMBER)
-        by_id = {e.id: e for e in entries}
-        touched = 0
-        for tid in dict.fromkeys(candidates.touches):
-            entry = by_id.get(tid)
-            if entry is None:
-                continue
-            entry.last_used = now
-            if isinstance(entry, MustRememberEntry):  # pragma: no branch
-                entry.repeat_count += 1
-            touched += 1
-        if touched:
-            bstore.save_atomic(STORE_MUST_REMEMBER, entries)
+        with bstore.store_lock_wait(STORE_MUST_REMEMBER):
+            entries = bstore.load(STORE_MUST_REMEMBER)
+            by_id = {e.id: e for e in entries}
+            touched = 0
+            for tid in dict.fromkeys(candidates.touches):
+                entry = by_id.get(tid)
+                if entry is None:
+                    continue
+                entry.last_used = now
+                if isinstance(entry, MustRememberEntry):  # pragma: no branch
+                    entry.repeat_count += 1
+                touched += 1
+            if touched:
+                bstore.save_atomic(STORE_MUST_REMEMBER, entries)
         added["touched"] = touched
     log.info(
         "ingest: +%d skills, +%d must_remember (%d touched), +%d topic detail(s)",
@@ -906,23 +915,27 @@ def _active_slice_turns(cfg: Config, post_turns: list[_Turn]) -> list[_Turn] | N
 
 def _boundary_marker(turns: list[_Turn], boundary: _Turn, rec) -> tuple[str, int]:
     """The new cursor (last_event_at, processed_events) after a slice ending at
-    *boundary*. With no parseable boundary timestamp (e.g. a worklog record),
-    fall back to the record's last event + the full turn count so the count
-    guard still has a value.
+    *boundary*.
 
-    The count is POSITIONAL (timestamped turns up to and including the
-    boundary), not timestamp-filtered: an active-slice hold-back turn that
-    happens to SHARE the boundary's timestamp must not be counted as
-    processed — a timestamp-filtered count would include it, the next
-    sweep's guard would then agree, and the turn would be skipped forever.
-    With the positional count the guard trips instead (stored < recomputed),
-    forcing a safe full re-pass that re-extracts the tied tail.
+    ``processed_events`` is fully POSITIONAL — ALL turns up to and
+    including the boundary, timestamped or not. The old timestamped-only
+    count could never mark an untimestamped turn processed: it always
+    landed back in the post-cursor slice (or desynced the count guard
+    when it was the boundary itself), re-staging and re-ingesting the
+    same content every sweep forever (audit: pipeline finding 2). The
+    positional prefix, checked bidirectionally by the guard in
+    ``_compute_incremental_slice``, absorbs untimestamped turns while
+    keeping the tied-timestamp hold-back property: a held-back turn
+    sharing the boundary's timestamp sits in the post-slice at ≤ cut,
+    trips the guard, and forces a safe full re-pass.
+
+    The cursor timestamp is the last parseable timestamp at/before the
+    boundary (the record's own end timestamp when there is none).
     """
-    if boundary.event_at is None:
-        return rec.last_event_at.isoformat(), len(turns)
     idx = turns.index(boundary)
-    count = sum(1 for t in turns[:idx + 1] if t.event_at is not None)
-    return boundary.event_at.isoformat(), count
+    stamped = [t.event_at for t in turns[:idx + 1] if t.event_at is not None]
+    ts = stamped[-1] if stamped else rec.last_event_at
+    return ts.isoformat(), idx + 1
 
 
 def _with_overlap(cfg: Config, overlap_turns: list[_Turn], target: str) -> str:
@@ -947,36 +960,38 @@ def _compute_incremental_slice(
     cursor = load_cursor(store, rec.conversation_uuid)
     cut = _parse_iso(cursor.last_event_at) if cursor is not None else None
     if cursor is not None and cut is not None:
-        if not any(t.event_at is not None for t in turns):
-            # Timestamp-less record (e.g. a worklog blob rendered as one
-            # unheadered turn): the stored cursor used the fallback count of
-            # ALL turns against the record's own end timestamp. Recomputing
-            # `pre` by timestamp would always yield 0 and trip the guard,
-            # re-ingesting the identical content every sweep (duplicate
-            # entries, touch inflation — forever). Nothing is new iff the
-            # record's end timestamp and turn count both still match.
-            if (
-                rec.last_event_at <= cut
-                and cursor.processed_events == len(turns)
-            ):
-                return None
-            cut = None  # record grew/changed — re-process in full
+        # POSITIONAL cursor model (audit: pipeline finding 2): the stored
+        # count is a turn-prefix length; the guard verifies it is still
+        # consistent with the timestamps on both sides — every timestamped
+        # turn inside the prefix must be ≤ cut and every one after it must
+        # be > cut. Any drift (prefilter change, tied-timestamp hold-back,
+        # a legacy timestamped-only count) trips the guard toward a safe
+        # full re-pass; untimestamped turns ride the prefix positionally
+        # instead of re-ingesting forever.
+        n = cursor.processed_events
+        if not (0 <= n <= len(turns)):
+            cut = None
         else:
-            pre = [
-                t for t in turns
-                if t.event_at is not None and t.event_at <= cut
-            ]
-            if len(pre) != cursor.processed_events:
-                cut = None  # event-filter changed underneath us — full re-pass
+            pre_c, post_c = turns[:n], turns[n:]
+            consistent = all(
+                t.event_at <= cut for t in pre_c if t.event_at is not None
+            ) and all(
+                t.event_at > cut for t in post_c if t.event_at is not None
+            )
+            if not consistent:
+                cut = None
+            elif not post_c and rec.last_event_at > cut:
+                # The record grew IN PLACE past the cursor without adding
+                # a turn (e.g. a worklog blob rendered as one unheadered
+                # turn) — re-process in full.
+                cut = None
 
     if cut is None:
         pre_turns: list[_Turn] = []
         post_turns = turns
     else:
-        pre_turns = [t for t in turns if t.event_at is not None and t.event_at <= cut]
-        post_turns = [
-            t for t in turns if not (t.event_at is not None and t.event_at <= cut)
-        ]
+        pre_turns = turns[:cursor.processed_events]
+        post_turns = turns[cursor.processed_events:]
 
     if not post_turns:
         return None  # nothing new since the cursor
@@ -1160,19 +1175,34 @@ def rebuild(cfg: Config, store: Store) -> int:
     briefing rebuild is what regenerates the skill index by Python.
     """
     store.init_layout()
-    _drop_legacy_surface(store)
-    # Per-persona format gate (plan §2 dev-3): validate + repair the three
-    # stores BEFORE the briefing is assembled from them, so malformed memory is
-    # mechanically fixed (or quarantined to <store>.rejected.md, no silent loss)
-    # rather than persisting past a wrap-up. Runs at the end of every sweep's
-    # per-persona rebuild.
-    from .check import check_all
-    report = check_all(cfg, store, fix=True)
-    repaired = [s.store_name for s in report.stores if s.repaired]
-    if repaired:
-        log.warning("rebuild: format-check repaired store(s): %s", ", ".join(repaired))
-    from .briefing import rebuild_briefing
-    rebuild_briefing(cfg, store)
+    # Serialize whole rebuilds on the configured rebuild lock — previously
+    # defined + reported but never ACQUIRED (audit F5), while the bridge's
+    # detached rebuild trigger makes concurrent rebuilds a normal event.
+    # Skip-if-held: a rebuild is idempotent maintenance; the next trigger
+    # retries.
+    with store.lock(
+        cfg.rebuild.lock_path,
+        timeout_minutes=cfg.rebuild.rebuild_timeout_minutes,
+    ) as acquired:
+        if not acquired:
+            log.info("rebuild: lock held by a live rebuild; skipping")
+            return 0
+        _drop_legacy_surface(store)
+        # Per-persona format gate (plan §2 dev-3): validate + repair the
+        # three stores BEFORE the briefing is assembled from them, so
+        # malformed memory is mechanically fixed (or quarantined to
+        # <store>.rejected.md, no silent loss) rather than persisting past
+        # a wrap-up. Runs at the end of every sweep's per-persona rebuild.
+        from .check import check_all
+        report = check_all(cfg, store, fix=True)
+        repaired = [s.store_name for s in report.stores if s.repaired]
+        if repaired:
+            log.warning(
+                "rebuild: format-check repaired store(s): %s",
+                ", ".join(repaired),
+            )
+        from .briefing import rebuild_briefing
+        rebuild_briefing(cfg, store)
     log.info("rebuild: dropped legacy surface; format-checked; briefing regenerated")
     return 0
 
@@ -1209,14 +1239,22 @@ def pin(cfg: Config, store: Store, *, memo: str, kind: str) -> int:
     store.init_layout()
     now = iso_now()
     bstore = BoundedStore(cfg, store)
-    entries = bstore.load(STORE_MUST_REMEMBER)
-    entries.append(
-        MustRememberEntry(
-            text=memo, created_at=now, last_used=now, source="pin",
-            kind=kind,
-        )
-    )
-    bstore.save_atomic(STORE_MUST_REMEMBER, entries)
+    try:
+        # Locked RMW (audit F2): a pin racing a compact-apply's critical
+        # section must block briefly, not silently vanish — this may be an
+        # operator_explicit directive.
+        with bstore.store_lock_wait(STORE_MUST_REMEMBER):
+            entries = bstore.load(STORE_MUST_REMEMBER)
+            entries.append(
+                MustRememberEntry(
+                    text=memo, created_at=now, last_used=now, source="pin",
+                    kind=kind,
+                )
+            )
+            bstore.save_atomic(STORE_MUST_REMEMBER, entries)
+    except StoreLockHeld as exc:
+        print(f"pin failed: {exc} — retry in a moment")
+        return 1
     print(f"pinned ({kind}): {memo}")
     return 0
 

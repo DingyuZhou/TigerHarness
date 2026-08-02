@@ -159,6 +159,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-08-02 (audit hardening): ayako: pre token/lease/LRU ship --
+        #   no --token on the closers, no lease-renewal note, no
+        #   ingested==0 anomaly check, no locked report keys.
+        "d336c010f76710472b8bdebdbe2c275b199591c52a38483a7643ca02905e48bc",
         # 2026-08-01 (team event log, ADR 0008): ayako: pre contract-v3
         #   ship -- three-marker bundle, no @@TEAM_EVENTS@@ section, no
         #   close-step team-events fold.
@@ -206,7 +210,7 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "d336c010f76710472b8bdebdbe2c275b199591c52a38483a7643ca02905e48bc",
+    "sweep-memory": "d7adf9aa9a3e5aa17959ffff0f2ac2d686a54298770b66ecf7b549a95ad17cf2",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }
@@ -414,8 +418,9 @@ memory:
     year_after_days: 400   # a month folds into its year this long after year end
     month_max_chars: 700   # target size of one folded month section
     year_max_chars: 1000   # target size of one folded year section
-    max_length: 8000       # size backstop over the whole rendered file
-    overflow_limit: 12000  # (hysteresis: backstop trims only at/over this)
+    max_length: 24000      # size backstop over the FOLDED tiers (month+year
+                           # sections only; the daily window is exempt)
+    overflow_limit: 30000  # (hysteresis: backstop trims only at/over this)
 """
 
 _MEMORY_CONFIG_TEMPLATE = """\
@@ -657,6 +662,12 @@ memories/*/state.json
 # in-session memory sweep stages and then consumes (each `tiger-memory plan`
 # rmtrees + rebuilds it). It embeds raw transcript content -- never commit it.
 memories/*/.sweep-staging/
+# Live coordination state, mutated by every sweep -- committing it lets a
+# branch merge/revert resurrect an old claim or roll cursors back. The
+# store files, not these, are the durable ledger (a cursor rollback only
+# re-processes, never skips).
+memories/.tiger-memory-sweep.json
+memories/*/.sweep-cursors.json
 # archive/ and journal/ are version-controlled (memory summaries).
 # .gitkeep files inside them ensure the empty dirs are tracked.
 """

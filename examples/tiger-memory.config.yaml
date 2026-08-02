@@ -82,8 +82,9 @@ memory:
     year_after_days: 400      # a month folds into its year this long after year end
     month_max_chars: 700      # target size of one folded month section
     year_max_chars: 1000      # target size of one folded year section
-    max_length: 8000          # size backstop over the whole rendered file
-    overflow_limit: 12000
+    max_length: 24000         # size backstop over the FOLDED tiers (month+year
+                              # sections only; the daily window is exempt)
+    overflow_limit: 30000
 
 # memory_extract: per-section word budgets for the extraction prompt
 # (optional; defaults shown). max_output_words caps the whole bundle.

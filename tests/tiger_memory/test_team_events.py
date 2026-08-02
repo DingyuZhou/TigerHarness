@@ -637,7 +637,7 @@ def test_team_events_config_defaults(tmp_path):
     assert te.enabled is True
     assert (te.recent_days, te.year_after_days) == (30, 400)
     assert (te.month_max_chars, te.year_max_chars) == (700, 1000)
-    assert (te.max_length, te.overflow_limit) == (8000, 12000)
+    assert (te.max_length, te.overflow_limit) == (24000, 30000)
     assert cfg.memory_extract.team_event_words == 15
 
 

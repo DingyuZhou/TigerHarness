@@ -27,7 +27,7 @@ import json
 import logging
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .bounded_store import BoundedStore, StoreLockHeld
@@ -85,12 +85,31 @@ def _fill(cfg: Config, name: str, **kwargs) -> str:
     return _fill_prompt(_prompts_root(cfg) / name, **kwargs)
 
 
+def _age_days(last_used: str, now: str) -> float:
+    """Age of a freshness anchor in days; UNPARSEABLE → infinitely old.
+
+    ``days_between`` returns ``0.0`` for an unparseable timestamp, which
+    read as "touched right now": a corrupt ``last_used`` made an entry
+    eternally fresh — immune to stale-forget, merge, and the forced trim,
+    a permanent still_over poison pill (audit: bounds finding 5 /
+    pipeline finding 6). Treating corruption as infinitely old matches
+    ``ranking.recency_score``'s convention (forgotten first).
+    """
+    from datetime import datetime
+
+    try:
+        datetime.fromisoformat(str(last_used).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return float("inf")
+    return days_between(last_used, now)
+
+
 def _is_fresh(entry: TopicEntry, now: str, fresh_days: int) -> bool:
-    return days_between(entry.last_used, now) <= fresh_days
+    return _age_days(entry.last_used, now) <= fresh_days
 
 
 def _is_stale(entry: TopicEntry, now: str, forget_days: int) -> bool:
-    return days_between(entry.last_used, now) > forget_days
+    return _age_days(entry.last_used, now) > forget_days
 
 
 # ----- plan -------------------------------------------------------------------
@@ -190,10 +209,14 @@ def _render_mr_blocks(
         lines.append(f"KIND: {e.kind}")
         lines.append(f"MEMO: {e.text}")
         if now is not None and forget_days is not None:
-            age = days_between(e.last_used, now)
+            age = _age_days(e.last_used, now)
             if age > forget_days:
+                age_label = (
+                    "unknown (corrupt timestamp)" if age == float("inf")
+                    else f"{int(age)} days"
+                )
                 lines.append(
-                    f"AGE: untouched {int(age)} days [forget-eligible]"
+                    f"AGE: untouched {age_label} [forget-eligible]"
                 )
         out.append("\n".join(lines))
     return "\n\n".join(out)
@@ -224,23 +247,33 @@ def _render_roster(
     return "\n".join(out)
 
 
-def _locked_save(bstore: BoundedStore, store_name: str, entries) -> bool:
-    """Persist a plan pre-pass mutation under the per-store lock.
+def _locked_prepass(bstore: BoundedStore, store_name: str, mutate):
+    """Run a plan pre-pass as lock → FRESH load → mutate → save.
 
-    Returns False (mutation NOT persisted) when a live session holds the
-    lock — the pre-pass is an optimization, so plan proceeds with the
-    unmutated store rather than clobbering a concurrent apply's write.
+    *mutate* receives the freshly-loaded entries and returns
+    ``(new_entries, meta, changed)``; the save happens only when
+    *changed*. Returns ``(entries, meta)`` — on a held lock, ``None``
+    (the pre-pass is an optimization; plan proceeds with the unmutated
+    store).
+
+    The load MUST happen inside the lock (audit F3): the old shape
+    loaded lockless, computed, then took the lock only for the save —
+    anything written between the load and the locked save (a pin, a
+    concurrent ingest) was clobbered by the stale snapshot.
     """
     try:
         with bstore.store_lock(store_name):
-            bstore.save_atomic(store_name, entries)
-        return True
+            entries = bstore.load(store_name)
+            new_entries, meta, changed = mutate(entries)
+            if changed:
+                bstore.save_atomic(store_name, new_entries)
+            return new_entries, meta
     except StoreLockHeld:
         log.warning(
             "compact-plan: %s locked by a live session; skipping this "
-            "wake's pre-pass save", store_name,
+            "wake's pre-pass", store_name,
         )
-        return False
+        return None
 
 
 def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
@@ -267,16 +300,19 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
         e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
     ]
     if bstore.is_over_overflow(STORE_TOPICS, topics):
-        survivors, dropped_stale = _forget_stale_topics(bstore, topics, now)
-        if dropped_stale:
-            if _locked_save(bstore, STORE_TOPICS, survivors):
+        def _forget_mut(entries):
+            fresh = [e for e in entries if isinstance(e, TopicEntry)]
+            survivors, dropped = _forget_stale_topics(bstore, fresh, now)
+            return survivors, dropped, bool(dropped)
+
+        res = _locked_prepass(bstore, STORE_TOPICS, _forget_mut)
+        if res is not None:
+            topics, dropped_stale = res
+            if dropped_stale:
                 log.info(
                     "compact-plan: forgot %d stale topic(s): %s",
                     len(dropped_stale), ", ".join(dropped_stale),
                 )
-                topics = survivors
-            else:
-                dropped_stale = []
     if bstore.is_over_overflow(STORE_TOPICS, topics):
         prompt_path = staging / "topic_roster.prompt.md"
         prompt_path.write_text(
@@ -328,19 +364,25 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
             )
 
     # --- skills: exact-dup merge, then index target + detail targets ---
-    skills = [e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)]
-    original_skills = list(skills)
-    skills, deduped_skills = _dedup_skills(skills)
-    if deduped_skills:
-        for e in skills:
-            refresh_importance(e, now, cfg)
-        if _locked_save(bstore, STORE_SKILLS, skills):
+    def _dedup_skills_mut(entries):
+        fresh = [e for e in entries if isinstance(e, SkillEntry)]
+        merged, deduped = _dedup_skills(fresh)
+        if deduped:
+            for e in merged:
+                refresh_importance(e, now, cfg)
+        return merged, deduped, bool(deduped)
+
+    res = _locked_prepass(bstore, STORE_SKILLS, _dedup_skills_mut)
+    if res is not None:
+        skills, deduped_skills = res
+        if deduped_skills:
             log.info(
                 "compact-plan: merged %d exact-duplicate skill(s)",
                 deduped_skills,
             )
-        else:
-            skills, deduped_skills = original_skills, 0
+    else:
+        skills = [e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)]
+        deduped_skills = 0
     skills_index_staged = False
     if bstore.is_over_overflow(STORE_SKILLS, skills):
         skills_index_staged = True
@@ -402,19 +444,24 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
             )
 
     # --- must_remember: exact-dup merge, then the compact target ---
-    must = [
-        e for e in bstore.load(STORE_MUST_REMEMBER)
-        if isinstance(e, MustRememberEntry)
-    ]
-    original_must = list(must)
-    must, deduped_mr = _dedup_must_remember(must)
-    if deduped_mr:
-        if _locked_save(bstore, STORE_MUST_REMEMBER, must):
+    def _dedup_mr_mut(entries):
+        fresh = [e for e in entries if isinstance(e, MustRememberEntry)]
+        merged, deduped = _dedup_must_remember(fresh)
+        return merged, deduped, bool(deduped)
+
+    res = _locked_prepass(bstore, STORE_MUST_REMEMBER, _dedup_mr_mut)
+    if res is not None:
+        must, deduped_mr = res
+        if deduped_mr:
             log.info(
                 "compact-plan: merged %d exact-duplicate memo(s)", deduped_mr
             )
-        else:
-            must, deduped_mr = original_must, 0
+    else:
+        must = [
+            e for e in bstore.load(STORE_MUST_REMEMBER)
+            if isinstance(e, MustRememberEntry)
+        ]
+        deduped_mr = 0
     if bstore.is_over_overflow(STORE_MUST_REMEMBER, must):
         protected = [e for e in must if e.kind == KIND_OPERATOR_EXPLICIT]
         compactable = [e for e in must if e.kind != KIND_OPERATOR_EXPLICIT]
@@ -430,7 +477,13 @@ def compact_plan(cfg: Config, store: Store, *, now: str | None = None) -> dict:
                 cfg, "compact_must_remember.md",
                 agent_name=cfg.agent.name,
                 current_chars=bstore.length_chars(must),
-                max_chars=max(0, budget),
+                # Floor the advertised budget: when protected entries alone
+                # exceed max_length the arithmetic goes ≤ 0 and the card
+                # author is told "compact to 0 chars" — a nonsense
+                # instruction that breeds malformed cards in exactly the
+                # stuck state that needs a clean card most (audit: bounds
+                # finding 8b).
+                max_chars=max(200, budget),
                 forget_days=forget_days,
                 protected=_render_mr_blocks(
                     protected, with_ids=True, now=now, forget_days=forget_days
@@ -517,6 +570,7 @@ class ApplyReport:
     malformed: list[dict]
     forced_trims: list[str]
     still_over: list[str]
+    locked: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -525,6 +579,7 @@ class ApplyReport:
             "malformed": self.malformed,
             "forced_trims": self.forced_trims,
             "still_over": self.still_over,
+            "locked": self.locked,
         }
 
 
@@ -556,20 +611,37 @@ def compact_apply(cfg: Config, store: Store, *, now: str | None = None) -> Apply
         text = card_path.read_text(encoding="utf-8")
         try:
             _apply_one(bstore, cfg, item, text, now, report)
-            report.applied.append(key)
         except (CompactionParseError, EntryError) as exc:
             report.malformed.append({"key": key, "error": str(exc)})
+            continue
+        except StoreLockHeld as exc:
+            # One contended store must not abort the whole apply with the
+            # other targets' consumed cards left on disk — a blind re-run
+            # would re-apply them and mint duplicates (audit F7 / pipeline
+            # finding 3). Skip just this target; it re-stages next sweep.
+            log.warning("compact-apply: %s skipped (%s)", key, exc)
+            report.locked.append(key)
+            continue
+        report.applied.append(key)
+        # Drop this target's staging files IMMEDIATELY after its store
+        # commit — a crash later in the loop must not leave an
+        # already-applied card behind for a duplicating re-run.
+        Path(item["prompt_path"]).unlink(missing_ok=True)
+        card_path.unlink(missing_ok=True)
 
-    # Drop applied targets' staging files so a re-run only retries failures.
-    for item in manifest.get("targets", []):
-        if item["key"] in report.applied:
-            Path(item["prompt_path"]).unlink(missing_ok=True)
-            Path(item["card_path"]).unlink(missing_ok=True)
+    # Consume the manifest once nothing actionable remains: a stale
+    # manifest lets a mis-sequenced later `compact-apply` exit 0 "clean"
+    # against 10-day-old targets instead of the loud exit-2 the protocol
+    # promises (audit: drift finding 6). Malformed/locked targets keep it
+    # for a targeted retry.
+    if not report.malformed and not report.locked:
+        manifest_path.unlink(missing_ok=True)
 
     log.info(
-        "compact-apply: %d applied, %d skipped, %d malformed, %d forced trims",
+        "compact-apply: %d applied, %d skipped, %d locked, %d malformed, "
+        "%d forced trims",
         len(report.applied), len(report.skipped_no_card),
-        len(report.malformed), len(report.forced_trims),
+        len(report.locked), len(report.malformed), len(report.forced_trims),
     )
     return report
 
@@ -617,7 +689,11 @@ def _apply_must_remember(
             # the live mission. It is DOWNGRADED (to `decision`, rejoining
             # the normal decay pool) — never directly dropped.
             stale_ids.add(_ref(b["STALE"]))
-            continue
+            if not (b.get("KIND") or b.get("MEMO")):
+                continue
+            # A sloppy card merged a memo and a STALE verdict into one
+            # block (no blank line) — keep BOTH rather than silently
+            # dropping the memo (mirrors the TOUCH parser's tolerance).
         kind = (b.get("KIND") or "").lower()
         memo = b.get("MEMO")
         if kind not in VALID_KINDS or not memo:
@@ -640,6 +716,7 @@ def _apply_must_remember(
         protected: list[MustRememberEntry] = []
         downgraded: list[MustRememberEntry] = []
         post_plan: list[MustRememberEntry] = []
+        forget_days = cfg.memory.must_remember.forget_days
         for e in current:
             if e.kind != KIND_OPERATOR_EXPLICIT:
                 # The card replaces only what its prompt SAW (the plan-time
@@ -650,6 +727,19 @@ def _apply_must_remember(
                     post_plan.append(e)
                 continue
             if e.id in stale_ids:
+                if _age_days(e.last_used, now) <= forget_days:
+                    # The documented contract is that only a directive
+                    # untouched past forget_days may be relevance-
+                    # downgraded; a card must not strip a FRESH
+                    # operator_explicit of its protection (audit: drift
+                    # finding 10).
+                    log.warning(
+                        "compact-apply: STALE verdict on FRESH operator "
+                        "directive %r refused (touched within %d days)",
+                        e.id, forget_days,
+                    )
+                    protected.append(e)
+                    continue
                 e.kind = KIND_DECISION
                 downgraded.append(e)
             else:
@@ -717,7 +807,7 @@ def _mr_drop_order(
     Fresh ``operator_explicit`` entries are absent — never droppable.
     """
     def stale(e: MustRememberEntry) -> bool:
-        return days_between(e.last_used, now) > forget_days
+        return _age_days(e.last_used, now) > forget_days
 
     normal = [e for e in entries if e.kind != KIND_OPERATOR_EXPLICIT]
     stale_normal = sorted(

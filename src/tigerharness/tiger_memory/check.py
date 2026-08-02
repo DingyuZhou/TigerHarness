@@ -38,6 +38,16 @@ from .store import Store
 log = logging.getLogger("tigerharness.tiger_memory.check")
 
 
+def _ts_parseable(ts: str) -> bool:
+    from datetime import datetime
+
+    try:
+        datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
 @dataclass
 class StoreCheck:
     """Per-store check outcome."""
@@ -100,6 +110,22 @@ def _check_frontmatter(
             res.problems.append(f"invalid {store_name} entry id={fm.get('id')!r}: {exc}")
             bad_blocks.append(block.strip())
             continue
+        if not _ts_parseable(entry.last_used):
+            # A corrupt freshness anchor used to read as "eternally fresh"
+            # (immune to forget/merge/trim — a convergence poison pill);
+            # compaction now treats it as infinitely old instead. Repair
+            # it here to something sane so the entry is neither immortal
+            # nor silently first-in-line to be forgotten.
+            res.problems.append(
+                f"unparseable last_used on {store_name} entry "
+                f"id={fm.get('id')!r}"
+            )
+            if fix:
+                from .state import iso_now
+                entry.last_used = (
+                    entry.created_at if _ts_parseable(entry.created_at)
+                    else iso_now()
+                )
         good.append(entry)
     res.valid = len(good)
     # a parseable store whose canonical re-render differs is mechanical drift.
@@ -115,12 +141,31 @@ def _check_frontmatter(
 
 
 def check_store(bstore: BoundedStore, store_name: str, *, fix: bool) -> StoreCheck:
-    """Validate (and optionally repair) one store."""
+    """Validate (and optionally repair) one store.
+
+    A repair is a read-modify-write, so with ``fix`` it runs under the
+    per-store lock (audit F5: the ``--fix`` save could clobber a
+    concurrent ingest's entries computed from a pre-ingest read). A held
+    lock degrades to a read-only check — the repair retries on the next
+    rebuild.
+    """
+    from .bounded_store import StoreLockHeld
+
     path = bstore._store_path(store_name)
     if not path.exists():
         return StoreCheck(store_name)
+    if fix:
+        try:
+            with bstore.store_lock_wait(store_name):
+                text = path.read_bytes().decode("utf-8", errors="replace")
+                return _check_frontmatter(bstore, store_name, path, text, fix=True)
+        except StoreLockHeld:
+            log.warning(
+                "check --fix: %s locked by a live session; reporting "
+                "read-only (repair retries next rebuild)", store_name,
+            )
     text = path.read_bytes().decode("utf-8", errors="replace")
-    return _check_frontmatter(bstore, store_name, path, text, fix=fix)
+    return _check_frontmatter(bstore, store_name, path, text, fix=False)
 
 
 def check_all(cfg: Config, store: Store, *, fix: bool = False) -> CheckReport:

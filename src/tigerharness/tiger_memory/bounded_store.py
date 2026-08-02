@@ -34,6 +34,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -54,7 +55,7 @@ from .entries import (
     TopicEntry,
     entry_from_frontmatter,
 )
-from .store import Store, _pid_alive
+from .store import Store, _pid_alive, reclaim_lockfile, release_lockfile
 
 log = logging.getLogger("tigerharness.tiger_memory.bounded_store")
 
@@ -155,7 +156,9 @@ class BoundedStore:
             if not fm:
                 continue
             try:
-                entry = entry_from_frontmatter(store_name, fm, body.rstrip("\n"))
+                entry = entry_from_frontmatter(
+                    store_name, fm, _unescape_body(body.rstrip("\n"))
+                )
                 self._validate_entry(entry)
             except EntryError as exc:
                 log.warning(
@@ -305,10 +308,39 @@ class BoundedStore:
         try:
             yield
         finally:
+            # Owner-verified release (audit F4): never unlink a lock that
+            # is no longer ours.
+            release_lockfile(path)
+
+    @contextmanager
+    def store_lock_wait(
+        self, store_name: str, *, retries: int = 40, delay: float = 0.05
+    ) -> Iterator[None]:
+        """Like :meth:`store_lock`, but waits (~2s default) before giving up.
+
+        For SHORT mutations that must not lose to a transient holder —
+        ingest and pin (audit F2): a compact-apply's per-store critical
+        section is fast, so a brief wait almost always wins; only a truly
+        stuck holder raises :class:`StoreLockHeld`, and the caller's card
+        then re-stages next sweep rather than silently losing a write.
+        """
+        last_exc: StoreLockHeld | None = None
+        for _ in range(retries):
+            entered = False
             try:
-                path.unlink()
-            except FileNotFoundError:  # pragma: no cover - best-effort cleanup
-                pass
+                with self.store_lock(store_name):
+                    entered = True
+                    yield
+                return
+            except StoreLockHeld as exc:
+                if entered:
+                    # Raised by the BODY, not by acquisition — never
+                    # retry (re-running the caller's mutation would
+                    # double-apply it).
+                    raise
+                last_exc = exc
+                time.sleep(delay)
+        raise last_exc  # type: ignore[misc]  # retries >= 1 always sets it
 
     def _acquire_store_lock(self, path: Path) -> bool:
         """Try to take *path* as an O_EXCL lock; reclaim a dead holder."""
@@ -320,17 +352,16 @@ class BoundedStore:
         except OSError as exc:
             if exc.errno != errno.EEXIST:
                 raise
-        # Lock exists: reclaim only if the holder PID is dead.
+        # Lock exists: reclaim only if the holder PID is dead — via the
+        # TOCTOU-safe rename reclaim (audit F4), never a bare unlink.
         try:
             holder_pid = int(path.read_text().split()[0])
         except (ValueError, OSError, IndexError):
             holder_pid = -1
         if holder_pid > 0 and _pid_alive(holder_pid):
             return False
-        try:
-            path.unlink()
-        except FileNotFoundError:  # pragma: no cover - raced release
-            pass
+        if not reclaim_lockfile(path):
+            return False  # lost the reclaim race — someone else owns it
         # Retry once after reclaiming the dead/garbage lock.
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -387,28 +418,64 @@ class BoundedStore:
 # ----- module-level serialization helpers ----------------------------------
 
 
+# A body line that IS the separator sentinel gets this prefix at serialize
+# time (stripped back off at split time). Without it, an entry whose text
+# quotes the sentinel — entirely plausible on a team that develops
+# tigerharness itself — severs the entry at the next load: the tail becomes
+# a frontmatter-less block that load() silently skips, and the next save
+# makes the truncation permanent (audit: pipeline finding 1).
+_SEP_ESCAPE = "\\"
+
+# Whole-line separator match. A plain substring split also severed entries
+# whose body merely MENTIONED the sentinel inline (same audit finding).
+_SEP_LINE_RE = re.compile(
+    rf"(?m)^{re.escape(_ENTRY_SEP)}[ \t]*$\n?"
+)
+
+
 def _serialize(entries: Sequence[BaseEntry]) -> str:
-    """Render *entries* as one store file (frontmatter blocks + separators)."""
+    """Render *entries* as one store file (frontmatter blocks + separators).
+
+    Body lines equal to the separator sentinel are escaped so a body can
+    never alias the framing.
+    """
     if not entries:
         # An empty store is a valid, parseable, zero-block file.
         return ""
     blocks = []
     for entry in entries:
-        body = entry.text if entry.text.endswith("\n") else entry.text + "\n"
+        body_lines = [
+            _SEP_ESCAPE + line if line.strip() == _ENTRY_SEP else line
+            for line in entry.text.split("\n")
+        ]
+        body = "\n".join(body_lines)
+        body = body if body.endswith("\n") else body + "\n"
         blocks.append(frontmatter.render(entry.frontmatter(), body))
     return (f"\n{_ENTRY_SEP}\n").join(blocks)
+
+
+def _unescape_body(text: str) -> str:
+    """Inverse of the serialize-time sentinel escape."""
+    return "\n".join(
+        line[len(_SEP_ESCAPE):]
+        if line.startswith(_SEP_ESCAPE) and line[len(_SEP_ESCAPE):].strip() == _ENTRY_SEP
+        else line
+        for line in text.split("\n")
+    )
 
 
 def _split_blocks(text: str) -> list[str]:
     """Split a store file back into per-entry blocks (inverse of _serialize).
 
-    Each block is lstripped of the separator's surrounding newlines so the
-    frontmatter ``---`` delimiter lands on the block's first line (which
-    ``frontmatter.parse`` requires).
+    The split matches the separator only as a WHOLE LINE (an inline mention
+    inside a body is content, not framing), and each block is lstripped of
+    the separator's surrounding newlines so the frontmatter ``---``
+    delimiter lands on the block's first line (which ``frontmatter.parse``
+    requires).
     """
     if not text.strip():
         return []
-    return [b.lstrip("\n") for b in text.split(_ENTRY_SEP)]
+    return [b.lstrip("\n") for b in _SEP_LINE_RE.split(text)]
 
 
 def _entry_chars(entry: BaseEntry) -> int:

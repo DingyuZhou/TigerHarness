@@ -980,17 +980,21 @@ def test_stale_prepass_stops_once_under_max(tmp_path: Path) -> None:
     assert [t for t in manifest["targets"] if t["kind"] == "topic_roster"] == []
 
 
-def test_corrupt_timestamp_topic_is_never_stale_dropped(tmp_path: Path) -> None:
-    """An unreadable last_used yields 0 elapsed days, so the topic counts as
-    fresh: the system must never irreversibly forget on a date it cannot
-    read (errs on the side of keeping)."""
+def test_corrupt_timestamp_topic_is_stale_not_immortal(tmp_path: Path) -> None:
+    """Hardening pass: an unreadable ``last_used`` counts as INFINITELY OLD,
+    not eternally fresh. The old 0-elapsed-days reading made a corrupt
+    entry immune to forget/merge/trim — an unconvergeable poison pill.
+    Keeping-on-corruption is now handled the data-preserving way: ``check
+    --fix`` REPAIRS the anchor (to ``created_at``) so the entry rejoins
+    the normal lifecycle instead of being either immortal or silently
+    first-forgotten."""
     bs = _make_store(tmp_path, sub="tiny", t_idx_max=10, t_idx_over=11,
                      fresh_days=2, forget_days=10)
     t = _topic("Unreadable Clock", last_used="garbage")
     bs.save_atomic("topics", [t])
     manifest = compact_plan(bs.cfg, bs.store, now=NOW)
-    assert manifest["dropped_stale_topics"] == []
-    assert [e.slug for e in bs.load("topics")] == ["unreadable-clock"]
+    assert manifest["dropped_stale_topics"] == ["unreadable-clock"]
+    assert bs.load("topics") == []
 
 
 # ====================================================================

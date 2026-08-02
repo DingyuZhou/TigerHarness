@@ -232,12 +232,18 @@ c. **Glue the cards** (non-AI, deterministic, race-free) once **all** of
    each bundle's blocks into the persona's three bounded stores, so the
    per-persona store writes are **serialized by construction** -- there
    is no ingest race to coordinate by hand. It prints
-   `{"ingested": N, "malformed": [...], "skipped_no_card": M}`. Exit
+   `{"ingested": N, "malformed": [...], "locked": [...],
+   "skipped_no_card": M}`. Exit
    codes: `0` clean; `1` at least one **malformed** card (its uuids are
    listed -- re-extract just those with a fresh sub-agent, or leave them
    to re-stage next wake); `2` no manifest (a planning bug -- surface
    it). A skipped (no-card) item simply was not extracted this wake; the
    store, not the card, is the durable ledger, so it re-stages next wake.
+   A `locked` uuid hit a stuck store lock -- it also re-stages next wake.
+   **Anomaly check:** after a COMPLETED fan-out, `ingested: 0` with
+   `skipped_no_card > 0` means misnamed/missing cards (or a premature
+   glue), not a quiet team -- the CLI now warns on stderr; check the
+   staging dir before moving on instead of treating exit 0 as success.
    For a `map_reduce` uuid, `ingest-staged` drops its chunk prompts +
    digests alongside the card, so the staging dir is clean next pass.
 
@@ -276,9 +282,13 @@ d. **Compact what outgrew its bound** (staged, same sub-agent shape as
    protected from forget/merge), and
    deterministically trims any surface a card left over its `max`. It
    prints `{"applied": [...], "skipped_no_card": [...], "malformed":
-   [...], "forced_trims": [...], "still_over": [...]}`; exit `1` means a
+   [...], "forced_trims": [...], "still_over": [...], "locked": [...]}`;
+   exit `1` means a
    malformed card (re-run just that target with a fresh sub-agent, or
    leave it -- the surface re-stages next wake), `2` means no manifest.
+   A `locked` target hit a live lock and was skipped (it re-stages next
+   wake). A fully-clean apply consumes the manifest, so a mistaken
+   re-apply gets the loud exit `2` instead of a silent "clean" no-op.
 
 e. **Finalize the persona**, then record it done:
 
@@ -322,10 +332,13 @@ process several `targets` concurrently (each its own plan -> stacks ->
   Exit `1` = a malformed card (leave it; the fold re-stages next
   sweep); `2` = no manifest (a sequencing bug -- surface it).
 
-  Then advance the watermark and clear the claim:
+  Then advance the watermark and clear the claim, passing YOUR claim
+  token (from `sweep-plan`'s JSON) so a stale driver whose lease was
+  stolen can never clobber the live owner's run (exit `3` = refused,
+  another session owns the sweep now -- stop, do not force):
 
   ```bash
-  $TM --config "$DRIVER" sweep-complete
+  $TM --config "$DRIVER" sweep-complete --token <token>
   ```
 
   This **includes the empty case**: if `sweep-plan` returned `ran=true`
@@ -337,8 +350,15 @@ process several `targets` concurrently (each its own plan -> stacks ->
   but keep progress + the stale watermark so the next wake resumes:
 
   ```bash
-  $TM --config "$DRIVER" sweep-release
+  $TM --config "$DRIVER" sweep-release --token <token>
   ```
+
+  The roster walk orders personas least-recently-swept first (durable
+  `done_at` map), so repeated capped wakes rotate through the whole
+  roster instead of re-sweeping the same head. If you have time in this
+  session, you MAY immediately re-run `sweep-plan --token <same>` after
+  the release and keep draining the backlog in 3-persona chunks --
+  re-claiming your own token is allowed while the watermark is stale.
 
 ## The three bounded stores (what a sweep is feeding)
 
@@ -365,6 +385,9 @@ process several `targets` concurrently (each its own plan -> stacks ->
 
 - **Staleness floor** (default 24h) + **team watermark** -> most triggers
   are a no-op.
+- **Lease renewal** -> every `sweep-done` refreshes the claim lease, so
+  a healthy long run (many personas, big fan-outs) is never stolen
+  mid-flight; only a genuinely silent driver loses the claim.
 - **Soft-lease claim** -> one session sweeps per window; a crashed owner's
   stale claim is stolen after the lease.
 - **Per-wake cap** (`--max-personas`) -> a big backlog spreads across

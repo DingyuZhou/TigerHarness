@@ -172,3 +172,34 @@ sweep driver's own persona config.
 - The extractor writes events *about* a persona from that persona's own
   transcript, so attribution is structural (the sweep already knows
   whose session it is) — the summarizer never guesses names.
+
+## Amendment (2026-08-02): audit hardening
+
+A four-lens adversarial audit of the whole memory system (concurrency,
+pipeline data-loss, bounds/convergence, protocol drift) caught two
+design errors in the original decision, fixed as follows:
+
+- **The size backstop measures the folded tiers only** (month + year
+  sections). The original measured the whole rendered file while
+  forbidding day-section drops — at ordinary activity (~3 bullets/day
+  team-wide) the file permanently exceeded the bound, the backstop
+  deleted *every* folded summary, and still reported over-bound forever.
+  Scoped to the folds it is always convergent; the day window is bounded
+  by real activity plus a **hard cap of 3 events per ingested card**
+  (`MAX_EVENTS_PER_APPEND`, enforcing the contract's 0–3 ask).
+- **Defaults resized for the real month inventory.** Up to ~26 month
+  sections legitimately coexist before a year fold at
+  `year_after_days=400`; at `month_max_chars=700` that needs ~19k chars,
+  so `max_length`/`overflow_limit` moved 8000/12000 → **24000/30000**,
+  and the loader now warns when a config's fold budget cannot fit under
+  its `max_length`.
+- Apply hardening: snapshot survival compares **normalized** keys (a
+  `(xN)` count bump between plan and apply no longer resurrects a folded
+  bullet); a re-apply after a crash **merges into** an existing
+  same-period section (deduped) instead of appending a duplicate; a held
+  lock skips just that target (`locked` in the report) instead of
+  aborting the run; a fully-clean apply consumes the manifest so a blind
+  re-apply gets the loud exit 2.
+- Appends run with ~2s of lock retries (was 0.5s), and a contended
+  append is still dropped by design — the log is awareness, not the
+  ledger of record.

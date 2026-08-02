@@ -53,6 +53,7 @@ from typing import Iterator
 
 from .config import Config
 from .state import iso_now
+from .store import reclaim_lockfile, release_lockfile
 
 log = logging.getLogger("tigerharness.tiger_memory.team_events")
 
@@ -63,6 +64,11 @@ STAGING_DIR_NAME = ".compact-staging"
 CARD_SUFFIX = ".card.md"
 
 MARK_TEAM_EVENTS = "@@TEAM_EVENTS@@"
+
+# Hard cap on EVENT lines accepted from one extraction card — the contract
+# asks for 0-3; enforcing it here keeps the day window (which the size
+# backstop deliberately never touches) bounded by real activity.
+MAX_EVENTS_PER_APPEND = 3
 
 KIND_DAY = "day"
 KIND_MONTH = "month"
@@ -163,9 +169,14 @@ def render(sections: list[PeriodSection]) -> str:
 
 
 def _save(cfg: Config, sections: list[PeriodSection]) -> None:
+    import uuid
     path = events_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # Unique tmp per writer (audit F2): a fixed tmp name is not safe under
+    # the cross-persona concurrency this file explicitly supports.
+    tmp = path.with_name(
+        f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    )
     tmp.write_text(render(sections), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -192,21 +203,24 @@ def _try_acquire(path: Path) -> bool:
     except OSError as exc:
         if exc.errno != errno.EEXIST:  # pragma: no cover - unexpected fs error
             raise
-    # Lock exists: reclaim only a dead holder's.
+    # Lock exists: reclaim only a dead holder's — via the TOCTOU-safe
+    # rename reclaim (audit F4), never a bare unlink.
     try:
         holder_pid = int(path.read_text().split()[0])
     except (ValueError, OSError, IndexError):
         holder_pid = -1
     if holder_pid > 0 and _pid_alive(holder_pid):
         return False
-    path.unlink(missing_ok=True)
+    reclaim_lockfile(path)
     return False  # caller retries the O_EXCL create
 
 
 @contextmanager
-def _lock(cfg: Config, *, retries: int = 10, delay: float = 0.05) -> Iterator[None]:
+def _lock(cfg: Config, *, retries: int = 40, delay: float = 0.05) -> Iterator[None]:
     """Exclusive team-log lock; raises :class:`TeamEventsLockHeld` when a
-    live holder keeps it through every retry."""
+    live holder keeps it through every retry (~2s by default — sized so a
+    concurrent persona's whole append, which is milliseconds, never wins
+    a spurious drop)."""
     path = team_dir(cfg) / LOCK_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     acquired = False
@@ -222,7 +236,7 @@ def _lock(cfg: Config, *, retries: int = 10, delay: float = 0.05) -> Iterator[No
     try:
         yield
     finally:
-        path.unlink(missing_ok=True)
+        release_lockfile(path)
 
 
 # ----- append (the sweep's ingest hook) -------------------------------------
@@ -259,6 +273,15 @@ def append_events(
     """
     if not cfg.memory.team_events.enabled or not events:
         return 0
+    if len(events) > MAX_EVENTS_PER_APPEND:
+        # The extraction contract asks for 0-3 EVENT lines; enforce it so
+        # a chatty card cannot balloon the (backstop-exempt) day window
+        # (audit: bounds finding 1).
+        log.warning(
+            "team-events append: %d events capped to %d",
+            len(events), MAX_EVENTS_PER_APPEND,
+        )
+        events = events[:MAX_EVENTS_PER_APPEND]
     now = now or iso_now()
     try:
         date.fromisoformat(day)
@@ -309,15 +332,31 @@ def _month_end(month: str) -> date:
     return date(y, m + 1, 1) - timedelta(days=1)
 
 
+def _folded_chars(sections: list[PeriodSection]) -> int:
+    """Rendered size of the FOLDED tiers only (month + year sections)."""
+    return len(render([s for s in sections if s.kind != KIND_DAY]))
+
+
 def _backstop_trim(
     cfg: Config, sections: list[PeriodSection]
 ) -> tuple[list[PeriodSection], list[str]]:
-    """Deterministic size backstop: while the rendered file is over
-    ``overflow_limit``, drop the oldest year section, then the oldest
-    month section, until back at/under ``max_length``. Daily sections —
-    the Operator's uncompacted window — are never backstop-dropped."""
+    """Deterministic size backstop over the **folded tiers only**: while
+    the rendered month+year sections are at/over ``overflow_limit``, drop
+    the oldest year section, then the oldest month section, until back
+    at/under ``max_length``.
+
+    Daily sections — the Operator's uncompacted window — are exempt from
+    both the measurement and the drops. Counting them against the bound
+    while forbidding their removal made the backstop unsatisfiable at
+    ordinary activity levels: it deleted every folded summary and still
+    reported over-bound forever (audit: bounds finding 1). Scoped to the
+    folded tiers it is always convergent — dropping everything it may
+    drop reaches the empty render, which is under any valid ``max``.
+    The day window is bounded by real team activity plus the per-append
+    cap, by design.
+    """
     te = cfg.memory.team_events
-    if len(render(sections)) < te.overflow_limit:
+    if _folded_chars(sections) < te.overflow_limit:
         return sections, []
     survivors = list(sections)
     dropped: list[str] = []
@@ -326,7 +365,7 @@ def _backstop_trim(
             (s for s in survivors if s.kind == kind), key=lambda s: s.period
         )
         for victim in victims:
-            if len(render(survivors)) <= te.max_length:
+            if _folded_chars(survivors) <= te.max_length:
                 return survivors, dropped
             survivors.remove(victim)
             dropped.append(victim.period)
@@ -393,22 +432,26 @@ def compact_plan(cfg: Config, *, now: str | None = None) -> dict:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
-    sections = load_sections(events_path(cfg))
-    trimmed, dropped = _backstop_trim(cfg, sections)
-    if dropped:
-        try:
-            with _lock(cfg):
+    dropped: list[str] = []
+    try:
+        # Load + trim + save all under the lock (audit F3): a lockless
+        # load followed by a locked save of the stale snapshot would erase
+        # any append that landed in between.
+        with _lock(cfg):
+            sections = load_sections(events_path(cfg))
+            trimmed, dropped = _backstop_trim(cfg, sections)
+            if dropped:
                 _save(cfg, trimmed)
-            sections = trimmed
-            log.info(
-                "team-events compact-plan: backstop dropped %d section(s): %s",
-                len(dropped), ", ".join(dropped),
-            )
-        except TeamEventsLockHeld:
-            log.warning(
-                "team-events compact-plan: lock held; backstop trim skipped"
-            )
-            dropped = []
+                sections = trimmed
+                log.info(
+                    "team-events compact-plan: backstop dropped %d "
+                    "section(s): %s", len(dropped), ", ".join(dropped),
+                )
+    except TeamEventsLockHeld:
+        log.warning(
+            "team-events compact-plan: lock held; backstop trim skipped"
+        )
+        sections = load_sections(events_path(cfg))  # read-only staging is fine
 
     targets: list[dict] = []
 
@@ -525,7 +568,7 @@ def compact_apply(cfg: Config, *, now: str | None = None) -> dict:
     te = cfg.memory.team_events
     report: dict = {
         "applied": [], "skipped_no_card": [], "malformed": [],
-        "forced_trims": [], "still_over": False,
+        "forced_trims": [], "locked": [], "still_over": False,
     }
     for item in manifest.get("targets", []):
         key = item["key"]
@@ -543,26 +586,68 @@ def compact_apply(cfg: Config, *, now: str | None = None) -> dict:
             else te.year_max_chars
         )
         snapshot: dict[str, list[str]] = item.get("snapshot") or {}
-        with _lock(cfg):
-            sections = load_sections(events_path(cfg))
-            survivors: list[str] = []
-            kept: list[PeriodSection] = []
-            for s in sections:
-                if s.period not in set(item["source_periods"]):
-                    kept.append(s)
-                    continue
-                seen = set(snapshot.get(s.period) or [])
-                survivors.extend(x for x in s.lines if x not in seen)
-            merged, trimmed = _trim_bullets(bullets + survivors, max_chars)
-            if trimmed:
-                report["forced_trims"].append(key)
-            kept.append(PeriodSection(period=item["period"], lines=merged))
-            _save(cfg, kept)
+        snapshot_keys = {
+            _normalize_key("", line)
+            for lines in snapshot.values()
+            for line in lines
+        }
+        source_periods = set(item["source_periods"])
+        try:
+            with _lock(cfg):
+                sections = load_sections(events_path(cfg))
+                survivors: list[str] = []
+                kept: list[PeriodSection] = []
+                for s in sections:
+                    if s.period == item["period"] and s.period not in source_periods:
+                        # A same-period section that was NOT a fold source
+                        # exists only after a crashed earlier apply — merge
+                        # into it instead of appending a duplicate section
+                        # (audit: pipeline finding 3 / drift finding 9).
+                        survivors.extend(s.lines)
+                        continue
+                    if s.period not in source_periods:
+                        kept.append(s)
+                        continue
+                    # Snapshot survival by NORMALIZED key: an exact-line
+                    # compare resurrects a bullet whose ``(xN)`` count was
+                    # bumped between plan and apply (audit: pipeline
+                    # finding 5) — the fold already covers it; only
+                    # genuinely new lines survive.
+                    survivors.extend(
+                        x for x in s.lines
+                        if _normalize_key("", x) not in snapshot_keys
+                    )
+                deduped: list[str] = []
+                seen_keys: set[str] = set()
+                for line in bullets + survivors:
+                    k = _normalize_key("", line)
+                    if k in seen_keys:
+                        continue
+                    seen_keys.add(k)
+                    deduped.append(line)
+                merged, trimmed = _trim_bullets(deduped, max_chars)
+                if trimmed:
+                    report["forced_trims"].append(key)
+                kept.append(PeriodSection(period=item["period"], lines=merged))
+                _save(cfg, kept)
+        except TeamEventsLockHeld as exc:
+            # Do not abort the whole apply over one contended target
+            # (audit F7); it re-stages next sweep.
+            log.warning("team-events compact-apply: %s skipped (%s)", key, exc)
+            report["locked"].append(key)
+            continue
         Path(item["prompt_path"]).unlink(missing_ok=True)
         card_path.unlink(missing_ok=True)
         report["applied"].append(key)
+    # Consume the manifest once nothing actionable remains: a stale
+    # manifest makes a driver's blind re-apply look "clean" (exit 0) while
+    # doing nothing (audit: drift finding 6). Malformed/locked targets keep
+    # it so a targeted retry stays possible; skipped-no-card items re-stage
+    # from a fresh plan anyway.
+    if not report["malformed"] and not report["locked"]:
+        manifest_path.unlink(missing_ok=True)
     report["still_over"] = (
-        len(render(load_sections(events_path(cfg)))) >= te.overflow_limit
+        _folded_chars(load_sections(events_path(cfg))) >= te.overflow_limit
     )
     log.info(
         "team-events compact-apply: %d applied, %d skipped, %d malformed",

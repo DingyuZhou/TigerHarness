@@ -267,10 +267,16 @@ class TeamEventsConfig:
     section whose year has ended longer ago than this folds into a year
     section. ``month_max_chars`` / ``year_max_chars``: target size of one
     folded section (the deterministic trim bound). ``max_length`` /
-    ``overflow_limit``: hysteresis bounds over the whole rendered file —
-    a size backstop that drops the oldest year/month sections, never the
-    daily window. ``enabled: false`` keeps the card contract intact but
-    drops the section at ingest (no team log is written).
+    ``overflow_limit``: hysteresis bounds over the rendered **folded
+    tiers only** (month + year sections) — a size backstop that drops the
+    oldest year/month sections; the daily window is exempt from both the
+    measurement and the drops (bounded instead by real activity + the
+    per-append event cap). Defaults are sized so the full legitimate
+    month inventory (up to ~26 month sections live before a year fold at
+    ``year_after_days=400``) fits under ``max_length`` at the sanctioned
+    ``month_max_chars`` — the coherence the loader validates.
+    ``enabled: false`` keeps the card contract intact but drops the
+    section at ingest (no team log is written).
     """
 
     enabled: bool = True
@@ -278,8 +284,8 @@ class TeamEventsConfig:
     year_after_days: int = 400
     month_max_chars: int = 700
     year_max_chars: int = 1000
-    max_length: int = 8000
-    overflow_limit: int = 12000
+    max_length: int = 24000
+    overflow_limit: int = 30000
 
 
 @dataclass(frozen=True)
@@ -735,10 +741,10 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
             "memory.team_events.year_max_chars",
         ),
         max_length=_cfg_int(
-            tev_raw.get("max_length", 8000), "memory.team_events.max_length"
+            tev_raw.get("max_length", 24000), "memory.team_events.max_length"
         ),
         overflow_limit=_cfg_int(
-            tev_raw.get("overflow_limit", 12000),
+            tev_raw.get("overflow_limit", 30000),
             "memory.team_events.overflow_limit",
         ),
     )
@@ -765,6 +771,30 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
             "memory.team_events.month_max_chars and year_max_chars must be "
             f"> 0; got {team_events.month_max_chars} / "
             f"{team_events.year_max_chars}."
+        )
+    # Coherence: the legitimate folded-month inventory should fit under
+    # the backstop, or sanctioned folds get backstop-dropped before their
+    # year fold can ever form (audit: bounds finding 2). Worst case,
+    # months live until ~year_after_days past their year end plus the
+    # current partial year: year_after_days/30 + 13 month sections. A
+    # WARNING, not an error — an incoherent config degrades (oldest folds
+    # trim early) but stays convergent, and hard-failing here would brick
+    # existing team configs at load time on upgrade.
+    month_inventory = team_events.year_after_days // 30 + 13
+    fold_budget = (
+        month_inventory * team_events.month_max_chars
+        + 5 * team_events.year_max_chars
+    )
+    if fold_budget > team_events.max_length:
+        log.warning(
+            "memory.team_events.max_length (%d) is smaller than the "
+            "folded-tier inventory it may need to hold (~%d month sections "
+            "x %d + 5 years x %d = %d); the oldest folded sections will be "
+            "backstop-trimmed early. Raise max_length/overflow_limit or "
+            "lower the fold targets.",
+            team_events.max_length, month_inventory,
+            team_events.month_max_chars, team_events.year_max_chars,
+            fold_budget,
         )
 
     return MemoryConfig(
