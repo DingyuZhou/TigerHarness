@@ -47,6 +47,7 @@ Reply posted to thread
 | `config.py` | BridgeConfig from env vars + .env |
 | `persistence.py` | ThreadStore: atomic JSON file for thread->session map |
 | `downloader.py` | SlackFileDownloader + prompt augmentation |
+| `history.py` | Thread-history fetch + transcript for untracked-thread joins |
 | `notify.py` | Outbound: SlackNotifier (text DM + file upload) + CLI |
 | `multi.py` | Multi-team bridge loader (per-team lanes from a bridges config) |
 | `router.py` | One-shot LLM persona routing (sticky per thread) |
@@ -128,6 +129,37 @@ slack_channel: D012ABCDEF
 ```
 
 Agents use this to route follow-up DMs via `--thread`.
+
+### Joining untracked threads (replies to notification DMs)
+
+`notify` and the slack-notify skill post DMs via raw `chat.postMessage`
+— deliberately without touching the bridge's `threads.json` (that store
+stays single-writer per process family). So the first reply a user
+sends inside such a thread carries a `thread_ts` the bridge has never
+seen.
+
+The bridge treats this as a **join**: before opening the new session it
+fetches the thread's messages via `conversations.replies` (bot token;
+needs the conversation type's `*:history` scope — `im:history` for DMs,
+which receiving DM events already requires) and injects a bounded
+transcript into the session's first prompt, so the persona can see the
+notification the user is replying to. The transcript also feeds the
+persona router, so a bare "Yes, go ahead!" under a
+"[Anzai]: Task complete …" notification routes to Anzai rather than the
+default persona. The same mechanism heals other blind spots — a lost
+`threads.json`, threads that predate the bridge.
+
+Bounds and behavior (`history.py`):
+
+- The thread root is always kept; at most 30 messages / ~8 KB total,
+  ~2 KB per message. Over budget, the **oldest non-root** messages are
+  dropped first and a gap marker records how many.
+- Fail-soft: on any fetch failure (API error, missing scope) the
+  dispatch proceeds with a one-line note telling the persona the
+  earlier context is unavailable.
+- Tracked threads never fetch — their resumed session already carries
+  the context. Each adopted thread fetches once; after the first turn
+  it is tracked like any other.
 
 ## Journal tasks over Slack (cost discipline)
 

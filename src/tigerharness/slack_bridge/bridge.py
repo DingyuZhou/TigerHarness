@@ -57,6 +57,13 @@ from .downloader import (
     SlackFileDownloader,
     augment_prompt,
 )
+from .history import (
+    CONTEXT_UNAVAILABLE_NOTE,
+    SlackThreadHistoryFetcher,
+    ThreadHistoryFetcher,
+    build_transcript,
+    format_context_block,
+)
 from .idle_compact import IdleCompactConfig, maybe_compact
 from .persistence import ThreadStore, default_state_path
 from .router import detect_persona
@@ -162,6 +169,7 @@ class SlackBridge:
         downloader: FileDownloader | None = None,
         *,
         team_ctx: TeamBridgeContext | None = None,
+        history_fetcher: ThreadHistoryFetcher | None = None,
     ) -> None:
         if team_ctx is not None:
             self._team = team_ctx
@@ -185,6 +193,12 @@ class SlackBridge:
         self._store.clear_in_flight_all()
         self._downloader: FileDownloader = downloader or SlackFileDownloader(
             self._team.slack_bot_token
+        )
+        # Fetches thread history when the bridge joins an untracked
+        # thread mid-conversation (e.g. a reply to a notification DM).
+        self._history: ThreadHistoryFetcher = (
+            history_fetcher
+            or SlackThreadHistoryFetcher(self._team.slack_bot_token)
         )
         # Per-lane config wins (multi-team); fall back to the env surface
         # only when no lane config was supplied (single-tenant / legacy).
@@ -328,7 +342,20 @@ class SlackBridge:
         # bail on shutdown before ever taking the state lock).
         in_flight_marked = False
         try:
-            state = await self._get_or_open_thread(thread_key, text)
+            # Untracked-thread join (e.g. a reply to a notification DM
+            # posted outside the bridge): fetch the thread's earlier
+            # messages so the fresh session can see what the user is
+            # replying to. Tracked threads skip this -- their resumed
+            # session already carries the context. Runs inside the
+            # drain slot so shutdown can't leak a session opened after
+            # a mid-fetch SIGTERM.
+            join_transcript, prompt = await self._maybe_inject_join_context(
+                event, thread_key, prompt
+            )
+
+            state = await self._get_or_open_thread(
+                thread_key, text, thread_context=join_transcript
+            )
 
             # The router LLM call took ~500ms-1s. Shutdown may have been
             # requested while we were waiting for the routing decision.
@@ -473,6 +500,72 @@ class SlackBridge:
             if self._in_flight == 0:  # pragma: no branch  # tested with single-request flows
                 self._drained.set()
 
+    def _is_untracked_thread_reply(self, event: dict[str, Any], thread_key: str) -> bool:
+        """True iff this message replies into a thread the bridge has
+        never seen: it has a parent (``thread_ts`` differs from its own
+        ``ts``), no in-memory state, and no persisted record. Such
+        threads typically began with a notification DM posted outside
+        the bridge (the notify CLI / slack-notify skill), so the new
+        session must be handed the thread's earlier messages explicitly.
+        """
+        thread_ts = event.get("thread_ts")
+        if not thread_ts or thread_ts == event.get("ts"):
+            return False
+        if thread_key in self._threads:
+            return False
+        return self._store.get_record(thread_key) is None
+
+    async def _maybe_inject_join_context(
+        self, event: dict[str, Any], thread_key: str, prompt: str
+    ) -> tuple[str | None, str]:
+        """Prepend thread history to *prompt* when joining an untracked
+        thread. Returns ``(transcript, prompt)`` -- transcript is
+        ``None`` when this isn't a join or nothing could be fetched
+        (the prompt then carries an honest "context unavailable" note
+        in the join case). Fail-soft throughout: dispatch proceeds no
+        matter what happens here."""
+        if not self._is_untracked_thread_reply(event, thread_key):
+            return None, prompt
+        transcript = await self._fetch_join_transcript(event, thread_key)
+        if transcript is None:
+            return None, f"{CONTEXT_UNAVAILABLE_NOTE}\n\n{prompt}"
+        return transcript, f"{format_context_block(transcript)}\n\n{prompt}"
+
+    async def _fetch_join_transcript(
+        self, event: dict[str, Any], thread_key: str
+    ) -> str | None:
+        """Fetch + render the joined thread's history; ``None`` on any
+        failure or when nothing usable came back."""
+        channel = event.get("channel")
+        if not channel:
+            log.warning(
+                "thread=%s untracked reply carries no channel; "
+                "skipping history fetch", thread_key,
+            )
+            return None
+        try:
+            messages = await self._history.fetch(channel, thread_key)
+        except Exception:  # noqa: BLE001 - injected fetchers may raise
+            log.warning(
+                "thread=%s history fetch raised; continuing without "
+                "join context", thread_key, exc_info=True,
+            )
+            return None
+        if messages is None:
+            return None
+        transcript = build_transcript(messages, exclude_ts=event.get("ts"))
+        if transcript is None:
+            log.info(
+                "thread=%s no usable earlier messages in joined thread",
+                thread_key,
+            )
+        else:
+            log.info(
+                "thread=%s injecting %d chars of joined-thread history",
+                thread_key, len(transcript),
+            )
+        return transcript
+
     def _is_tracked_thread_reply(self, event: dict[str, Any]) -> bool:
         """True iff this is a non-bot reply in a thread we're engaged in."""
         thread_ts = event.get("thread_ts")
@@ -498,12 +591,20 @@ class SlackBridge:
         async def _on_mention(event: dict[str, Any], say: Any) -> None:  # noqa: ARG001  # pragma: no cover — bolt callback
             await self.handle_mention(event, say)
 
-    async def _get_or_open_thread(self, key: str, first_text: str) -> _ThreadState:
+    async def _get_or_open_thread(
+        self,
+        key: str,
+        first_text: str,
+        thread_context: str | None = None,
+    ) -> _ThreadState:
         """Look up the thread's session + persona, or open a new one.
 
         On the first message of a new thread, runs the router to pick
         the active persona. On subsequent messages, reuses whatever was
-        stored in ``ThreadStore``.
+        stored in ``ThreadStore``. *thread_context* is the joined
+        thread's transcript (untracked-thread reply) -- fed to the
+        router so a reply to "[Anzai]: task complete ..." routes to
+        Anzai instead of the default persona.
 
         Concurrency note: the router LLM call (~500ms-1s) and
         ``backend.open_session`` (also async) run **outside** the
@@ -544,6 +645,7 @@ class SlackBridge:
                 list(self._team.personas.keys()),
                 self._team.default_persona,
                 aliases=self._team.persona_aliases,
+                context=thread_context,
             )
             self._record_cost(cost)
             log.info(

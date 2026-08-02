@@ -176,6 +176,35 @@ class TestFormatRouterPrompt:
         assert "Ayako (also known as" not in prompt
         assert "Anzai (also known as: Anxi)" in prompt
 
+    def test_context_included_when_provided(self):
+        prompt = _format_router_prompt(
+            "Yes, go ahead!", ["Ayako", "Anzai"],
+            context="[Anzai]: Task complete: fix is on the branch.",
+        )
+        assert "Thread history" in prompt
+        assert "[Anzai]: Task complete" in prompt
+        # Message still present and clearly separated.
+        assert "Yes, go ahead!" in prompt
+
+    def test_no_context_no_history_section(self):
+        prompt = _format_router_prompt("Hi", ["Ayako", "Anzai"])
+        assert "Thread history" not in prompt
+
+    def test_context_head_truncated(self):
+        # Head-truncation keeps the thread ROOT (the routing signal).
+        ctx = "ROOT-SIGNAL " + "c" * 5000
+        prompt = _format_router_prompt("Hi", ["Ayako"], context=ctx)
+        assert "ROOT-SIGNAL" in prompt
+        assert "c" * 5000 not in prompt
+        assert "c" * 2988 in prompt  # 3000 - len("ROOT-SIGNAL ")
+
+    def test_system_prompt_teaches_history_rule(self):
+        # Contract test: the router must know how to use the optional
+        # history block, and that the newest message wins on conflict.
+        from tigerharness.slack_bridge.router import _ROUTER_SYSTEM_PROMPT
+        assert "Thread history" in _ROUTER_SYSTEM_PROMPT
+        assert "message always" in _ROUTER_SYSTEM_PROMPT
+
 
 # ---------------------------------------------------------------------------
 # _build_router_config
@@ -415,6 +444,33 @@ class TestDetectPersona:
             default_persona="ayako",
         )
         assert (persona, cost) == ("ayako", 0.0)
+
+    @pytest.mark.asyncio
+    async def test_context_reaches_router_prompt(self, monkeypatch):
+        """detect_persona(context=...) must surface the thread history
+        in the prompt actually sent to the routing LLM."""
+        from unittest.mock import AsyncMock, MagicMock
+        backend = MagicMock()
+        backend.open_session = AsyncMock(return_value=_FakeSession())
+
+        captured: list[str] = []
+
+        async def fake_retry(_backend, _cfg, prompt, **_kw):
+            captured.append(prompt)
+            return MagicMock(final_output="ayako", cost_usd=0.0)
+
+        monkeypatch.setattr(
+            "tigerharness.slack_bridge.router.run_with_retry", fake_retry
+        )
+        result = await detect_persona(
+            backend, "Yes, go ahead!", roster=["ayako", "sakuragi"],
+            default_persona="sakuragi",
+            context="[ayako]: Task complete.",
+        )
+        assert result[0] == "ayako"
+        assert len(captured) == 1
+        assert "Thread history" in captured[0]
+        assert "[ayako]: Task complete." in captured[0]
 
     @pytest.mark.asyncio
     async def test_alias_response_maps_to_canonical(self, monkeypatch):

@@ -53,6 +53,12 @@ Rules:
 - If a team member is clearly addressed by name or by any of their \
 listed aliases (e.g. "Hi Ayako" or "Hi 安西教练"), return the \
 team member's CANONICAL name (the first name listed, before the aliases).
+- A "Thread history" block may accompany the message: earlier messages \
+from the same Slack thread, oldest first. When the message itself does \
+not clearly address anyone, return the roster member (if any) whose \
+name labels or signs the most recent team-authored message in that \
+history (e.g. a message starting "[Ayako]: ..."). The message always \
+wins over the history when they disagree.
 - If no team member is clearly addressed, or the addressed name is \
 not in the roster, return the literal word "default".
 - Return EXACTLY one roster entry: a canonical name from the roster \
@@ -110,10 +116,18 @@ def _build_router_config() -> AgentConfig:
     )
 
 
+#: Cap on the optional thread-history block in the routing prompt.
+#: The transcript is oldest-first and the thread ROOT (e.g. the
+#: notification DM carrying "[Anzai]: ...") is what identifies the
+#: speaking persona, so head-truncation keeps the routing signal.
+_CONTEXT_CAP = 3000
+
+
 def _format_router_prompt(
     message: str,
     roster: Iterable[str],
     aliases: dict[str, list[str]] | None = None,
+    context: str | None = None,
 ) -> str:
     names = list(roster)
     options = ", ".join(names + [_DEFAULT_TOKEN])
@@ -136,11 +150,18 @@ def _format_router_prompt(
     else:
         roster_display = ", ".join(names)
 
-    return (
-        f"Roster: {roster_display}\n"
-        f'Message: """{body}"""\n\n'
-        f"Return one of: {options}"
-    )
+    parts = [f"Roster: {roster_display}\n"]
+    if context:
+        # Untracked-thread join: earlier thread messages help route a
+        # reply that names nobody (e.g. "Yes, go ahead!" under a
+        # "[Anzai]: task complete ..." notification).
+        parts.append(
+            "Thread history (earlier messages in this thread, oldest "
+            f'first): """{context[:_CONTEXT_CAP]}"""\n'
+        )
+    parts.append(f'Message: """{body}"""\n\n')
+    parts.append(f"Return one of: {options}")
+    return "".join(parts)
 
 
 def _build_alias_index(
@@ -204,6 +225,7 @@ async def detect_persona(
     roster: list[str],
     default_persona: str,
     aliases: dict[str, list[str]] | None = None,
+    context: str | None = None,
 ) -> tuple[str, float]:
     """Route the first message of a new thread to a persona.
 
@@ -216,6 +238,11 @@ async def detect_persona(
     list of alternate names (nicknames, translations, pinyin, etc.).
     When provided, aliases are included in the LLM routing prompt and
     accepted in response parsing.
+
+    *context* is an optional transcript of earlier messages in the
+    thread (untracked-thread join -- see ``history.py``). It lets the
+    router pick the persona who authored the thread's earlier messages
+    when the reply itself names nobody.
 
     *default_persona* must itself be in *roster* -- the loader enforces
     that at startup, but we don't re-check here because the failure
@@ -234,7 +261,9 @@ async def detect_persona(
         return roster[0], 0.0
 
     cfg = _build_router_config()
-    prompt = _format_router_prompt(message, roster, aliases=aliases)
+    prompt = _format_router_prompt(
+        message, roster, aliases=aliases, context=context
+    )
 
     try:
         session = await backend.open_session(resume_id=None)
