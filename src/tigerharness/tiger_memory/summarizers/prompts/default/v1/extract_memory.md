@@ -67,7 +67,9 @@ MEMO: <= {memo_max_words} words; one sentence; specific>
 - **operator_explicit**: the owner said "remember" / "never" / "always" /
   "don't forget" (quote-faithful is best).
 - **preference**: a stylistic / process / tooling preference.
-- **decision**: a factual / architectural / strategic decision.
+- **decision**: a decision that CONSTRAINS how future work must be
+  done. How a subsystem behaves is NOT a must-remember — file it
+  under `@@TOPICS@@`.
 - **incident**: a bug, near-miss, or expensive lesson.
 
 **Touch what this session relied on.** Your current must-remember items:
@@ -93,7 +95,10 @@ marker.
 
 ### @@TOPICS@@ — durable project knowledge, filed by topic (0 to 3)
 A topic is a named, growing body of knowledge about one subject (a
-subsystem, an ongoing effort, a recurring theme). File durable facts
+subsystem, an ongoing effort, a recurring theme). A topic must be a
+SUBJECT future sessions can add to — a completed one-off operation is
+not a topic (its occurrence belongs in `@@TEAM_EVENTS@@`, its
+transferable lesson in `@@SKILLS@@`). File durable facts
 from this session into topics — **route to an existing topic whenever
 one fits; create a new topic only when nothing fits**.
 
@@ -105,9 +110,10 @@ One block per topic touched, blank line between:
 ```
 TOPIC: <an existing slug from the list above, or exactly NEW>
 NAME: <required when TOPIC is NEW — a short human topic name; omit otherwise>
-SUMMARY: <= {topic_summary_max_words} words — the topic's refreshed one-line
-  index summary (required for NEW; for an existing topic include it only
-  when the old summary no longer fits)>
+SUMMARY: <= {topic_summary_max_words} words — what the topic's WHOLE
+  body covers, a table-of-contents line; never this session's outcome,
+  verdict, or status (required for NEW; for an existing topic include
+  it only when the old summary no longer fits)>
 DETAIL: <= {topic_detail_max_words} words — the new durable facts/events
   from THIS session to append under the topic>
 ```

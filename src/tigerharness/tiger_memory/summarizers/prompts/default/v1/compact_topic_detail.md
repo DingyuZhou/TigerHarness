@@ -17,6 +17,10 @@ Current body size: {current_chars} characters. Target: **at most
   state. Recent sections matter more than old ones.
 - Collapse superseded/duplicated lines; fold long-past minutiae into a
   short "earlier" digest section at the top if needed.
+- When a newer section contradicts or supersedes an older fact,
+  rewrite the older fact in PAST tense naming what replaced it
+  ("replaced by X on <date>") — never leave both standing as
+  present-tense truth.
 - Keep the dated-section shape: `## YYYY-MM-DD` headings with `- ` fact
   bullets under each, oldest first.
 

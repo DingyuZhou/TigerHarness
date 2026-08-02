@@ -29,6 +29,14 @@ summarizer:
   model: claude-sonnet-4-6
   prompts: default/v1
 
+# sweep: team-sweep gating (optional; defaults shown). floor_hours is
+# how long after a completed sweep the next trigger is a no-op -- a
+# single-operator team may prefer 12 so the evening absorbs the sweep
+# instead of the morning's first question.
+sweep:
+  floor_hours: 24
+  max_personas: 3
+
 rebuild:
   lock_path: /tmp/tiger-memory-researcher.lock
   idle_threshold_hours: 1
@@ -67,8 +75,8 @@ memory:
     forget_days: 30           # sweeps TOUCH related items; untouched for N
                               # days: forget-eligible when compaction needs it
   topics:                     # named bodies of durable project knowledge
-    index_max_length: 2000    # slug + freshness + summary index (fresh first)
-    index_overflow_limit: 3000
+    index_max_length: 4000    # slug + freshness + summary index (fresh first)
+    index_overflow_limit: 6000
     detail_max_length: 4000   # each topic's dated detail body
     detail_overflow_limit: 6000
     fresh_days: 7             # touched within N days: protected from forget/merge
@@ -80,11 +88,11 @@ memory:
     enabled: true
     recent_days: 30           # daily sections younger than this never compact
     year_after_days: 400      # a month folds into its year this long after year end
-    month_max_chars: 700      # target size of one folded month section
+    month_max_chars: 1200     # target size of one folded month section
     year_max_chars: 1000      # target size of one folded year section
-    max_length: 24000         # size backstop over the FOLDED tiers (month+year
+    max_length: 40000         # size backstop over the FOLDED tiers (month+year
                               # sections only; the daily window is exempt)
-    overflow_limit: 30000
+    overflow_limit: 50000
 
 # memory_extract: per-section word budgets for the extraction prompt
 # (optional; defaults shown). max_output_words caps the whole bundle.

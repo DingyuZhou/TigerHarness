@@ -148,8 +148,8 @@ memory:
     overflow_limit: 3000
     forget_days: 30              # untouched (no TOUCH) for => forget-eligible (>= 0)
   topics:
-    index_max_length: 2000
-    index_overflow_limit: 3000
+    index_max_length: 4000       # raised 2026-08-02: ~160 chars/topic
+    index_overflow_limit: 6000
     detail_max_length: 4000
     detail_overflow_limit: 6000
     fresh_days: 7                # touched within => protected from forget/merge
@@ -158,10 +158,10 @@ memory:
     enabled: true
     recent_days: 30              # daily sections younger than this never compact
     year_after_days: 400         # a month folds into its year this long after year end
-    month_max_chars: 700         # target size of one folded month section
+    month_max_chars: 1200        # target size of one folded month section
     year_max_chars: 1000         # target size of one folded year section
-    max_length: 24000            # size backstop over the FOLDED tiers (month+year)
-    overflow_limit: 30000
+    max_length: 40000            # size backstop over the FOLDED tiers (month+year)
+    overflow_limit: 50000
 
 memory_extract:                  # per-section word budgets for extraction
   skill_procedure_words: 120
@@ -170,6 +170,14 @@ memory_extract:                  # per-section word budgets for extraction
   topic_detail_words: 80
   team_event_words: 15
   max_output_words: 600
+
+# Team-sweep gating (optional; these are the defaults). Tunable per
+# team since 2026-08-02 -- e.g. floor_hours: 12 halves how stale
+# memory is when a single-operator day starts.
+sweep:
+  floor_hours: 24
+  max_personas: 3
+  lease_seconds: 1800
 
 rebuild:
   trigger: lazy
@@ -226,6 +234,9 @@ executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
 | `team-events-compact-plan` | non-AI, **team-level** (ADR 0008): run the size backstop, then stage one fold prompt per aged-out team-event period under `memories/team/.compact-staging/` (empty `targets` = nothing aged out) |
 | `team-events-compact-apply` | non-AI: validate + apply every staged team-events fold card in ONE process (deterministic trim; post-plan appends survive). Exit 0 clean / 1 ≥1 malformed card / 2 no manifest |
 | `sweep-plan` / `sweep-done` / `sweep-complete [--token]` / `sweep-release [--token]` | team-sweep gating (non-AI). `sweep-done` renews the claim lease and stamps the durable per-persona `done_at` map (the roster walk is least-recently-swept first); with `--token`, complete/release are refused (exit 3) when another session now owns the claim |
+| `search <term> [--team] [--store S]` | case-insensitive content search over the stores (and the team event log); `--team` walks every roster persona. The read half of the Operator find-it/fix-it loop |
+| `forget --store S (--id I \| --slug SLUG)` | Operator-authority removal of one entry (locked RMW; the removed block is archived to `journal/<store>.forgotten.md`, never silently lost; may drop even a fresh `operator_explicit` — the Operator IS the authority the protection serves). Rebuilds the briefing |
+| `doctor [--json]` | team-wide health table: per-persona bounds/overflow, staged files, quarantines, sweep `done_at`, data-through, last still_over/malformed reports, cross-persona topic-slug collisions. Exit 1 when anything is flagged (cron-friendly) |
 | `check [--fix]` | validate the 3 stores' on-disk format; exit non-zero if any invalid. `--fix` repairs mechanical drift + quarantines non-mechanical to `<store>.rejected.md` (no silent loss). Runs automatically inside every `rebuild` |
 
 The retired verbs `import-legacy` and `migrate-emotional-to-diary` were
@@ -284,7 +295,12 @@ DETAIL: <the new durable facts from THIS session — always required>
 ```
 
 Existing slug → the detail is appended (dated) to the topic body, its
-freshness and touch count update. `NEW` → a topic is minted. A malformed
+freshness and touch count update. **All ingest dating is
+source-dated** (2026-08-02): entry `created_at`/`last_used`, topic
+section headings, and team-event days carry the session's END
+timestamp, not the sweep's wall clock — a backlog sweep files
+history under when the work happened, and an old session's touch
+never moves an already-fresher entry backward. `NEW` → a topic is minted. A malformed
 *bundle* (missing or out-of-order markers, or a **duplicated standalone
 marker** — a bundle must emit each marker exactly once; a duplicate,
 e.g. an echoed contract sample, makes the split ambiguous and the whole

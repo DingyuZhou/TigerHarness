@@ -65,6 +65,10 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-08-02 (practicality pass): ayako: pre memory-adoption ship --
+        #   step 3 read-context had no persona-briefing load (drives worked
+        #   with a persona's voice but none of its memory).
+        "b2f4a99050eb144c6d9945418ba82c0d55ab7630ca30ec22b17faa0f622f4a64",
         # 2026-07-22 (critique round): ayako: first idle-maintenance-tail ship
         #   (ba03eef) -- called compact-idle "model-free"; superseded by the
         #   accurate one-bounded-/compact-turn wording.
@@ -159,6 +163,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-08-02 (practicality pass): ayako: pre answer-first ship --
+        #   before the answer-the-user-first rule, the map-reduce lore trim
+        #   (protocol-doc pointer), and the ingest anomaly wording tweaks.
+        "d7adf9aa9a3e5aa17959ffff0f2ac2d686a54298770b66ecf7b549a95ad17cf2",
         # 2026-08-02 (audit hardening): ayako: pre token/lease/LRU ship --
         #   no --token on the closers, no lease-renewal note, no
         #   ingested==0 anomaly check, no locked report keys.
@@ -206,11 +214,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "b2f4a99050eb144c6d9945418ba82c0d55ab7630ca30ec22b17faa0f622f4a64",
+    "drive-journal": "b2bcfff96c9e16996260c171349fddf116c23bc66de974d2fc77283e15abbaf3",
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "d7adf9aa9a3e5aa17959ffff0f2ac2d686a54298770b66ecf7b549a95ad17cf2",
+    "sweep-memory": "9ea39fcc6dce4d3255033f4e928dc2123257eaae7a28b616a32646573cbe1b78",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }
@@ -292,11 +300,12 @@ outside scope. Read them before any substantive task:
    INDEX exists) -- the team's curated reference base. Drill into
    the specific topic you need; don't load the whole base eagerly.
 
-If you have a tiger-memory briefing at
-`../memories/{persona}/briefing/README.md`, read that too -- it's
-your persistent cross-session memory. The briefing is most useful
-once you've already oriented on the team's charter and the project
-the team owns.
+**Session-start gate:** before your first substantive reply in a new
+session, read `../memories/{persona}/briefing/README.md` (your
+persistent cross-session memory) and follow it -- do not answer
+questions about project state before you have. When memory shapes an
+answer, say so ("per my memory: ..."). The briefing pays off most once
+you've oriented on the team's charter and the project the team owns.
 
 ## Working style
 
@@ -407,6 +416,12 @@ rebuild:
   idle_threshold_hours: 1
   rebuild_timeout_minutes: 60
 
+# Team-sweep gating (package defaults shown; floor 12 keeps memory at
+# most ~half a day stale for a single-operator team).
+sweep:
+  floor_hours: 24
+  max_personas: 3
+
 # Team-wide event log (ADR 0008): a lazy, dated who-did-what ledger at
 # memories/team/events.md, appended by every persona's sweep ingest.
 # These are the package defaults -- spelled out so team-level tuning is
@@ -416,11 +431,11 @@ memory:
     enabled: true
     recent_days: 30        # daily sections younger than this never compact
     year_after_days: 400   # a month folds into its year this long after year end
-    month_max_chars: 700   # target size of one folded month section
+    month_max_chars: 1200  # target size of one folded month section
     year_max_chars: 1000   # target size of one folded year section
-    max_length: 24000      # size backstop over the FOLDED tiers (month+year
+    max_length: 40000      # size backstop over the FOLDED tiers (month+year
                            # sections only; the daily window is exempt)
-    overflow_limit: 30000  # (hysteresis: backstop trims only at/over this)
+    overflow_limit: 50000  # (hysteresis: backstop trims only at/over this)
 """
 
 _MEMORY_CONFIG_TEMPLATE = """\

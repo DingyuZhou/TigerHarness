@@ -33,6 +33,10 @@ silently deleted. When in doubt, keep it protected: do not mark it.
 
 ## What to do
 
+- Drop memos that merely restate subsystem BEHAVIOR — that knowledge
+  belongs in a topic, not in the always-loaded directives store; keep
+  only items that constrain how future work must be done.
+
 - Merge duplicates and near-duplicates into one memo each.
 - Tighten wording; drop filler. Keep memos one sentence, specific.
 - Drop entries that no longer matter (superseded decisions, resolved

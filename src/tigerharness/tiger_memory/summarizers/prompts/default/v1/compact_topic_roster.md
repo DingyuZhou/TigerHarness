@@ -22,7 +22,8 @@ MERGE them away.
    bodies are concatenated automatically; give the merged topic one
    summary).
 3. **SUMMARY** — rewrite verbose summaries shorter ({summary_max_words}
-   words or fewer).
+   words or fewer), as a table-of-contents line for the topic's WHOLE
+   body — never the latest session's outcome, verdict, or status.
 
 ## Output contract — STRICT
 

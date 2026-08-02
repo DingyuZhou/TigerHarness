@@ -55,8 +55,8 @@ def test_memory_defaults_when_block_absent(minimal_config_yaml: Path) -> None:
     assert m.must_remember.overflow_limit == 3000
     assert m.must_remember.forget_days == 30
     # Topics: index + per-topic detail bounds + freshness windows.
-    assert m.topics.index_max_length == 2000
-    assert m.topics.index_overflow_limit == 3000
+    assert m.topics.index_max_length == 4000
+    assert m.topics.index_overflow_limit == 6000
     assert m.topics.detail_max_length == 4000
     assert m.topics.detail_overflow_limit == 6000
     assert m.topics.fresh_days == 7
@@ -128,7 +128,7 @@ def test_memory_partial_override_keeps_defaults(tmp_path: Path) -> None:
     assert m.must_remember.max_length == 2000
     assert m.topics.fresh_days == 2
     assert m.topics.forget_days == 60
-    assert m.topics.index_max_length == 2000
+    assert m.topics.index_max_length == 4000
 
 
 def test_removed_store_keys_are_ignored(tmp_path: Path) -> None:

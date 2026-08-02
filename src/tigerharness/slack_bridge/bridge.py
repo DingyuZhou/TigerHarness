@@ -352,6 +352,20 @@ class SlackBridge:
             bridge_body: str | None = None
             async with state.lock:
                 resume_id = state.session.id or "<new>"
+                if not state.session.id:
+                    # First turn of a NEW session: make the memory read
+                    # mechanical rather than aspirational — the persona
+                    # prompt's "read your briefing at session start"
+                    # instruction was measured firing only ~half the time
+                    # (practicality audit, consumption finding 2). An
+                    # instruction appended to the first user turn is far
+                    # harder to skip than one buried mid-system-prompt.
+                    prompt = (
+                        f"{prompt}\n\n[bridge-context] first turn of a new "
+                        "session: before answering, read "
+                        f"memories/{state.persona}/briefing/README.md and "
+                        "follow it (skip silently if it does not exist)."
+                    )
                 log.info(
                     "thread=%s persona=%s dispatch (resume=%s, chars=%d, files=%d)",
                     thread_key, state.persona, resume_id, len(prompt), len(attachments),

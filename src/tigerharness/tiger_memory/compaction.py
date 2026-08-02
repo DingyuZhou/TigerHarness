@@ -643,6 +643,11 @@ def compact_apply(cfg: Config, store: Store, *, now: str | None = None) -> Apply
         len(report.applied), len(report.skipped_no_card),
         len(report.locked), len(report.malformed), len(report.forced_trims),
     )
+    # Persist the outcome for the Operator read/fix loop: `tiger-memory
+    # doctor` reports still_over/malformed from the last sweep without
+    # re-deriving them (practicality audit).
+    from .inspect_tools import record_sweep_report
+    record_sweep_report(store, "compact_apply", report.to_dict())
     return report
 
 

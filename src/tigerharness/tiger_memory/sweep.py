@@ -215,7 +215,8 @@ def release_sweep_claim(
 
 
 def mark_sweep_complete(
-    team_memories_dir: Path, now: datetime, *, token: str | None = None
+    team_memories_dir: Path, now: datetime, *, token: str | None = None,
+    force: bool = False,
 ) -> bool:
     """Advance the team watermark and end the run: clear the claim AND the
     per-persona progress. The bumped ``last_sweep_at`` is what makes the
@@ -223,11 +224,29 @@ def mark_sweep_complete(
 
     With *token*, refused (``False``) on a claim mismatch — a stale
     driver advancing the watermark would skip the live run's remaining
-    personas for a whole floor window. The per-persona ``done_at``
-    freshness map is kept — it orders future roster walks."""
+    personas for a whole floor window. Also refused when roster personas
+    are still PENDING (not in ``progress``) unless *force* — completing
+    early parks the skipped personas behind the 24h floor, which is
+    exactly how the live roster starvation stayed invisible (practicality
+    audit S4). The per-persona ``done_at`` freshness map is kept — it
+    orders future roster walks."""
     state = read_sweep_state(team_memories_dir)
     if _token_mismatch(state, token, "sweep-complete"):
         return False
+    if not force:
+        done = sweep_progress(team_memories_dir)
+        pending = [
+            t.name for t in enumerate_persona_configs(team_memories_dir)
+            if t.name not in done
+        ]
+        if pending:
+            log.warning(
+                "team sweep: sweep-complete refused — %d persona(s) not "
+                "recorded done this run (%s). Finish them (sweep-done) or "
+                "release the claim; pass force to complete anyway.",
+                len(pending), ", ".join(pending),
+            )
+            return False
     state["last_sweep_at"] = now.isoformat()
     state.pop("claim_token", None)
     state.pop("claim_at", None)

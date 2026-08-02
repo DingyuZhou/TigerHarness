@@ -109,6 +109,12 @@ It prints JSON:
 - `ran == true` -> you hold the claim. `targets` is the persona list to
   process **this wake** (at most `--max-personas`).
 
+  **Answer the user first.** If this wake happened inside a conversation
+  where the user asked a real question, handle their request BEFORE
+  executing the claimed sweep (the lease is renewed by every
+  `sweep-done`, and a ~30-min claim is stealable only when you go
+  silent) -- the sweep is maintenance; the user is not.
+
 ### 2. Per target persona: stage -> extract in stacks -> glue
 
 For each `target` in `targets`:
@@ -163,61 +169,18 @@ b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
      existing topic over minting a new one). A card that is `NONE` /
      `NONE` / `NONE` is a valid, expected outcome.
 
-b'. **Oversized transcripts -- the map->reduce two-phase.** Most items are
-   `kind="single"` (one `<uuid>.prompt.md`, the 2b flow above). An item
-   whose prefiltered content exceeds `max_staged_content_chars` is staged
-   by `plan` as `kind="map_reduce"` instead: in the `items` manifest it
-   carries explicit **`chunk_prompts`** and **`digest_paths`** lists and
-   has **no** `prompt_path`, so the oversized middle is split losslessly
-   rather than silently clipped. If `plan`'s `items` shows ANY
-   `map_reduce` uuid, run this extra hop for those uuids **between 2b and
-   2c** (skipping it silently drops the oversized content -- the exact
-   data-loss this path closes). It is a **three-hop dance**: a map
-   sub-agent, then the driver's reduce CLI, then a second (carding)
-   sub-agent -- and only then does 2c run.
-   - **(map -- sub-agent round 1)** the stack's Task sub-agent reads the
-     **exact `chunk_prompts` paths from the manifest** (each a
-     `chunk_condense` prompt -- do NOT glob the staging dir or guess
-     names) and writes one digest per chunk **at the matching
-     `digest_paths` path from the manifest**, as **plain neutral prose --
-     NOT** the `@@SKILLS@@ / @@MUST_REMEMBER@@ / @@TOPICS@@ /
-     @@TEAM_EVENTS@@` contract (that
-     stays single-sourced in the reduce). **Hand the sub-agent the
-     manifest's `chunk_prompts` and `digest_paths` literally** -- a digest
-     written to a path that does not match `digest_paths` makes the reduce
-     below see a *missing* digest and the uuid wedges in `pending` forever.
-     Same brief as 2b (read only its assigned files; return a short
-     confirmation); it writes digests, **not a card**, for these uuids.
-   - **(reduce -- non-AI glue, the driver runs it; no sub-agent)** once a
-     uuid's digests are **all** written: `$TM --config
-     "<target.config_path>" build-reduce-prompts`. It concatenates that
-     uuid's digests (a bounded last-resort clip only if they *still*
-     overflow), fills the single-sourced contract over them, and writes
-     `<uuid>.prompt.md` -- the **same** filename and shape a single item
-     has. It prints `{"built": [...], "pending": [...]}` and exits `0`
-     (pending is not an error) or `2` (no manifest). **Read this as your
-     health signal:** a uuid in `built` is ready to card; a uuid in
-     `pending` is not fully mapped yet. A uuid that **stays in `pending`
-     across more than one pass** is the symptom of a missing or **misnamed
-     digest** (round 1 wrote to the wrong path) -- investigate that uuid,
-     do not just re-run. Its cursor never advances until it builds, so it
-     cannot silently skip, but it also never ingests until the digest is
-     fixed. Never force it.
-   - **(card -- sub-agent round 2)** for each now-`built` uuid the
-     `<uuid>.prompt.md` is **indistinguishable from a single item**: spawn
-     a 2b-style sub-agent to turn it into the `<uuid>.extract.md` card.
-     **Only after this second round has carded the built uuids do you run
-     2c (`ingest-staged`)** -- running `ingest-staged` straight after
-     `build-reduce-prompts`, before the carding round, would skip the card
-     (`skipped_no_card`) and leave the cursor unmoved.
-
-   **To verify the oversized path end to end:** force an item over
-   `max_staged_content_chars`, confirm `plan` stages it as
-   `kind="map_reduce"`, walk map -> `build-reduce-prompts` (uuid lands in
-   `built`) -> card -> `ingest-staged`, and confirm the uuid appears in
-   `ingest-staged`'s **`ingested`** list. A uuid stuck in `pending`, or
-   surfacing in `skipped_no_card`, means the dance broke at the hop named
-   above.
+b'. **Oversized transcripts (kind="map_reduce") -- three-hop dance.**
+   If `plan`'s `items` shows ANY `map_reduce` uuid (it carries
+   `chunk_prompts` + `digest_paths`, no `prompt_path`), run, between
+   2b and 2c: (map) a sub-agent writes one plain-prose digest per
+   chunk at the manifest's EXACT `digest_paths` (never the 4-marker
+   contract, never guessed paths); (reduce, non-AI)
+   `$TM --config "<target.config_path>" build-reduce-prompts` -- a
+   uuid in `built` is ready, one stuck in `pending` across passes
+   means a misnamed digest (investigate, never force); (card) a
+   2b-style sub-agent turns the built `<uuid>.prompt.md` into its
+   `.extract.md` card. Only then run 2c. Full contract + acceptance
+   walkthrough: `docs/tiger-memory-sweep-protocol.md`.
 
 c. **Glue the cards** (non-AI, deterministic, race-free) once **all** of
    this persona's stacks have finished carding (for a `map_reduce` uuid,

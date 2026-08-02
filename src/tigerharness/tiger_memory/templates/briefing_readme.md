@@ -54,6 +54,19 @@ actually needs cross-team awareness — picking up work you don't
 recognise, "who touched X before?", a handoff. It may not exist yet on
 a young team.
 
+The log only covers work ingested since it existed. **If it has no
+answer, fall back to the primary records**: worklogs are
+persona-attributed (`grep -ril <topic> ../../../journal/*/*/worklog/`)
+and commits are persona-prefixed (`git log -i --grep=<persona>`).
+
+## When memory shapes an answer, say so
+
+When a must_remember directive or a topic materially shapes your
+answer, say so in one clause — e.g. *"per my memory: <item>"*. It costs
+a few words, lets the Operator SEE memory working, and gives them the
+chance to correct it when it is stale (`tiger-memory search` /
+`forget`). Silent memory cannot be debugged.
+
 ---
 
 ## Forgetting is a feature

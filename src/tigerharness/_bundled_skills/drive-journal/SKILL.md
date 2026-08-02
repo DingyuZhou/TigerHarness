@@ -88,6 +88,14 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    for `kind=workflow`), `status.json.next_action`, and the tail of
    `progress.md`.
 
+   Then **adopt the assigned persona WITH its memory**: read
+   `personas/<persona>/prompt.md` and that persona's
+   `memories/<persona>/briefing/must_remember.md` + `skill_index.md`
+   (1-3 KB; indexes only -- open a detail file only when its line
+   matches this task). A drive turn is that persona's session start for
+   its briefing. History references work you don't recognise? Consult
+   `memories/team/events.md`, then persona-attributed worklogs.
+
 4. **Work the task continuously** per OPERATING.md — branch on
    `status.kind` (for `kind=workflow`, follow the compile / graph-walk
    sub-protocols *in OPERATING.md*: in a **graph walk**, end each step at
