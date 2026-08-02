@@ -683,6 +683,7 @@ memories/*/.sweep-staging/
 # re-processes, never skips).
 memories/.tiger-memory-sweep.json
 memories/*/.sweep-cursors.json
+memories/*/.last-sweep-report.json
 # archive/ and journal/ are version-controlled (memory summaries).
 # .gitkeep files inside them ensure the empty dirs are tracked.
 """
