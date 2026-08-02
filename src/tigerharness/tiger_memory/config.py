@@ -119,6 +119,7 @@ class MemoryExtractConfig:
     memo_words: int = 25
     topic_summary_words: int = 25
     topic_detail_words: int = 80
+    team_event_words: int = 15
     max_output_words: int = 600
 
 
@@ -256,6 +257,32 @@ class TopicsStoreConfig:
 
 
 @dataclass(frozen=True)
+class TeamEventsConfig:
+    """Knobs for the team-wide event log (ADR 0008) — one shared file at
+    ``<team>/memories/team/events.md``, appended by every persona's sweep
+    ingest and read lazily (pointer-only; never part of a briefing load).
+
+    ``recent_days``: daily sections younger than this are never compacted
+    (the Operator's uncompacted window). ``year_after_days``: a month
+    section whose year has ended longer ago than this folds into a year
+    section. ``month_max_chars`` / ``year_max_chars``: target size of one
+    folded section (the deterministic trim bound). ``max_length`` /
+    ``overflow_limit``: hysteresis bounds over the whole rendered file —
+    a size backstop that drops the oldest year/month sections, never the
+    daily window. ``enabled: false`` keeps the card contract intact but
+    drops the section at ingest (no team log is written).
+    """
+
+    enabled: bool = True
+    recent_days: int = 30
+    year_after_days: int = 400
+    month_max_chars: int = 700
+    year_max_chars: int = 1000
+    max_length: int = 8000
+    overflow_limit: int = 12000
+
+
+@dataclass(frozen=True)
 class MemoryConfig:
     """The ``memory:`` block (design §7; stores per ADR 0007).
 
@@ -269,6 +296,7 @@ class MemoryConfig:
         default_factory=MustRememberStoreConfig
     )
     topics: TopicsStoreConfig = field(default_factory=TopicsStoreConfig)
+    team_events: TeamEventsConfig = field(default_factory=TeamEventsConfig)
 
 
 @dataclass(frozen=True)
@@ -489,6 +517,7 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         memo_words=int(extract_raw.get("memo_words", 25)),
         topic_summary_words=int(extract_raw.get("topic_summary_words", 25)),
         topic_detail_words=int(extract_raw.get("topic_detail_words", 80)),
+        team_event_words=int(extract_raw.get("team_event_words", 15)),
         max_output_words=int(extract_raw.get("max_output_words", 600)),
     )
 
@@ -687,11 +716,63 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
             "protected-fresh and forget-eligible."
         )
 
+    tev_raw = memory_raw.get("team_events") or {}
+    team_events = TeamEventsConfig(
+        enabled=bool(tev_raw.get("enabled", True)),
+        recent_days=_cfg_int(
+            tev_raw.get("recent_days", 30), "memory.team_events.recent_days"
+        ),
+        year_after_days=_cfg_int(
+            tev_raw.get("year_after_days", 400),
+            "memory.team_events.year_after_days",
+        ),
+        month_max_chars=_cfg_int(
+            tev_raw.get("month_max_chars", 700),
+            "memory.team_events.month_max_chars",
+        ),
+        year_max_chars=_cfg_int(
+            tev_raw.get("year_max_chars", 1000),
+            "memory.team_events.year_max_chars",
+        ),
+        max_length=_cfg_int(
+            tev_raw.get("max_length", 8000), "memory.team_events.max_length"
+        ),
+        overflow_limit=_cfg_int(
+            tev_raw.get("overflow_limit", 12000),
+            "memory.team_events.overflow_limit",
+        ),
+    )
+    _validate_bound(
+        "memory.team_events",
+        "max_length",
+        team_events.max_length,
+        team_events.overflow_limit,
+    )
+    if team_events.recent_days < 0:
+        raise ConfigError(
+            f"memory.team_events.recent_days must be ≥ 0; "
+            f"got {team_events.recent_days}."
+        )
+    if team_events.year_after_days < team_events.recent_days:
+        raise ConfigError(
+            f"memory.team_events.year_after_days "
+            f"({team_events.year_after_days}) must be ≥ recent_days "
+            f"({team_events.recent_days}); a section cannot fold to a year "
+            "while still inside the daily window."
+        )
+    if team_events.month_max_chars <= 0 or team_events.year_max_chars <= 0:
+        raise ConfigError(
+            "memory.team_events.month_max_chars and year_max_chars must be "
+            f"> 0; got {team_events.month_max_chars} / "
+            f"{team_events.year_max_chars}."
+        )
+
     return MemoryConfig(
         length_unit=length_unit,
         skills=skills,
         must_remember=must_remember,
         topics=topics,
+        team_events=team_events,
     )
 
 

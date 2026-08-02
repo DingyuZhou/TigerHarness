@@ -136,16 +136,20 @@ b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
      already embeds the prefiltered transcript, the persona's current
      topic routing list, and the full output contract). Nothing else.
    - **Do**: for each uuid in the stack, in order -- read the prompt;
-     emit ONLY the `@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@TOPICS@@`
-     bundle per the prompt's output contract; **self-validate** (all
-     three markers present, each on its own line, in that order; a
+     emit ONLY the `@@SKILLS@@` / `@@MUST_REMEMBER@@` / `@@TOPICS@@` /
+     `@@TEAM_EVENTS@@` bundle (contract v3, ADR 0008) per the prompt's
+     output contract; **self-validate** (all
+     four markers present, each on its own line, in that order; a
      section is either well-formed blocks or the literal `NONE`; every
      `@@TOPICS@@` block routes to an existing slug from the embedded
      list or is `TOPIC: NEW` with NAME + SUMMARY + DETAIL; the
      `@@MUST_REMEMBER@@` section may also carry `TOUCH: <id>` blocks
      marking embedded existing items this session relied on -- touching
      keeps them fresh, and an item untouched past its forget window
-     becomes forgettable); and **write that bundle to a card file**
+     becomes forgettable; the `@@TEAM_EVENTS@@` section is 0-3
+     `EVENT: <verb-first past-tense clause, no persona name>` lines of
+     real work DONE -- ingest prefixes the name and files them, dated,
+     into the team-wide event log); and **write that bundle to a card file**
      `<store>/.sweep-staging/<uuid>.extract.md`. **Do NOT ingest** and do
      NOT run any `tiger-memory` command -- the driver glues all cards in
      one step. Return only a short confirmation (e.g. `carded 5 uuids`).
@@ -176,7 +180,8 @@ b'. **Oversized transcripts -- the map->reduce two-phase.** Most items are
      `chunk_condense` prompt -- do NOT glob the staging dir or guess
      names) and writes one digest per chunk **at the matching
      `digest_paths` path from the manifest**, as **plain neutral prose --
-     NOT** the `@@SKILLS@@ / @@MUST_REMEMBER@@ / @@TOPICS@@` contract (that
+     NOT** the `@@SKILLS@@ / @@MUST_REMEMBER@@ / @@TOPICS@@ /
+     @@TEAM_EVENTS@@` contract (that
      stays single-sourced in the reduce). **Hand the sub-agent the
      manifest's `chunk_prompts` and `digest_paths` literally** -- a digest
      written to a path that does not match `digest_paths` makes the reduce
@@ -296,15 +301,36 @@ process several `targets` concurrently (each its own plan -> stacks ->
 
 ### 3. Close the run
 
-- **All due personas processed** (`remaining == 0`) -> advance the
-  watermark and clear the claim:
+- **All due personas processed** (`remaining == 0`) -> first fold the
+  **team event log** (ADR 0008; team-level, once per completed sweep,
+  while you still hold the claim):
+
+  ```bash
+  $TM --config "$DRIVER" team-events-compact-plan
+  ```
+
+  `targets: []` (the common case) -> move on. Otherwise spawn ONE Task
+  sub-agent per staged prompt (read its `prompt_path`; write the folded
+  bullets to exactly `card_path` per the prompt's strict
+  `@@TEAM_EVENTS@@` contract; run no `tiger-memory` command; return a
+  one-line confirmation), then glue:
+
+  ```bash
+  $TM --config "$DRIVER" team-events-compact-apply
+  ```
+
+  Exit `1` = a malformed card (leave it; the fold re-stages next
+  sweep); `2` = no manifest (a sequencing bug -- surface it).
+
+  Then advance the watermark and clear the claim:
 
   ```bash
   $TM --config "$DRIVER" sweep-complete
   ```
 
   This **includes the empty case**: if `sweep-plan` returned `ran=true`
-  with `targets == []` and `remaining == 0`, call `sweep-complete`
+  with `targets == []` and `remaining == 0`, still run the team-events
+  fold above, then call `sweep-complete`
   **immediately** -- do not leave the claim dangling.
 
 - **Per-wake cap hit, more remain** (`remaining > 0`) -> drop the claim

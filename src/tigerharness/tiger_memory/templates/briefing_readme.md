@@ -44,6 +44,16 @@ case" — the index tells you which ones matter.
 
 ## 5. `MANIFEST.md` — the inventory + read order
 
+## 6. The team event log — LAZY, never load at session start
+
+`../../team/events.md` is the **team-wide** event log: one dated line
+per thing each team member did (newest first; older periods compacted
+to month/year summaries). It is not part of this briefing and is
+**never** loaded at session start. Open it only when the session
+actually needs cross-team awareness — picking up work you don't
+recognise, "who touched X before?", a handoff. It may not exist yet on
+a young team.
+
 ---
 
 ## Forgetting is a feature

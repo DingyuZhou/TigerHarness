@@ -87,8 +87,9 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
         else. It does **not** ingest and runs no `tiger-memory` command.
       - **Instruction**: for each uuid in the stack, act **as that persona,
         in character**; read the prompt; emit ONLY the
-        `@@SKILLS@@/@@MUST_REMEMBER@@/@@TOPICS@@` bundle per the prompt's
-        output contract; **self-validate** (all three markers present, each
+        `@@SKILLS@@/@@MUST_REMEMBER@@/@@TOPICS@@/@@TEAM_EVENTS@@` bundle
+        (contract v3, ADR 0008) per the prompt's
+        output contract; **self-validate** (all four markers present, each
         on its own line, in that order, and **each marker exactly once** —
         a bundle with a duplicated standalone marker is MALFORMED at
         ingest, the contract-echo protection, so never echo the prompt's
@@ -114,6 +115,13 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
         longer fits), `DETAIL:` (the new durable facts — always required).
         Route to an existing topic whenever one fits; a malformed block is
         dropped at ingest, never the whole bundle.
+      - **The `@@TEAM_EVENTS@@` grammar (ADR 0008)**: 0–3 `EVENT:` lines —
+        what the persona actually DID this session (verb-first, past
+        tense, ≤ ~15 words, no persona name; ingest prefixes the name and
+        dates the line by the session's end day in the team-wide event
+        log at `<team>/memories/team/events.md`). Real work only (shipped
+        / reviewed / QA'd / decided / migrated), or `NONE`. Lines need no
+        blank line between them (parsed line-wise).
    c. **Glue** once all of this persona's stacks have carded: `tiger-memory
       --config <target.config_path> ingest-staged`. It reads every
       `<uuid>.extract.md` card and merges each bundle's blocks into the
@@ -181,11 +189,24 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
       `sweep.record_persona_done(team_memories_dir, target.name)`.
 
 3. **Close the run.**
-   - All due personas processed → `sweep.mark_sweep_complete(
+   - All due personas processed (`remaining == 0`) → **first fold the
+     team event log** (ADR 0008, team-level, once per completed sweep,
+     while still holding the claim): run `tiger-memory --config <driver
+     config> team-events-compact-plan`. `targets: []` (the common case)
+     → move on. Otherwise spawn one Task sub-agent per staged prompt
+     (read `prompt_path`, write the folded bullets to exactly
+     `card_path` per the prompt's strict `@@TEAM_EVENTS@@` contract,
+     return a one-line confirmation), then `tiger-memory --config
+     <driver config> team-events-compact-apply` (exit `1` = a malformed
+     card — leave it, the fold re-stages next sweep; `2` = no manifest,
+     a sequencing bug). A capped wake skips this step entirely — the
+     wake that finishes the roster does the fold.
+   - Then `sweep.mark_sweep_complete(
      team_memories_dir, now=<utcnow>)` (advances the watermark, clears the
      claim + progress). **This includes the empty case:** if
      `decision.plan.targets` is empty and `plan.remaining == 0` (idle team,
-     or every persona already done), call `mark_sweep_complete`
+     or every persona already done), still run the team-events fold above,
+     then call `mark_sweep_complete`
      immediately — do NOT leave the claim dangling, or other sessions see
      `busy` until the lease expires.
    - Per-wake cap hit, more remain (`decision.plan.remaining > 0`) →

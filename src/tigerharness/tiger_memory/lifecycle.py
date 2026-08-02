@@ -93,12 +93,18 @@ class Decision:
 # ----- extraction candidate parsing -----------------------------------------
 
 # The extraction prompt's strict output contract (see
-# ``summarizers/prompts/default/v1/extract_memory.md``): three whole-line
-# section markers, in this order.
+# ``summarizers/prompts/default/v1/extract_memory.md``): four whole-line
+# section markers, in this order (contract v3 — @@TEAM_EVENTS@@ added by
+# ADR 0008).
 MARK_SKILLS = "@@SKILLS@@"
 MARK_MUST_REMEMBER = "@@MUST_REMEMBER@@"
 MARK_TOPICS = "@@TOPICS@@"
-_MARKERS = (MARK_SKILLS, MARK_MUST_REMEMBER, MARK_TOPICS)
+MARK_TEAM_EVENTS = "@@TEAM_EVENTS@@"
+_MARKERS = (MARK_SKILLS, MARK_MUST_REMEMBER, MARK_TOPICS, MARK_TEAM_EVENTS)
+
+# Section key for the parsed team-events list (not a bounded store name —
+# the team event log is a team-level file, ADR 0008).
+SECTION_TEAM_EVENTS = "team_events"
 
 
 class ExtractionParseError(ValueError):
@@ -127,16 +133,21 @@ class Candidates:
     ``touches`` carries the ids of existing must-remember items the bundle
     marked as related to this session (``TOUCH:`` blocks) — ingest refreshes
     their ``last_used`` freshness anchor rather than adding anything.
+    ``team_events`` carries the session's concise activity lines
+    (``EVENT:`` blocks, ADR 0008) — appended to the team-wide event log,
+    not to any per-persona store, so they don't count in :meth:`total`.
     """
 
     skills: list[SkillEntry]
     must_remember: list[MustRememberEntry]
     topics: list[TopicCandidate]
     touches: list[str] = field(default_factory=list)
+    team_events: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return not (
             self.skills or self.must_remember or self.topics or self.touches
+            or self.team_events
         )
 
     def total(self) -> int:
@@ -176,13 +187,17 @@ def _split_sections(text: str) -> dict[str, str]:
         raise ExtractionParseError(
             "duplicate standalone section marker (ambiguous bundle)"
         )
-    i_s, i_m, i_t = pos[MARK_SKILLS], pos[MARK_MUST_REMEMBER], pos[MARK_TOPICS]
-    if not (i_s < i_m < i_t):
+    i_s, i_m, i_t, i_e = (
+        pos[MARK_SKILLS], pos[MARK_MUST_REMEMBER], pos[MARK_TOPICS],
+        pos[MARK_TEAM_EVENTS],
+    )
+    if not (i_s < i_m < i_t < i_e):
         raise ExtractionParseError("section markers out of order")
     return {
         STORE_SKILLS: "\n".join(lines[i_s + 1:i_m]).strip(),
         STORE_MUST_REMEMBER: "\n".join(lines[i_m + 1:i_t]).strip(),
-        STORE_TOPICS: "\n".join(lines[i_t + 1:]).strip(),
+        STORE_TOPICS: "\n".join(lines[i_t + 1:i_e]).strip(),
+        SECTION_TEAM_EVENTS: "\n".join(lines[i_e + 1:]).strip(),
     }
 
 
@@ -313,8 +328,26 @@ def parse_extraction(text: str, *, now: str, source: str) -> Candidates:
             topics.append(
                 TopicCandidate(slug=slug, name=name, summary=summary, detail=detail)
             )
+    # EVENT items are single-field, so they are parsed line-wise, not
+    # block-wise — consecutive ``EVENT:`` lines with no blank line between
+    # them must not collapse into one block (last-wins silent event loss).
+    # An unkeyed line continues the previous event.
+    team_events: list[str] = []
+    events_section = sections[SECTION_TEAM_EVENTS]
+    if events_section and not events_section.strip().upper().startswith("NONE"):
+        for raw in events_section.split("\n"):
+            line = raw.strip()
+            if not line:
+                continue
+            key, sep, value = line.partition(":")
+            if sep and key.strip().upper() == "EVENT":
+                if value.strip():
+                    team_events.append(value.strip())
+            elif team_events:
+                team_events[-1] = f"{team_events[-1]} {line}"
     return Candidates(
-        skills=skills, must_remember=must, topics=topics, touches=touches
+        skills=skills, must_remember=must, topics=topics, touches=touches,
+        team_events=team_events,
     )
 
 
@@ -534,7 +567,15 @@ def extract_and_ingest(
         topic_index=_topic_routing_index(cfg, store),
         must_remember_index=_mr_touch_index(cfg, store),
     )
-    return ingest_candidates(bstore, cfg, candidates, now=now)
+    added = ingest_candidates(bstore, cfg, candidates, now=now)
+    if candidates.team_events:
+        from .team_events import append_events
+        added["team_events"] = append_events(
+            cfg, persona=cfg.agent.name,
+            day=rec.last_event_at.date().isoformat(),
+            events=candidates.team_events, now=now,
+        )
+    return added
 
 
 # ----- discovery + idle decision --------------------------------------------
@@ -706,6 +747,7 @@ def _fill_extract_prompt(
         memo_max_words=cfg.memory_extract.memo_words,
         topic_summary_max_words=cfg.memory_extract.topic_summary_words,
         topic_detail_max_words=cfg.memory_extract.topic_detail_words,
+        team_event_max_words=cfg.memory_extract.team_event_words,
         topic_index=topic_index,
         must_remember_index=(
             must_remember_index or "(no must-remember items yet)"

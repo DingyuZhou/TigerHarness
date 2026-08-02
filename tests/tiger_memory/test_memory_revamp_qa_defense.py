@@ -154,11 +154,15 @@ def _topic(
     )
 
 
-def _bundle(skills: str = "NONE", must: str = "NONE", topics: str = "NONE") -> str:
+def _bundle(
+    skills: str = "NONE", must: str = "NONE", topics: str = "NONE",
+    events: str = "NONE",
+) -> str:
     return (
         f"@@SKILLS@@\n{skills}\n"
         f"@@MUST_REMEMBER@@\n{must}\n"
         f"@@TOPICS@@\n{topics}\n"
+        f"@@TEAM_EVENTS@@\n{events}\n"
     )
 
 
@@ -208,6 +212,7 @@ def test_marker_with_surrounding_whitespace_still_recognized() -> None:
         "  @@SKILLS@@  \nNONE\n"
         "\t@@MUST_REMEMBER@@\nNONE\n"
         " @@TOPICS@@ \nNONE\n"
+        "  @@TEAM_EVENTS@@\t\nNONE\n"
     )
     cands = parse_extraction(text, now=NOW, source="test")
     assert cands.is_empty()
@@ -224,7 +229,8 @@ def test_missing_topics_marker_raises() -> None:
 def test_out_of_order_markers_raise() -> None:
     with pytest.raises(ExtractionParseError, match="order"):
         parse_extraction(
-            "@@SKILLS@@\nNONE\n@@TOPICS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n",
+            "@@SKILLS@@\nNONE\n@@TOPICS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
+            "@@TEAM_EVENTS@@\nNONE\n",
             now=NOW, source="test",
         )
 

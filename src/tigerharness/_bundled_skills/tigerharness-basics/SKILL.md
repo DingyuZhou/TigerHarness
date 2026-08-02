@@ -117,7 +117,9 @@ diary/fuzzy surface). The in-session sub-agent executor (`plan` stages
 extraction prompts, `ingest-extraction` writes back one bundle over
 stdin, `ingest-staged` glues every staged `.extract.md` card in one
 process, `compact-plan` / `compact-apply` stage + apply bound
-compactions) and the `sweep-*` family back the in-session and
+compactions, `team-events-compact-plan` / `team-events-compact-apply`
+fold the team-wide event log's aged-out periods — ADR 0008) and the
+`sweep-*` family back the in-session and
 team-sweep protocols — driven by the `sweep-memory` skill, like the
 journal gates. Deep dive: `docs/tiger-memory.md` and the canonical
 design `docs/DESIGN-memory.md` in the tigerharness repo.

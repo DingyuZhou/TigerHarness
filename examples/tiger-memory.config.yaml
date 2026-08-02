@@ -73,6 +73,17 @@ memory:
     detail_overflow_limit: 6000
     fresh_days: 7             # touched within N days: protected from forget/merge
     forget_days: 60           # untouched for N days: forget-eligible
+  team_events:                # team-wide event log (ADR 0008): a lazy, dated
+                              # who-did-what ledger at <team>/memories/team/
+                              # events.md, appended by every persona's sweep
+                              # ingest; keep these team-uniform (shared file)
+    enabled: true
+    recent_days: 30           # daily sections younger than this never compact
+    year_after_days: 400      # a month folds into its year this long after year end
+    month_max_chars: 700      # target size of one folded month section
+    year_max_chars: 1000      # target size of one folded year section
+    max_length: 8000          # size backstop over the whole rendered file
+    overflow_limit: 12000
 
 # memory_extract: per-section word budgets for the extraction prompt
 # (optional; defaults shown). max_output_words caps the whole bundle.
@@ -81,6 +92,7 @@ memory_extract:
   memo_words: 25
   topic_summary_words: 25     # topic index-summary length hint
   topic_detail_words: 80      # per-session topic detail length hint
+  team_event_words: 15        # per-EVENT line length hint (team event log)
   max_output_words: 600
 
 # briefing: session-start assembly knobs (optional).

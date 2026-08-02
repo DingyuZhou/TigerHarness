@@ -33,6 +33,8 @@ _BUNDLE = dedent("""\
     NAME: Store Revamp
     SUMMARY: Topic-store revamp status.
     DETAIL: shipped the three-store layout
+    @@TEAM_EVENTS@@
+    NONE
 """)
 
 # A follow-up bundle routing a detail to the topic minted by _BUNDLE.
@@ -44,6 +46,8 @@ _FOLLOWUP = dedent("""\
     @@TOPICS@@
     TOPIC: store-revamp
     DETAIL: compaction landed too
+    @@TEAM_EVENTS@@
+    NONE
 """)
 
 
@@ -146,6 +150,7 @@ def test_ingest_extraction_reports_touches(tmp_path):
         "@@MUST_REMEMBER@@\n"
         f"TOUCH: {old.id}\n"
         "@@TOPICS@@\nNONE\n"
+        "@@TEAM_EVENTS@@\nNONE\n"
     )
     result = ingest_extraction(
         store, cfg, conversation_uuid="u-touch", source="test",

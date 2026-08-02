@@ -55,6 +55,8 @@ _BUNDLE = dedent("""\
     NAME: Store Revamp
     SUMMARY: the topic-store revamp
     DETAIL: switched the bundle to the topics contract
+    @@TEAM_EVENTS@@
+    NONE
 """)
 
 

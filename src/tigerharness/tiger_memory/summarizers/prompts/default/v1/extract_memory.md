@@ -27,7 +27,7 @@ context, not material to extract.
 
 ## Output contract — STRICT
 
-Emit exactly the three markers below, each on its own line, in this
+Emit exactly the four markers below, each on its own line, in this
 order, with the section content underneath. No other preamble or
 trailing commentary.
 
@@ -38,6 +38,8 @@ trailing commentary.
 <must-remember blocks, or NONE>
 @@TOPICS@@
 <topic blocks, or NONE>
+@@TEAM_EVENTS@@
+<event blocks, or NONE>
 ```
 
 ### @@SKILLS@@ — learned, invokable lessons (0 to 3)
@@ -114,3 +116,20 @@ Only durable knowledge belongs here — decisions, how things work,
 project state. No feelings, no play-by-play, no transient status.
 
 If none, write exactly `NONE` under the marker.
+
+### @@TEAM_EVENTS@@ — what you DID, for the team-wide event log (0 to 3)
+
+A dated, team-visible ledger line so teammates can later see who worked
+on what. One block per distinct piece of work actually DONE this
+session (shipped, fixed, reviewed, QA'd, decided, migrated,
+documented…) — not process noise, not plans, not reading around:
+
+```
+EVENT: <= {team_event_max_words} words; past tense, START WITH A VERB,
+  no subject — your name is prefixed automatically (e.g.
+  "migrated all 9 personas to the topic store")>
+```
+
+Name concrete artifacts (module, PR, doc, task) so a teammate who never
+saw this session can tell what happened. If the session did no real
+work, write exactly `NONE` under the marker.

@@ -26,6 +26,10 @@ Subcommands:
                             (index / detail / must_remember); print the manifest
         compact-apply       validate + apply every staged compaction card in
                             ONE process (deterministic convergence fallback)
+        team-events-compact-plan   stage one fold prompt per aged-out
+                            team-event-log period (ADR 0008; team-level)
+        team-events-compact-apply  validate + apply every staged team-events
+                            fold card in ONE process (deterministic trim)
 
     Team-sweep gating (B3, non-AI -- drive the in-session protocol):
         sweep-plan      claim the team sweep; print targets for this wake
@@ -135,6 +139,20 @@ def main(argv: list[str] | None = None) -> int:
              "(deterministic convergence fallback; no silent oversize).",
     )
 
+    p_tep = sub.add_parser(
+        "team-events-compact-plan",
+        help="Stage one fold prompt per aged-out team-event period "
+             "(non-AI; runs the deterministic size backstop first).",
+    )
+    p_tep.add_argument("--now", default=None,
+                       help="ISO timestamp override (testing/determinism).")
+
+    sub.add_parser(
+        "team-events-compact-apply",
+        help="Validate + apply every staged team-events fold card in ONE "
+             "process (deterministic trim; snapshot-surviving).",
+    )
+
     # ----- B3 team-sweep gating convenience CLIs (non-AI) -----
     p_swp = sub.add_parser(
         "sweep-plan",
@@ -209,6 +227,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_compact_plan(cfg, store)
     if args.cmd == "compact-apply":
         return _cmd_compact_apply(cfg, store)
+    if args.cmd == "team-events-compact-plan":
+        return _cmd_team_events_compact_plan(cfg, now=args.now)
+    if args.cmd == "team-events-compact-apply":
+        return _cmd_team_events_compact_apply(cfg)
     if args.cmd == "sweep-plan":
         return _cmd_sweep_plan(
             cfg, token=args.token, max_personas=args.max_personas,
@@ -302,6 +324,30 @@ def _cmd_compact_apply(cfg: Config, store: Store) -> int:
     return 1 if report.malformed else 0
 
 
+def _cmd_team_events_compact_plan(cfg: Config, *, now: str | None) -> int:
+    """Stage team-event-log fold prompts (ADR 0008, non-AI, team-level)."""
+    from .team_events import compact_plan
+    manifest = compact_plan(cfg, now=now)
+    print(json.dumps(manifest, indent=2))
+    return 0
+
+
+def _cmd_team_events_compact_apply(cfg: Config) -> int:
+    """Apply every staged team-events fold card in one process.
+
+    Exit: 0 = clean; 1 = ≥1 malformed card (kept; the fold re-stages next
+    sweep); 2 = no team-events manifest.
+    """
+    from .team_events import compact_apply
+    try:
+        report = compact_apply(cfg)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(report, indent=2))
+    return 1 if report["malformed"] else 0
+
+
 def _cmd_plan(cfg: Config, store: Store, max_sessions: int | None) -> int:
     from .lifecycle import _sweep_staging_dir, plan_extraction
     plan_extraction(cfg, store, max_sessions=max_sessions)
@@ -331,6 +377,10 @@ def _ingest_item_bundle(cfg: Config, store: Store, item: dict, bundle_text: str)
         conversation_uuid=item["conversation_uuid"],
         source=item["source"],
         bundle_text=bundle_text,
+        # Team events (ADR 0008) are dated by when the session ENDED, not
+        # when the sweep ingested it — a backlog sweep must not pile old
+        # work onto today's log entry.
+        event_day=(item.get("last_event_at") or "")[:10] or None,
     )
     # ADR 0006 Part 2: advance the session's high-water-mark cursor — but ONLY
     # after the card above ingested cleanly (ingest raises before this on a

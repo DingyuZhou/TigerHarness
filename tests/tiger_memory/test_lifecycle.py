@@ -119,9 +119,15 @@ _FULL_BUNDLE = dedent("""\
     NAME: Bounded store revamp
     SUMMARY: three bounded stores replace the rollup lifecycle
     DETAIL: landed the bounded-store substrate clean and green
+
+    @@TEAM_EVENTS@@
+    NONE
 """)
 
-_EMPTY_BUNDLE = "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@TOPICS@@\nNONE\n"
+_EMPTY_BUNDLE = (
+    "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@TOPICS@@\nNONE\n"
+    "@@TEAM_EVENTS@@\nNONE\n"
+)
 
 
 # ----- bundle parsing -------------------------------------------------------
@@ -160,7 +166,10 @@ def test_parse_empty_raises() -> None:
 
 
 def test_parse_out_of_order_raises() -> None:
-    bundle = "@@TOPICS@@\nNONE\n@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
+    bundle = (
+        "@@TOPICS@@\nNONE\n@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n"
+        "@@TEAM_EVENTS@@\nNONE\n"
+    )
     with pytest.raises(lc.ExtractionParseError, match="out of order"):
         lc.parse_extraction(bundle, now=NOW, source="x")
 
@@ -178,6 +187,8 @@ def test_parse_inline_echoed_marker_does_not_split() -> None:
         NAME: Marker echo
         SUMMARY: quoting markers inline is safe
         DETAIL: the transcript quoted @@SKILLS@@ inline and nothing split
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.skills == [] and c.must_remember == []
@@ -198,6 +209,8 @@ def test_parse_duplicate_standalone_marker_is_malformed() -> None:
         MEMO: markers split on first standalone occurrence
         @@TOPICS@@
         NONE
+        @@TEAM_EVENTS@@
+        NONE
         @@SKILLS@@
     """)
     with pytest.raises(lc.ExtractionParseError, match="duplicate standalone"):
@@ -208,7 +221,10 @@ def test_parse_contract_echo_bundle_is_malformed() -> None:
     # The exact F3 shape: a card that echoes the whole three-marker contract
     # sample first, then emits the real bundle. First-wins parsing would
     # return zero candidates "successfully" and lose the card silently.
-    echo = "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@TOPICS@@\nNONE\n"
+    echo = (
+        "@@SKILLS@@\nNONE\n@@MUST_REMEMBER@@\nNONE\n@@TOPICS@@\nNONE\n"
+        "@@TEAM_EVENTS@@\nNONE\n"
+    )
     real = dedent("""\
         @@SKILLS@@
         NONE
@@ -216,6 +232,8 @@ def test_parse_contract_echo_bundle_is_malformed() -> None:
         KIND: operator_explicit
         MEMO: never lose this
         @@TOPICS@@
+        NONE
+        @@TEAM_EVENTS@@
         NONE
     """)
     with pytest.raises(lc.ExtractionParseError, match="duplicate standalone"):
@@ -240,6 +258,9 @@ def test_parse_skips_malformed_blocks() -> None:
         TOPIC: NEW
         SUMMARY: new but nameless
         DETAIL: dropped for missing NAME
+
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.skills == []           # missing trigger/procedure
@@ -257,6 +278,8 @@ def test_parse_topic_new_requires_summary() -> None:
         TOPIC: NEW
         NAME: Named but summaryless
         DETAIL: dropped — a NEW topic must be index-worthy
+        @@TEAM_EVENTS@@
+        NONE
     """)
     assert lc.parse_extraction(bundle, now=NOW, source="x").topics == []
 
@@ -285,6 +308,8 @@ def test_parse_topic_new_unsluggable_name_dropped() -> None:
         NAME: Survivor Topic
         SUMMARY: the good sibling still lands
         DETAIL: kept
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert [t.name for t in c.topics] == ["Survivor Topic"]
@@ -312,6 +337,8 @@ def test_parse_skill_unsluggable_name_dropped() -> None:
         NONE
         @@TOPICS@@
         NONE
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert [s.name for s in c.skills] == ["Survivor Skill"]
@@ -326,6 +353,8 @@ def test_parse_topic_existing_requires_detail() -> None:
         @@TOPICS@@
         TOPIC: bounded-store
         SUMMARY: a refresh with nothing to append
+        @@TEAM_EVENTS@@
+        NONE
     """)
     assert lc.parse_extraction(bundle, now=NOW, source="x").topics == []
 
@@ -344,6 +373,8 @@ def test_parse_topic_bad_slug_dropped() -> None:
 
         TOPIC: bounded-store
         DETAIL: this one still lands
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert [t.slug for t in c.topics] == ["bounded-store"]
@@ -359,6 +390,8 @@ def test_parse_topic_existing_slug_normalized() -> None:
         TOPIC: Bounded Store
         SUMMARY: refreshed summary
         DETAIL: a new fact
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert len(c.topics) == 1
@@ -377,6 +410,8 @@ def test_parse_topic_existing_summary_optional() -> None:
         @@TOPICS@@
         TOPIC: bounded-store
         DETAIL: append without touching the summary
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.topics[0].summary == ""
@@ -393,6 +428,8 @@ def test_parse_multiline_value_continuation() -> None:
         @@MUST_REMEMBER@@
         NONE
         @@TOPICS@@
+        NONE
+        @@TEAM_EVENTS@@
         NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
@@ -480,7 +517,7 @@ def test_fill_extract_prompt_fills_topic_placeholders(tmp_path: Path) -> None:
     assert "THE-CONTENT" in prompt
     assert routing in prompt
     assert "TestTiger" in prompt
-    for marker in ("@@SKILLS@@", "@@MUST_REMEMBER@@", "@@TOPICS@@"):
+    for marker in ("@@SKILLS@@", "@@MUST_REMEMBER@@", "@@TOPICS@@", "@@TEAM_EVENTS@@"):
         assert marker in prompt
     for placeholder in (
         "{topic_index}", "{topic_summary_max_words}", "{topic_detail_max_words}",
@@ -684,6 +721,8 @@ def test_ingest_no_topics_skips_topic_store(tmp_path: Path) -> None:
         MEMO: only a memo
         @@TOPICS@@
         NONE
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     added = lc.ingest_candidates(BoundedStore(cfg, store), cfg, c, now=NOW)
@@ -716,6 +755,8 @@ def test_extract_and_ingest_routes_to_existing_topic(tmp_path: Path) -> None:
         @@TOPICS@@
         TOPIC: bounded-store
         DETAIL: routed straight into the seed topic
+        @@TEAM_EVENTS@@
+        NONE
     """)
     s = ScriptedExtractor(bundle)
     added = lc.extract_and_ingest(cfg, store, s, _rec(), now=NOW)
@@ -1072,6 +1113,8 @@ def test_parse_touch_blocks() -> None:
         TOUCH:
         @@TOPICS@@
         NONE
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.touches == ["abc123", "def456"]  # empty TOUCH value dropped
@@ -1098,6 +1141,8 @@ def test_parse_touch_backticked_id_resolves() -> None:
         TOUCH: `abc123`
         @@TOPICS@@
         NONE
+        @@TEAM_EVENTS@@
+        NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")
     assert c.touches == ["abc123"]  # backticked echo of the prompt listing
@@ -1115,6 +1160,8 @@ def test_parse_touch_merged_with_memo_keeps_both() -> None:
         KIND: decision
         MEMO: memo sharing the touch block
         @@TOPICS@@
+        NONE
+        @@TEAM_EVENTS@@
         NONE
     """)
     c = lc.parse_extraction(bundle, now=NOW, source="x")

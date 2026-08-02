@@ -154,12 +154,21 @@ memory:
     detail_overflow_limit: 6000
     fresh_days: 7                # touched within => protected from forget/merge
     forget_days: 60              # untouched for => forget-eligible (>= fresh_days)
+  team_events:                   # the team-wide event log (ADR 0008)
+    enabled: true
+    recent_days: 30              # daily sections younger than this never compact
+    year_after_days: 400         # a month folds into its year this long after year end
+    month_max_chars: 700         # target size of one folded month section
+    year_max_chars: 1000         # target size of one folded year section
+    max_length: 8000             # size backstop over the whole rendered file
+    overflow_limit: 12000
 
 memory_extract:                  # per-section word budgets for extraction
   skill_procedure_words: 120
   memo_words: 25
   topic_summary_words: 25
   topic_detail_words: 80
+  team_event_words: 15
   max_output_words: 600
 
 rebuild:
@@ -214,6 +223,8 @@ executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
 | `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free). Exit 0 clean / 1 ≥1 malformed card / 2 no plan manifest |
 | `compact-plan` | non-AI: run the deterministic stale-topic forget, then stage one compaction prompt per surface over its `overflow_limit` under `.compact-staging/` + `manifest.json` (empty `targets` = nothing to do) |
 | `compact-apply` | non-AI: validate + apply every staged `<key>.card.md` in ONE process; deterministic convergence trim; protected content (operator-explicit, fresh topics) never force-dropped. Exit 0 clean / 1 ≥1 malformed card / 2 no compaction manifest |
+| `team-events-compact-plan` | non-AI, **team-level** (ADR 0008): run the size backstop, then stage one fold prompt per aged-out team-event period under `memories/team/.compact-staging/` (empty `targets` = nothing aged out) |
+| `team-events-compact-apply` | non-AI: validate + apply every staged team-events fold card in ONE process (deterministic trim; post-plan appends survive). Exit 0 clean / 1 ≥1 malformed card / 2 no manifest |
 | `sweep-plan` / `sweep-done` / `sweep-complete` / `sweep-release` | team-sweep gating (non-AI) |
 | `check [--fix]` | validate the 3 stores' on-disk format; exit non-zero if any invalid. `--fix` repairs mechanical drift + quarantines non-mechanical to `<store>.rejected.md` (no silent loss). Runs automatically inside every `rebuild` |
 
@@ -224,8 +235,9 @@ verbs (`bootstrap`, `search`, `drill`, `tree`, `raw`, `resummarize`,
 
 ## The extraction contract
 
-Extraction turns one finished session into a strict bundle with three
-whole-line section markers, in order (see
+Extraction turns one finished session into a strict bundle with four
+whole-line section markers, in order (contract v3 — `@@TEAM_EVENTS@@`
+added by [ADR 0008](adr/0008-team-event-log.md); see
 `summarizers/prompts/default/v1/extract_memory.md`):
 
 ```
@@ -235,6 +247,8 @@ whole-line section markers, in order (see
 <must-remember blocks, or NONE>
 @@TOPICS@@
 <topic blocks, or NONE>
+@@TEAM_EVENTS@@
+<EVENT: lines, or NONE>
 ```
 
 A skill block is `NAME:` / `TRIGGER:` / `PROCEDURE:`; a must-remember block
@@ -277,6 +291,50 @@ e.g. an echoed contract sample, makes the split ambiguous and the whole
 bundle MALFORMED) is rejected before any write; an
 individual malformed *block* is skipped. `NONE` for a store is a valid,
 expected outcome — most sessions add little.
+
+The `@@TEAM_EVENTS@@` section carries 0–3 `EVENT: <verb-first, past
+tense, ≤ ~15 words>` lines — what the persona actually DID this session,
+without its own name (ingest prefixes it — attribution is structural).
+EVENT items are parsed line-wise (no blank line needed between them);
+they feed the team-wide event log below, never a persona store.
+
+## The team event log (ADR 0008) — lazy, team-wide, self-compacting
+
+One file per team, beside the per-persona stores:
+`<team>/memories/team/events.md` — a dated who-did-what ledger:
+
+```
+## 2026-08-01
+- Anzai planned the QA pass for the topic store.
+- Ayako reviewed PR #12. (x3)
+
+## 2026-07
+- Mitsui shipped the reliability fixes for the sweep planner.
+```
+
+- **Write path:** each persona's `ingest-staged` appends its bundle's
+  `EVENT:` lines under the session's END day (name prefixed, exact
+  same-day repeats collapse to `(xN)`), under a cross-persona file lock.
+- **Read path — LAZY only:** no briefing ever loads it; the briefing
+  README carries a pointer. Open it only when a session needs
+  cross-team awareness ("who touched X before?").
+- **Compaction — age-tiered, staged:** day sections whose whole month
+  is older than `recent_days` (default 30) fold into one `## YYYY-MM`
+  section; month sections whose year ended more than `year_after_days`
+  (default 400) ago fold into one `## YYYY` section. Folds are staged
+  by `team-events-compact-plan` (non-AI), carded by Task sub-agents
+  (subscription rail, strict `@@TEAM_EVENTS@@` bullet contract), and
+  applied by `team-events-compact-apply` (non-AI; bullets appended
+  between plan and apply survive; an oversized card is hard-trimmed).
+  A deterministic size backstop (`max_length` / `overflow_limit` over
+  the whole file) drops the oldest year/month sections — never the
+  daily window. The driver runs the fold once per completed sweep,
+  before `sweep-complete`, while still holding the claim.
+- **Config:** the `memory.team_events` block — `enabled`,
+  `recent_days`, `year_after_days`, `month_max_chars`,
+  `year_max_chars`, `max_length`, `overflow_limit` (all optional;
+  keep them team-uniform via the team defaults file). The extraction
+  word budget is `memory_extract.team_event_words` (default 15).
 
 ## Compaction (staged — replaces meditation)
 
