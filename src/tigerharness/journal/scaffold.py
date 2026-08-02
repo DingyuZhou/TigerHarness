@@ -61,6 +61,11 @@ _PRIOR_OPERATING_HASHES = {
     # Each entry is a previously-shipped rendered OPERATING.md an existing
     # journal may still have on disk; all refresh to the current (merged
     # cascade + per-persona-memory) template.
+    # 2026-08-02 (memory read-path wiring): pre persona-memory-read render
+    # -- before step 3's adopt-with-memory instruction and the
+    # persona-switch briefing read (practicality audit: drives never
+    # loaded any persona's memory). Shohoku's live journal carries this.
+    "c7772ce348c1a43f46e198a8920eec140f950d446cbc7652d39d659d44d13ece",
     # first idle-maintenance-tail render (ba03eef) -- called compact-idle
     # "model-free"; superseded by the accurate one-bounded-/compact-turn
     # wording from the critique round.

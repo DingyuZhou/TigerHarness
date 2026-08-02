@@ -263,6 +263,15 @@ completed task until no actionable tasks remain.
    `kind=workflow`: `task_brief.md`, `playbook_snapshot.md`,
    `status.json.next_action`, and the tail of `progress.md`.
 
+   Then **adopt the assigned persona WITH its memory**: read
+   `teams/<team>/personas/<persona>/prompt.md` and that persona's
+   `teams/<team>/memories/<persona>/briefing/must_remember.md` +
+   `skill_index.md` (indexes only -- open a `skills/`/`topics/` detail
+   file only when its line matches this task). A drive turn counts as
+   that persona's session start for its briefing. If the task's history
+   references work or names you don't recognise, consult
+   `teams/<team>/memories/team/events.md` (dated, newest first).
+
 4. **Work the task continuously** -- branch on `status.kind`:
 
    - **`kind=task`** -- do the real work, appending to `progress.md`
@@ -552,7 +561,12 @@ OBJECTIVE: <one sentence about what this turn must produce>
 ```
 
 The persona's prompt body (read from `teams/<team>/personas/<name>/prompt.md`)
-follows the preamble. The session writes the persona's turn output
+follows the preamble. Then read that persona's
+`teams/<team>/memories/<name>/briefing/must_remember.md` and
+`skill_index.md` (1-3 KB; indexes only -- open a detail file only when
+its line matches this step). A persona turn counts as that persona's
+session start for its briefing: directives and hard-won skills must
+reach the work, not just the persona's voice. The session writes the persona's turn output
 verbatim into `compile/round-NN.json` (round-granular checkpoint), then
 ends every turn with one trailer line:
 

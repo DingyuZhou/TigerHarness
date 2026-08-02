@@ -400,6 +400,21 @@ def extract_candidates(
 # ----- ingest (candidates → bounded stores) ---------------------------------
 
 
+def _latest_ts(a: str, b: str) -> str:
+    """The later of two ISO timestamps (parse-based; unparseable loses).
+
+    Source-dated ingest means *now* can be an OLD timestamp (a backfilled
+    session). A touch or topic bump from old work must never move an
+    already-fresher entry's ``last_used`` backward.
+    """
+    da, db = _parse_iso(a), _parse_iso(b)
+    if da is None:
+        return b
+    if db is None:
+        return a
+    return a if da >= db else b
+
+
 def _append_topic_detail(text: str, date: str, detail: str) -> str:
     """Append one detail bullet to a topic body under its ``## <date>`` section.
 
@@ -470,9 +485,15 @@ def _route_topic_candidates(
             landed += 1
             continue
         entry.text = _append_topic_detail(entry.text, day, cand.detail)
-        if cand.summary:
+        stale_candidate = (
+            _latest_ts(entry.last_used, now) == entry.last_used
+            and entry.last_used != now
+        )
+        if cand.summary and (not stale_candidate or not entry.summary):
+            # A backfilled OLD session must not clobber a newer summary;
+            # a same-or-newer session refreshes it as before.
             entry.summary = cand.summary
-        entry.last_used = now
+        entry.last_used = _latest_ts(entry.last_used, now)
         entry.touch_count += 1
         landed += 1
     return existing, landed
@@ -541,7 +562,9 @@ def ingest_candidates(
                 entry = by_id.get(tid)
                 if entry is None:
                     continue
-                entry.last_used = now
+                # Never move freshness backward: a backfilled old session's
+                # touch must not un-refresh an item a newer session touched.
+                entry.last_used = _latest_ts(entry.last_used, now)
                 if isinstance(entry, MustRememberEntry):  # pragma: no branch
                     entry.repeat_count += 1
                 touched += 1
@@ -570,18 +593,20 @@ def extract_and_ingest(
     extraction prompt so facts land in existing topics (ADR 0007).
     """
     now = now or iso_now()
+    from .executor import _source_stamp
+    stamp = _source_stamp(rec.last_event_at.isoformat(), now)
     bstore = BoundedStore(cfg, store)
     candidates = extract_candidates(
-        cfg, summarizer, rec, now=now,
+        cfg, summarizer, rec, now=stamp,
         topic_index=_topic_routing_index(cfg, store),
         must_remember_index=_mr_touch_index(cfg, store),
     )
-    added = ingest_candidates(bstore, cfg, candidates, now=now)
+    added = ingest_candidates(bstore, cfg, candidates, now=stamp)
     if candidates.team_events:
         from .team_events import append_events
         added["team_events"] = append_events(
             cfg, persona=cfg.agent.name,
-            day=rec.last_event_at.date().isoformat(),
+            day=stamp[:10],
             events=candidates.team_events, now=now,
         )
     return added

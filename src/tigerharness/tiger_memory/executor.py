@@ -43,6 +43,28 @@ class IngestResult:
         return self.skills_added + self.must_remember_added + self.topics_added
 
 
+def _source_stamp(source_ts: str | None, now: str) -> str:
+    """The timestamp new entries should carry: the SOURCE's end time.
+
+    Stamping ``now`` at ingest mis-dates every backfilled record — a bulk
+    sweep marks weeks-old facts "touched today", which breaks freshest-first
+    ranking, blanket-protects genuinely stale topics inside ``fresh_days``,
+    and presents retired architecture as current knowledge (practicality
+    audit, content findings 1/2/5). Falls back to *now* when the source
+    timestamp is missing, unparseable, or in the future.
+    """
+    if not source_ts:
+        return now
+    from datetime import datetime
+
+    try:
+        src = datetime.fromisoformat(str(source_ts).replace("Z", "+00:00"))
+        cur = datetime.fromisoformat(now.replace("Z", "+00:00"))
+    except ValueError:
+        return now
+    return source_ts if src < cur else now
+
+
 def ingest_extraction(
     store: Store,
     cfg: Config,
@@ -51,7 +73,7 @@ def ingest_extraction(
     source: str,
     bundle_text: str,
     now: str | None = None,
-    event_day: str | None = None,
+    source_last_event_at: str | None = None,
 ) -> IngestResult:
     """Parse an extraction bundle and merge its candidates into the stores.
 
@@ -59,10 +81,11 @@ def ingest_extraction(
     on a malformed bundle — parsing happens BEFORE any write, so the store is
     left untouched and the caller can re-ask the sub-agent.
 
-    ``event_day`` (``YYYY-MM-DD``) dates the bundle's ``@@TEAM_EVENTS@@``
-    lines in the team log — pass the session's END day (the plan manifest's
-    ``last_event_at``), not the ingest day, so a backlog sweep files events
-    under when the work actually happened. Defaults to ``now``'s day.
+    ``source_last_event_at`` is the session's END timestamp (the plan
+    manifest's ``last_event_at``). It — not the ingest wall clock — dates
+    everything the bundle produces: entry ``created_at``/``last_used``,
+    topic detail section headings, and the team event log day. A backlog
+    sweep therefore files history under when the work actually happened.
 
     **Concurrency — serialize per persona.** The merge is a read-modify-write
     on each per-persona store file; calls for the SAME persona must be
@@ -72,14 +95,15 @@ def ingest_extraction(
     """
     log.info("ingest-extraction: merging bundle for %s", conversation_uuid)
     now = now or iso_now()
-    candidates = parse_extraction(bundle_text, now=now, source=source)
+    stamp = _source_stamp(source_last_event_at, now)
+    candidates = parse_extraction(bundle_text, now=stamp, source=source)
     bstore = BoundedStore(cfg, store)
-    added = ingest_candidates(bstore, cfg, candidates, now=now)
+    added = ingest_candidates(bstore, cfg, candidates, now=stamp)
     events_added = 0
     if candidates.team_events:
         from .team_events import append_events
         events_added = append_events(
-            cfg, persona=cfg.agent.name, day=(event_day or now)[:10],
+            cfg, persona=cfg.agent.name, day=stamp[:10],
             events=candidates.team_events, now=now,
         )
     return IngestResult(

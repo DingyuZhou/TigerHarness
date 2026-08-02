@@ -104,7 +104,7 @@ def test_sweep_plan_busy_when_other_holds_fresh_claim(
 
 def test_sweep_complete_then_plan_not_due(tmp_path: Path, capsys) -> None:
     cfg = _setup(tmp_path)
-    rc = main(["--config", cfg, "sweep-complete"])
+    rc = main(["--config", cfg, "sweep-complete", "--force"])
     assert rc == 0
     assert "watermark advanced" in capsys.readouterr().out
     out = _run(cfg, "sweep-plan", capsys=capsys)
@@ -140,7 +140,7 @@ def test_sweep_release_clears_claim_for_other_session(
 def test_sweep_plan_now_and_floor_overrides(tmp_path: Path, capsys) -> None:
     cfg = _setup(tmp_path)
     # Watermark stamped at midnight.
-    rc = main(["--config", cfg, "sweep-complete",
+    rc = main(["--config", cfg, "sweep-complete", "--force",
                "--now", "2026-01-01T00:00:00Z"])
     assert rc == 0
     capsys.readouterr()

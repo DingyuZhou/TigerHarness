@@ -355,4 +355,9 @@ def test_manifest_last_rebuild_from_state(tmp_path: Path) -> None:
     store.write_state({"last_rebuild_at": "2026-01-02T03:04:05Z"})
     bf.rebuild_briefing(cfg, store)
     m = (store.paths.briefing / bf.MANIFEST_NAME).read_text()
-    assert "Last rebuild: 2026-01-02T03:04:05Z" in m
+    # Practicality pass: the manifest shows the RENDER time (a rebuild is
+    # happening right now), and the rebuild stamps state -- the old stale
+    # echo misreported briefing age for weeks.
+    assert "Last rebuild: 2026-01-02T03:04:05Z" not in m
+    assert "Last rebuild: 20" in m
+    assert store.read_state()["last_rebuild_at"] != "2026-01-02T03:04:05Z"

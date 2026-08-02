@@ -16,6 +16,9 @@ Current content: {current_chars} characters. Target: **at most
 - Keep attribution: every line stays a `- <Name> <did thing>.` bullet.
 - Merge repeats and near-repeats per person (`(x3)` count suffixes and
   re-occurring work collapse into one line — "shipped 4 sweep fixes").
+- NEVER collapse distinct tasks into "and N more" — name each task,
+  even if only in two words; the whole point of this log is that a
+  reader can find WHO touched WHAT.
 - Keep what a teammate would need to know happened: ships, decisions,
   reviews, migrations, incidents. Drop minutiae and process noise.
 - Keep chronological reading order (earliest work first is fine); do

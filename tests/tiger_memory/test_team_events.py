@@ -576,7 +576,8 @@ def test_ingest_extraction_appends_dated_team_events(tmp_path):
     store.init_layout()
     result = ingest_extraction(
         store, cfg, conversation_uuid="c1", source="claude_code",
-        bundle_text=_V3_EVENTS_BUNDLE, now=NOW, event_day="2026-07-15",
+        bundle_text=_V3_EVENTS_BUNDLE, now=NOW,
+        source_last_event_at="2026-07-15T10:00:00+00:00",
     )
     assert result.team_events_added == 2
     assert result.total_added == 0
@@ -636,8 +637,8 @@ def test_team_events_config_defaults(tmp_path):
     te = cfg.memory.team_events
     assert te.enabled is True
     assert (te.recent_days, te.year_after_days) == (30, 400)
-    assert (te.month_max_chars, te.year_max_chars) == (700, 1000)
-    assert (te.max_length, te.overflow_limit) == (24000, 30000)
+    assert (te.month_max_chars, te.year_max_chars) == (1200, 1000)
+    assert (te.max_length, te.overflow_limit) == (40000, 50000)
     assert cfg.memory_extract.team_event_words == 15
 
 

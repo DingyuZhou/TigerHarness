@@ -70,7 +70,9 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
     tmp = Path(tempfile.mkdtemp(prefix="briefing.tmp.", dir=parent))
     try:
         (tmp / README_NAME).write_text(_render_readme(cfg), encoding="utf-8")
-        (tmp / NOTICE_NAME).write_text(_render_notice(cfg), encoding="utf-8")
+        (tmp / NOTICE_NAME).write_text(
+            _render_notice(cfg, store), encoding="utf-8"
+        )
 
         must = [
             e for e in bstore.load(STORE_MUST_REMEMBER)
@@ -119,6 +121,13 @@ def rebuild_briefing(cfg: Config, store: Store) -> None:
         if tmp.exists():  # pragma: no branch  # mkdtemp always creates the dir
             shutil.rmtree(tmp, ignore_errors=True)
         raise
+    # Stamp the rebuild time. Nothing wrote ``last_rebuild_at`` on the
+    # post-ADR-0007 path, so MANIFEST and `state` reported a weeks-stale
+    # date — a false "this memory is ancient" signal to every reader
+    # (practicality audit, three independent sightings).
+    state_payload = store.read_state() or {}
+    state_payload["last_rebuild_at"] = iso_now()
+    store.write_state(state_payload)
 
 
 # ----- no-op shortcut -------------------------------------------------------
@@ -172,18 +181,44 @@ class _SafeFormat(dict):
         return "{" + key + "}"
 
 
-def _render_notice(cfg: Config) -> str:
-    """The unprocessed/active-session awareness notice (design §6)."""
+def _render_notice(cfg: Config, store: Store) -> str:
+    """The unprocessed/active-session awareness notice (design §6).
+
+    Includes a machine-generated **data-through** line so a persona can
+    STATE its staleness instead of silently misleading — memory here is
+    structurally up to ~a day behind (idle threshold + staleness floor),
+    and the practicality audit found "where are we?" answered from a
+    briefing missing the whole weekend with no way to say so.
+    """
+    from .cursor import load_cursors
+
+    data_through = None
+    for c in load_cursors(store).values():
+        if data_through is None or c.last_event_at > data_through:
+            data_through = c.last_event_at
+    through_line = (
+        f"**This briefing reflects ingested sessions through "
+        f"{data_through[:16].replace('T', ' ')}Z** (session end time). "
+        "Anything newer — including all still-active work — is not in "
+        "memory yet; find it in the journal, worklogs, or git.\n\n"
+        if data_through
+        else "**Nothing has been ingested into this memory yet** — treat "
+             "every store as empty and rely on the journal, worklogs, and "
+             "git for state.\n\n"
+    )
     return (
         "# Unprocessed sessions — read this rule\n\n"
         f"You are **{cfg.agent.name}**. Memory is built from sessions only "
         "after they go idle, so a **still-active or very recent session may "
         "not be reflected in this briefing yet**.\n\n"
+        + through_line +
         "**Rule:** if the Operator references something you do not recognise, "
         "do NOT claim ignorance immediately. First check this memory "
         "(must_remember + skill index + topic index, then the relevant "
         "detail files), then check for unprocessed / active recent "
-        "sessions. Only then say you don't know.\n"
+        "sessions. Only then say you don't know. When your answer is about "
+        "recent project state, SAY how fresh your memory is (the "
+        "data-through line above).\n"
     )
 
 
@@ -233,8 +268,9 @@ def _render_manifest(
     skills: list[SkillEntry],
     topics: list[TopicEntry],
 ) -> str:
-    saved = store.read_state() or {}
-    last_rebuild = saved.get("last_rebuild_at") or iso_now()
+    # The manifest is rendered DURING a rebuild — its rebuild time is now,
+    # not whatever a previous era last stamped into state.
+    last_rebuild = iso_now()
     parts = [
         "# Briefing manifest",
         "",

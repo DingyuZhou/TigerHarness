@@ -137,6 +137,25 @@ class RebuildConfig:
 
 
 @dataclass(frozen=True)
+class SweepGateConfig:
+    """The ``sweep:`` block — team-sweep gating knobs (previously code
+    constants + a hard-coded skill flag, untunable per team).
+
+    ``floor_hours``: staleness floor — how long after a completed sweep
+    the next trigger is a no-op. A single-operator team may prefer a
+    smaller value (e.g. 12) so the evening's last session absorbs the
+    sweep instead of the morning's first, halving how stale memory is
+    when the day starts. ``max_personas``: per-wake cap on personas one
+    trigger processes. ``lease_seconds``: soft-lease before a claim is
+    stealable (renewed by every ``sweep-done``).
+    """
+
+    floor_hours: float = 24.0
+    max_personas: int = 3
+    lease_seconds: float = 1800.0
+
+
+@dataclass(frozen=True)
 class BriefingConfig:
     """Session-start briefing assembly (design §6; ADR 0007).
 
@@ -248,8 +267,8 @@ class TopicsStoreConfig:
     topics are dropped oldest-first before any AI compaction is staged.
     """
 
-    index_max_length: int = 2000
-    index_overflow_limit: int = 3000
+    index_max_length: int = 4000
+    index_overflow_limit: int = 6000
     detail_max_length: int = 4000
     detail_overflow_limit: int = 6000
     fresh_days: int = 7
@@ -282,10 +301,10 @@ class TeamEventsConfig:
     enabled: bool = True
     recent_days: int = 30
     year_after_days: int = 400
-    month_max_chars: int = 700
+    month_max_chars: int = 1200
     year_max_chars: int = 1000
-    max_length: int = 24000
-    overflow_limit: int = 30000
+    max_length: int = 40000
+    overflow_limit: int = 50000
 
 
 @dataclass(frozen=True)
@@ -321,6 +340,7 @@ class Config:
     memory_extract: MemoryExtractConfig = field(
         default_factory=MemoryExtractConfig
     )
+    sweep: SweepGateConfig = field(default_factory=SweepGateConfig)
     env_var: str = "TIGER_MEMORY_CONFIG"
     # Resolved at load time so tests can introspect.
     source_path: Path | None = None
@@ -527,6 +547,24 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         max_output_words=int(extract_raw.get("max_output_words", 600)),
     )
 
+    sweep_raw = raw.get("sweep") or {}
+    sweep_gate = SweepGateConfig(
+        floor_hours=float(sweep_raw.get("floor_hours", 24.0)),
+        max_personas=_cfg_int(
+            sweep_raw.get("max_personas", 3), "sweep.max_personas"
+        ),
+        lease_seconds=float(sweep_raw.get("lease_seconds", 1800.0)),
+    )
+    if sweep_gate.floor_hours <= 0 or sweep_gate.lease_seconds <= 0:
+        raise ConfigError(
+            "sweep.floor_hours and sweep.lease_seconds must be > 0; got "
+            f"{sweep_gate.floor_hours} / {sweep_gate.lease_seconds}."
+        )
+    if sweep_gate.max_personas < 1:
+        raise ConfigError(
+            f"sweep.max_personas must be >= 1; got {sweep_gate.max_personas}."
+        )
+
     rebuild_raw = raw.get("rebuild") or {}
     rebuild = RebuildConfig(
         trigger=str(rebuild_raw.get("trigger", "lazy")),
@@ -578,6 +616,7 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
         collapse=collapse,
         memory=memory,
         memory_extract=memory_extract,
+        sweep=sweep_gate,
         env_var=str(raw.get("env_var", "TIGER_MEMORY_CONFIG")),
         source_path=source_path,
     )
@@ -677,11 +716,11 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
     tp_raw = memory_raw.get("topics") or {}
     topics = TopicsStoreConfig(
         index_max_length=_cfg_int(
-            tp_raw.get("index_max_length", 2000),
+            tp_raw.get("index_max_length", 4000),
             "memory.topics.index_max_length",
         ),
         index_overflow_limit=_cfg_int(
-            tp_raw.get("index_overflow_limit", 3000),
+            tp_raw.get("index_overflow_limit", 6000),
             "memory.topics.index_overflow_limit",
         ),
         detail_max_length=_cfg_int(
@@ -733,7 +772,7 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
             "memory.team_events.year_after_days",
         ),
         month_max_chars=_cfg_int(
-            tev_raw.get("month_max_chars", 700),
+            tev_raw.get("month_max_chars", 1200),
             "memory.team_events.month_max_chars",
         ),
         year_max_chars=_cfg_int(
@@ -741,10 +780,10 @@ def _parse_memory(memory_raw: dict[str, Any]) -> MemoryConfig:
             "memory.team_events.year_max_chars",
         ),
         max_length=_cfg_int(
-            tev_raw.get("max_length", 24000), "memory.team_events.max_length"
+            tev_raw.get("max_length", 40000), "memory.team_events.max_length"
         ),
         overflow_limit=_cfg_int(
-            tev_raw.get("overflow_limit", 30000),
+            tev_raw.get("overflow_limit", 50000),
             "memory.team_events.overflow_limit",
         ),
     )

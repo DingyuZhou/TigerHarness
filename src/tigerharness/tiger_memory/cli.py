@@ -36,6 +36,14 @@ Subcommands:
         sweep-done      mark one persona done in the in-flight run
         sweep-complete  advance the watermark + end the run
         sweep-release   drop the claim without advancing the watermark
+
+    Operator read/fix loop (practicality audit; see inspect_tools.py):
+        search        substring search across the journal stores (+ team
+                      event log); --team widens to every roster persona
+        forget        operator-authority removal of one entry (audited to
+                      <store>.forgotten.md, never silent)
+        doctor        team-wide health table; exit 1 when anything is
+                      flagged (cron-alertable)
 """
 from __future__ import annotations
 
@@ -48,7 +56,6 @@ from pathlib import Path
 
 from .config import Config, ConfigError, load_config
 from .store import Store
-from .sweep import DEFAULT_MAX_PERSONAS
 
 log = logging.getLogger("tigerharness.tiger_memory.cli")
 
@@ -80,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     p_pin.add_argument(
         "--kind",
         choices=["operator_explicit", "preference", "decision", "incident"],
-        default="operator_explicit",
+        # preference, NOT operator_explicit: the old default made every
+        # casual pin a maximally-protected directive that nothing could
+        # remove (practicality audit: one live store is 17/17
+        # operator_explicit). Protection now requires saying so.
+        default="preference",
     )
 
     p_mig = sub.add_parser(
@@ -161,12 +172,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_swp.add_argument("--token", default=None,
                        help="Stable claim token (default: random uuid).")
-    p_swp.add_argument("--max-personas", type=int, default=DEFAULT_MAX_PERSONAS,
-                       help=f"Per-wake cap on personas (default {DEFAULT_MAX_PERSONAS}).")
+    p_swp.add_argument("--max-personas", type=int, default=None,
+                       help="Per-wake cap on personas (default: the config's "
+                            "sweep.max_personas, package default 3).")
     p_swp.add_argument("--floor-hours", type=float, default=None,
-                       help="Staleness floor override (default 24h).")
+                       help="Staleness floor override (default: the config's "
+                            "sweep.floor_hours, package default 24).")
     p_swp.add_argument("--lease-seconds", type=float, default=None,
-                       help="Soft-lease seconds before a claim is stealable.")
+                       help="Soft-lease seconds before a claim is stealable "
+                            "(default: the config's sweep.lease_seconds).")
     p_swp.add_argument("--now", default=None,
                        help="ISO timestamp override (testing/determinism).")
 
@@ -183,6 +197,9 @@ def main(argv: list[str] | None = None) -> int:
     p_swc.add_argument("--token", default=None,
                        help="Claim token from sweep-plan; refused (exit 3) if "
                             "another session now owns the claim.")
+    p_swc.add_argument("--force", action="store_true",
+                       help="Complete even though roster personas were not "
+                            "recorded done this run (normally refused, exit 3).")
 
     p_swr = sub.add_parser(
         "sweep-release",
@@ -198,6 +215,49 @@ def main(argv: list[str] | None = None) -> int:
         "--fix", action="store_true",
         help="Repair mechanical drift + quarantine non-mechanical to "
              "<store>.rejected.md (no silent loss).")
+
+    # ----- operator read/fix loop (practicality audit) -----
+    p_srch = sub.add_parser(
+        "search",
+        help="Case-insensitive substring search across the journal stores "
+             "(+ the team event log). Exit 0 even on zero matches.",
+    )
+    p_srch.add_argument("term", help="Substring to look for.")
+    p_srch.add_argument(
+        "--team", action="store_true",
+        help="Search every roster persona's stores, not just this config's.",
+    )
+    p_srch.add_argument(
+        "--store",
+        choices=["skills", "must_remember", "topics", "events"],
+        default=None,
+        help="Restrict to one store (default: all three + events).",
+    )
+
+    p_fgt = sub.add_parser(
+        "forget",
+        help="Operator-authority removal of ONE entry; the removed entry is "
+             "appended to <store>.forgotten.md first (never silent).",
+    )
+    p_fgt.add_argument(
+        "--store", required=True,
+        choices=["skills", "must_remember", "topics"],
+        help="Which journal store to remove from.",
+    )
+    grp = p_fgt.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--id", help="Entry id (any store).")
+    grp.add_argument("--slug", help="Topic slug (topics store only).")
+
+    p_doc = sub.add_parser(
+        "doctor",
+        help="Team-wide memory health table (bounds, staging, rejects, "
+             "freshness, topic-slug collisions); exit 1 if anything is "
+             "flagged.",
+    )
+    p_doc.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="Print the full JSON structure instead of the table.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -246,16 +306,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "sweep-done":
         return _cmd_sweep_done(cfg, args.persona)
     if args.cmd == "sweep-complete":
-        return _cmd_sweep_complete(cfg, now=args.now, token=args.token)
+        return _cmd_sweep_complete(
+            cfg, now=args.now, token=args.token, force=args.force
+        )
     if args.cmd == "sweep-release":
         return _cmd_sweep_release(cfg, token=args.token)
-    if args.cmd == "check":  # pragma: no branch  # exhaustive
+    if args.cmd == "check":
         return _cmd_check(cfg, store, fix=args.fix)
+    if args.cmd == "search":
+        return _cmd_search(cfg, args.term, team=args.team,
+                           store_filter=args.store)
+    if args.cmd == "forget":
+        return _cmd_forget(cfg, store, store_name=args.store,
+                           entry_id=args.id, slug=args.slug)
+    if args.cmd == "doctor":  # pragma: no branch  # exhaustive
+        return _cmd_doctor(cfg, as_json=args.as_json)
     return 2  # pragma: no cover  # argparse rejects unknown subcommands first
 
 
 def _cmd_init(cfg: Config, store: Store) -> int:
     store.init_layout()
+    # Render the (empty) briefing immediately: a new persona's prompt says
+    # "read briefing/README.md" from its very first session — without this,
+    # that instruction points at a missing file until the first team sweep
+    # happens to reach them (practicality audit S3).
+    from .briefing import rebuild_briefing
+    rebuild_briefing(cfg, store)
     print(f"tiger-memory store initialised at: {store.root}")
     print(f"  journal/   {store.paths.journal}")
     print(f"  briefing/  {store.paths.briefing}")
@@ -383,10 +459,11 @@ def _ingest_item_bundle(cfg: Config, store: Store, item: dict, bundle_text: str)
         conversation_uuid=item["conversation_uuid"],
         source=item["source"],
         bundle_text=bundle_text,
-        # Team events (ADR 0008) are dated by when the session ENDED, not
-        # when the sweep ingested it — a backlog sweep must not pile old
-        # work onto today's log entry.
-        event_day=(item.get("last_event_at") or "")[:10] or None,
+        # Source-dated ingest: everything this bundle produces (entry
+        # freshness, topic section headings, team-event days) is dated by
+        # when the session ENDED, not when the sweep ran — a backlog sweep
+        # must not stamp weeks-old work "today".
+        source_last_event_at=item.get("last_event_at") or None,
     )
     # ADR 0006 Part 2: advance the session's high-water-mark cursor — but ONLY
     # after the card above ingested cleanly (ingest raises before this on a
@@ -530,13 +607,83 @@ def _cmd_ingest_staged(cfg: Config, store: Store) -> int:
             f"{len(locked)} locked) — check the staging dir before moving on",
             file=sys.stderr,
         )
-    print(json.dumps({
+    summary = {
         "ingested": len(ingested),
         "malformed": malformed,
         "locked": locked,
         "skipped_no_card": skipped_no_card,
-    }, indent=2))
+    }
+    # Persist the outcome for the Operator read/fix loop: `tiger-memory
+    # doctor` reports the last ingest's malformed/locked counts without
+    # re-deriving them (practicality audit).
+    from .inspect_tools import record_sweep_report
+    record_sweep_report(store, "ingest", summary)
+    print(json.dumps(summary, indent=2))
     return 1 if malformed else 0
+
+
+# ----- operator read/fix loop (search / forget / doctor) --------------------
+
+
+def _cmd_search(
+    cfg: Config, term: str, *, team: bool, store_filter: str | None
+) -> int:
+    """Print one line per hit + a trailing count. Exit 0 always — zero
+    matches is an answer, not an error."""
+    from .inspect_tools import search_memory
+    hits = search_memory(cfg, term, team=team, store=store_filter)
+    for h in hits:
+        print(f"{h.persona}  {h.store}  {h.ref}  {h.line}")
+    print(f"{len(hits)} match(es)")
+    return 0
+
+
+def _cmd_forget(
+    cfg: Config, store: Store, *, store_name: str,
+    entry_id: str | None, slug: str | None,
+) -> int:
+    """Operator-authority removal of one entry (audited, never silent).
+
+    Exit: 0 = forgotten (prints what); 1 = no matching entry (or a stuck
+    store lock); 2 = bad flag combo (``--slug`` outside topics; argparse
+    already enforces exactly-one-of ``--id``/``--slug``).
+    """
+    if slug is not None and store_name != "topics":
+        print("--slug only addresses the topics store; use --id",
+              file=sys.stderr)
+        return 2
+    from .bounded_store import StoreLockHeld
+    from .inspect_tools import forget_entry
+    try:
+        removed = forget_entry(
+            cfg, store, store_name=store_name, entry_id=entry_id, slug=slug
+        )
+    except StoreLockHeld as exc:
+        print(f"store locked: {exc}", file=sys.stderr)
+        return 1
+    if removed is None:
+        ref = slug if slug is not None else entry_id
+        print(f"no {store_name} entry matches {ref!r}", file=sys.stderr)
+        return 1
+    from .entries import TopicEntry
+    ref = removed.slug if isinstance(removed, TopicEntry) else removed.id
+    head = " ".join(removed.text.split())
+    if len(head) > 80:
+        head = head[:79] + "…"
+    print(f"forgot {store_name} {ref}: {head}")
+    return 0
+
+
+def _cmd_doctor(cfg: Config, *, as_json: bool) -> int:
+    """Team-wide health view. Exit 0 = nothing flagged; 1 = ≥1 flag (so a
+    cron wrapper can alert on the exit code alone)."""
+    from .inspect_tools import doctor_report, render_doctor
+    report = doctor_report(cfg)
+    if as_json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(render_doctor(report))
+    return 1 if report["flags"] else 0
 
 
 # ----- B3 team-sweep gating helpers ----------------------------------------
@@ -561,15 +708,21 @@ def _cmd_sweep_plan(
 
     from . import sweep
 
-    kwargs: dict[str, float] = {}
-    if floor_hours is not None:
-        kwargs["floor_hours"] = floor_hours
-    if lease_seconds is not None:
-        kwargs["lease_seconds"] = lease_seconds
+    # Flags win; otherwise the config's sweep: block (tunable per team —
+    # previously these were untunable code constants).
     claim_token = token or uuid.uuid4().hex
     decision = sweep.maybe_sweep_roster(
         _team_memories_dir(cfg), now=_parse_now(now), token=claim_token,
-        max_personas=max_personas, **kwargs,
+        max_personas=(
+            max_personas if max_personas is not None else cfg.sweep.max_personas
+        ),
+        floor_hours=(
+            floor_hours if floor_hours is not None else cfg.sweep.floor_hours
+        ),
+        lease_seconds=(
+            lease_seconds if lease_seconds is not None
+            else cfg.sweep.lease_seconds
+        ),
     )
     plan = decision.plan
     payload = {
@@ -594,13 +747,16 @@ def _cmd_sweep_done(cfg: Config, persona: str) -> int:
     return 0
 
 
-def _cmd_sweep_complete(cfg: Config, *, now: str | None, token: str | None) -> int:
+def _cmd_sweep_complete(
+    cfg: Config, *, now: str | None, token: str | None, force: bool = False
+) -> int:
     from . import sweep
     if not sweep.mark_sweep_complete(
-        _team_memories_dir(cfg), _parse_now(now), token=token
+        _team_memories_dir(cfg), _parse_now(now), token=token, force=force
     ):
-        print("sweep-complete refused: claim token mismatch "
-              "(another session owns the sweep)", file=sys.stderr)
+        print("sweep-complete refused: claim token mismatch or personas "
+              "still pending (see log; --force overrides the pending check)",
+              file=sys.stderr)
         return 3
     print("sweep complete; watermark advanced")
     return 0
