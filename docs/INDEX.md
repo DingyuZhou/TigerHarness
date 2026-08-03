@@ -27,10 +27,10 @@ plain `claude -p` subprocess.
 | Understand per-persona memory from journal work (the worklog rail) | [per-persona-journal-memory.md](per-persona-journal-memory.md) |
 | Set up / operate the Slack bridge (1..N lanes) | [slack-bridge.md](slack-bridge.md) |
 | Use tiger-memory (the three bounded stores, CLI, config) | [tiger-memory.md](tiger-memory.md) |
-| Understand the memory design (stores + meditation, the rationale) | [DESIGN-memory.md](DESIGN-memory.md) |
+| Understand the memory design (stores + staged compaction, the rationale) | [DESIGN-memory.md](DESIGN-memory.md) |
 | Run the team-wide memory sweep | [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md) |
 | Use the backend-agnostic agent SDK | [agent_sdk.md](agent_sdk.md) |
-| Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep) |
+| Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep, 0007 topic-store revamp, 0008 team event log) |
 
 ## Must-not-miss rules (one hop, never bury these)
 
@@ -63,13 +63,15 @@ plain `claude -p` subprocess.
   DMs/@mentions to personas, posts replies in-thread, persists
   thread→session; a `notify` CLI sends proactive text/file messages.
 - **Tiger-memory.** Per-persona memory as **three bounded, self-pruning
-  stores** (skills / must_remember / emotional): in-persona extraction turns
-  finished sessions into store entries, a meditation engine merges /
-  relevance-downgrades / compacts / forgets when a store overflows, and a
-  Python-rebuilt briefing (skill index + must_remember + emotional view) is
-  read at session start. A team-wide sweep protocol keeps a roster fresh on
-  the subscription rail under a lease, watermark, and per-wake cap. Design:
-  [DESIGN-memory.md](DESIGN-memory.md).
+  stores** (skills / must_remember / topics): in-persona extraction turns
+  finished sessions into store entries, staged compaction merges / tightens /
+  forgets when a surface overflows, and a Python-rebuilt, index-only briefing
+  (must_remember + skill index + topic index) is read at session start. A
+  team-wide sweep protocol keeps a roster fresh on the subscription rail
+  under a lease, watermark, and per-wake cap; a lazy team event log records
+  who-did-what ([adr/0008](adr/0008-team-event-log.md)). Design:
+  [DESIGN-memory.md](DESIGN-memory.md),
+  [adr/0007](adr/0007-topic-store-revamp.md).
 - **Team tooling.** `tigerharness init` scaffolds a team and installs six
   bundled Claude Code skills (drive-journal, journal-new, journal-autodrive,
   slack-notify, workflow-append-steps, tigerharness-basics), hash-aware so
