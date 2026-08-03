@@ -4,7 +4,7 @@ The retired subcommands (search/drill/tree/raw/bootstrap/resummarize,
 import-legacy, migrate-emotional-to-diary) are gone; this covers init /
 rebuild / pin / state / migrate-to-topics, the in-session executor glue
 (plan / ingest-extraction / build-reduce-prompts / ingest-staged) and the
-staged compaction glue (compact-plan / compact-apply).
+staged compaction glue (compact-plan / compact-apply / card-check).
 """
 from __future__ import annotations
 
@@ -476,6 +476,68 @@ def test_compact_apply_skipped_no_card_exits_0(tmp_path: Path, capsys) -> None:
     assert main(["--config", str(cfg_path), "compact-apply"]) == 0  # no card yet
     report = json.loads(capsys.readouterr().out)
     assert report["skipped_no_card"] == ["must_remember"]
+
+
+# ----- card-check (the card author's ruler) -----------------------------------
+
+
+def _staged_card_path(cfg_path: Path, capsys) -> Path:
+    """Pin an over-bound memo, plan, and return the staged card_path."""
+    memo = "a memo well past the thirty char overflow limit"
+    main(["--config", str(cfg_path), "pin", memo, "--kind", "decision"])
+    capsys.readouterr()
+    main(["--config", str(cfg_path), "compact-plan"])
+    manifest = json.loads(capsys.readouterr().out)
+    return Path(manifest["targets"][0]["card_path"])
+
+
+def test_card_check_fits_exits_0(tmp_path: Path, capsys) -> None:
+    cfg_path = _compact_cfg_path(tmp_path)
+    card = _staged_card_path(cfg_path, capsys)
+    card.write_text("@@MUST_REMEMBER@@\nKIND: decision\nMEMO: short memo\n")
+    assert main(["--config", str(cfg_path), "card-check", str(card)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["fits"] is True and out["over_by"] == 0
+    assert out["kind"] == "must_remember" and out["max"] == 20
+    # The ruler is read-only: card + staging survive for the real apply.
+    assert card.exists()
+    assert (card.parent / "manifest.json").exists()
+
+
+def test_card_check_over_bound_exits_4(tmp_path: Path, capsys) -> None:
+    cfg_path = _compact_cfg_path(tmp_path)
+    card = _staged_card_path(cfg_path, capsys)
+    card.write_text(f"@@MUST_REMEMBER@@\nKIND: decision\nMEMO: {'z' * 60}\n")
+    assert main(["--config", str(cfg_path), "card-check", str(card)]) == 4
+    out = json.loads(capsys.readouterr().out)
+    assert out["fits"] is False
+    assert out["chars"] > out["max"] == 20
+    assert out["over_by"] == out["chars"] - out["max"]
+
+
+def test_card_check_malformed_exits_1(tmp_path: Path, capsys) -> None:
+    cfg_path = _compact_cfg_path(tmp_path)
+    card = _staged_card_path(cfg_path, capsys)
+    card.write_text("garbage, no marker")
+    assert main(["--config", str(cfg_path), "card-check", str(card)]) == 1
+    assert "malformed card" in capsys.readouterr().err
+
+
+def test_card_check_missing_card_exits_2(tmp_path: Path, capsys) -> None:
+    cfg_path = _compact_cfg_path(tmp_path)
+    card = _staged_card_path(cfg_path, capsys)  # never written
+    assert main(["--config", str(cfg_path), "card-check", str(card)]) == 2
+    assert capsys.readouterr().err.strip()
+
+
+def test_card_check_no_manifest_exits_2(tmp_path: Path, capsys) -> None:
+    cfg_path = _cfg_path(tmp_path)
+    main(["--config", str(cfg_path), "init"])
+    capsys.readouterr()
+    orphan = tmp_path / "orphan.card.md"
+    orphan.write_text("@@MUST_REMEMBER@@\nNONE\n")
+    assert main(["--config", str(cfg_path), "card-check", str(orphan)]) == 2
+    assert "no staging manifest" in capsys.readouterr().err
 
 
 # ----- check ------------------------------------------------------------------

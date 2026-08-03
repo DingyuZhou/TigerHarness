@@ -560,6 +560,259 @@ def _ref(raw: str | None) -> str:
     return clean_ref(raw)
 
 
+# The per-kind parse + merge helpers below are shared by ``compact_apply``
+# and ``card_check`` — ONE code path, so the ruler a card author measures
+# with can never disagree with what apply later does. Parsers raise the
+# exact apply-time :class:`CompactionParseError`; merges are pure over the
+# entry lists they are given (no lock, no save — the callers own those).
+
+
+def _parse_must_remember_card(
+    text: str, now: str
+) -> tuple[list[MustRememberEntry], set[str]]:
+    """One must_remember card → (new non-protected entries, STALE ids)."""
+    section = _section_after_marker(text, MARK_MUST_REMEMBER)
+    new_entries: list[MustRememberEntry] = []
+    stale_ids: set[str] = set()
+    for b in _blocks(section):
+        if "STALE" in b:
+            # The relevance-check verdict on a protected directive: the id
+            # names an operator_explicit entry judged no longer relevant to
+            # the live mission. It is DOWNGRADED (to `decision`, rejoining
+            # the normal decay pool) — never directly dropped.
+            stale_ids.add(_ref(b["STALE"]))
+            if not (b.get("KIND") or b.get("MEMO")):
+                continue
+            # A sloppy card merged a memo and a STALE verdict into one
+            # block (no blank line) — keep BOTH rather than silently
+            # dropping the memo (mirrors the TOUCH parser's tolerance).
+        kind = (b.get("KIND") or "").lower()
+        memo = b.get("MEMO")
+        if kind not in VALID_KINDS or not memo:
+            raise CompactionParseError(f"bad must_remember block: {b!r}")
+        if kind == KIND_OPERATOR_EXPLICIT:
+            # Protected entries are carried over automatically; a card must
+            # not mint new operator directives out of a compaction.
+            continue
+        new_entries.append(
+            MustRememberEntry(
+                text=memo, created_at=now, last_used=now, source="compact",
+                kind=kind,
+            )
+        )
+    return new_entries, stale_ids
+
+
+def _parse_skills_card(text: str, now: str) -> list[SkillEntry]:
+    """One skills-index card → the full replacement roster it declares."""
+    section = _section_after_marker(text, MARK_SKILLS)
+    new_entries: list[SkillEntry] = []
+    for b in _blocks(section):
+        name, trigger, proc = b.get("NAME"), b.get("TRIGGER"), b.get("PROCEDURE")
+        if not (name and trigger and proc):
+            raise CompactionParseError(f"bad skill block: {b!r}")
+        new_entries.append(
+            SkillEntry(
+                text=proc, created_at=now, last_used=now, source="compact",
+                name=name, trigger=trigger, procedure=proc,
+            )
+        )
+    return new_entries
+
+
+def _parse_topic_detail_card(text: str) -> str:
+    """One topic-detail card → the full rewritten body."""
+    body = _section_after_marker(text, MARK_TOPIC_DETAIL)
+    if not body:
+        raise CompactionParseError("empty topic detail body")
+    if body.strip().upper() == "NONE":
+        # Sibling card contracts teach "write exactly NONE", but a topic
+        # detail card has no NONE option — accepting it would replace the
+        # topic's whole history with the literal string. Malformed instead.
+        raise CompactionParseError(
+            "topic detail card has no NONE option — emit the full rewritten body"
+        )
+    return body
+
+
+def _parse_skill_detail_card(text: str) -> dict[str, str]:
+    """One skill-detail card → its single NAME/TRIGGER/PROCEDURE block."""
+    section = _section_after_marker(text, MARK_SKILLS)
+    blocks = _blocks(section)
+    if len(blocks) != 1:
+        raise CompactionParseError(
+            f"skill detail card must contain exactly one block; got {len(blocks)}"
+        )
+    b = blocks[0]
+    if not (b.get("NAME") and b.get("TRIGGER") and b.get("PROCEDURE")):
+        raise CompactionParseError(f"bad skill block: {b!r}")
+    return b
+
+
+def _merge_must_remember(
+    cfg: Config,
+    current: list[MustRememberEntry],
+    new_entries: list[MustRememberEntry],
+    stale_ids: set[str],
+    snapshot_ids: set[str],
+    now: str,
+) -> list[MustRememberEntry]:
+    """The pre-trim merged store one must_remember card produces.
+
+    Pure over the given lists (mutates entries in place — callers pass
+    freshly-loaded copies). The deterministic trim stays with the caller.
+    """
+    protected: list[MustRememberEntry] = []
+    downgraded: list[MustRememberEntry] = []
+    post_plan: list[MustRememberEntry] = []
+    forget_days = cfg.memory.must_remember.forget_days
+    for e in current:
+        if e.kind != KIND_OPERATOR_EXPLICIT:
+            # The card replaces only what its prompt SAW (the plan-time
+            # snapshot). Anything written between plan and apply — a pin,
+            # a concurrent ingest — survives; the caller's trim still
+            # enforces the bound.
+            if snapshot_ids and e.id not in snapshot_ids:
+                post_plan.append(e)
+            continue
+        if e.id in stale_ids:
+            if _age_days(e.last_used, now) <= forget_days:
+                # The documented contract is that only a directive
+                # untouched past forget_days may be relevance-
+                # downgraded; a card must not strip a FRESH
+                # operator_explicit of its protection (audit: drift
+                # finding 10).
+                log.warning(
+                    "compact-apply: STALE verdict on FRESH operator "
+                    "directive %r refused (touched within %d days)",
+                    e.id, forget_days,
+                )
+                protected.append(e)
+                continue
+            e.kind = KIND_DECISION
+            downgraded.append(e)
+        else:
+            protected.append(e)
+    if downgraded:
+        log.info(
+            "compact-apply: relevance-check downgraded %d operator "
+            "directive(s) to decision", len(downgraded),
+        )
+    # Freshness carry-over: a memo the card KEPT (same kind + normalized
+    # text as a snapshot entry) inherits that entry's identity and
+    # signals — compaction must not reset the TOUCH clock or the repeat
+    # count of a surviving memo.
+    by_key = {
+        (e.kind, " ".join(e.text.split()).lower()): e
+        for e in current
+        if e.kind != KIND_OPERATOR_EXPLICIT
+        and (not snapshot_ids or e.id in snapshot_ids)
+    }
+    for e in new_entries:
+        old = by_key.pop((e.kind, " ".join(e.text.split()).lower()), None)
+        if old is not None:
+            e.id = old.id
+            e.created_at = old.created_at
+            e.last_used = old.last_used
+            e.repeat_count = old.repeat_count
+    return protected + downgraded + new_entries + post_plan
+
+
+def _merge_skills(
+    cfg: Config,
+    current: list[SkillEntry],
+    new_entries: list[SkillEntry],
+    snapshot_ids: set[str],
+    now: str,
+) -> list[SkillEntry]:
+    """The pre-trim merged roster one skills-index card produces.
+
+    Carries identity + usage/recency forward for kept skills (matched by
+    name, case-insensitive, within the plan-time snapshot) so compaction
+    does not reset the keep-rank — and does not re-mint ids (detail
+    filenames and future detail targets are id-addressed). Skills written
+    between plan and apply (concurrent ingest) survive the card's
+    replacement roster; the caller's trim still enforces the bound.
+    """
+    by_name = {
+        e.name.strip().lower(): e
+        for e in current
+        if not snapshot_ids or e.id in snapshot_ids
+    }
+    for e in new_entries:
+        old = by_name.pop(e.name.strip().lower(), None)
+        if old is not None:
+            e.id = old.id
+            e.usage_count = old.usage_count
+            e.created_at = old.created_at
+            e.last_used = old.last_used
+        refresh_importance(e, now, cfg)
+    post_plan = [
+        e for e in current
+        if snapshot_ids and e.id not in snapshot_ids
+    ]
+    return list(new_entries) + post_plan
+
+
+def _roster_apply_directives(
+    topics: list[TopicEntry], directives: list[dict[str, str]], now: str, cfgt
+) -> list[TopicEntry]:
+    """Apply one roster card's forget/merge/summary directives in place.
+
+    Pure over the given list (callers pass freshly-loaded copies); raises
+    the apply-time :class:`CompactionParseError` on a bad directive. The
+    fresh-topic guards live here so the ruler sees exactly what apply
+    would keep.
+    """
+    by_slug = {t.slug: t for t in topics}
+    for d in directives:
+        action = (d.get("ACTION") or "").lower()
+        if action == "forget":
+            slug = _ref(d.get("TOPIC"))
+            victim = by_slug.get(slug)
+            if victim is None:
+                continue
+            if _is_fresh(victim, now, cfgt.fresh_days):
+                log.warning(
+                    "compact-apply: refusing to forget fresh topic %r", slug
+                )
+                continue
+            topics.remove(victim)
+            del by_slug[slug]
+        elif action == "merge":
+            into_slug = _ref(d.get("INTO"))
+            into = by_slug.get(into_slug)
+            if into is None:
+                continue
+            for from_slug in (d.get("FROM") or "").split():
+                src = by_slug.get(_ref(from_slug))
+                if src is None or src is into:
+                    continue
+                if _is_fresh(src, now, cfgt.fresh_days):
+                    log.warning(
+                        "compact-apply: refusing to merge away fresh "
+                        "topic %r", src.slug
+                    )
+                    continue
+                into.text = f"{into.text.rstrip()}\n\n{src.text.strip()}"
+                into.touch_count += src.touch_count
+                into.last_used = max(into.last_used, src.last_used)
+                topics.remove(src)
+                del by_slug[src.slug]
+            summary = (d.get("SUMMARY") or "").strip()
+            if summary:
+                into.summary = summary
+        elif action == "summary":
+            slug = _ref(d.get("TOPIC"))
+            summary = (d.get("SUMMARY") or "").strip()
+            target = by_slug.get(slug)
+            if target is not None and summary:
+                target.summary = summary
+        else:
+            raise CompactionParseError(f"bad roster directive: {d!r}")
+    return topics
+
+
 # ----- apply -------------------------------------------------------------------
 
 
@@ -684,95 +937,14 @@ def _apply_must_remember(
     bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport,
     *, snapshot_ids: set[str] = frozenset(),
 ) -> None:
-    section = _section_after_marker(text, MARK_MUST_REMEMBER)
-    new_entries: list[MustRememberEntry] = []
-    stale_ids: set[str] = set()
-    for b in _blocks(section):
-        if "STALE" in b:
-            # The relevance-check verdict on a protected directive: the id
-            # names an operator_explicit entry judged no longer relevant to
-            # the live mission. It is DOWNGRADED (to `decision`, rejoining
-            # the normal decay pool) — never directly dropped.
-            stale_ids.add(_ref(b["STALE"]))
-            if not (b.get("KIND") or b.get("MEMO")):
-                continue
-            # A sloppy card merged a memo and a STALE verdict into one
-            # block (no blank line) — keep BOTH rather than silently
-            # dropping the memo (mirrors the TOUCH parser's tolerance).
-        kind = (b.get("KIND") or "").lower()
-        memo = b.get("MEMO")
-        if kind not in VALID_KINDS or not memo:
-            raise CompactionParseError(f"bad must_remember block: {b!r}")
-        if kind == KIND_OPERATOR_EXPLICIT:
-            # Protected entries are carried over automatically; a card must
-            # not mint new operator directives out of a compaction.
-            continue
-        new_entries.append(
-            MustRememberEntry(
-                text=memo, created_at=now, last_used=now, source="compact",
-                kind=kind,
-            )
-        )
+    new_entries, stale_ids = _parse_must_remember_card(text, now)
     with bstore.store_lock(STORE_MUST_REMEMBER):
         current = [
             e for e in bstore.load(STORE_MUST_REMEMBER)
             if isinstance(e, MustRememberEntry)
         ]
-        protected: list[MustRememberEntry] = []
-        downgraded: list[MustRememberEntry] = []
-        post_plan: list[MustRememberEntry] = []
-        forget_days = cfg.memory.must_remember.forget_days
-        for e in current:
-            if e.kind != KIND_OPERATOR_EXPLICIT:
-                # The card replaces only what its prompt SAW (the plan-time
-                # snapshot). Anything written between plan and apply — a pin,
-                # a concurrent ingest — survives; the trim below still
-                # enforces the bound.
-                if snapshot_ids and e.id not in snapshot_ids:
-                    post_plan.append(e)
-                continue
-            if e.id in stale_ids:
-                if _age_days(e.last_used, now) <= forget_days:
-                    # The documented contract is that only a directive
-                    # untouched past forget_days may be relevance-
-                    # downgraded; a card must not strip a FRESH
-                    # operator_explicit of its protection (audit: drift
-                    # finding 10).
-                    log.warning(
-                        "compact-apply: STALE verdict on FRESH operator "
-                        "directive %r refused (touched within %d days)",
-                        e.id, forget_days,
-                    )
-                    protected.append(e)
-                    continue
-                e.kind = KIND_DECISION
-                downgraded.append(e)
-            else:
-                protected.append(e)
-        if downgraded:
-            log.info(
-                "compact-apply: relevance-check downgraded %d operator "
-                "directive(s) to decision", len(downgraded),
-            )
-        # Freshness carry-over: a memo the card KEPT (same kind + normalized
-        # text as a snapshot entry) inherits that entry's identity and
-        # signals — compaction must not reset the TOUCH clock or the repeat
-        # count of a surviving memo.
-        by_key = {
-            (e.kind, " ".join(e.text.split()).lower()): e
-            for e in current
-            if e.kind != KIND_OPERATOR_EXPLICIT
-            and (not snapshot_ids or e.id in snapshot_ids)
-        }
-        for e in new_entries:
-            old = by_key.pop((e.kind, " ".join(e.text.split()).lower()), None)
-            if old is not None:
-                e.id = old.id
-                e.created_at = old.created_at
-                e.last_used = old.last_used
-                e.repeat_count = old.repeat_count
-        merged: list[MustRememberEntry] = (
-            protected + downgraded + new_entries + post_plan
+        merged = _merge_must_remember(
+            cfg, current, new_entries, stale_ids, set(snapshot_ids), now
         )
         # Deterministic convergence, in the ADR 0007 drop order: stale
         # normal entries first (oldest untouched first — the sweep's TOUCH
@@ -836,47 +1008,14 @@ def _apply_skills(
     bstore: BoundedStore, cfg: Config, text: str, now: str, report: ApplyReport,
     *, snapshot_ids: set[str] = frozenset(),
 ) -> None:
-    section = _section_after_marker(text, MARK_SKILLS)
-    new_entries: list[SkillEntry] = []
-    for b in _blocks(section):
-        name, trigger, proc = b.get("NAME"), b.get("TRIGGER"), b.get("PROCEDURE")
-        if not (name and trigger and proc):
-            raise CompactionParseError(f"bad skill block: {b!r}")
-        new_entries.append(
-            SkillEntry(
-                text=proc, created_at=now, last_used=now, source="compact",
-                name=name, trigger=trigger, procedure=proc,
-            )
-        )
+    new_entries = _parse_skills_card(text, now)
     with bstore.store_lock(STORE_SKILLS):
         current = [
             e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)
         ]
-        # Carry identity + usage/recency forward for kept skills (matched by
-        # name, case-insensitive, within the plan-time snapshot) so
-        # compaction does not reset the keep-rank — and does not re-mint ids
-        # (detail filenames and future detail targets are id-addressed).
-        by_name = {
-            e.name.strip().lower(): e
-            for e in current
-            if not snapshot_ids or e.id in snapshot_ids
-        }
-        for e in new_entries:
-            old = by_name.pop(e.name.strip().lower(), None)
-            if old is not None:
-                e.id = old.id
-                e.usage_count = old.usage_count
-                e.created_at = old.created_at
-                e.last_used = old.last_used
-            refresh_importance(e, now, cfg)
-        # Skills written between plan and apply (concurrent ingest) survive
-        # the card's replacement roster — the trim below still enforces the
-        # bound.
-        post_plan = [
-            e for e in current
-            if snapshot_ids and e.id not in snapshot_ids
-        ]
-        merged: list[SkillEntry] = list(new_entries) + post_plan
+        merged = _merge_skills(
+            cfg, current, new_entries, set(snapshot_ids), now
+        )
         max_len = cfg.memory.skills.index_max_length
         if bstore.index_chars(STORE_SKILLS, merged) > max_len:
             report.forced_trims.append(STORE_SKILLS)
@@ -901,52 +1040,7 @@ def _apply_topic_roster(
         topics = [
             e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
         ]
-        by_slug = {t.slug: t for t in topics}
-        for d in directives:
-            action = (d.get("ACTION") or "").lower()
-            if action == "forget":
-                slug = _ref(d.get("TOPIC"))
-                victim = by_slug.get(slug)
-                if victim is None:
-                    continue
-                if _is_fresh(victim, now, cfgt.fresh_days):
-                    log.warning(
-                        "compact-apply: refusing to forget fresh topic %r", slug
-                    )
-                    continue
-                topics.remove(victim)
-                del by_slug[slug]
-            elif action == "merge":
-                into_slug = _ref(d.get("INTO"))
-                into = by_slug.get(into_slug)
-                if into is None:
-                    continue
-                for from_slug in (d.get("FROM") or "").split():
-                    src = by_slug.get(_ref(from_slug))
-                    if src is None or src is into:
-                        continue
-                    if _is_fresh(src, now, cfgt.fresh_days):
-                        log.warning(
-                            "compact-apply: refusing to merge away fresh "
-                            "topic %r", src.slug
-                        )
-                        continue
-                    into.text = f"{into.text.rstrip()}\n\n{src.text.strip()}"
-                    into.touch_count += src.touch_count
-                    into.last_used = max(into.last_used, src.last_used)
-                    topics.remove(src)
-                    del by_slug[src.slug]
-                summary = (d.get("SUMMARY") or "").strip()
-                if summary:
-                    into.summary = summary
-            elif action == "summary":
-                slug = _ref(d.get("TOPIC"))
-                summary = (d.get("SUMMARY") or "").strip()
-                target = by_slug.get(slug)
-                if target is not None and summary:
-                    target.summary = summary
-            else:
-                raise CompactionParseError(f"bad roster directive: {d!r}")
+        topics = _roster_apply_directives(topics, directives, now, cfgt)
         # Deterministic convergence: still over max → forget non-fresh topics,
         # oldest-touched first. Fresh topics are never force-dropped.
         max_len = cfgt.index_max_length
@@ -983,16 +1077,7 @@ def _apply_topic_detail(
     bstore: BoundedStore, cfg: Config, slug: str, text: str, now: str,
     report: ApplyReport,
 ) -> None:
-    body = _section_after_marker(text, MARK_TOPIC_DETAIL)
-    if not body:
-        raise CompactionParseError("empty topic detail body")
-    if body.strip().upper() == "NONE":
-        # Sibling card contracts teach "write exactly NONE", but a topic
-        # detail card has no NONE option — accepting it would replace the
-        # topic's whole history with the literal string. Malformed instead.
-        raise CompactionParseError(
-            "topic detail card has no NONE option — emit the full rewritten body"
-        )
+    body = _parse_topic_detail_card(text)
     with bstore.store_lock(STORE_TOPICS):
         topics = [
             e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
@@ -1035,16 +1120,8 @@ def _apply_skill_detail(
     bstore: BoundedStore, cfg: Config, entry_id: str, text: str, now: str,
     report: ApplyReport,
 ) -> None:
-    section = _section_after_marker(text, MARK_SKILLS)
-    blocks = _blocks(section)
-    if len(blocks) != 1:
-        raise CompactionParseError(
-            f"skill detail card must contain exactly one block; got {len(blocks)}"
-        )
-    b = blocks[0]
-    name, trigger, proc = b.get("NAME"), b.get("TRIGGER"), b.get("PROCEDURE")
-    if not (name and trigger and proc):
-        raise CompactionParseError(f"bad skill block: {b!r}")
+    b = _parse_skill_detail_card(text)
+    name, trigger, proc = b["NAME"], b["TRIGGER"], b["PROCEDURE"]
     with bstore.store_lock(STORE_SKILLS):
         skills = [
             e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)
@@ -1066,3 +1143,174 @@ def _apply_skill_detail(
         if bstore.detail_chars(target) > max_len:
             report.still_over.append(f"skill_detail.{entry_id}")
         bstore.save_atomic(STORE_SKILLS, skills)
+
+
+# ----- card-check (the card author's ruler) ----------------------------------
+
+
+def card_check(
+    cfg: Config, store: Store, card_path: Path, *, now: str | None = None
+) -> dict:
+    """Measure ONE staged card draft against the bound its apply enforces.
+
+    The compaction sub-agent's ruler: instead of hand-counting characters
+    through generate→measure→trim loops, the card author writes its draft
+    to the manifest's ``card_path`` and asks this ONE deterministic call
+    "does it fit?". Read-only — no lock, no store write, no staging
+    mutation — and it parses + merges through the exact code path
+    ``compact_apply`` uses, so the ruler can never disagree with the apply.
+
+    The card is resolved through the ``manifest.json`` beside it, which
+    also covers the team-events fold cards (their staging lives beside the
+    team log; kinds ``month``/``year``). Reports the PRE-trim size: a
+    ``fits: false`` card would still converge at apply, but through the
+    deterministic trim instead of the author's judgement.
+
+    Raises ``FileNotFoundError`` (no card / no manifest), ``LookupError``
+    (card is not a manifest target), or the apply-time parse errors
+    (:class:`CompactionParseError` / ``TeamEventsError``) on a malformed
+    draft — the same feedback apply would give, delivered before it.
+    """
+    now = now or iso_now()
+    card_path = Path(card_path)
+    text = card_path.read_text(encoding="utf-8")
+    manifest_path = card_path.parent / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"no staging manifest at {manifest_path}; run compact-plan "
+            "(or team-events-compact-plan) first"
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    item = next(
+        (
+            t for t in manifest.get("targets", [])
+            if Path(t["card_path"]).resolve() == card_path.resolve()
+        ),
+        None,
+    )
+    if item is None:
+        raise LookupError(
+            f"{card_path} is not a staged target of {manifest_path} — "
+            "write the card at the manifest's exact card_path"
+        )
+    kind = item["kind"]
+
+    # Team-events fold cards (ADR 0008) — measured with the apply-time
+    # trim accounting over the card's OWN bullets (survivor bullets
+    # appended between plan and apply merge in before the trim, so keep
+    # headroom on an active period).
+    from .team_events import KIND_MONTH, KIND_YEAR, fold_card_chars
+    if kind in (KIND_MONTH, KIND_YEAR):
+        te = cfg.memory.team_events
+        chars = fold_card_chars(text)
+        max_len = (
+            te.month_max_chars if kind == KIND_MONTH else te.year_max_chars
+        )
+        return _check_result(
+            card_path, item, chars, max_len,
+            measured="fold-card bullets (apply-time trim accounting)",
+        )
+
+    bstore = BoundedStore(cfg, store)
+    if kind == KIND_MUST_REMEMBER:
+        new_entries, stale_ids = _parse_must_remember_card(text, now)
+        current = [
+            e for e in bstore.load(STORE_MUST_REMEMBER)
+            if isinstance(e, MustRememberEntry)
+        ]
+        merged = _merge_must_remember(
+            cfg, current, new_entries, stale_ids,
+            set(item.get("snapshot_ids") or []), now,
+        )
+        return _check_result(
+            card_path, item,
+            bstore.length_chars(merged), cfg.memory.must_remember.max_length,
+            measured="post-merge store length (protected + kept + post-plan)",
+        )
+    if kind == KIND_SKILLS:
+        new_entries = _parse_skills_card(text, now)
+        current = [
+            e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)
+        ]
+        merged = _merge_skills(
+            cfg, current, new_entries, set(item.get("snapshot_ids") or []), now
+        )
+        return _check_result(
+            card_path, item,
+            bstore.index_chars(STORE_SKILLS, merged),
+            cfg.memory.skills.index_max_length,
+            measured="post-merge rendered skill index",
+        )
+    if kind == KIND_TOPIC_ROSTER:
+        directives = _blocks(_section_after_marker(text, MARK_TOPIC_ROSTER))
+        topics = [
+            e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
+        ]
+        topics = _roster_apply_directives(
+            topics, directives, now, cfg.memory.topics
+        )
+        return _check_result(
+            card_path, item,
+            bstore.index_chars(STORE_TOPICS, topics),
+            cfg.memory.topics.index_max_length,
+            measured="post-directive rendered topic index",
+        )
+    if kind == KIND_TOPIC_DETAIL:
+        body = _parse_topic_detail_card(text)
+        topics = [
+            e for e in bstore.load(STORE_TOPICS) if isinstance(e, TopicEntry)
+        ]
+        target = next((t for t in topics if t.slug == item["slug"]), None)
+        max_len = cfg.memory.topics.detail_max_length
+        if target is None:
+            return _check_result(
+                card_path, item, 0, max_len,
+                measured="rendered topic detail file",
+                note="topic no longer exists; apply will no-op",
+            )
+        target.text = body  # in-memory copy only — never saved
+        return _check_result(
+            card_path, item, bstore.detail_chars(target), max_len,
+            measured="rendered topic detail file",
+        )
+    if kind == KIND_SKILL_DETAIL:
+        b = _parse_skill_detail_card(text)
+        skills = [
+            e for e in bstore.load(STORE_SKILLS) if isinstance(e, SkillEntry)
+        ]
+        target = next((s for s in skills if s.id == item["entry_id"]), None)
+        max_len = cfg.memory.skills.detail_max_length
+        if target is None:
+            return _check_result(
+                card_path, item, 0, max_len,
+                measured="rendered skill detail file",
+                note="skill no longer exists; apply will no-op",
+            )
+        target.name = b["NAME"]  # in-memory copy only — never saved
+        target.trigger = b["TRIGGER"]
+        target.procedure = b["PROCEDURE"]
+        target.text = b["PROCEDURE"]
+        return _check_result(
+            card_path, item, bstore.detail_chars(target), max_len,
+            measured="rendered skill detail file",
+        )
+    raise CompactionParseError(f"unknown target kind {kind!r}")
+
+
+def _check_result(
+    card_path: Path, item: dict, chars: int, max_len: int, *,
+    measured: str, note: str | None = None,
+) -> dict:
+    out = {
+        "card": str(card_path),
+        "kind": item["kind"],
+        "key": item["key"],
+        "measured": measured,
+        "chars": chars,
+        "max": max_len,
+        "over_by": max(0, chars - max_len),
+        "fits": chars <= max_len,
+    }
+    if note is not None:
+        out["note"] = note
+    return out

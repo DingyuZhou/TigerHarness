@@ -26,6 +26,9 @@ Subcommands:
                             (index / detail / must_remember); print the manifest
         compact-apply       validate + apply every staged compaction card in
                             ONE process (deterministic convergence fallback)
+        card-check          measure ONE staged card draft against its
+                            apply-time bound (the card author's ruler;
+                            covers compaction + team-events fold cards)
         team-events-compact-plan   stage one fold prompt per aged-out
                             team-event-log period (ADR 0008; team-level)
         team-events-compact-apply  validate + apply every staged team-events
@@ -148,6 +151,20 @@ def main(argv: list[str] | None = None) -> int:
         "compact-apply",
         help="Validate + apply every staged compaction card in ONE process "
              "(deterministic convergence fallback; no silent oversize).",
+    )
+
+    p_cc = sub.add_parser(
+        "card-check",
+        help="Measure ONE staged card draft against the bound its apply "
+             "will enforce (the card author's ruler; read-only, non-AI). "
+             "Covers compaction cards AND team-events fold cards. "
+             "Exit: 0 fits, 4 over-bound, 1 malformed card, 2 no card / "
+             "no manifest / not a staged target.",
+    )
+    p_cc.add_argument(
+        "card",
+        help="Path to the card draft — must be the manifest's exact "
+             "card_path (write the draft there, then check it).",
     )
 
     p_tep = sub.add_parser(
@@ -302,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_compact_plan(cfg, store)
     if args.cmd == "compact-apply":
         return _cmd_compact_apply(cfg, store)
+    if args.cmd == "card-check":
+        return _cmd_card_check(cfg, store, args.card)
     if args.cmd == "team-events-compact-plan":
         return _cmd_team_events_compact_plan(cfg, now=args.now)
     if args.cmd == "team-events-compact-apply":
@@ -414,6 +433,29 @@ def _cmd_compact_apply(cfg: Config, store: Store) -> int:
         return 2
     print(json.dumps(report.to_dict(), indent=2))
     return 1 if report.malformed else 0
+
+
+def _cmd_card_check(cfg: Config, store: Store, card: str) -> int:
+    """Measure one staged card draft against its apply-time bound.
+
+    The card author's ruler (read-only, deterministic). Exit: 0 = the
+    card fits its bound untrimmed; 4 = valid card, over-bound (tighten
+    and re-check); 1 = malformed card (the same error apply would raise);
+    2 = no card file / no manifest / card is not a staged target.
+    """
+    from .compaction import CompactionParseError, card_check
+    from .entries import EntryError
+    from .team_events import TeamEventsError
+    try:
+        result = card_check(cfg, store, Path(card))
+    except (FileNotFoundError, LookupError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except (CompactionParseError, TeamEventsError, EntryError) as exc:
+        print(f"malformed card: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0 if result["fits"] else 4
 
 
 def _cmd_team_events_compact_plan(cfg: Config, *, now: str | None) -> int:
@@ -780,6 +822,13 @@ def _cmd_sweep_complete(
     cfg: Config, *, now: str | None, token: str | None, force: bool = False
 ) -> int:
     from . import sweep
+    # Read the claim's scope BEFORE completing — mark_sweep_complete clears
+    # it. The success message must match what actually happened: an
+    # own-only close leaves the team watermark untouched, and this CLI
+    # line is the surface an AI driver reads (printing "watermark
+    # advanced" there sent one auditing its own run to the state file).
+    state = sweep.read_sweep_state(_team_memories_dir(cfg))
+    scope = state.get("scope") or "team"
     if not sweep.mark_sweep_complete(
         _team_memories_dir(cfg), _parse_now(now), token=token, force=force
     ):
@@ -787,7 +836,10 @@ def _cmd_sweep_complete(
               "still pending (see log; --force overrides the pending check)",
               file=sys.stderr)
         return 3
-    print("sweep complete; watermark advanced")
+    if scope == "own-only":
+        print("sweep complete; own-only run — team watermark unchanged")
+    else:
+        print("sweep complete; watermark advanced")
     return 0
 
 

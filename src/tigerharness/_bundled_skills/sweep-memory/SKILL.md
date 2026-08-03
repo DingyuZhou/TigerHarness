@@ -137,10 +137,11 @@ The per-target `plan` / `ingest-staged` / `rebuild` use
 
 **Sub-agent caveat:** a Task sub-agent runs in a *fresh* shell, so the
 `$TM` you exported in the driver shell is NOT inherited. In each
-sub-agent's brief, spell out the full invocation form literally -- but
-note the extraction sub-agents below do **not** run any `tiger-memory`
-command at all (they only write card files); the driver runs the single
-glue command.
+sub-agent's brief, spell out the full invocation form literally. The
+extraction sub-agents below run **no** `tiger-memory` command at all
+(they only write card files; the driver runs the single glue command).
+The compaction and team-events fold sub-agents run exactly **one** --
+the read-only `card-check` ruler on their own draft (steps 2d and 3).
 
 ## The procedure
 
@@ -319,9 +320,24 @@ d. **Compact what outgrew its bound** (staged, same sub-agent shape as
    Otherwise, spawn **ONE Task sub-agent per target** (parallel, same
    cap). Each sub-agent's brief: read its `prompt_path` (the prompt
    embeds the store content and the strict output contract), emit ONLY
-   the contracted replacement, **write it to exactly `card_path`**, run
-   no `tiger-memory` command, and return a one-line confirmation. Then
-   glue:
+   the contracted replacement, **write it to exactly `card_path`**, then
+   measure the draft with the ruler -- the ONE `tiger-memory` command a
+   compaction sub-agent runs (fresh shell: put your literal `$TM`
+   expansion in the brief, never the bare variable):
+
+   ```bash
+   $TM --config "<target.config_path>" card-check "<card_path>"
+   ```
+
+   Read-only + deterministic: it re-parses the card through the exact
+   `compact-apply` code path (post-merge against the live store, so
+   protected carry-overs are counted) and prints `{chars, max, over_by,
+   fits}`. Exit `0` fits / `4` over-bound / `1` malformed card / `2` not
+   a staged card. On `4`, tighten and re-check until it fits -- an
+   over-bound card would still converge at apply, but through the
+   deterministic trim instead of the author's judgement; a couple of
+   ruler passes beats hand-counting characters. The sub-agent returns a
+   one-line confirmation. Then glue:
 
    ```bash
    $TM --config "<target.config_path>" compact-apply
@@ -375,8 +391,11 @@ process several `targets` concurrently (each its own plan -> stacks ->
   `targets: []` (the common case) -> move on. Otherwise spawn ONE Task
   sub-agent per staged prompt (read its `prompt_path`; write the folded
   bullets to exactly `card_path` per the prompt's strict
-  `@@TEAM_EVENTS@@` contract; run no `tiger-memory` command; return a
-  one-line confirmation), then glue:
+  `@@TEAM_EVENTS@@` contract; measure with the same ruler as step 2d --
+  `$TM --config "<abs path to $DRIVER>" card-check "<card_path>"`, the
+  literal `$TM` + config expansion spelled out in the brief -- and
+  tighten until it reports `fits` (exit `0`; exit `4` = over-bound);
+  return a one-line confirmation), then glue:
 
   ```bash
   $TM --config "$DRIVER" team-events-compact-apply

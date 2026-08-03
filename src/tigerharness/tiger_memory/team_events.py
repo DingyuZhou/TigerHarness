@@ -534,6 +534,18 @@ def _parse_card(text: str) -> list[str]:
     raise TeamEventsError(f"missing marker {MARK_TEAM_EVENTS}")
 
 
+def fold_card_chars(text: str) -> int:
+    """Apply-time size accounting for one fold card's own bullets.
+
+    The ``card-check`` ruler's measure: mirrors :func:`_trim_bullets`
+    exactly — each bullet costs its length plus one (its newline) — so
+    "``fold_card_chars(text) <= max_chars``" is precisely "the trim would
+    keep every bullet". Raises :class:`TeamEventsError` on a malformed
+    card (same parse as apply).
+    """
+    return sum(len(b) + 1 for b in _parse_card(text))
+
+
 def _trim_bullets(bullets: list[str], max_chars: int) -> tuple[list[str], bool]:
     """Keep leading bullets within *max_chars* total (always at least one)."""
     kept: list[str] = []
