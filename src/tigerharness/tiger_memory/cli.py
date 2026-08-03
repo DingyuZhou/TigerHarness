@@ -203,8 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     p_swp.add_argument("--own-persona", default=None,
                        help="Split gate: the calling session's persona (must "
                             "be the persona this --config belongs to). Its "
-                            "completed-but-un-swept sources bypass the "
-                            "staleness floor; other personas keep it.")
+                            "un-swept sources — completed, or still active "
+                            "but past the active-slice threshold — bypass "
+                            "the staleness floor; other personas keep it.")
     p_swp.add_argument("--exclude-session", default=None,
                        help="The calling session's conversation uuid — "
                             "excluded from the own-persona pending check so "

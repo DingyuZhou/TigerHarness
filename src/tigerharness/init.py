@@ -65,6 +65,10 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-08-03 (gate lockstep): anzai: pre active-slice-gate ship --
+        #   idle tail said only completed transcripts open the own-persona
+        #   bypass (no active-over-threshold path).
+        "536432c99474b57a29597989c9b3908ee970921bbe1fae9b7ca0bcff72380764",
         # 2026-08-03 (slack-bootstrap sweep): miyagi: pre split-gate ship --
         #   idle tail described the sweep gate as staleness floor + watermark
         #   only (no own-persona/--driver split-gate pointer).
@@ -171,6 +175,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-08-03 (gate lockstep + deferred compaction): anzai: pre ship
+        #   -- own-pending was completed-transcripts-only (no active-slice
+        #   lockstep) and split-mode ran own compaction blocking before the
+        #   requested work instead of backgrounding it under the claim.
+        "c1fb2173700ea4aef75f594dce5e8f6dec15b4b63bd75cded43aeccb0572c74c",
         # 2026-08-03 (card-check ruler): anzai: pre card-check ship -- the
         #   compaction + team-events fold sub-agents still hand-counted
         #   characters ("run no tiger-memory command"); now they run the
@@ -232,11 +241,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "536432c99474b57a29597989c9b3908ee970921bbe1fae9b7ca0bcff72380764",
+    "drive-journal": "e8d5e86e62eb47e5663619d7c9c1f141bfbb431c1ad2d611dcec31172b16be52",
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "f3a4d521209476b1b6255ee49ff212db611e01134055b13c0344fbc16b0f2fa4",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "c1fb2173700ea4aef75f594dce5e8f6dec15b4b63bd75cded43aeccb0572c74c",
+    "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }

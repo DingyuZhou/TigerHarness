@@ -706,20 +706,31 @@ def has_pending_source(
     now: float | None = None,
     max_age_days: int | None = 7,
 ) -> bool:
-    """Does this persona have completed-but-un-swept source content?
+    """Does this persona have un-swept source content a sweep would stage?
 
-    The split-gate pending check (cheap, no LLM, no staging side-effects):
+    The split-gate pending check (no LLM, no staging side-effects):
     True iff some discovered source record — the live session excluded —
-    is idle (its ``activity_mtime`` older than the config's
-    ``rebuild.idle_threshold_hours``, the same "completed" test the
-    extraction pipeline applies) AND carries content past the persona's
-    ingest-dedupe cursor (no cursor recorded, or ``last_event_at`` newer
-    than the cursor's high-water mark).
+    would stage a slice today. Two paths, mirroring staging exactly:
+
+    - **Idle** (``activity_mtime`` older than the config's
+      ``rebuild.idle_threshold_hours``, the same "completed" test the
+      extraction pipeline applies) AND carrying content past the
+      persona's ingest-dedupe cursor (no cursor recorded, or
+      ``last_event_at`` newer than the cursor's high-water mark); OR
+    - **Still active but over the active-slice threshold** — the exact
+      staging predicate (``_compute_incremental_slice`` with
+      ``active=True``, ADR 0006 Part 2): its post-cursor completed
+      turns (or an oversized live tail) exceed
+      ``budgets.active_slice_threshold_chars``. Keeping the gate in
+      lockstep with staging means it never claims a sweep that would
+      stage nothing, and a persona's own long still-warm session can
+      open the floor bypass instead of waiting out the quiet window.
 
     *exclude_session* is the calling session's ``conversation_uuid`` — the
-    hard live-session guarantee on top of the idle heuristic. Without it
-    the check excludes nothing by uuid; the idle threshold still keeps any
-    actively-written transcript (fresh mtime) out.
+    hard live-session guarantee on top of the heuristics. Without it the
+    check excludes nothing by uuid; a fresh-mtime transcript still stays
+    out until its completed turns cross the threshold, and even then the
+    active slice holds the live tail turn back (whole-turn boundary).
 
     A record that grew in place without advancing its timestamp is missed
     here (the full pipeline's count guard catches it at the next team
@@ -732,7 +743,12 @@ def has_pending_source(
         if exclude_session and rec.conversation_uuid == exclude_session:
             continue
         if (now - rec.activity_mtime) < idle_sec:
-            continue  # still active — not "completed"
+            # Still active — pending only when staging's active gate would
+            # already extract a slice (post-cursor completed turns over
+            # ``active_slice_threshold_chars``; the live tail held back).
+            if _compute_incremental_slice(cfg, store, rec, active=True) is not None:
+                return True
+            continue  # still active and under threshold — not pending
         cursor = load_cursor(store, rec.conversation_uuid)
         if cursor is None:
             return True
