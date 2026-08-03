@@ -26,11 +26,16 @@ compacts any surface that has gone over its must-compact bound.
 
 ## When it runs
 
-At **persona-session bootstrap** — any Shohoku persona conversation start
-(drive-journal is one caller; the slack-bridge persona session is
-another). Any human contact with any teammate becomes the heartbeat that
-keeps the *whole roster* fresh (B3). It is a cheap no-op inside the
-staleness floor, so triggering on every session start is safe.
+At every sweep trigger: the **first Slack message of a new thread** (the
+bridge's first-turn injection), **persona-session bootstrap**, a drive's
+**idle-maintenance tail**, the **autodrive idle path**, or an explicit
+"sweep memory" ask. Any human contact with any teammate becomes the
+heartbeat that keeps the *whole roster* fresh (B3). Gating is the
+**split gate**: the calling session's own persona sweeps whenever it has
+completed-but-un-swept transcripts (no staleness floor; its live session
+never counts itself), while every other persona keeps the team floor +
+watermark — so most triggers are still a cheap no-op, and firing on
+every session start is safe.
 
 ## The procedure
 
@@ -47,11 +52,22 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
 1. **Claim the team sweep.** Compute `team_memories_dir =
    cfg.store.root.parent` for any persona on the team (= `<team>/memories/`).
    Call `sweep.maybe_sweep_roster(team_memories_dir, now=<utcnow>,
-   token=<this-session-id>, max_personas=<per-wake cap>)`.
-   - `ran=False` (`not_due` / `busy`) → **stop**: another session swept
-     recently, or owns the sweep right now. No work.
+   token=<this-session-id>, max_personas=<per-wake cap>,
+   own_persona=<calling persona or None>, own_pending=<bool>)` — the CLI
+   form is `tiger-memory sweep-plan --own-persona <name>
+   --exclude-session <uuid>`, which computes `own_pending` via
+   `lifecycle.has_pending_source` (idle per
+   `rebuild.idle_threshold_hours`, past the ingest cursor, live session
+   excluded) before claiming.
+   - `ran=False` (`not_due` / `busy`) → **stop**: nothing pending and the
+     team is inside the floor, or another session owns the sweep right
+     now. No work.
    - `ran=True` → you hold the claim; `decision.plan.targets` is the list
-     of `PersonaTarget(name, config_path)` to process this wake.
+     of `PersonaTarget(name, config_path)` to process this wake, and
+     `decision.scope` records the claim's scope: `"team"` (floor due —
+     own persona, if pending, is first and floor-exempt; the cap applies
+     to the others) or `"own-only"` (targets is exactly the own persona;
+     `sweep-complete` will NOT advance the team watermark for this run).
 
 2. **Per target persona: stage → extract in stacks → glue.** For each
    target:
@@ -234,8 +250,12 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
 
 ## Guardrails (all already enforced by the module)
 
-- **Staleness floor** (default 24h) + **team watermark** → most triggers
-  are a no-op.
+- **Split gate**: the team **staleness floor** (default 24h) + **team
+  watermark** make most triggers a no-op; the own-persona bypass fires
+  only on real pending work (live session excluded), and an own-only
+  run completes without advancing the team watermark (claim-scope
+  marker; a scope-less claim from pre-change code completes as
+  `"team"`).
 - **Soft-lease claim** → one session sweeps per window; a crashed owner's
   stale claim is stolen after the lease.
 - **Per-wake cap** → a big backlog spreads across several wakes.
@@ -249,8 +269,8 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
 - **Stacks bound sub-agent context** → `plan` packs transcripts into
   stacks (`sweep_stack_content_chars` / `sweep_stack_max_items`) so a
   backlog runs as many fresh contexts, not one ballooning one.
-- **Subscription-safe** → the executor is always the sub-agent; the
-  trigger context's billing is irrelevant.
+- **Context-safe** → the executor is always the sub-agent; bulky
+  transcripts and bundles never enter the trigger context.
 
 ## Worklog-only personas (journal memory)
 

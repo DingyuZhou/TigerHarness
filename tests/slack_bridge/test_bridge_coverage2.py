@@ -318,3 +318,58 @@ class TestRaceLoserSessionClose:
             await b.handle_message(event, say)
 
         say.assert_awaited_once()
+
+
+class TestFirstTurnBootstrapInjection:
+    """Criterion 5 (Slack-bootstrap sweep build): the first turn of a
+    NEW session carries the memory-bootstrap injection -- the existing
+    briefing read, the sweep-memory Slack-bootstrap instruction, the
+    notify-first duty, and the persona name. A resumed session gets
+    none of it (no injection -> no bootstrap sweep, by design)."""
+
+    @pytest.mark.asyncio
+    async def test_first_turn_injection_contract(self, tmp_path):
+        store = ThreadStore(tmp_path / "threads.json")
+        b, backend = _make_bridge(store)
+        # A brand-new session has no id yet -> the injection branch.
+        backend.open_session = AsyncMock(return_value=FakeSession(id=""))
+
+        with patch("tigerharness.slack_bridge.bridge.run_with_retry",
+                   return_value=FakeResult()) as m:
+            with patch("tigerharness.slack_bridge.bridge.detect_persona",
+                       return_value=("beta", 0.001)):
+                say = AsyncMock()
+                event = {"channel_type": "im", "user": "U0CEO",
+                         "text": "hello", "ts": "900.0"}
+                await b.handle_message(event, say)
+
+        prompt = m.call_args[0][2]  # (backend, cfg, prompt, ...)
+        assert "[bridge-context] first turn of a new session" in prompt
+        # (a) the existing briefing instruction, persona-named
+        assert "memories/beta/briefing/README.md" in prompt
+        # (b) the bootstrap-sweep instruction names the skill + flow
+        assert "sweep-memory" in prompt
+        assert "Slack-bootstrap" in prompt
+        # (c) the notify-first duty
+        assert "notify-first" in prompt
+        assert "heads-up BEFORE sweeping" in prompt
+        # (d) the persona name as the sweep's own persona
+        assert "as persona beta" in prompt
+
+    @pytest.mark.asyncio
+    async def test_resumed_session_gets_no_injection(self, tmp_path):
+        store = ThreadStore(tmp_path / "threads.json")
+        store.set("910.0", "sess-old", persona="alpha")
+        b, backend = _make_bridge(store)  # open_session -> id "sess-001"
+
+        with patch("tigerharness.slack_bridge.bridge.run_with_retry",
+                   return_value=FakeResult()) as m:
+            say = AsyncMock()
+            event = {"channel_type": "im", "user": "U0CEO",
+                     "text": "follow-up", "ts": "910.1",
+                     "thread_ts": "910.0"}
+            await b.handle_message(event, say)
+
+        prompt = m.call_args[0][2]
+        assert "first turn of a new session" not in prompt
+        assert "sweep-memory" not in prompt

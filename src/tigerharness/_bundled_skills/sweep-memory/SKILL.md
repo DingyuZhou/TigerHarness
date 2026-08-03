@@ -1,15 +1,15 @@
 ---
 name: sweep-memory
-description: Keep the whole team's tiger-memory fresh on the subscription rail. Run at persona-session bootstrap (or when the user says "sweep memory", "refresh team memory", "rebuild memories"). Claims a team-wide sweep, then extracts each stale persona's new transcripts into their three bounded memory stores via constrained Task-tool sub-agents (subscription-billed) -- never an inline `claude -p`. A cheap no-op inside the staleness floor, so triggering every session start is safe.
+description: Keep the whole team's tiger-memory fresh. Runs at every sweep trigger -- the first Slack message of a new thread (the bridge's Slack-bootstrap flow), persona-session bootstrap, a drive's idle-maintenance tail, the autodrive idle path, or an explicit "sweep memory" / "refresh team memory" / "rebuild memories" ask. Claims a team-wide sweep under the split gate (the calling persona's completed-but-un-swept transcripts bypass the staleness floor; every other persona keeps it), then extracts each target persona's new transcripts into their three bounded memory stores via constrained Task-tool sub-agents -- never an inline `claude -p`. A cheap no-op when nothing is pending, so firing on every trigger is safe.
 ---
 
 # sweep-memory
 
-The **in-session, subscription-billed** memory refresh. One invocation
-keeps the *whole roster* fresh: any human contact with any teammate is
-the heartbeat. The bulky extraction work runs in isolated **Task-tool
-sub-agents** so it bills to the **subscription**, regardless of which
-conversation triggered it.
+The **in-session** memory refresh. One invocation keeps the *whole
+roster* fresh: any human contact with any teammate is the heartbeat. The
+bulky extraction work runs in isolated **Task-tool sub-agents**, so the
+transcripts and extraction bundles never enter the triggering
+conversation's context -- you only ever see short confirmations.
 
 This skill drives the topic-store memory model (design
 `docs/DESIGN-memory.md`, ADR 0007): each persona has **three** bounded
@@ -23,34 +23,96 @@ skill is the driver over the non-AI gating CLIs (`sweep-plan` /
 `plan` / `ingest-staged` / `compact-plan` / `compact-apply` / `rebuild`
 CLIs.
 
-## When to use this skill
+## When to use this skill (the five triggers)
 
-- At **persona-session bootstrap** -- any persona conversation start. It
-  is a cheap no-op inside the staleness floor (default 24h), so firing on
-  every session start is safe and correct.
-- When the user explicitly asks to "sweep memory", "refresh team
-  memory", or "rebuild memories".
-- From a **drive's idle-maintenance tail** (the `drive-journal` skill):
-  when a drive — including an Operator-sanctioned autodrive `claude -p`
-  fire — ends with nothing actionable and nothing busy, it invokes this
-  skill before stopping. Same cheap no-op guarantee applies.
+One gate rule serves every trigger (see "The split gate" below); what
+differs per trigger is only the UX:
 
-The executor must be a **Task-tool sub-agent** — only an *agent session*
-(interactive, or a sanctioned agentic drive such as an autodrive fire)
-can spawn one. A plain daemon process (the slack-bridge) cannot, and
-shelling out to `claude -p` as the executor is banned (see billing,
-below) -- that is exactly why this lives in the session, not the daemon.
+- **First Slack message of a NEW thread** -- the bridge's first turn of
+  a new session. The bridge's first-turn injection names your persona
+  and points here; a resumed thread/session gets no injection and no
+  bootstrap sweep -- by design. Notify-first + split-mode: see "The
+  Slack-bootstrap flow" below.
+- **Persona-session bootstrap** -- any persona conversation start. No
+  notify needed (the terminal shows the work); split-mode is optional
+  when requested work is waiting.
+- **A drive's idle-maintenance tail** (the `drive-journal` skill): when
+  a drive -- including an Operator-sanctioned autodrive fire -- ends
+  with nothing actionable and nothing busy, it invokes this skill
+  before stopping. No notify; sequential processing is fine.
+- **The autodrive idle path** -- same as the drive tail (autodrive
+  reaches it through the drive-journal skill's prompt).
+- **An explicit ask** -- "sweep memory", "refresh team memory",
+  "rebuild memories". The split gate still applies by default; a forced
+  full-team sweep regardless of the floor is a separate, explicit ask.
 
-## The billing model (load-bearing -- do not get this wrong)
+## The split gate (own persona vs. the rest of the team)
 
-- A programmatic `claude -p` bills **API tokens**. NEVER extract by
-  shelling out to `claude -p`.
-- A **Task-tool sub-agent** runs in isolated context, writes files,
-  returns a short message, and bills to the **subscription** regardless
-  of the triggering context. THAT is the executor for every extraction.
-- The bulky transcript and the bulky extraction bundle must live in the
-  **sub-agent's** context, never yours -- you only ever see short
-  confirmations.
+The gate rule, identical at every trigger (the CLI enforces it; you
+supply the inputs):
+
+- **Own persona -- NO staleness floor.** Whenever the calling persona
+  has completed-but-un-swept transcripts (its live session never counts
+  itself), a sweep of THAT persona runs now, however recently the team
+  swept.
+- **Other personas -- the team floor.** Everyone else stays gated by
+  the team watermark + `sweep.floor_hours` exactly as before.
+- **Silent cases.** Own persona has nothing pending AND the team is
+  inside the floor (`reason: "not_due"`), or another session holds the
+  lease (`reason: "busy"`) -> proceed straight to the requested work.
+  No notice, no sweep.
+
+**Own-persona resolution, per trigger** (pass it as `--own-persona`):
+
+- Slack bridge -> the persona the bridge injection names
+  (`state.persona`).
+- drive-journal -> the drive's `--driver` persona.
+- autodrive -> the driven session's persona (its `--driver`).
+- Interactive persona session -> the adopted persona.
+- A session with NO persona identity -> omit `--own-persona`: the
+  sweep is the plain team-floor sweep exactly as before (the
+  no-identity fallback).
+
+**Your own live session never counts as pending.** Pass
+`--exclude-session <your session uuid>` when you can determine it (a
+drive knows its session id; an interactive session can read its own).
+Omitting it is also safe: an actively-written transcript has a fresh
+mtime, inside the pipeline's idle threshold, so it is never counted --
+but pass the uuid when you have it.
+
+## The Slack-bootstrap flow (notify-first)
+
+For the Slack trigger only, the in-thread UX is part of the contract:
+
+1. Run `sweep-plan` (step 1 below) with `--own-persona <the persona
+   the bridge injection names>`.
+2. `ran == false` -> say nothing about sweeping; just do the requested
+   work (the silent cases above).
+3. `ran == true` -> post ONE short in-thread heads-up BEFORE any sweep
+   work runs (notify-first), then follow split-mode ordering (step 1's
+   ordering rule): own persona blocking, others in the background
+   behind the requested work. Branch the wording on the JSON's `scope`:
+   - `"own-only"` -> e.g. "Catching up my memory from recent sessions
+     before I answer -- one moment."
+   - `"team"` -> e.g. "Refreshing team memory (mine first, the rest in
+     the background) -- one moment."
+   One message; no progress spam afterwards.
+
+## The executor rule (load-bearing -- do not get this wrong)
+
+- The executor for every extraction is a **Task-tool sub-agent**: it
+  runs in an isolated context window, writes card files, and returns a
+  short confirmation, so the bulky transcript and extraction bundle
+  live in the **sub-agent's** context, never yours.
+- NEVER extract by shelling out to `claude -p`: a shelled-out model
+  process runs outside the session's supervision and context
+  management -- no isolation guarantee, no oversight, no resumability.
+- Only an *agent session* (interactive, or a sanctioned agentic drive
+  such as an autodrive fire) can spawn a Task sub-agent. A plain daemon
+  process (e.g. the slack-bridge itself) cannot -- which is why every
+  trigger routes the sweep INTO a session: the bridge injects the
+  bootstrap instruction into the persona session's first turn rather
+  than sweeping in the daemon.
 
 ## Paths and the `tiger-memory` invocation
 
@@ -85,12 +147,18 @@ glue command.
 ### 1. Claim the team sweep
 
 ```bash
-$TM --config "$DRIVER" sweep-plan --token <stable-token> --max-personas 3
+$TM --config "$DRIVER" sweep-plan --token <stable-token> --max-personas 3 \
+    --own-persona <your-persona> --exclude-session <your-session-uuid>
 ```
 
-`--max-personas 3` caps how many stale personas this wake processes, so a
-big backlog spreads across several new-thread triggers instead of making
-one user wait. When `remaining > 0`, the rest resume on the next wake.
+`--own-persona` is the split gate's input -- your persona per the
+resolution list above (`$DRIVER` must be that persona's config; omit the
+flag entirely in the no-identity fallback). `--exclude-session` is your
+current session's conversation uuid (omit if unknown -- safe, see
+above). `--max-personas 3` caps how many stale OTHER personas this wake
+processes, so a big backlog spreads across several triggers instead of
+making one user wait -- your own persona, when pending, is never counted
+against the cap. When `remaining > 0`, the rest resume on the next wake.
 
 For `<stable-token>`, prefer a durable id tied to this session/thread (so
 a resume can re-steal its own claim). If you have none, omit `--token` --
@@ -100,20 +168,42 @@ anyway.
 It prints JSON:
 
 ```json
-{"ran": true, "reason": "claimed", "token": "...",
+{"ran": true, "reason": "claimed", "token": "...", "scope": "team",
+ "own": {"persona": "Anzai", "pending": true},
  "targets": [{"name": "Anzai", "config_path": ".../tiger-memory.config.yaml"}],
  "remaining": 0, "all_personas": 5}
 ```
 
 - `ran == false` (`reason` is `not_due` or `busy`) -> **STOP. No work.**
+  `not_due` now means "no own pending AND team inside the floor". While
+  another session's own-only run holds the lease, a concurrently due
+  team claim gets `busy` too -- accepted, the lease is short and the
+  next trigger retries.
 - `ran == true` -> you hold the claim. `targets` is the persona list to
-  process **this wake** (at most `--max-personas`).
+  process **this wake**. Branch notify wording and split-mode dispatch
+  on **`scope`**, never on inferred target composition:
+  - `scope: "team"` -- the team floor was due. If `own.pending` is
+    true, your own persona is `targets[0]` (floor-exempt); the
+    `--max-personas` cap applied to the others.
+  - `scope: "own-only"` -- only your own persona had pending work;
+    `targets` is exactly your persona and the rest of the team keeps
+    its floor. Drive the run exactly the same; at close,
+    `sweep-complete` knows not to advance the team watermark (the CLI
+    handles it -- nothing extra to do).
+  - `own` is `null` when you omitted `--own-persona` (the no-identity
+    fallback -- plain team-floor behavior).
 
-  **Answer the user first.** If this wake happened inside a conversation
-  where the user asked a real question, handle their request BEFORE
-  executing the claimed sweep (the lease is renewed by every
-  `sweep-done`, and a ~30-min claim is stealable only when you go
-  silent) -- the sweep is maintenance; the user is not.
+  **Ordering vs. the requested work (split-mode).** When the trigger
+  fired inside a conversation with real requested work waiting (a Slack
+  thread, an interactive ask): process YOUR OWN persona's target first,
+  BLOCKING, before the requested work -- your own un-swept transcripts
+  are exactly the memory that work needs. Dispatch the OTHER targets'
+  extraction sub-agents with `run_in_background: true`, start the
+  requested work while they card in parallel, then glue + finalize each
+  persona as its cards land and close the run (step 3). With no
+  requested work waiting (idle tail, explicit ask), plain sequential
+  processing is fine. The lease is renewed by every `sweep-done`, and a
+  ~30-min claim is stealable only when you go silent.
 
 ### 2. Per target persona: stage -> extract in stacks -> glue
 
@@ -295,10 +385,13 @@ process several `targets` concurrently (each its own plan -> stacks ->
   Exit `1` = a malformed card (leave it; the fold re-stages next
   sweep); `2` = no manifest (a sequencing bug -- surface it).
 
-  Then advance the watermark and clear the claim, passing YOUR claim
-  token (from `sweep-plan`'s JSON) so a stale driver whose lease was
-  stolen can never clobber the live owner's run (exit `3` = refused,
-  another session owns the sweep now -- stop, do not force):
+  Then close the run, passing YOUR claim token (from `sweep-plan`'s
+  JSON) so a stale driver whose lease was stolen can never clobber the
+  live owner's run (exit `3` = refused, another session owns the sweep
+  now -- stop, do not force). A `scope: "team"` run advances the team
+  watermark; a `scope: "own-only"` run completes WITHOUT advancing it
+  (the team's floor window is untouched -- the CLI reads the claim's
+  scope, nothing extra to pass):
 
   ```bash
   $TM --config "$DRIVER" sweep-complete --token <token>
@@ -346,8 +439,9 @@ process several `targets` concurrently (each its own plan -> stacks ->
 
 ## Guardrails (already enforced by the package)
 
-- **Staleness floor** (default 24h) + **team watermark** -> most triggers
-  are a no-op.
+- **Split gate**: the team floor (default 24h) + **team watermark**
+  make most triggers a no-op; the own-persona bypass fires only on real
+  pending work, and an own-only run never advances the team watermark.
 - **Lease renewal** -> every `sweep-done` refreshes the claim lease, so
   a healthy long run (many personas, big fan-outs) is never stolen
   mid-flight; only a genuinely silent driver loses the claim.
@@ -366,13 +460,15 @@ process several `targets` concurrently (each its own plan -> stacks ->
   overflow limit, never drops a *fresh* `operator_explicit` directive
   (a stale one goes only as a logged last resort), and
   never forgets/merges a fresh topic.
-- **Subscription-safe** -> the executor is always the Task sub-agent
-  (extraction AND compaction).
+- **Context-safe** -> the executor is always the Task sub-agent
+  (extraction AND compaction); bulky content stays in sub-agent
+  windows.
 
 ## What NOT to do
 
-- **Never** extract via `claude -p` -- that bills API. The executor is
-  always a Task-tool sub-agent.
+- **Never** extract via `claude -p` -- the executor is always a
+  Task-tool sub-agent (the executor rule above: isolation, oversight,
+  resumability).
 - **Never** let the bulky transcript or extraction bundle into your own
   context -- a sub-agent reads the prompt files and writes card files; you
   see only short confirmations and the `ingest-staged` JSON summary.

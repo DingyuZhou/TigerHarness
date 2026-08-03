@@ -382,7 +382,7 @@ When a surface crosses its `overflow_limit`, the sweep stages a compaction
    would clobber a same-run detail rewrite; a full index replacement
    would dangle it) — the oversized detail re-stages against the settled
    store.
-2. **Card sub-agents** (Task tool, subscription-billed) each write one
+2. **Card sub-agents** (Task tool, isolated context) each write one
    `<key>.card.md` per the prompt's embedded strict contract.
 3. **`compact-apply`** (non-AI) validates each card, applies it atomically
    to the entry store, and **guarantees convergence
