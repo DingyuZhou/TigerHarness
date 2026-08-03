@@ -1,6 +1,6 @@
 ---
 name: sweep-memory
-description: Keep the whole team's tiger-memory fresh. Runs at every sweep trigger -- the first Slack message of a new thread (the bridge's Slack-bootstrap flow), persona-session bootstrap, a drive's idle-maintenance tail, the autodrive idle path, or an explicit "sweep memory" / "refresh team memory" / "rebuild memories" ask. Claims a team-wide sweep under the split gate (the calling persona's completed-but-un-swept transcripts bypass the staleness floor; every other persona keeps it), then extracts each target persona's new transcripts into their three bounded memory stores via constrained Task-tool sub-agents -- never an inline `claude -p`. A cheap no-op when nothing is pending, so firing on every trigger is safe.
+description: Keep the whole team's tiger-memory fresh. Runs at every sweep trigger -- the first Slack message of a new thread (the bridge's Slack-bootstrap flow), persona-session bootstrap, a drive's idle-maintenance tail, the autodrive idle path, or an explicit "sweep memory" / "refresh team memory" / "rebuild memories" ask. Claims a team-wide sweep under the split gate (the calling persona's un-swept transcripts -- completed ones, or a still-active session past the active-slice threshold -- bypass the staleness floor; every other persona keeps it), then extracts each target persona's new transcripts into their three bounded memory stores via constrained Task-tool sub-agents -- never an inline `claude -p`. A cheap no-op when nothing is pending, so firing on every trigger is safe.
 ---
 
 # sweep-memory
@@ -52,9 +52,13 @@ The gate rule, identical at every trigger (the CLI enforces it; you
 supply the inputs):
 
 - **Own persona -- NO staleness floor.** Whenever the calling persona
-  has completed-but-un-swept transcripts (its live session never counts
-  itself), a sweep of THAT persona runs now, however recently the team
-  swept.
+  has un-swept content that staging would extract -- a completed (idle)
+  transcript with content past the ingest cursor, or a still-active
+  session whose unprocessed slice already exceeds the active-slice
+  threshold (its live session never counts itself) -- a sweep of THAT
+  persona runs now, however recently the team swept. The pending test
+  is kept in exact lockstep with staging, so a claimed own-only run
+  always stages at least one slice.
 - **Other personas -- the team floor.** Everyone else stays gated by
   the team watermark + `sweep.floor_hours` exactly as before.
 - **Silent cases.** Own persona has nothing pending AND the team is
@@ -75,10 +79,12 @@ supply the inputs):
 
 **Your own live session never counts as pending.** Pass
 `--exclude-session <your session uuid>` when you can determine it (a
-drive knows its session id; an interactive session can read its own).
-Omitting it is also safe: an actively-written transcript has a fresh
-mtime, inside the pipeline's idle threshold, so it is never counted --
-but pass the uuid when you have it.
+drive knows its session id; an interactive session can read its own) --
+that is the hard guarantee. Omitting it is still safe for ingest
+correctness: a still-active transcript only counts once its unprocessed
+slice crosses the active-slice threshold, and even then staging cuts at
+a completed-turn boundary and holds the live tail turn back -- but pass
+the uuid when you have it.
 
 ## The Slack-bootstrap flow (notify-first)
 
@@ -90,8 +96,10 @@ For the Slack trigger only, the in-thread UX is part of the contract:
    work (the silent cases above).
 3. `ran == true` -> post ONE short in-thread heads-up BEFORE any sweep
    work runs (notify-first), then follow split-mode ordering (step 1's
-   ordering rule): own persona blocking, others in the background
-   behind the requested work. Branch the wording on the JSON's `scope`:
+   ordering rule): own persona's freshness half (extract -> glue ->
+   rebuild) blocking, compaction and the other personas in the
+   background behind the requested work. Branch the wording on the
+   JSON's `scope`:
    - `"own-only"` -> e.g. "Catching up my memory from recent sessions
      before I answer -- one moment."
    - `"team"` -> e.g. "Refreshing team memory (mine first, the rest in
@@ -196,15 +204,27 @@ It prints JSON:
 
   **Ordering vs. the requested work (split-mode).** When the trigger
   fired inside a conversation with real requested work waiting (a Slack
-  thread, an interactive ask): process YOUR OWN persona's target first,
-  BLOCKING, before the requested work -- your own un-swept transcripts
-  are exactly the memory that work needs. Dispatch the OTHER targets'
-  extraction sub-agents with `run_in_background: true`, start the
-  requested work while they card in parallel, then glue + finalize each
-  persona as its cards land and close the run (step 3). With no
-  requested work waiting (idle tail, explicit ask), plain sequential
-  processing is fine. The lease is renewed by every `sweep-done`, and a
-  ~30-min claim is stealable only when you go silent.
+  thread, an interactive ask), only the FRESHNESS half of YOUR OWN
+  persona's target blocks the requested work -- your own un-swept
+  transcripts are exactly the memory that work needs, and that half is
+  short (typically one stack). Run own 2a -> 2b -> 2c, then 2e
+  (`rebuild` + `sweep-done`) immediately -- fresh briefing BEFORE the
+  real request -- and only then 2d (`compact-plan`): if it stages
+  targets, dispatch the compaction sub-agents with
+  `run_in_background: true` instead of blocking. Dispatch the OTHER
+  targets' extraction sub-agents in the background the same way, start
+  the requested work, then glue + finalize each persona as its cards
+  land -- for the deferred compaction: `compact-apply` when its cards
+  land, plus a second cheap `rebuild` to refresh the briefing over the
+  compacted stores -- and close the run (step 3). Hold the claim for
+  the whole tail: closing before `compact-apply` would let the next
+  trigger's ingest race the pending cards. A driver that dies mid-tail
+  degrades gracefully -- the stale claim is stolen after the lease, and
+  any surface still over its bound re-stages at the next sweep's
+  `compact-plan`. With no requested work waiting (idle tail, explicit
+  ask), plain sequential processing (2a -> 2e in order) is fine. The
+  lease is renewed by every `sweep-done`, and a ~30-min claim is
+  stealable only when you go silent.
 
 ### 2. Per target persona: stage -> extract in stacks -> glue
 
@@ -315,7 +335,10 @@ d. **Compact what outgrew its bound** (staged, same sub-agent shape as
    at/over its `overflow_limit` under `<store>/.compact-staging/` and
    prints a manifest (`targets`: kind / key / `prompt_path` /
    `card_path`). **`targets: []` -> skip straight to step e** (the
-   common case).
+   common case). (Split-mode, own persona: this step runs AFTER step e,
+   with the card sub-agents backgrounded behind the requested work --
+   see step 1's ordering rule; run `compact-apply` when the cards land,
+   then a second `rebuild`.)
 
    Otherwise, spawn **ONE Task sub-agent per target** (parallel, same
    cap). Each sub-agent's brief: read its `prompt_path` (the prompt
@@ -460,7 +483,10 @@ process several `targets` concurrently (each its own plan -> stacks ->
 
 - **Split gate**: the team floor (default 24h) + **team watermark**
   make most triggers a no-op; the own-persona bypass fires only on real
-  pending work, and an own-only run never advances the team watermark.
+  pending work (the pending test is in exact lockstep with staging --
+  idle past the cursor, or still-active over the active-slice
+  threshold -- so a claimed own-only run always stages at least one
+  slice), and an own-only run never advances the team watermark.
 - **Lease renewal** -> every `sweep-done` refreshes the claim lease, so
   a healthy long run (many personas, big fan-outs) is never stolen
   mid-flight; only a genuinely silent driver loses the claim.

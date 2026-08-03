@@ -32,10 +32,13 @@ bridge's first-turn injection), **persona-session bootstrap**, a drive's
 "sweep memory" ask. Any human contact with any teammate becomes the
 heartbeat that keeps the *whole roster* fresh (B3). Gating is the
 **split gate**: the calling session's own persona sweeps whenever it has
-completed-but-un-swept transcripts (no staleness floor; its live session
-never counts itself), while every other persona keeps the team floor +
-watermark — so most triggers are still a cheap no-op, and firing on
-every session start is safe.
+un-swept source content that staging would extract — a completed
+(idle-past-the-quiet-window) transcript with content past the ingest
+cursor, or a still-active one whose post-cursor slice already exceeds
+the active-slice threshold (ADR 0006 Part 2) — with no staleness floor;
+its live session never counts itself. Every other persona keeps the
+team floor + watermark — so most triggers are still a cheap no-op, and
+firing on every session start is safe.
 
 ## The procedure
 
@@ -56,9 +59,14 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
    own_persona=<calling persona or None>, own_pending=<bool>)` — the CLI
    form is `tiger-memory sweep-plan --own-persona <name>
    --exclude-session <uuid>`, which computes `own_pending` via
-   `lifecycle.has_pending_source` (idle per
-   `rebuild.idle_threshold_hours`, past the ingest cursor, live session
-   excluded) before claiming.
+   `lifecycle.has_pending_source` before claiming. The pending test is
+   kept in exact **lockstep with staging**: a record is pending iff it
+   is idle per `rebuild.idle_threshold_hours` with content past the
+   ingest cursor, OR still active but with a post-cursor slice over
+   `budgets.active_slice_threshold_chars` (the same
+   `_compute_incremental_slice` gate staging applies, ADR 0006
+   Part 2) — so a claimed own-only run always stages at least one
+   slice. The live session is excluded either way.
    - `ran=False` (`not_due` / `busy`) → **stop**: nothing pending and the
      team is inside the floor, or another session owns the sweep right
      now. No work.
@@ -209,6 +217,28 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
       index + detail files + unprocessed notice). Then
       `sweep.record_persona_done(team_memories_dir, target.name)`.
 
+   **Interactive-trigger ordering — freshness first, compaction
+   deferred.** When the sweep runs inline in a live persona session (the
+   Slack-bootstrap or session-bootstrap trigger, where a real request is
+   waiting), the freshness-critical half of the pipeline is short
+   (stage → extract → glue → rebuild: a typical own-persona delta is one
+   stack), while staged compaction is routinely the long pole (several
+   card sub-agents). Run them in that order per target: 2a→2c, then 2e's
+   `rebuild` + `record_persona_done` immediately — the briefing is fresh
+   *before* the session turns to its real request, so the persona never
+   answers from a stale briefing about work it just finished. Then run
+   2d's `compact-plan`; if it stages targets, dispatch the card
+   sub-agents **in the background** and proceed with the real request.
+   When the cards land: `compact-apply`, a second `rebuild` (pure
+   Python — regenerates the briefing over the compacted stores), then
+   close the run (step 3). The claim is held for the whole tail **on
+   purpose**: closing before `compact-apply` would let the next
+   trigger's ingest race the pending cards. The lease survives the
+   deferral (`record_persona_done` renews it), and a driver that dies
+   mid-tail degrades gracefully — the stale claim is stolen after the
+   lease, and any surface still over its bound simply re-stages at the
+   next sweep's `compact-plan` (the store, as always, is the ledger).
+
 3. **Close the run.**
    - All due personas processed (`remaining == 0`) → **first fold the
      team event log** (ADR 0008, team-level, once per completed sweep,
@@ -252,10 +282,12 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
 
 - **Split gate**: the team **staleness floor** (default 24h) + **team
   watermark** make most triggers a no-op; the own-persona bypass fires
-  only on real pending work (live session excluded), and an own-only
-  run completes without advancing the team watermark (claim-scope
-  marker; a scope-less claim from pre-change code completes as
-  `"team"`).
+  only on real pending work (live session excluded, pending test in
+  exact lockstep with staging — idle past the cursor, or active over
+  the slice threshold — so a claimed own-only run always stages at
+  least one slice), and an own-only run completes without advancing
+  the team watermark (claim-scope marker; a scope-less claim from
+  pre-change code completes as `"team"`).
 - **Soft-lease claim** → one session sweeps per window; a crashed owner's
   stale claim is stolen after the lease.
 - **Per-wake cap** → a big backlog spreads across several wakes.

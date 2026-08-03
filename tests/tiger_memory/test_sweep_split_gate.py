@@ -3,8 +3,10 @@
 Covers the claim-scope marker (`scope: "own-only"` vs `"team"`), the
 target-composition matrix, the watermark-postponement guard (an own-only
 run leaves `last_sweep_at` untouched), the missing-scope compat rule,
-the `has_pending_source` pending check (live-session exclusion), and
-the `sweep-plan --own-persona / --exclude-session` CLI contract.
+the `has_pending_source` pending check (live-session exclusion, and the
+active-over-threshold path kept in lockstep with staging's ADR 0006
+Part 2 gate), and the `sweep-plan --own-persona / --exclude-session`
+CLI contract.
 """
 from __future__ import annotations
 
@@ -233,7 +235,7 @@ def test_maybe_sweep_roster_not_claimed_scope_none(tmp_path: Path) -> None:
 # ----- has_pending_source (plan.md §3 pending definition, criterion 3) ------
 
 
-def _cfg_and_store(tmp_path: Path):
+def _cfg_and_store(tmp_path: Path, *, extra: str = ""):
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(dedent(f"""\
         agent: {{name: Anzai, role: coach}}
@@ -242,16 +244,18 @@ def _cfg_and_store(tmp_path: Path):
           - kind: claude_code
             project_path: {tmp_path}/proj/
         summarizer: {{backend: anthropic, model: m, prompts: default/v1}}
-    """))
+    """) + extra)
     cfg = load_config(str(cfg_path))
     return cfg, Store(cfg.store.root)
 
 
-def _rec(uuid: str, *, last_event: datetime, mtime: float) -> SourceRecord:
+def _rec(
+    uuid: str, *, last_event: datetime, mtime: float, content: str = "x"
+) -> SourceRecord:
     return SourceRecord(
         conversation_uuid=uuid, source="claude_code", source_id="s",
         first_event_at=last_event, last_event_at=last_event,
-        activity_mtime=mtime, content="x", raw_path=Path("/r"),
+        activity_mtime=mtime, content=content, raw_path=Path("/r"),
     )
 
 
@@ -282,10 +286,11 @@ def test_live_session_never_counts_as_pending(tmp_path, monkeypatch) -> None:
     ) is False
 
 
-def test_active_record_not_pending(tmp_path, monkeypatch) -> None:
-    # Fresh mtime (< idle_threshold_hours) -> still being written -> not
-    # "completed", the idle heuristic that also guards a mid-write live
-    # transcript when --exclude-session is absent (safety clause).
+def test_active_record_under_threshold_not_pending(tmp_path, monkeypatch) -> None:
+    # Fresh mtime (< idle_threshold_hours) AND under the active-slice
+    # threshold -> staging would extract nothing yet, so the gate stays
+    # quiet. (Over-threshold active records ARE pending — see the ADR
+    # 0006 Part 2 lockstep tests below.)
     cfg, store = _cfg_and_store(tmp_path)
     rec = _rec("conv-b", last_event=_IDLE, mtime=_T0 - 60)
     monkeypatch.setattr(lc, "_discover", lambda c, max_age_days=7: [rec])
@@ -327,6 +332,52 @@ def test_pending_default_now_wallclock(tmp_path, monkeypatch) -> None:
     rec = _rec("conv-f", last_event=_IDLE, mtime=0.0)
     monkeypatch.setattr(lc, "_discover", lambda c, max_age_days=7: [rec])
     assert lc.has_pending_source(cfg, store) is True
+
+
+# ----- active-over-threshold pending (lockstep with ADR 0006 Part 2) --------
+
+_ACTIVE_BUDGET = "budgets: {active_slice_threshold_chars: 40}\n"
+_TS1 = "2026-08-01T10:00:00+00:00"
+_TS2 = "2026-08-01T10:05:00+00:00"
+
+
+def test_active_over_threshold_is_pending(tmp_path, monkeypatch) -> None:
+    # A still-warm transcript whose COMPLETED turns already exceed the
+    # active-slice threshold would stage a slice (ADR 0006 Part 2), so
+    # the gate reports pending without waiting out the quiet window.
+    cfg, store = _cfg_and_store(tmp_path, extra=_ACTIVE_BUDGET)
+    content = f"[{_TS1}] user:\n" + "x" * 80 + f"\n[{_TS2}] assistant:\nok\n"
+    rec = _rec("conv-g", last_event=_IDLE, mtime=_T0 - 60, content=content)
+    monkeypatch.setattr(lc, "_discover", lambda c, max_age_days=7: [rec])
+    assert lc.has_pending_source(cfg, store, now=_T0) is True
+
+
+def test_active_over_threshold_cursor_current_not_pending(
+    tmp_path, monkeypatch
+) -> None:
+    # Same shape of record, but the cursor already covers every turn —
+    # staging would stage nothing, so the gate stays quiet (the exact
+    # lockstep property: gate pending <=> staging stages a slice).
+    cfg, store = _cfg_and_store(tmp_path, extra=_ACTIVE_BUDGET)
+    content = f"[{_TS1}] user:\n" + "x" * 80 + f"\n[{_TS2}] assistant:\nok\n"
+    last = datetime(2026, 8, 1, 10, 5, tzinfo=timezone.utc)
+    rec = _rec("conv-h", last_event=last, mtime=_T0 - 60, content=content)
+    monkeypatch.setattr(lc, "_discover", lambda c, max_age_days=7: [rec])
+    save_cursor(store, "conv-h",
+                Cursor(last_event_at=_TS2, processed_events=2))
+    assert lc.has_pending_source(cfg, store, now=_T0) is False
+
+
+def test_active_oversized_live_tail_is_pending(tmp_path, monkeypatch) -> None:
+    # The hard case: the live turn ALONE exceeds the threshold — no
+    # completed boundary below it, so staging extracts the whole
+    # post-cursor slice (Part 1's chunker handles it) and the gate
+    # reports pending accordingly.
+    cfg, store = _cfg_and_store(tmp_path, extra=_ACTIVE_BUDGET)
+    content = f"[{_TS1}] user:\n" + "y" * 80 + "\n"
+    rec = _rec("conv-i", last_event=_IDLE, mtime=_T0 - 60, content=content)
+    monkeypatch.setattr(lc, "_discover", lambda c, max_age_days=7: [rec])
+    assert lc.has_pending_source(cfg, store, now=_T0) is True
 
 
 # ----- CLI contract (plan.md criterion 2) -----------------------------------
