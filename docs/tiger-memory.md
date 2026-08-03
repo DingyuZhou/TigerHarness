@@ -231,6 +231,7 @@ executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
 | `ingest-staged` | glue every staged `<uuid>.extract.md` card in ONE process (race-free). Exit 0 clean / 1 ≥1 malformed card / 2 no plan manifest |
 | `compact-plan` | non-AI: run the deterministic stale-topic forget, then stage one compaction prompt per surface at/over its `overflow_limit` under `.compact-staging/` + `manifest.json` (empty `targets` = nothing to do) |
 | `compact-apply` | non-AI: validate + apply every staged `<key>.card.md` in ONE process; deterministic convergence trim; protected content (operator-explicit, fresh topics) never force-dropped. Exit 0 clean / 1 ≥1 malformed card / 2 no compaction manifest |
+| `card-check <card>` | non-AI, **read-only ruler for card authors**: resolve `<card>` through the `manifest.json` beside it, parse + merge through the exact `compact-apply` code path (post-merge store size for `must_remember` / `skills` / `topic_roster` against the live store, rendered detail for `topic_detail` / `skill_detail`, apply-time bullet accounting for team-events `month`/`year` fold cards), and report `{chars, max, over_by, fits}` — the pre-trim answer to "does my draft fit?". Exit 0 fits / 4 over-bound / 1 malformed card / 2 no card, no manifest, or not a staged target |
 | `team-events-compact-plan` | non-AI, **team-level** (ADR 0008): run the size backstop, then stage one fold prompt per aged-out team-event period under `memories/team/.compact-staging/` (empty `targets` = nothing aged out) |
 | `team-events-compact-apply` | non-AI: validate + apply every staged team-events fold card in ONE process (deterministic trim; post-plan appends survive). Exit 0 clean / 1 ≥1 malformed card / 2 no manifest |
 | `sweep-plan` / `sweep-done` / `sweep-complete [--token]` / `sweep-release [--token]` | team-sweep gating (non-AI). `sweep-done` renews the claim lease and stamps the durable per-persona `done_at` map (the roster walk is least-recently-swept first); with `--token`, complete/release are refused (exit 3) when another session now owns the claim |
@@ -383,7 +384,11 @@ When a surface crosses its `overflow_limit`, the sweep stages a compaction
    would dangle it) — the oversized detail re-stages against the settled
    store.
 2. **Card sub-agents** (Task tool, isolated context) each write one
-   `<key>.card.md` per the prompt's embedded strict contract.
+   `<key>.card.md` per the prompt's embedded strict contract, then run
+   `tiger-memory card-check <card>` — the deterministic, read-only ruler
+   (same parse + merge code path as apply, incl. team-events fold cards)
+   — and tighten the draft until it reports `fits`. This replaces the
+   hand-counted generate→measure→trim loops that dominated sweep time.
 3. **`compact-apply`** (non-AI) validates each card, applies it atomically
    to the entry store, and **guarantees convergence
    deterministically** — a surface still over `max` after its card is

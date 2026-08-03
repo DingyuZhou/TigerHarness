@@ -171,6 +171,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-08-03 (card-check ruler): anzai: pre card-check ship -- the
+        #   compaction + team-events fold sub-agents still hand-counted
+        #   characters ("run no tiger-memory command"); now they run the
+        #   read-only card-check ruler on their drafts.
+        "28ab4eeafa3cf4545f0e893477a40208984fccc0b1e354d8bd1d62b659e08539",
         # 2026-08-03 (slack-bootstrap sweep): miyagi: pre split-gate ship --
         #   plain team-floor gate (no --own-persona/--exclude-session, no
         #   scope/own JSON keys, no Slack-bootstrap notify-first flow) and
@@ -231,7 +236,7 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "f3a4d521209476b1b6255ee49ff212db611e01134055b13c0344fbc16b0f2fa4",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "28ab4eeafa3cf4545f0e893477a40208984fccc0b1e354d8bd1d62b659e08539",
+    "sweep-memory": "c1fb2173700ea4aef75f594dce5e8f6dec15b4b63bd75cded43aeccb0572c74c",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }

@@ -3,9 +3,11 @@
 Covers ``compact_plan`` (deterministic stale-topic forget + one staged
 prompt per over-bound surface), ``compact_apply`` (card contracts per
 target kind, malformed-card handling, deterministic convergence trims,
-protected-content still_over reporting), and the small pure helpers
-(``_split_dated_sections``, ``_section_after_marker``, ``_is_fresh`` /
-``_is_stale`` boundaries). Pure Python, no model calls.
+protected-content still_over reporting), ``card_check`` (the card
+author's read-only ruler, all card kinds incl. team-events folds), and
+the small pure helpers (``_split_dated_sections``,
+``_section_after_marker``, ``_is_fresh`` / ``_is_stale`` boundaries).
+Pure Python, no model calls.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ import yaml
 
 from tigerharness.tiger_memory import compaction as cp
 from tigerharness.tiger_memory import indexes
+from tigerharness.tiger_memory import team_events as tev
 from tigerharness.tiger_memory.bounded_store import BoundedStore
 from tigerharness.tiger_memory.config import load_config
 from tigerharness.tiger_memory.entries import (
@@ -1559,3 +1562,203 @@ def test_plan_skills_index_staged_without_oversized_details(tmp_path, caplog):
         manifest = cp.compact_plan(cfg, store, now=NOW)
     assert [t["kind"] for t in manifest["targets"]] == ["skills"]
     assert "deferring" not in caplog.text        # no detail was over-bound
+
+
+# ----- card_check (the card author's ruler) ------------------------------------
+
+
+def test_card_check_must_remember_counts_protected_and_is_readonly(tmp_path):
+    """The card alone fits; the protected directive it cannot drop pushes
+    the post-merge store over the bound — that is exactly the answer the
+    hand-counting sub-agent could not compute cheaply."""
+    cfg, store, bstore, staging, _ = _mr_env(tmp_path, memory={
+        "must_remember": {"max_length": 20, "overflow_limit": 30},
+    })
+    op = _memo("P" * 15, kind="operator_explicit")
+    junk = _memo("J" * 25)
+    bstore.save_atomic(STORE_MUST_REMEMBER, [op, junk])
+    card = _card(staging, "must_remember",
+                 "@@MUST_REMEMBER@@\nKIND: preference\nMEMO: aaaaaaaaaa\n")
+    result = cp.card_check(cfg, store, card, now=NOW)
+    assert result["kind"] == cp.KIND_MUST_REMEMBER
+    assert result["key"] == "must_remember"
+    assert result["chars"] == bstore.length_chars([op, _memo("a" * 10)])
+    assert result["max"] == 20
+    assert result["fits"] is False
+    assert result["over_by"] == result["chars"] - 20
+    assert "note" not in result
+    # Read-only: store, card, and staging all survive untouched for apply.
+    assert [e.text for e in bstore.load(STORE_MUST_REMEMBER)] == \
+        [op.text, junk.text]
+    assert card.exists()
+    assert (staging / "manifest.json").exists()
+
+
+def test_card_check_skills_measures_post_merge_index(tmp_path):
+    keep = _skill("Keep Me", trigger="kt", proc="kp")
+    new = _skill("Brand New", trigger="bt", proc="bp")
+    fit_len = len(indexes.render_skill_index([keep, new]))
+    cfg, store, bstore, staging, _ = _skills_env(tmp_path, memory={
+        "skills": {
+            "index_max_length": fit_len, "index_overflow_limit": fit_len + 50,
+        },
+    })
+    bstore.save_atomic(STORE_SKILLS, [_skill("Keep Me", trigger="kt", proc="kp")])
+    card = _card(staging, "skills", (
+        "@@SKILLS@@\n"
+        "NAME: Keep Me\nTRIGGER: kt\nPROCEDURE: kp\n"
+        "\n"
+        "NAME: Brand New\nTRIGGER: bt\nPROCEDURE: bp\n"
+    ))
+    result = cp.card_check(cfg, store, card, now=NOW)
+    assert result["chars"] == fit_len
+    assert result["fits"] is True and result["over_by"] == 0
+    # Read-only: the store still holds only the original skill.
+    assert [e.name for e in bstore.load(STORE_SKILLS)] == ["Keep Me"]
+
+
+def test_card_check_topic_roster_applies_directives_readonly(tmp_path):
+    alpha = _topic("Alpha", last=NOT_FRESH)
+    beta = _topic("Beta", last=NOT_FRESH)
+    keep_len = len(indexes.render_topic_index([beta]))
+    cfg, store, bstore, staging, _ = _roster_env(tmp_path, memory={
+        "topics": {
+            "index_max_length": keep_len,
+            "index_overflow_limit": keep_len + 100,
+        },
+    })
+    bstore.save_atomic(STORE_TOPICS, [alpha, beta])
+    card = _card(staging, "topic_roster",
+                 "@@TOPIC_ROSTER@@\nACTION: forget\nTOPIC: alpha\n")
+    result = cp.card_check(cfg, store, card, now=NOW)
+    # Measured AFTER the forget directive: only beta renders.
+    assert result["chars"] == keep_len
+    assert result["fits"] is True
+    # Read-only: alpha is still in the store — apply does the forgetting.
+    assert {t.slug for t in bstore.load(STORE_TOPICS)} == {"alpha", "beta"}
+
+
+def test_card_check_topic_detail_over_bound(tmp_path):
+    cfg, store, bstore, staging, _ = _topic_detail_env(tmp_path, "alpha", memory={
+        "topics": {"detail_max_length": 100, "detail_overflow_limit": 150},
+    })
+    bstore.save_atomic(STORE_TOPICS, [_topic("Alpha")])
+    body = "## 2026-07-23\n- " + "x" * 200
+    card = _card(staging, "topic_detail.alpha", "@@TOPIC_DETAIL@@\n" + body)
+    result = cp.card_check(cfg, store, card, now=NOW)
+    assert result["fits"] is False
+    assert result["over_by"] == result["chars"] - 100 > 0
+    # Read-only: the stored body is untouched.
+    [al] = bstore.load(STORE_TOPICS)
+    assert al.text == "## 2026-07-01\n- a"
+
+
+def test_card_check_topic_detail_vanished_topic_notes_noop(tmp_path):
+    cfg, store, bstore, staging, _ = _topic_detail_env(tmp_path, "ghost")
+    bstore.save_atomic(STORE_TOPICS, [_topic("Alpha")])
+    card = _card(staging, "topic_detail.ghost",
+                 "@@TOPIC_DETAIL@@\n## 2026-07-23\n- x\n")
+    result = cp.card_check(cfg, store, card, now=NOW)
+    assert result["chars"] == 0 and result["fits"] is True
+    assert result["note"] == "topic no longer exists; apply will no-op"
+
+
+def test_card_check_skill_detail_measures_render(tmp_path):
+    s = _skill("Old Name", trigger="ot", proc="op")
+    cfg, store, bstore, staging, _ = _skill_detail_env(tmp_path, s.id, memory={
+        "skills": {"detail_max_length": 200, "detail_overflow_limit": 300},
+    })
+    bstore.save_atomic(STORE_SKILLS, [s])
+    card = _card(staging, f"skill_detail.{s.id}",
+                 "@@SKILLS@@\nNAME: New Name\nTRIGGER: nt\nPROCEDURE: np\n")
+    result = cp.card_check(cfg, store, card, now=NOW)
+    assert result["chars"] == \
+        bstore.detail_chars(_skill("New Name", trigger="nt", proc="np"))
+    assert result["fits"] is True
+    # Read-only: the stored skill keeps its old fields.
+    [e] = bstore.load(STORE_SKILLS)
+    assert e.name == "Old Name" and e.procedure == "op"
+
+
+def test_card_check_skill_detail_vanished_skill_notes_noop(tmp_path):
+    cfg, store, bstore, staging, _ = _skill_detail_env(tmp_path, "missing12345")
+    bstore.save_atomic(STORE_SKILLS, [_skill("Keep")])
+    card = _card(staging, "skill_detail.missing12345",
+                 "@@SKILLS@@\nNAME: N\nTRIGGER: T\nPROCEDURE: P\n")
+    result = cp.card_check(cfg, store, card, now=NOW)
+    assert result["chars"] == 0 and result["fits"] is True
+    assert result["note"] == "skill no longer exists; apply will no-op"
+
+
+def test_card_check_team_events_month_and_year(tmp_path):
+    # Resolution is by the manifest BESIDE the card, so a fold-staging
+    # manifest works no matter where it lives — the real one sits next to
+    # the team log, this test's sits under the store root.
+    cfg, store, _ = make_env(tmp_path, memory={
+        "team_events": {"month_max_chars": 12, "year_max_chars": 10},
+    })
+    staging = store.root / cp.STAGING_DIR_NAME
+    staging.mkdir(parents=True)
+    month = _target(staging, tev.KIND_MONTH, "2026-06")
+    year = _target(staging, tev.KIND_YEAR, "2025")
+    _stage(store, [month, year])
+    m_card = _card(staging, "2026-06", "@@TEAM_EVENTS@@\n- A did x.\n")
+    y_card = _card(staging, "2025", "@@TEAM_EVENTS@@\n- big year here.\n")
+    m = cp.card_check(cfg, store, m_card, now=NOW)
+    # Apply-time trim accounting: each bullet costs its length plus one.
+    assert (m["chars"], m["max"], m["fits"]) == (len("- A did x.") + 1, 12, True)
+    y = cp.card_check(cfg, store, y_card, now=NOW)
+    assert y["chars"] == len("- big year here.") + 1
+    assert (y["max"], y["fits"], y["over_by"]) == (10, False, y["chars"] - 10)
+
+
+def test_card_check_malformed_card_raises_parse_error(tmp_path):
+    cfg, store, _, staging, _ = _mr_env(tmp_path)
+    card = _card(staging, "must_remember",
+                 "@@MUST_REMEMBER@@\nKIND: bogus\nMEMO: m\n")
+    with pytest.raises(cp.CompactionParseError, match="bad must_remember block"):
+        cp.card_check(cfg, store, card, now=NOW)
+
+
+def test_card_check_malformed_team_events_card_raises(tmp_path):
+    cfg, store, _ = make_env(tmp_path)
+    staging = store.root / cp.STAGING_DIR_NAME
+    staging.mkdir(parents=True)
+    _stage(store, [_target(staging, tev.KIND_MONTH, "2026-06")])
+    card = _card(staging, "2026-06", "no marker at all")
+    with pytest.raises(tev.TeamEventsError):
+        cp.card_check(cfg, store, card, now=NOW)
+
+
+def test_card_check_unknown_target_kind_raises(tmp_path):
+    cfg, store, _ = make_env(tmp_path)
+    staging = store.root / cp.STAGING_DIR_NAME
+    staging.mkdir(parents=True)
+    _stage(store, [_target(staging, "wat", "wat")])
+    card = _card(staging, "wat", "@@ANYTHING@@\nstuff\n")
+    with pytest.raises(cp.CompactionParseError, match="unknown target kind"):
+        cp.card_check(cfg, store, card, now=NOW)
+
+
+def test_card_check_missing_manifest_raises(tmp_path):
+    cfg, store, _ = make_env(tmp_path)
+    orphans = store.root / "orphans"
+    orphans.mkdir(parents=True)
+    card = orphans / "orphan.card.md"
+    card.write_text("@@MUST_REMEMBER@@\nNONE\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="no staging manifest"):
+        cp.card_check(cfg, store, card, now=NOW)
+
+
+def test_card_check_card_not_a_target_raises(tmp_path):
+    cfg, store, _, staging, _ = _mr_env(tmp_path)
+    stray = staging / "stray.card.md"
+    stray.write_text("@@MUST_REMEMBER@@\nNONE\n", encoding="utf-8")
+    with pytest.raises(LookupError, match="not a staged target"):
+        cp.card_check(cfg, store, stray, now=NOW)
+
+
+def test_card_check_missing_card_file_raises(tmp_path):
+    cfg, store, _, _, t = _mr_env(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        cp.card_check(cfg, store, Path(t["card_path"]), now=NOW)

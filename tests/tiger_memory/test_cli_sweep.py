@@ -16,9 +16,11 @@ team_memories_dir = cfg.store.root.parent = <tmp>/mem.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
 
+from tigerharness.tiger_memory import sweep
 from tigerharness.tiger_memory.cli import main
 
 
@@ -110,6 +112,34 @@ def test_sweep_complete_then_plan_not_due(tmp_path: Path, capsys) -> None:
     out = _run(cfg, "sweep-plan", capsys=capsys)
     assert out["ran"] is False
     assert out["reason"] == "not_due"
+
+
+def test_sweep_complete_own_only_says_watermark_unchanged(
+    tmp_path: Path, capsys
+) -> None:
+    # The success line is the surface an AI driver reads: an own-only
+    # close leaves the team watermark untouched and must SAY so —
+    # printing "watermark advanced" there once sent a driver auditing
+    # its own run into the state file.
+    cfg = _setup(tmp_path)
+    team = tmp_path / "mem"
+    last = "2026-08-03T11:00:00+00:00"
+    sweep.write_sweep_state(team, {"last_sweep_at": last})  # floor not due
+    claim = sweep.try_claim_sweep(
+        team, now=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        token="T", own_persona="anzai", own_pending=True,
+    )
+    assert claim.claimed and claim.scope == "own-only"
+    rc = main(["--config", cfg, "sweep-done", "--persona", "anzai"])
+    assert rc == 0
+    capsys.readouterr()
+    rc = main(["--config", cfg, "sweep-complete", "--token", "T",
+               "--now", "2026-08-03T12:30:00Z"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "team watermark unchanged" in out
+    assert "watermark advanced" not in out
+    assert sweep.read_sweep_state(team)["last_sweep_at"] == last
 
 
 def test_sweep_done_skips_persona_on_next_plan(tmp_path: Path, capsys) -> None:
