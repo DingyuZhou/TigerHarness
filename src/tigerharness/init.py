@@ -65,6 +65,10 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-08-03 (slack-bootstrap sweep): miyagi: pre split-gate ship --
+        #   idle tail described the sweep gate as staleness floor + watermark
+        #   only (no own-persona/--driver split-gate pointer).
+        "b2bcfff96c9e16996260c171349fddf116c23bc66de974d2fc77283e15abbaf3",
         # 2026-08-02 (practicality pass): ayako: pre memory-adoption ship --
         #   step 3 read-context had no persona-briefing load (drives worked
         #   with a persona's voice but none of its memory).
@@ -120,6 +124,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "5271f7d54ad66c2c9c1d4449305d01dff682531def965b3260ddaa4221fac0c3",
     },
     "journal-new": {
+        # 2026-08-03 (slack-bootstrap sweep): miyagi: pre split-gate ship --
+        #   Slack-lean section still framed by billing rails and forbade
+        #   "journal sweeps" (now governed by sweep-memory's bootstrap flow).
+        "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
         # 2026-06-11 (1c370b4): miyagi: Slack rail cost discipline -- lean scheduling...
         "df0105db8bbfa6adfdf1ad27494712ae480e1c23fa1abc10b6d6e44404c52816",
         # 2026-06-10 (00443fb): miyagi: purge live runner references from docs, READM...
@@ -163,6 +171,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-08-03 (slack-bootstrap sweep): miyagi: pre split-gate ship --
+        #   plain team-floor gate (no --own-persona/--exclude-session, no
+        #   scope/own JSON keys, no Slack-bootstrap notify-first flow) and
+        #   billing-framed executor rationale.
+        "9ea39fcc6dce4d3255033f4e928dc2123257eaae7a28b616a32646573cbe1b78",
         # 2026-08-02 (practicality pass): ayako: pre answer-first ship --
         #   before the answer-the-user-first rule, the map-reduce lore trim
         #   (protocol-doc pointer), and the ingest anomaly wording tweaks.
@@ -214,11 +227,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "b2bcfff96c9e16996260c171349fddf116c23bc66de974d2fc77283e15abbaf3",
+    "drive-journal": "536432c99474b57a29597989c9b3908ee970921bbe1fae9b7ca0bcff72380764",
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
-    "journal-new": "533da85e99d19ea359c25e4b25deca358ebf2593e79f25baafbe7f881cda1943",
+    "journal-new": "f3a4d521209476b1b6255ee49ff212db611e01134055b13c0344fbc16b0f2fa4",
     "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
-    "sweep-memory": "9ea39fcc6dce4d3255033f4e928dc2123257eaae7a28b616a32646573cbe1b78",
+    "sweep-memory": "28ab4eeafa3cf4545f0e893477a40208984fccc0b1e354d8bd1d62b659e08539",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
 }

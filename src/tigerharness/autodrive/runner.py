@@ -11,12 +11,12 @@ WHY THIS EXISTS AT ALL (read before extending)
 -----------------------------------------------
 The journal is a *human-triggered* subscription backend: "no programmatic
 driver by design". This module is the deliberate, Operator-authorized
-exception. It is only safe to run while ``claude -p`` bills the Claude
-subscription rather than API tokens (the reason the Slack-drive ban was
-lifted in the same period). If Anthropic flips ``claude -p`` to API
-billing, an unattended autodrive bills real dollars on every tick --
-that is what ``max_budget_usd`` and the ``autodrive stop`` off-switch
-guard against. Keep those guardrails loud.
+exception. Which run shapes are sanctioned, why, and what changes if the
+vendor's billing terms shift is the rails doctrine in
+``docs/subscription-backend.md`` -- re-read it before extending this
+module. The guardrails here exist because an unattended loop must always
+be budget-capped and killable: that is what ``max_budget_usd`` and the
+``autodrive stop`` off-switch guard. Keep those guardrails loud.
 
 Loop shape: **fire on a fixed cadence, do NOT wait** (overlap allowed).
 Every ``interval`` seconds the loop launches a fresh drive and immediately
@@ -120,8 +120,15 @@ def default_prompt(driver: str | None) -> str:
             f"Claim each task with `--driver {driver} --allow-api-drive` so "
             f"the work is attributed to {driver}'s memory store"
         )
+        own = (
+            f" -- your --driver persona {driver} is the sweep's own persona"
+        )
     else:
         claim = "Claim each task with `--allow-api-drive`"
+        own = (
+            " -- with no driver persona set, it runs as the plain "
+            "team-floor sweep (no own-persona bypass)"
+        )
     return (
         "You are an Operator-authorized automatic journal driver "
         "(`tigerharness autodrive`). This is a SANCTIONED programmatic "
@@ -138,9 +145,10 @@ def default_prompt(driver: str | None) -> str:
         "nothing busy, run the skill's idle-maintenance tail before "
         "stopping: `tigerharness slack-bridge compact-idle` (self-gating; "
         "its only model call is one bounded /compact turn per heavy idle "
-        "lane) and the team's sweep-memory skill (self-gating via "
-        "its watermark + lease; its summarize work runs in Task-tool "
-        "sub-agents, which THIS session may spawn). Then stop cleanly."
+        "lane) and the team's sweep-memory skill (self-gating via its "
+        f"split gate + watermark + lease{own}; its summarize work runs "
+        "in Task-tool sub-agents, which THIS session may spawn). Then "
+        "stop cleanly."
     )
 
 

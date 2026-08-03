@@ -11,17 +11,20 @@ journal task -- either single-persona (`kind=task`) or multi-persona
 `drive-journal` skill then drives the task from there.
 
 The subscription backend runs work through the *interactive* Claude
-Code app (subscription-billed) instead of through `claude -p` (which
-moves to API-token billing soon). See
+Code app instead of through a programmatic `claude -p` driver (rails
+and billing: `docs/subscription-backend.md`). See
 [`docs/journal.md`](../../docs/journal.md) for the architecture and
 [`docs/journal-workflow-mode.md`](../../docs/journal-workflow-mode.md)
 for the workflow-mode details.
 
-## Slack-triggered? Stay lean (the API rail)
+## Slack-triggered? Stay lean
 
-When triggered from Slack to schedule a journal task, you are on the
-API-billed rail: do the minimum -- which since the deferred inbox
-landed means **don't even scaffold**.
+When triggered from Slack to schedule a journal task, keep the thread
+lean: a chat turn is for capturing the ask, not for doing it -- the
+deferred inbox gives the request durable tracking with minimum
+ceremony, and the scaffold + preflight + compile all have a better
+home inside a drive. So do the minimum -- which since the deferred
+inbox landed means **don't even scaffold**.
 
 1. Collect the Operator's message VERBATIM (the whole conversation
    that defines the ask) plus a short title and the team name --
@@ -45,12 +48,15 @@ explicitly asks for an immediate scaffold, but the defer verb is the
 default — it is the cheapest possible Slack-side path.
 
 Forbidden on this rail: repo exploration, file reads beyond this
-skill's own needs, design work, journal sweeps, claiming, driving,
-compile turns, materializing. All real work happens later, on the
-subscription rail, via `drive-journal` in an interactive session --
-and that is a hard rule, not a preference: Slack schedules, never
-drives (`journal claim` refuses bridge sessions mechanically). Rails
-and billing: `docs/subscription-backend.md`.
+skill's own needs, design work, claiming, driving, compile turns,
+materializing. (Memory sweeps are no longer on this list: the
+`sweep-memory` skill's Slack-bootstrap flow -- notify-first, split
+gate -- governs them, and a Slack session runs it when triggered.)
+All real journal work happens later, on the subscription rail, via
+`drive-journal` in an interactive session -- and that is a hard rule,
+not a preference: Slack schedules, never drives (`journal claim`
+refuses bridge sessions mechanically). Rails and billing:
+`docs/subscription-backend.md`.
 
 ## When to use this skill
 

@@ -387,11 +387,27 @@ class SlackBridge:
                     # (practicality audit, consumption finding 2). An
                     # instruction appended to the first user turn is far
                     # harder to skip than one buried mid-system-prompt.
+                    # The same injection hands the session its
+                    # Slack-bootstrap sweep duty (split gate +
+                    # notify-first); the sweep-memory skill owns the
+                    # procedure and self-gates, so this is a cheap no-op
+                    # when nothing is pending. A resumed thread/session
+                    # gets no injection and no bootstrap sweep — by
+                    # design.
                     prompt = (
                         f"{prompt}\n\n[bridge-context] first turn of a new "
                         "session: before answering, read "
                         f"memories/{state.persona}/briefing/README.md and "
-                        "follow it (skip silently if it does not exist)."
+                        "follow it (skip silently if it does not exist). "
+                        "Then run the sweep-memory skill's Slack-bootstrap "
+                        f"flow as persona {state.persona} (your own "
+                        "persona): it self-gates. If a sweep will run, "
+                        "post a short in-thread heads-up BEFORE sweeping "
+                        "(notify-first), sweep your own persona's pending "
+                        "transcripts before the requested work, and "
+                        "dispatch other personas' extraction in the "
+                        "background. Skip silently if the sweep-memory "
+                        "skill is not installed."
                     )
                 log.info(
                     "thread=%s persona=%s dispatch (resume=%s, chars=%d, files=%d)",

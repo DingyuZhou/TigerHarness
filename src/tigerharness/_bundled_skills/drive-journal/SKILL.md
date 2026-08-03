@@ -190,11 +190,14 @@ ceiling (step 7 — hand off instead).
    `/compact` turn it sends per eligible lane. Run it from the team
    root.
 2. **Sweep the team's memory**: invoke the `sweep-memory` skill.
-   Self-gating via its staleness floor + watermark + soft lease — a
-   fresh team is a few tokens of no-op. Its summarize work runs in
-   Task-tool sub-agents, which any agent drive session (including an
-   autodrive `claude -p` fire) can spawn; the executor ban only covers
-   plain daemons that cannot host sub-agents.
+   Self-gating via its split gate: the drive's `--driver` persona is
+   the sweep's **own persona** (its completed-but-un-swept transcripts
+   bypass the team staleness floor; every other persona keeps the
+   floor + watermark + soft lease) — a fresh team is a few tokens of
+   no-op. Its summarize work runs in Task-tool sub-agents, which any
+   agent drive session (including an autodrive `claude -p` fire) can
+   spawn; the executor rule only bars plain daemons, which cannot host
+   sub-agents.
 
 Order matters slightly: compact first (bounded, usually a no-op), then
 the memory sweep (it may fan out sub-agents). If the sweep claims work,

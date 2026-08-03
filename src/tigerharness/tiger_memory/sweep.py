@@ -54,6 +54,9 @@ DEFAULT_MAX_PERSONAS = 3
 class ClaimResult:
     claimed: bool
     reason: str  # "claimed" | "not_due" | "busy"
+    # "team" (floor-due roster run) | "own-only" (floor bypassed for the
+    # calling persona's pending sources) | None when not claimed.
+    scope: str | None = None
 
 
 # ----- state file IO -------------------------------------------------------
@@ -123,20 +126,34 @@ def try_claim_sweep(
     token: str,
     floor_hours: float = DEFAULT_STALENESS_FLOOR_HOURS,
     lease_seconds: float = DEFAULT_LEASE_SECONDS,
+    own_persona: str | None = None,
+    own_pending: bool = False,
 ) -> ClaimResult:
     """Decide whether THIS session runs the team sweep.
 
-    1. Staleness floor: if the last completed sweep is recent, return
+    1. Staleness floor: if the last completed sweep is recent AND the
+       calling persona has no pending own sources (*own_pending*), return
        ``not_due`` — the cheap common case (every trigger inside the floor
-       window is a no-op).
+       window is a no-op). ``own_pending=True`` bypasses the floor for the
+       calling persona only (split gate): the claim then carries
+       ``scope: "own-only"`` unless the team floor is ALSO due, in which
+       case the run is a normal ``scope: "team"`` roster run that the own
+       persona rides along in.
     2. Soft-lease claim: if another session holds a *fresh* claim (within
        *lease_seconds*), return ``busy``; otherwise stamp our token +
        timestamp into the state file and return ``claimed``. A stale claim
        (crashed owner) is stolen; re-claiming our own token is allowed.
+       One lease serializes BOTH scopes — an own-only run holding the
+       lease makes a concurrently due team claim ``busy`` (accepted
+       tradeoff: the lease is short, the next trigger retries).
     """
     state = read_sweep_state(team_memories_dir)
-    if not sweep_due(state.get("last_sweep_at"), now, floor_hours=floor_hours):
-        log.info("team sweep: not_due (inside staleness floor)")
+    team_due = sweep_due(
+        state.get("last_sweep_at"), now, floor_hours=floor_hours
+    )
+    if not team_due and not own_pending:
+        log.info("team sweep: not_due (inside staleness floor, no own "
+                 "pending)")
         return ClaimResult(False, "not_due")
 
     claim_at = _parse_iso(state.get("claim_at"))
@@ -148,6 +165,11 @@ def try_claim_sweep(
     if held_by_other:
         log.info("team sweep: busy (live claim holds the lease)")
         return ClaimResult(False, "busy")
+
+    # Scope of THIS claim (recorded in the state file so sweep-complete
+    # knows whether to advance the team watermark): a due team floor
+    # always wins — the own persona simply rides along in the roster run.
+    scope = "team" if team_due else "own-only"
 
     # Bound a sweep RUN to the staleness floor. A run spans several wakes
     # (per-wake cap → release → resume), and `progress` carries the
@@ -168,9 +190,14 @@ def try_claim_sweep(
 
     state["claim_token"] = token
     state["claim_at"] = now.isoformat()
+    state["scope"] = scope
+    if scope == "own-only" and own_persona:
+        state["own_persona"] = own_persona
+    else:
+        state.pop("own_persona", None)
     write_sweep_state(team_memories_dir, state)
-    log.info("team sweep: claimed")
-    return ClaimResult(True, "claimed")
+    log.info("team sweep: claimed (scope=%s)", scope)
+    return ClaimResult(True, "claimed", scope)
 
 
 def _token_mismatch(state: dict, token: str | None, verb: str) -> bool:
@@ -210,6 +237,10 @@ def release_sweep_claim(
         return False
     state.pop("claim_token", None)
     state.pop("claim_at", None)
+    # Scope is claim-scoped, not run-scoped: the next claim recomputes it
+    # fresh, so a released claim leaves no stale scope behind.
+    state.pop("scope", None)
+    state.pop("own_persona", None)
     write_sweep_state(team_memories_dir, state)
     return True
 
@@ -218,9 +249,11 @@ def mark_sweep_complete(
     team_memories_dir: Path, now: datetime, *, token: str | None = None,
     force: bool = False,
 ) -> bool:
-    """Advance the team watermark and end the run: clear the claim AND the
-    per-persona progress. The bumped ``last_sweep_at`` is what makes the
-    next trigger inside the floor window a cheap no-op.
+    """End the run: clear the claim AND the per-persona progress, and — for
+    a ``scope: "team"`` claim only — advance the team watermark. The bumped
+    ``last_sweep_at`` is what makes the next trigger inside the floor
+    window a cheap no-op; an ``own-only`` run leaves it untouched so the
+    team's floor-due sweep is not silently postponed.
 
     With *token*, refused (``False``) on a claim mismatch — a stale
     driver advancing the watermark would skip the live run's remaining
@@ -233,12 +266,20 @@ def mark_sweep_complete(
     state = read_sweep_state(team_memories_dir)
     if _token_mismatch(state, token, "sweep-complete"):
         return False
+    # Claim scope decides the watermark. Compat: a claim record WITHOUT a
+    # scope field (written by pre-scope code) is a team run — today's
+    # semantics, conservative.
+    scope = state.get("scope") or "team"
     if not force:
         done = sweep_progress(team_memories_dir)
-        pending = [
-            t.name for t in enumerate_persona_configs(team_memories_dir)
-            if t.name not in done
-        ]
+        if scope == "own-only":
+            own = state.get("own_persona")
+            pending = [own] if own and own not in done else []
+        else:
+            pending = [
+                t.name for t in enumerate_persona_configs(team_memories_dir)
+                if t.name not in done
+            ]
         if pending:
             log.warning(
                 "team sweep: sweep-complete refused — %d persona(s) not "
@@ -247,11 +288,19 @@ def mark_sweep_complete(
                 len(pending), ", ".join(pending),
             )
             return False
-    state["last_sweep_at"] = now.isoformat()
+    if scope == "own-only":
+        # An own-only sweep must NOT advance the team watermark — doing so
+        # would silently push the team's floor-due sweep back a full
+        # window every time one persona's pending sources fire.
+        log.info("team sweep: own-only run complete; watermark unchanged")
+    else:
+        state["last_sweep_at"] = now.isoformat()
     state.pop("claim_token", None)
     state.pop("claim_at", None)
     state.pop("progress", None)
     state.pop("run_started_at", None)
+    state.pop("scope", None)
+    state.pop("own_persona", None)
     write_sweep_state(team_memories_dir, state)
     return True
 
@@ -359,16 +408,40 @@ def plan_team_sweep(
     team_memories_dir: Path,
     *,
     max_personas: int | None = DEFAULT_MAX_PERSONAS,
+    own_persona: str | None = None,
+    scope: str = "team",
 ) -> SweepPlan:
     """Sequence the roster for THIS wake: skip personas already done in the
     in-flight run, then take at most *max_personas* of the rest
     (default ``DEFAULT_MAX_PERSONAS``; ``None`` for unbounded).
+
+    Target composition by *scope* (the split-gate matrix):
+
+    - ``"own-only"`` — targets are exactly ``[own_persona]``; every other
+      persona keeps the staleness floor and is NOT swept this run.
+    - ``"team"`` with *own_persona* set — the own persona (floor-exempt,
+      pending sources) goes first; LRU others follow under the cap, which
+      applies to the OTHERS only (no starvation change).
+    - ``"team"`` without *own_persona* — the plain LRU walk; nobody is
+      privileged. Callers pass *own_persona* only when its pending check
+      fired.
 
     Pure sequencing (non-AI): the per-persona rebuild — a no-op when the
     persona has no new sessions — runs in the executor (slice c).
     """
     done = sweep_progress(team_memories_dir)
     all_targets = enumerate_persona_configs(team_memories_dir)
+    if scope == "own-only":
+        # A crashed prior run may already have the own persona in
+        # `progress`; an empty target list is fine (the driver completes
+        # or releases without work).
+        own_t = [
+            t for t in all_targets
+            if t.name == own_persona and t.name not in done
+        ]
+        return SweepPlan(
+            targets=own_t, remaining=0, all_personas=len(all_targets)
+        )
     pending = [t for t in all_targets if t.name not in done]
     # Least-recently-completed first (durable done_at map; a persona never
     # completed sorts oldest). With fixed roster order, a team whose runs
@@ -376,11 +449,13 @@ def plan_team_sweep(
     # starves the tail; LRU ordering guarantees rotation ("no persona
     # left behind", B3). Ties keep roster order (sorted() is stable).
     done_at = persona_done_at(team_memories_dir)
-    pending.sort(key=lambda t: done_at.get(t.name, ""))
-    selected = pending if max_personas is None else pending[:max_personas]
+    own_t = [t for t in pending if t.name == own_persona]
+    others = [t for t in pending if t.name != own_persona]
+    others.sort(key=lambda t: done_at.get(t.name, ""))
+    selected = others if max_personas is None else others[:max_personas]
     return SweepPlan(
-        targets=selected,
-        remaining=len(pending) - len(selected),
+        targets=own_t + selected,
+        remaining=len(others) - len(selected),
         all_personas=len(all_targets),
     )
 
@@ -390,6 +465,7 @@ class SweepDecision:
     ran: bool
     reason: str             # "claimed" | "not_due" | "busy"
     plan: SweepPlan | None  # the roster targets to process when ran
+    scope: str | None = None  # "team" | "own-only" | None when not claimed
 
 
 def maybe_sweep_roster(
@@ -400,6 +476,8 @@ def maybe_sweep_roster(
     floor_hours: float = DEFAULT_STALENESS_FLOOR_HOURS,
     lease_seconds: float = DEFAULT_LEASE_SECONDS,
     max_personas: int | None = DEFAULT_MAX_PERSONAS,
+    own_persona: str | None = None,
+    own_pending: bool = False,
 ) -> SweepDecision:
     """The shared persona-session-bootstrap hook (B3). Tries to claim the
     team sweep; on success returns the roster `plan` for the caller to
@@ -407,14 +485,26 @@ def maybe_sweep_roster(
     `record_persona_done` and finally `mark_sweep_complete` /
     `release_sweep_claim`). On `not_due` / `busy` it is a cheap no-op.
 
+    *own_persona* + *own_pending* wire the split gate (the caller computes
+    the pending check — this module stays discovery-agnostic): pending own
+    sources bypass the staleness floor for the own persona only, and the
+    claim's ``scope`` drives target composition + watermark semantics.
+
     Pure gating + sequencing — no AI. The caller owns execution so this
     stays vendor-neutral and unit-testable.
     """
     claim = try_claim_sweep(
         team_memories_dir, now=now, token=token,
         floor_hours=floor_hours, lease_seconds=lease_seconds,
+        own_persona=own_persona, own_pending=own_pending,
     )
     if not claim.claimed:
         return SweepDecision(ran=False, reason=claim.reason, plan=None)
-    plan = plan_team_sweep(team_memories_dir, max_personas=max_personas)
-    return SweepDecision(ran=True, reason="claimed", plan=plan)
+    plan = plan_team_sweep(
+        team_memories_dir, max_personas=max_personas,
+        own_persona=own_persona if own_pending else None,
+        scope=claim.scope or "team",
+    )
+    return SweepDecision(
+        ran=True, reason="claimed", plan=plan, scope=claim.scope
+    )
