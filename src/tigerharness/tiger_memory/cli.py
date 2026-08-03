@@ -183,6 +183,15 @@ def main(argv: list[str] | None = None) -> int:
                             "(default: the config's sweep.lease_seconds).")
     p_swp.add_argument("--now", default=None,
                        help="ISO timestamp override (testing/determinism).")
+    p_swp.add_argument("--own-persona", default=None,
+                       help="Split gate: the calling session's persona (must "
+                            "be the persona this --config belongs to). Its "
+                            "completed-but-un-swept sources bypass the "
+                            "staleness floor; other personas keep it.")
+    p_swp.add_argument("--exclude-session", default=None,
+                       help="The calling session's conversation uuid — "
+                            "excluded from the own-persona pending check so "
+                            "a live session never counts itself.")
 
     p_swd = sub.add_parser(
         "sweep-done", help="Mark one persona completed in the in-flight run.")
@@ -299,9 +308,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_team_events_compact_apply(cfg)
     if args.cmd == "sweep-plan":
         return _cmd_sweep_plan(
-            cfg, token=args.token, max_personas=args.max_personas,
+            cfg, store, token=args.token, max_personas=args.max_personas,
             floor_hours=args.floor_hours, lease_seconds=args.lease_seconds,
-            now=args.now,
+            now=args.now, own_persona=args.own_persona,
+            exclude_session=args.exclude_session,
         )
     if args.cmd == "sweep-done":
         return _cmd_sweep_done(cfg, args.persona)
@@ -701,12 +711,28 @@ def _parse_now(raw: str | None) -> datetime:
 
 
 def _cmd_sweep_plan(
-    cfg: Config, *, token: str | None, max_personas: int | None,
-    floor_hours: float | None, lease_seconds: float | None, now: str | None,
+    cfg: Config, store: Store, *, token: str | None,
+    max_personas: int | None, floor_hours: float | None,
+    lease_seconds: float | None, now: str | None,
+    own_persona: str | None = None, exclude_session: str | None = None,
 ) -> int:
     import uuid
 
     from . import sweep
+
+    # Split gate: the own-persona pending check (cheap, no LLM) runs
+    # against THIS config's sources + cursors — the config must belong to
+    # the named persona. Computed before the claim so a floor-bypassing
+    # own-only claim is only taken when there is actually work.
+    own = None
+    own_pending = False
+    if own_persona:
+        from .lifecycle import has_pending_source
+
+        own_pending = has_pending_source(
+            cfg, store, exclude_session=exclude_session
+        )
+        own = {"persona": own_persona, "pending": own_pending}
 
     # Flags win; otherwise the config's sweep: block (tunable per team —
     # previously these were untunable code constants).
@@ -723,12 +749,15 @@ def _cmd_sweep_plan(
             lease_seconds if lease_seconds is not None
             else cfg.sweep.lease_seconds
         ),
+        own_persona=own_persona, own_pending=own_pending,
     )
     plan = decision.plan
     payload = {
         "ran": decision.ran,
         "reason": decision.reason,
         "token": claim_token,
+        "scope": decision.scope,
+        "own": own,
         "targets": [
             {"name": t.name, "config_path": str(t.config_path)}
             for t in (plan.targets if plan else [])

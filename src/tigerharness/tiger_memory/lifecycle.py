@@ -698,6 +698,50 @@ def _discover(cfg: Config, *, max_age_days: int | None = 7) -> list[SourceRecord
     return records
 
 
+def has_pending_source(
+    cfg: Config,
+    store: Store,
+    *,
+    exclude_session: str | None = None,
+    now: float | None = None,
+    max_age_days: int | None = 7,
+) -> bool:
+    """Does this persona have completed-but-un-swept source content?
+
+    The split-gate pending check (cheap, no LLM, no staging side-effects):
+    True iff some discovered source record — the live session excluded —
+    is idle (its ``activity_mtime`` older than the config's
+    ``rebuild.idle_threshold_hours``, the same "completed" test the
+    extraction pipeline applies) AND carries content past the persona's
+    ingest-dedupe cursor (no cursor recorded, or ``last_event_at`` newer
+    than the cursor's high-water mark).
+
+    *exclude_session* is the calling session's ``conversation_uuid`` — the
+    hard live-session guarantee on top of the idle heuristic. Without it
+    the check excludes nothing by uuid; the idle threshold still keeps any
+    actively-written transcript (fresh mtime) out.
+
+    A record that grew in place without advancing its timestamp is missed
+    here (the full pipeline's count guard catches it at the next team
+    sweep) — a false negative only ever delays one persona's sweep to the
+    floor window, never ingests early.
+    """
+    now = time.time() if now is None else now
+    idle_sec = cfg.rebuild.idle_threshold_hours * 3600
+    for rec in _discover(cfg, max_age_days=max_age_days):
+        if exclude_session and rec.conversation_uuid == exclude_session:
+            continue
+        if (now - rec.activity_mtime) < idle_sec:
+            continue  # still active — not "completed"
+        cursor = load_cursor(store, rec.conversation_uuid)
+        if cursor is None:
+            return True
+        cut = _parse_iso(cursor.last_event_at)
+        if cut is None or rec.last_event_at > cut:
+            return True
+    return False
+
+
 def _decide(
     records: Iterable[SourceRecord], cfg: Config, *, now: float
 ) -> list[Decision]:
