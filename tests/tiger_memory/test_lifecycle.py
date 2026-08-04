@@ -1232,3 +1232,52 @@ def test_fill_extract_prompt_defaults_mr_placeholder(tmp_path: Path) -> None:
         cfg, lc._prompts_root(cfg), rec, "content", topic_index="(none)"
     )
     assert "(no must-remember items yet)" in filled
+
+
+# ----- project_path resolution (auto + ~) -----------------------------------
+
+
+def test_build_adapters_project_path_auto_from_config_location(
+    tmp_path: Path,
+) -> None:
+    from tigerharness.init import expected_claude_project_path
+
+    team_root = tmp_path / "tiger-teams" / "Shohoku"
+    cfg_dir = team_root / "memories" / "T"
+    cfg_dir.mkdir(parents=True)
+    cfg_path = cfg_dir / "tiger-memory.config.yaml"
+    cfg_path.write_text(dedent(f"""\
+        agent: {{name: T, role: t}}
+        store: {{root: .}}
+        sources:
+          - kind: claude_code
+            project_path: auto
+        summarizer: {{backend: anthropic, model: m, prompts: default/v1}}
+    """))
+    cfg = load_config(cfg_path)
+    adapters = lc._build_adapters(cfg)
+    assert len(adapters) == 1
+    assert adapters[0].project_path == expected_claude_project_path(team_root)
+
+
+def test_resolve_project_path_auto_without_source_path_uses_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from tigerharness.init import expected_claude_project_path
+
+    monkeypatch.chdir(tmp_path)
+    out = lc._resolve_project_path(
+        "auto", tmp_path, SimpleNamespace(source_path=None)
+    )
+    assert out == expected_claude_project_path(Path.cwd())
+
+
+def test_resolve_project_path_explicit_expands_tilde(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    out = lc._resolve_project_path(
+        "~/somewhere", tmp_path, SimpleNamespace(source_path=tmp_path / "c.yaml")
+    )
+    assert out == Path.home() / "somewhere"
