@@ -12,10 +12,9 @@ journal task -- either single-persona (`kind=task`) or multi-persona
 
 The subscription backend runs work through the *interactive* Claude
 Code app instead of through a programmatic `claude -p` driver (rails
-and billing: `docs/subscription-backend.md`). See
-[`docs/journal.md`](../../docs/journal.md) for the architecture and
-[`docs/journal-workflow-mode.md`](../../docs/journal-workflow-mode.md)
-for the workflow-mode details.
+and billing: `docs/subscription-backend.md`). See `docs/journal.md`
+for the architecture and `docs/journal-workflow-mode.md` for the
+workflow-mode details.
 
 ## Slack-triggered? Stay lean
 

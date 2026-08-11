@@ -330,6 +330,37 @@ class TestCompileContext:
         assert "drafter: Mitsui" in out
         assert "akagi: Akagi" in out  # still default
 
+    def test_alias_override_renders_canonical_name(
+        self, scaffolded, capsys,
+    ):
+        """A workflow.yaml override naming a roster ALIAS (``ayako:
+        Mumu``) must surface as the canonical persona name -- the
+        session adopting the role, and every stamp downstream, key on
+        the canonical name."""
+        task_id, paths = scaffolded
+        team_root_dir = Path.cwd()
+        (team_root_dir / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Ayako\n"
+            "  - name: Mitsui\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team_root_dir / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  ayako: Mumu\n"
+        )
+        ns = argparse.Namespace(
+            journal_dir=str(paths.root), task_id=task_id,
+        )
+        rc = cmd_compile_context(ns)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "ayako: Kogure" in out
+        assert "Mumu" not in out
+
     def test_prints_playbook_name(self, scaffolded, capsys):
         """Phase 2: the playbook name shows up in the Task section."""
         task_id, paths = scaffolded
@@ -895,6 +926,60 @@ class TestLandCompileWorklog:
             ("Anzai", "compile-draft"),
         ]
         assert "worklog entries: 1" in capsys.readouterr().out
+
+    def test_land_stamps_canonical_persona_for_alias_override(
+        self, scaffolded, tmp_path, capsys,
+    ):
+        """The alias bug's end-to-end pin: with ``ayako: Mumu`` in
+        workflow.yaml, the landed compile worklog frontmatter must
+        attribute the ayako round to canonical ``Kogure`` (the name
+        tiger-memory keys on), never the alias."""
+        task_id, paths = scaffolded
+        team_root_dir = Path.cwd()
+        (team_root_dir / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Ayako\n"
+            "  - name: Mitsui\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team_root_dir / "personas" / "Kogure").mkdir(parents=True)
+        (team_root_dir / "personas" / "Kogure" / "prompt.md").write_text(
+            "You are Kogure.\n"
+        )
+        (team_root_dir / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  ayako: Mumu\n"
+        )
+        cd = _compile_dir(paths, task_id)
+        cd.mkdir(parents=True, exist_ok=True)
+        (cd / "round-01-draft.md").write_text(
+            _VALID_BUNDLE + "\nWORKFLOW: APPROVE\n", encoding="utf-8")
+        (cd / "round-01-ayako.md").write_text(
+            "looks good\nWORKFLOW: APPROVE\n", encoding="utf-8")
+        d = tmp_path / "draft.md"
+        d.write_text(_VALID_BUNDLE)
+        t = tmp_path / "transcript.md"
+        t.write_text("Round 1: APPROVE.\n")
+        rc = cmd_land_compile(argparse.Namespace(
+            journal_dir=str(paths.root), task=task_id,
+            draft=str(d), transcript=str(t), rounds=1,
+        ))
+        assert rc == 0
+        entries = worklog.list_entries(paths, task_id)
+        assert [(e.persona, e.step) for e in entries] == [
+            ("Anzai", "compile-draft"),
+            ("Kogure", "compile-ayako"),
+        ]
+        raw = "\n".join(
+            p.read_text() for p in sorted(
+                (paths.task_dir(task_id) / "worklog").glob("*.md")
+            )
+        )
+        assert "Kogure" in raw
+        assert "Mumu" not in raw
 
     def test_land_worklog_failure_does_not_break_landing(
         self, scaffolded, tmp_path, monkeypatch, capsys,

@@ -329,6 +329,18 @@ completed task until no actionable tasks remain.
      **not** a turn-end -- the rest of the queue keeps moving. See
      "Parking on an Operator question."
 
+   **Route task notifies to the task's origin thread.** A task
+   materialized from the Slack inbox carries `deferred_origin.json`
+   (the Operator's origin `thread_ts`, plus `channel` on newer
+   sidecars); `release` prints an `origin thread:` line whenever one is
+   recorded. Send the completion / park notify THERE, not top-level:
+   `python -m tigerharness.slack_bridge.notify text "..." --task
+   <task-id>` resolves the sidecar for you (explicit `--thread`
+   overrides it; a task without a recorded origin falls back to the
+   operator DM with a warning). A top-level DM for a task that has an
+   origin thread strands the Operator's thread -- the wrong-thread bug
+   this rule exists to prevent.
+
    `release` refreshes `updated_at` and clears `session_ref` for you.
    Do NOT bump `sessions` here -- that happened atomically in `claim`
    at pickup. For a mid-task heartbeat (not a stop), just append to
@@ -464,7 +476,9 @@ reopens the task. Four rules govern this:
 
 3. **Notify after parking -- mandatory when Slack is configured.** Once
    parked, tell the Operator: a short Slack message (the `slack-notify`
-   skill) naming the task id and summarising what you need. This is
+   skill) naming the task id and summarising what you need -- routed
+   with `--task <task-id>` so it threads into the task's origin thread
+   when one is recorded. This is
    **required** whenever Slack is configured for the team. When it is not,
    the `needs_input/` tray move is itself the visual signal (the Operator
    sees the parked task on `ls journal/needs_input/`). Either way the

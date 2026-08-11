@@ -1204,6 +1204,73 @@ class TestCmdClaimRelease:
         assert "TIGERHARNESS_JOURNAL_STUCK_TIMEOUT" in capsys.readouterr().err
 
 
+class TestReleaseOriginThreadLine:
+    """``release`` prints an ``origin thread:`` cue when the task's
+    deferred_origin.json records a Slack origin -- the wrong-thread
+    fix's human-facing half (the driver composing the notify sees where
+    the Operator asked, and that ``notify --task`` routes there)."""
+
+    def _origin(self, paths: JournalPaths, task_id: str, data) -> None:
+        (paths.active / task_id / "deferred_origin.json").write_text(
+            data if isinstance(data, str) else json.dumps(data)
+        )
+
+    def test_release_prints_origin_line(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        self._origin(paths, "t1", {
+            "thread_ts": "1786460709.118669", "channel": "D0B4L5V7RFG",
+        })
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "done"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert (
+            "origin thread: 1786460709.118669 (channel D0B4L5V7RFG)" in out
+        )
+        assert "--task" in out
+
+    def test_release_without_sidecar_has_no_line(self, journal_dir, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1"])
+        assert rc == 0
+        assert "origin thread" not in capsys.readouterr().out
+
+    def test_park_prints_origin_line_despite_tray_move(
+        self, tmp_path, journal_dir, capsys
+    ):
+        """The sidecar is read BEFORE the active/ -> needs_input/ move;
+        the cue must survive the park."""
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        self._origin(paths, "t1", {"thread_ts": "1.618"})
+        q = tmp_path / "q.md"
+        q.write_text("**Question:** which?\n")
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1",
+                   "--state", "needs_input", "--question", str(q)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Parked t1" in out
+        assert "origin thread: 1.618 --" in out  # no channel suffix
+
+    @pytest.mark.parametrize("payload", [
+        "{not json",
+        json.dumps([1, 2]),
+        json.dumps({"channel": "DONLY"}),  # no thread_ts
+        json.dumps({"thread_ts": "   "}),
+    ])
+    def test_unusable_sidecars_are_silent(
+        self, journal_dir, capsys, payload
+    ):
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.IN_PROGRESS, session_ref="tok")
+        self._origin(paths, "t1", payload)
+        rc = main(["--journal-dir", str(journal_dir), "release", "t1"])
+        assert rc == 0
+        assert "origin thread" not in capsys.readouterr().out
+
+
 class TestNeedsInputParkAndAnswer:
     """``release --state needs_input`` parks a task to the needs_input/
     tray with a questions.md Q block; ``answer`` re-enters it to active/

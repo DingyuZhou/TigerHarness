@@ -132,7 +132,14 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    `questions.md`, moves `active/<id>/ → needs_input/<id>/`, and detaches.
    Then **notify the Operator** (Slack `slack-notify` skill — *mandatory*
    when Slack is configured; otherwise the tray move is the signal) and
-   cascade on. Decide-by-default first: only park a genuine Operator call
+   cascade on. **Route task notifies to the task's origin thread when one
+   exists:** a task materialized from the Slack inbox carries the
+   Operator's origin thread in its `deferred_origin.json` sidecar, and
+   `journal release` prints an `origin thread:` line whenever a task has
+   one — pass `--task <task-id>` on the notify command (instead of
+   copying thread ids by hand) so completion / park / progress messages
+   thread under the Operator's original ask rather than landing in the
+   wrong lane. Decide-by-default first: only park a genuine Operator call
    (or when `autonomy=ask`); if `autonomy=judgement`, resolve it yourself
    and log a `Decision:` in `progress.md` instead. The Operator answers in
    `questions.md` + runs `journal answer <id>`, which returns the task to

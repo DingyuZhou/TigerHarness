@@ -471,6 +471,23 @@ class TestWithThreadEnv:
         # original's env dict is not mutated
         assert cfg.extra["env"] == {"FOO": "bar"}
 
+    def test_channel_rides_along_when_known(self):
+        """The origin channel feeds `journal defer`'s sidecar so a later
+        notify --task threads back to the right channel (the
+        wrong-thread fix's bridge-side leg)."""
+        from tigerharness.slack_bridge.bridge import _with_thread_env
+        cfg = AgentConfig(name="x")
+        out = _with_thread_env(cfg, "123.456", "D0B4L5V7RFG")
+        assert out.extra["env"]["TIGERHARNESS_SLACK_CHANNEL"] == "D0B4L5V7RFG"
+        assert out.extra["env"]["TIGERHARNESS_SLACK_THREAD_TS"] == "123.456"
+
+    @pytest.mark.parametrize("channel", [None, ""])
+    def test_unknown_channel_sets_no_env(self, channel):
+        from tigerharness.slack_bridge.bridge import _with_thread_env
+        cfg = AgentConfig(name="x")
+        out = _with_thread_env(cfg, "123.456", channel)
+        assert "TIGERHARNESS_SLACK_CHANNEL" not in out.extra["env"]
+
 
 class TestSlackBridge:
     @pytest.fixture

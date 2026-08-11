@@ -426,7 +426,10 @@ class SlackBridge:
                 try:
                     result = await run_with_retry(
                         self._backend,
-                        _with_thread_env(persona.agent_config, thread_key),
+                        _with_thread_env(
+                            persona.agent_config, thread_key,
+                            event.get("channel"),
+                        ),
                         prompt,
                         session=state.session,
                         max_attempts=3,
@@ -781,7 +784,9 @@ def _append_bridge_context(prompt: str, thread_ts: str, channel: str | None) -> 
     return f"{prompt}\n\n[bridge-context]\n" + "\n".join(lines)
 
 
-def _with_thread_env(config: AgentConfig, thread_ts: str) -> AgentConfig:
+def _with_thread_env(
+    config: AgentConfig, thread_ts: str, channel: str | None = None,
+) -> AgentConfig:
     """Return a per-turn copy of *config* carrying this thread's Slack
     ``thread_ts`` in ``extra["env"]`` so the claude_p backend injects it
     into the turn's subprocess as ``TIGERHARNESS_SLACK_THREAD_TS``.
@@ -793,14 +798,19 @@ def _with_thread_env(config: AgentConfig, thread_ts: str) -> AgentConfig:
     drive's transcript is registered for suppression even if the agent
     omits the flag. Set on every turn (inert unless the turn becomes a
     drive); a copy, never a mutation, so the persona's shared config and
-    concurrent turns stay independent."""
+    concurrent turns stay independent.
+
+    When *channel* is known it rides along as
+    ``TIGERHARNESS_SLACK_CHANNEL``: ``journal defer`` records it in the
+    sidecar so a later completion notify can thread back to the origin
+    channel, not just the origin thread_ts."""
     existing_env = config.extra.get("env") or {}
+    env = {**existing_env, "TIGERHARNESS_SLACK_THREAD_TS": thread_ts}
+    if channel:
+        env["TIGERHARNESS_SLACK_CHANNEL"] = channel
     return replace(
         config,
-        extra={
-            **config.extra,
-            "env": {**existing_env, "TIGERHARNESS_SLACK_THREAD_TS": thread_ts},
-        },
+        extra={**config.extra, "env": env},
     )
 
 

@@ -65,6 +65,10 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-08-11 (wrong-thread notify fix): miyagi: pre origin-thread
+        #   ship -- park notify text had no route-via---task pointer to the
+        #   task's deferred_origin.json / release's origin-thread line.
+        "e8d5e86e62eb47e5663619d7c9c1f141bfbb431c1ad2d611dcec31172b16be52",
         # 2026-08-03 (gate lockstep): anzai: pre active-slice-gate ship --
         #   idle tail said only completed transcripts open the own-persona
         #   bypass (no active-over-threshold path).
@@ -128,6 +132,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "5271f7d54ad66c2c9c1d4449305d01dff682531def965b3260ddaa4221fac0c3",
     },
     "journal-new": {
+        # 2026-08-11 (wrong-thread notify fix): miyagi: pre link-fix ship --
+        #   intro still carried relative markdown links to ../../docs/*.md,
+        #   dead in every scaffolded team copy.
+        "f3a4d521209476b1b6255ee49ff212db611e01134055b13c0344fbc16b0f2fa4",
         # 2026-08-03 (slack-bootstrap sweep): miyagi: pre split-gate ship --
         #   Slack-lean section still framed by billing rails and forbade
         #   "journal sweeps" (now governed by sweep-memory's bootstrap flow).
@@ -146,6 +154,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "f9667640cda40128909f86f25f2d4d78b51c5986545c38bf337b25e1cc443d1d",
     },
     "slack-notify": {
+        # 2026-08-11 (wrong-thread notify fix): miyagi: pre --task ship --
+        #   no journal-task routing section (notify text/file could not
+        #   resolve a task's origin thread from deferred_origin.json).
+        "72bc9c96b520b2b02a8853a0dca6525aa9816f989206ec409814bef4cd5a084c",
         # 2026-05-27 (ba4fa65): anzai: scaffold .claude/settings.json + skills on tig...
         "0bc91d13201769b6327e762bc9763db3c8b97c7923d3830171effedad9e56691",
         # 2026-08-10 (00443fb was last touch): pre canonical-env-name doc
@@ -244,10 +256,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "e8d5e86e62eb47e5663619d7c9c1f141bfbb431c1ad2d611dcec31172b16be52",
+    "drive-journal": "20d8521342086b2c6702097396da6b1beda5258f8aa5451580799e3cdc9ac627",
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
-    "journal-new": "f3a4d521209476b1b6255ee49ff212db611e01134055b13c0344fbc16b0f2fa4",
-    "slack-notify": "72bc9c96b520b2b02a8853a0dca6525aa9816f989206ec409814bef4cd5a084c",
+    "journal-new": "958276c5bd03a13b106b06790cd57186440c11df99898a71fbe600734f99832a",
+    "slack-notify": "bc182b0f0dc5e07f3e7fa3506b3b1658d63fbedfb4e5d69c2cb7e6ad97767a99",
     "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",

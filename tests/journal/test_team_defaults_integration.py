@@ -68,12 +68,14 @@ class TestRealishTeamConfig:
     def test_compile_personas_resolves_workflow_yaml_alias(
         self, team_root: Path,
     ):
-        """workflow.yaml has `ayako: Mumu`. The resolver returns the
-        alias as-written (Mumu); the downstream validate_personas /
-        prompt-path lookup canonicalises through to Kogure."""
+        """workflow.yaml has `ayako: Mumu`. The resolver is the single
+        canonicalization home: it returns canonical Kogure, so every
+        downstream consumer (compile-context prints, land-compile
+        worklog stamping, validate_personas) sees the name the memory
+        store is keyed by -- the wrong-name compile-stamp bug's pin."""
         mapping = resolve_compile_personas(team_root)
         assert mapping == {
-            "drafter": "Anzai", "akagi": "Akagi", "ayako": "Mumu",
+            "drafter": "Anzai", "akagi": "Akagi", "ayako": "Kogure",
         }
 
     def test_validate_personas_resolves_compile_mapping_via_aliases(

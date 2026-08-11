@@ -49,6 +49,9 @@ class DeferredEntry:
     created_at: str
     path: Path
     payload: str = ""
+    # Slack channel the origin thread lives in. Optional: old sidecars
+    # predate the field, and a defer may come from outside Slack.
+    channel: str = ""
 
 
 def defer_entry(
@@ -60,6 +63,7 @@ def defer_entry(
     playbook: str = "default",
     requester: str = "",
     thread_ts: str = "",
+    channel: str = "",
 ) -> DeferredEntry:
     """Write one deferred entry. Deliberately dumb: no playbook read,
     no roster validation -- those run at materialization on the
@@ -86,6 +90,7 @@ def defer_entry(
         "playbook": playbook,
         "requester": requester,
         "thread_ts": thread_ts,
+        "channel": channel,
         "created_at": created_at,
         # Provenance: where this entry was meant to live. Carried
         # forward into the materialized task so a misplaced entry is
@@ -98,7 +103,7 @@ def defer_entry(
     log.info("deferred entry %s written (team=%s)", entry_id, team)
     return DeferredEntry(
         id=entry_id, title=title, team=team, playbook=playbook,
-        requester=requester, thread_ts=thread_ts,
+        requester=requester, thread_ts=thread_ts, channel=channel,
         created_at=created_at, path=entry_dir,
     )
 
@@ -150,6 +155,7 @@ def read_entry(paths: JournalPaths, entry_id: str) -> DeferredEntry:
         playbook=str(sidecar.get("playbook") or "default"),
         requester=str(sidecar.get("requester", "")),
         thread_ts=str(sidecar.get("thread_ts", "")),
+        channel=str(sidecar.get("channel", "")),
         created_at=str(sidecar.get("created_at", "")),
         path=entry_dir,
         payload=payload,
