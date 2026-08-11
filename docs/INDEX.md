@@ -37,7 +37,7 @@ plain `claude -p` subprocess.
 - **Slack rail rule** — a Slack-triggered session may SCHEDULE journal tasks
   but must NEVER drive them (driving is the subscription rail). See
   [subscription-backend.md](subscription-backend.md) and
-  [slack-bridge.md](slack-bridge.md#journal-tasks-over-slack-cost-discipline).
+  [slack-bridge.md](slack-bridge.md#journal-tasks-over-slack-scheduling-discipline).
 - **Cross-root dismiss safety** — `dismiss` tears down only the operated
   root's bridge, scoped by content (the 2026-06-12 incident class). See
   [slack-bridge.md](slack-bridge.md#the-bridge-one-process-1n-lanes).

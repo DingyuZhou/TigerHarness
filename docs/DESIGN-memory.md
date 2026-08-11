@@ -91,7 +91,7 @@ it is the rendered surfaces (§7).
 |---|---|---|---|
 | `skills` | `journal/skills.md` | `skill_index.md` — index only; per-skill detail files on demand | index 2000 / 3000; per-skill detail 4000 / 6000 |
 | `must_remember` | `journal/must_remember.md` | the whole (small) store | 2000 / 3000 |
-| `topics` | `journal/topics.md` | `topic_index.md` — index only; per-topic detail files on demand | index 2000 / 3000; per-topic detail 4000 / 6000 |
+| `topics` | `journal/topics.md` | `topic_index.md` — index only; per-topic detail files on demand | index 4000 / 6000; per-topic detail 4000 / 6000 |
 
 Every bound is a two-number pair (`*_max_length` + `*_overflow_limit`)
 giving **hysteresis**: a surface may drift above `max`; crossing the
@@ -362,8 +362,8 @@ memory:
     overflow_limit: 3000
     forget_days: 30              # untouched (no TOUCH) for => forget-eligible (>= 0)
   topics:
-    index_max_length: 2000       # the rendered topic index (chars)
-    index_overflow_limit: 3000
+    index_max_length: 4000       # the rendered topic index (chars)
+    index_overflow_limit: 6000
     detail_max_length: 4000      # each topic's detail file (chars)
     detail_overflow_limit: 6000
     fresh_days: 7                # touched within => protected from forget/merge

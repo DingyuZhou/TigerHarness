@@ -63,18 +63,26 @@ src/tigerharness/
         downloader.py        File attachment download
         notify.py            Outbound DM/file CLI
         persistence.py       Thread -> session mapping
-    tiger_memory/            Persistent bounded memory (4 self-pruning stores)
-        cli.py               CLI (init, rebuild, pin, plan, ingest-*, sweep-*, check, state)
+    tiger_memory/            Persistent bounded memory (3 stores: skills / must_remember / topics)
+        cli.py               CLI (init, rebuild, pin, state, ingest-*, compact-*, sweep-*, check, search, forget, doctor)
         config.py            YAML config loader + validation
         lifecycle.py         Extraction -> ingest core + fresh-start rebuild
         bounded_store.py     Bounded-store engine + forget guard
-        entries.py           Entry schemas (skill / must_remember / diary)
+        entries.py           Entry schemas (skill / must_remember / topic)
         briefing.py          Session-start briefing assembly
-        meditation.py        Compaction / forgetting engine
-        diary_format.py      Diary on-disk format (dated signed-weight bullets)
-        fuzzy_store.py       Free-text coarsened 4th store
-        sweep.py             Team-sweep gating + meditation orchestration
+        compaction.py        Staged compaction for the three bounded stores
+        indexes.py           Index + detail renderers (skills / topics)
+        skills.py            Skill-importance scoring
+        ranking.py           Recency / date-math helpers for keep-ranking
+        prefilter.py         Transcript pre-filter
+        executor.py          In-session sub-agent write-back to the stores
+        cursor.py            Per-session incremental-sweep cursors
+        sweep.py             Team-sweep gating (non-AI bookkeeping)
+        state.py             State snapshot payload (tiger-memory state)
         check.py             Store-format validation gate
+        inspect_tools.py     Operator read/fix loop (search / forget / doctor)
+        team_events.py       Team-wide event log (lazy, self-compacting)
+        migrate_topics.py    One-off migration to the topic-store model
         store.py             On-disk layout + atomic write + locking
         frontmatter.py       YAML frontmatter parser/writer
         sources/             Source adapters (claude_code, journal_worklog, docs)

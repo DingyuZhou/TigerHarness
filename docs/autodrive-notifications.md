@@ -72,7 +72,9 @@ Two new `autodrive start` flags, persisted into the state file so the detached
 | `--notify {slack,none}` | `slack` | Notification backend. `none` **mutes** all daemon-level notifications (the loop runs unchanged; only the posting is suppressed). |
 | `--notify-channel <id>` | operator DM | Slack channel id (e.g. `C0ABC123`) for daemon-level events. When unset, falls back to a DM to the Operator. Resolution: flag > env `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` > DM. |
 
-Credentials come from the same place [`slack-notify`](slack-notify) reads them
+Credentials come from the same place
+[`slack-notify`](../src/tigerharness/_bundled_skills/slack-notify/SKILL.md)
+reads them
 (`SLACK_BOT_TOKEN` + the team's `configs/.env` / `slack-bridge.yaml`). If the
 backend is `slack` but creds can't be loaded, autodrive degrades to a
 **no-op notifier** (logged once) — a missing token never wedges the daemon.

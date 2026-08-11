@@ -1,5 +1,11 @@
 # drive-journal redesign — implementation note (2026-06-08, Anzai)
 
+> **Status:** HISTORICAL — implementation note for the 2026-06-08
+> drive-journal redesign, kept as the design record, not a description
+> of current behavior. For the current contract see
+> [`../journal.md`](../journal.md) and
+> [`../subscription-backend.md`](../subscription-backend.md).
+
 Worktree: `<checkout-parent>/tigerharness-dj-redesign` (historical note; worktree long removed)
 Branch: `work/2026-06-06... → work/2026-06-08-drive-journal-cascade` off
 `origin/main` (cb38fd2). **Not pushed.** Main checkout untouched, so you

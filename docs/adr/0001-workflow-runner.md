@@ -1,6 +1,8 @@
 # ADR 0001 — workflow-runner
 
-- **Status:** Accepted (spec phase; implementation in phases 1–5).
+- **Status:** Superseded by [ADR 0003](0003-remove-legacy-runners.md)
+  (2026-06-10) — the runner and the standalone `workflow` console script
+  were removed. Retained as the historical record of the original design.
 - **Date:** 2026-05-28.
 - **Decision-makers:** Operator + Anzai.
 - **Thread:** Slack DM 2026-05-28 (Anzai ↔ Operator).
@@ -9,9 +11,9 @@
 > the standalone `workflow` console script — invocations written below as
 > `tigerharness workflow ...` are the standalone `workflow ...` in the
 > shipped code. The `workflow-run` skill and the sweep/diagnose surfaces
-> referenced below were not built. See
-> [`../workflow-runner.md`](../workflow-runner.md) for the current
-> surface; the decisions in this ADR stand.
+> referenced below were not built. `docs/workflow-runner.md`, which this
+> note once pointed at, was removed with the runner
+> ([ADR 0003](0003-remove-legacy-runners.md)).
 
 ## Context
 
@@ -22,9 +24,10 @@ planning, MVP, quality), a status-tracked task journal, a triggering
 skill, and constraints to prevent runaway behavior.
 
 This ADR records the design decisions we made in this thread before
-any code is written. The full spec lives at
-[`docs/workflow-runner.md`](../workflow-runner.md). This document is
-only the decision log — what we chose, what we rejected, and why.
+any code is written. The full spec lived at `docs/workflow-runner.md`,
+removed with the runner ([ADR 0003](0003-remove-legacy-runners.md)).
+This document is only the decision log — what we chose, what we
+rejected, and why.
 
 ## Decisions
 

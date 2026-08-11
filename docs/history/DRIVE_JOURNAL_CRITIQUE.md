@@ -1,5 +1,11 @@
 # drive-journal redesign — critique & iterate (3 rounds, 2026-06-08)
 
+> **Status:** HISTORICAL — a point-in-time self-critique record of the
+> 2026-06-08 redesign. Rounds 1–3 below describe the code as it stood
+> then, not current behavior. For the current contract see
+> [`../journal.md`](../journal.md) and
+> [`../subscription-backend.md`](../subscription-backend.md).
+
 Self-critique over the two commits (b556052 cascade redesign + 6a200eb
 compact/propagation). Each round: severity-ranked findings, a fix where
 warranted, 100% line+branch coverage held.

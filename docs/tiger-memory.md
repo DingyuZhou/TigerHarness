@@ -69,7 +69,7 @@ preventing compact-every-session thrash.
 |---|---|---|---|
 | `skills` | learned, reusable lessons (name + trigger + procedure) | the **index only**; per-skill detail files (`briefing/skills/`) on demand | index 2000 / 3000; per-skill detail 4000 / 6000 |
 | `must_remember` | external directives (`operator_explicit` / `preference` / `decision` / `incident`) | whole store (kept small) | 2000 / 3000; `forget_days` 30 |
-| `topics` | durable project knowledge, filed by subject; dated detail bodies | the **index only** (freshest first); per-topic detail files (`briefing/topics/`) on demand | index 2000 / 3000; per-topic detail 4000 / 6000; `fresh_days` 7, `forget_days` 60 |
+| `topics` | durable project knowledge, filed by subject; dated detail bodies | the **index only** (freshest first); per-topic detail files (`briefing/topics/`) on demand | index 4000 / 6000; per-topic detail 4000 / 6000; `fresh_days` 7, `forget_days` 60 |
 
 On-disk, all three are YAML-frontmatter entry stores under the persona
 store's `journal/` dir (`skills.md`, `must_remember.md`, `topics.md`). The

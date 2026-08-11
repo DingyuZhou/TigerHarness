@@ -656,8 +656,9 @@ needed to implement Phase 1.5 the same shape as Phase 1.
 - [`subscription-backend.md`](subscription-backend.md) — the design
   Phase 1 implements; this doc extends.
 - [`journal.md`](journal.md) — Phase 1 operator docs.
-- [`workflow-runner.md`](workflow-runner.md) — the api-backed
-  multi-persona runner whose compile machinery we reuse.
-- [`workflow-runner-phase2.md`](workflow-runner-phase2.md) — the
-  compile / drafter / critique pipeline this design depends on
-  (shipped in Wave 2).
+- `docs/workflow-runner.md` + `docs/workflow-runner-phase2.md` — the
+  api-backed runner specs whose compile machinery this mode reuses;
+  removed with the runner
+  ([ADR 0003](adr/0003-remove-legacy-runners.md)). The decisions are
+  recorded in [ADR 0001](adr/0001-workflow-runner.md) and
+  [ADR 0002](adr/0002-workflow-runner-phase2.md).
