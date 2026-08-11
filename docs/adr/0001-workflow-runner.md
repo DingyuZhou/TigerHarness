@@ -24,9 +24,10 @@ planning, MVP, quality), a status-tracked task journal, a triggering
 skill, and constraints to prevent runaway behavior.
 
 This ADR records the design decisions we made in this thread before
-any code is written. The full spec lives at
-[`docs/workflow-runner.md`](../workflow-runner.md). This document is
-only the decision log — what we chose, what we rejected, and why.
+any code is written. The full spec lived at `docs/workflow-runner.md`,
+removed with the runner ([ADR 0003](0003-remove-legacy-runners.md)).
+This document is only the decision log — what we chose, what we
+rejected, and why.
 
 ## Decisions
 
