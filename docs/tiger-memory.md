@@ -126,6 +126,10 @@ store:
 sources:
   - kind: claude_code
     project_path: ~/.claude/projects/-my-project/
+    # `~` is expanded. `project_path: auto` derives the transcripts dir
+    # from the team root at runtime (standard layout: the config lives at
+    # <team>/memories/<persona>/tiger-memory.config.yaml) -- use it to keep
+    # per-persona configs free of machine-specific absolute paths.
     # Optional, for multi-persona Slack-bridge setups:
     # persona: ayako                    # only ingest sessions owned by this persona
     # include_unattributed: false        # opt-in to also include local claude-p sessions

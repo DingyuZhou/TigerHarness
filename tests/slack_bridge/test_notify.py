@@ -31,12 +31,47 @@ def test_resolve_target_user_id_explicit(monkeypatch):
 
 def test_resolve_target_user_id_fallback(monkeypatch):
     monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+    monkeypatch.delenv("SLACK_ALLOWED_USER_IDS", raising=False)
     monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0FIRST, U0SECOND")
     assert _resolve_target_user_id() == "U0FIRST"
 
 
+def test_resolve_target_user_id_canonical_env(monkeypatch):
+    """`SLACK_ALLOWED_USER_IDS` -- the name `tigerharness init` writes to
+    configs/.env and the bridge loader reads -- works for notify too."""
+    monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+    monkeypatch.delenv("ALLOWED_SLACK_USER_IDS", raising=False)
+    monkeypatch.setenv("SLACK_ALLOWED_USER_IDS", "U0CANON, U0SECOND")
+    assert _resolve_target_user_id() == "U0CANON"
+
+
+def test_resolve_target_user_id_canonical_beats_legacy(monkeypatch):
+    monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+    monkeypatch.setenv("SLACK_ALLOWED_USER_IDS", "U0CANON")
+    monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0LEGACY")
+    assert _resolve_target_user_id() == "U0CANON"
+
+
+def test_resolve_target_user_id_whitespace_separated(monkeypatch):
+    """Comma/whitespace separation matches the bridge loader's format."""
+    monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+    monkeypatch.delenv("ALLOWED_SLACK_USER_IDS", raising=False)
+    monkeypatch.setenv("SLACK_ALLOWED_USER_IDS", "U0AA U0BB\tU0CC")
+    assert _resolve_target_user_id() == "U0AA"
+
+
+def test_resolve_target_user_id_blank_canonical_falls_to_legacy(monkeypatch):
+    """A set-but-unusable canonical var (only separators) falls through
+    to the legacy spelling -- first usable id wins."""
+    monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+    monkeypatch.setenv("SLACK_ALLOWED_USER_IDS", "  , ,  ")
+    monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U0LEGACY")
+    assert _resolve_target_user_id() == "U0LEGACY"
+
+
 def test_resolve_target_user_id_empty(monkeypatch):
     monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+    monkeypatch.delenv("SLACK_ALLOWED_USER_IDS", raising=False)
     monkeypatch.delenv("ALLOWED_SLACK_USER_IDS", raising=False)
     assert _resolve_target_user_id() is None
 
@@ -429,7 +464,29 @@ class TestResolveTargetUserIdFromYaml:
     """In multi-team mode, the canonical user-id source is the team's
     `configs/slack-bridge.yaml`. Notify's target-user resolution
     consults that yaml between the explicit env override and the
-    legacy `ALLOWED_SLACK_USER_IDS` env var."""
+    allowlist env vars (`SLACK_ALLOWED_USER_IDS`, then the legacy
+    `ALLOWED_SLACK_USER_IDS`)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_canonical_env(self, monkeypatch):
+        """Keep these fallback-order tests hermetic: a canonical
+        `SLACK_ALLOWED_USER_IDS` in the runner's environment would
+        shadow the legacy var the tests set."""
+        monkeypatch.delenv("SLACK_ALLOWED_USER_IDS", raising=False)
+
+    def test_yaml_beats_canonical_env_var(self, monkeypatch, tmp_path):
+        """Yaml stays the single source of truth over the canonical
+        env spelling, same as over the legacy one."""
+        from tigerharness.slack_bridge.notify import _resolve_target_user_id
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "slack-bridge.yaml").write_text(
+            "allowed_user_ids:\n  - U0YAML\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.setenv("SLACK_ALLOWED_USER_IDS", "U0CANON")
+        assert _resolve_target_user_id() == "U0YAML"
 
     def test_yaml_used_when_present(self, monkeypatch, tmp_path):
         from tigerharness.slack_bridge.notify import _resolve_target_user_id

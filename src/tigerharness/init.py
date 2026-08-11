@@ -148,6 +148,9 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "slack-notify": {
         # 2026-05-27 (ba4fa65): anzai: scaffold .claude/settings.json + skills on tig...
         "0bc91d13201769b6327e762bc9763db3c8b97c7923d3830171effedad9e56691",
+        # 2026-08-10 (00443fb was last touch): pre canonical-env-name doc
+        # (SLACK_ALLOWED_USER_IDS accepted by notify alongside legacy).
+        "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
     },
     "tigerharness-basics": {
         # 2026-08-01 (team event log, ADR 0008): ayako: pre team-events
@@ -244,7 +247,7 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "drive-journal": "e8d5e86e62eb47e5663619d7c9c1f141bfbb431c1ad2d611dcec31172b16be52",
     "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
     "journal-new": "f3a4d521209476b1b6255ee49ff212db611e01134055b13c0344fbc16b0f2fa4",
-    "slack-notify": "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
+    "slack-notify": "72bc9c96b520b2b02a8853a0dca6525aa9816f989206ec409814bef4cd5a084c",
     "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
     "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",

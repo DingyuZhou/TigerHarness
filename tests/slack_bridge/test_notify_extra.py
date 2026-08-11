@@ -82,6 +82,7 @@ class TestLoadCreds:
         monkeypatch.delenv("TIGERHARNESS_SLACK_BRIDGE_DIR", raising=False)
         monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
         monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
+        monkeypatch.delenv("SLACK_ALLOWED_USER_IDS", raising=False)
         monkeypatch.delenv("ALLOWED_SLACK_USER_IDS", raising=False)
         result = _load_creds()
         assert result is None

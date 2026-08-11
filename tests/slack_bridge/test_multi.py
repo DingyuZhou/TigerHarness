@@ -458,7 +458,9 @@ class TestLoadMultiAllowedUserIds:
         team_dir = _make_valid_team(tmp_path, "shohoku")
         _write_fragment(team_dir, "default_persona: ayako\nstate_dir: /tmp/s\n")
         idx = _write_index(tmp_path, ["shohoku"])
-        with pytest.raises(ValueError, match="missing required field 'allowed_user_ids'"):
+        # No YAML list and no SLACK_ALLOWED_USER_IDS in the env file:
+        # the loader names both places it looked.
+        with pytest.raises(ValueError, match="missing 'allowed_user_ids'"):
             load_multi(idx)
 
     def test_not_a_list(self, tmp_path: Path):
@@ -467,8 +469,10 @@ class TestLoadMultiAllowedUserIds:
             load_multi(idx)
 
     def test_empty_list(self, tmp_path: Path):
+        # An empty YAML list now falls through to the env file; with no
+        # SLACK_ALLOWED_USER_IDS there either, the combined error fires.
         idx = self._setup(tmp_path, "allowed_user_ids: []\n")
-        with pytest.raises(ValueError, match="must be a non-empty list"):
+        with pytest.raises(ValueError, match="missing 'allowed_user_ids'"):
             load_multi(idx)
 
     def test_entry_not_string(self, tmp_path: Path):
@@ -621,3 +625,72 @@ class TestHelpers:
             state_path=tmp_path / "b.json",
         )
         _check_lane_uniqueness((l1, l2))  # no raise
+
+
+# ---------------------------------------------------------------------------
+# Allowlist env fallback (SLACK_ALLOWED_USER_IDS in the lane env file)
+# ---------------------------------------------------------------------------
+
+class TestAllowlistEnvFallback:
+    def _team_without_yaml_allowlist(
+        self, root: Path, env_allowlist: str | None
+    ) -> Path:
+        team_dir = _make_valid_team(root, "shohoku")
+        _write_fragment(team_dir, f"""\
+default_persona: ayako
+state_dir: {root / 'state/shohoku'}
+""")
+        env = team_dir / "configs" / ".env"
+        body = "SLACK_APP_TOKEN=xapp-1\nSLACK_BOT_TOKEN=xoxb-1\n"
+        if env_allowlist is not None:
+            body += f"SLACK_ALLOWED_USER_IDS={env_allowlist}\n"
+        env.write_text(body)
+        return team_dir
+
+    def test_env_fallback_parses_commas_and_whitespace(self, tmp_path: Path):
+        self._team_without_yaml_allowlist(tmp_path, "U0CEO, W0AAA  U0BBB")
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        assert cfg.lanes[0].team_ctx.allowed_user_ids == frozenset(
+            {"U0CEO", "W0AAA", "U0BBB"}
+        )
+
+    def test_missing_everywhere_raises(self, tmp_path: Path):
+        self._team_without_yaml_allowlist(tmp_path, None)
+        idx = _write_index(tmp_path, ["shohoku"])
+        with pytest.raises(ValueError, match="missing 'allowed_user_ids'"):
+            load_multi(idx)
+
+    def test_empty_env_value_raises(self, tmp_path: Path):
+        self._team_without_yaml_allowlist(tmp_path, "  ")
+        idx = _write_index(tmp_path, ["shohoku"])
+        with pytest.raises(ValueError, match="missing 'allowed_user_ids'"):
+            load_multi(idx)
+
+    def test_empty_yaml_list_falls_back_to_env(self, tmp_path: Path):
+        team_dir = self._team_without_yaml_allowlist(tmp_path, "U0CEO")
+        _write_fragment(team_dir, f"""\
+default_persona: ayako
+allowed_user_ids: []
+state_dir: {tmp_path / 'state/shohoku'}
+""")
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        assert cfg.lanes[0].team_ctx.allowed_user_ids == frozenset({"U0CEO"})
+
+    def test_yaml_wins_over_env(self, tmp_path: Path):
+        team_dir = self._team_without_yaml_allowlist(tmp_path, "U0ENV")
+        _write_fragment(team_dir, f"""\
+default_persona: ayako
+allowed_user_ids: [U0YAML]
+state_dir: {tmp_path / 'state/shohoku'}
+""")
+        idx = _write_index(tmp_path, ["shohoku"])
+        cfg = load_multi(idx)
+        assert cfg.lanes[0].team_ctx.allowed_user_ids == frozenset({"U0YAML"})
+
+    def test_env_fallback_still_validates_prefixes(self, tmp_path: Path):
+        self._team_without_yaml_allowlist(tmp_path, "BADID")
+        idx = _write_index(tmp_path, ["shohoku"])
+        with pytest.raises(ValueError, match="must start with 'U' or 'W'"):
+            load_multi(idx)

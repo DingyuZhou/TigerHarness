@@ -293,7 +293,10 @@ Per-team fragment (`teams/shohoku/configs/slack-bridge.yaml`):
 ```yaml
 default_persona: ayako          # required; legacy `persona:` accepted as alias
 allowed_user_ids:
-  - U0123ABC                    # required: at least one Slack user ID
+  - U0123ABC                    # at least one Slack user ID; may be omitted (or [])
+                                # when the lane env file carries
+                                # SLACK_ALLOWED_USER_IDS=U0123ABC,U0456DEF instead
+                                # (keeps workspace ids out of a public team repo)
 state_dir: ~/.local/state/slack-bridge/shohoku   # required, must be unique across lanes
 
 # Optional overrides (defaults shown):
@@ -308,7 +311,7 @@ second edit needed.
 
 The loader (`tigerharness.slack_bridge.multi.load_multi`) enforces:
 
-- Required fields present, `default_persona` exists in the team's roster, `allowed_user_ids` non-empty + each starts with `U`/`W`.
+- Required fields present, `default_persona` exists in the team's roster, `allowed_user_ids` non-empty + each starts with `U`/`W` (the list may come from the fragment or, when the fragment omits it, from `SLACK_ALLOWED_USER_IDS` in the lane env file — same validation either way).
 - Token prefixes (`xapp-` / `xoxb-`).
 - Every persona in the roster has a `personas/<name>/prompt.md` file.
 - No two lanes share a `state_dir` (would corrupt each other's `threads.json`).

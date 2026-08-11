@@ -38,6 +38,7 @@ team's Slack bridge.
 from __future__ import annotations
 
 import logging
+import re
 
 import os
 from dataclasses import dataclass
@@ -306,10 +307,6 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
         )
     default_persona = default_raw.strip()
 
-    allowed_user_ids = _validate_allowed_user_ids(
-        _require(spec, "allowed_user_ids", where), where
-    )
-
     state_dir_raw = str(_require(spec, "state_dir", where)).strip()
     if not state_dir_raw:
         raise ValueError(f"{where}: 'state_dir' cannot be empty")
@@ -327,6 +324,21 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
     env_path = _resolve(env_rel, team_dir)
     env_vars = _load_env_file(env_path)
     app_token, bot_token = _validate_tokens(env_vars, where)
+
+    # Allowlist: the YAML `allowed_user_ids:` list wins when present;
+    # otherwise the lane's env file may carry SLACK_ALLOWED_USER_IDS
+    # (comma/whitespace separated), so a public team repo need not
+    # track workspace user ids -- they live with the tokens.
+    raw_allowed = spec.get("allowed_user_ids")
+    if raw_allowed is None or raw_allowed == []:
+        env_allowed = (env_vars.get("SLACK_ALLOWED_USER_IDS") or "").strip()
+        if not env_allowed:
+            raise ValueError(
+                f"{where}: missing 'allowed_user_ids' -- set the list in the "
+                f"lane fragment, or SLACK_ALLOWED_USER_IDS in {env_path}"
+            )
+        raw_allowed = [t for t in re.split(r"[,\s]+", env_allowed) if t]
+    allowed_user_ids = _validate_allowed_user_ids(raw_allowed, where)
 
     # Build per-persona configs from the team's personas.yaml roster
     roster, persona_aliases = _read_team_roster(team_dir, where)

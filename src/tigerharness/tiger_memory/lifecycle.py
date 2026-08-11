@@ -644,7 +644,9 @@ def _build_adapters(cfg: Config, *, max_age_days: int | None = 7) -> list[Source
             include_unattributed = bool(s.fields.get("include_unattributed", False))
             adapters.append(
                 ClaudeTranscriptAdapter(
-                    project_path=Path(s.fields["project_path"]),
+                    project_path=_resolve_project_path(
+                        s.fields["project_path"], repo_root, cfg
+                    ),
                     threads_json=threads_json,
                     persona=persona,
                     team=team,
@@ -670,6 +672,27 @@ def _build_adapters(cfg: Config, *, max_age_days: int | None = 7) -> list[Source
             )
         # slack_thread / docs / auto_memory carry no live adapter on this path.
     return adapters
+
+
+def _resolve_project_path(field_path: object, repo_root: Path, cfg: Config) -> Path:
+    """Resolve a ``claude_code`` source's ``project_path`` field.
+
+    ``auto`` derives the Claude Code transcripts dir from the team root
+    (standard layout: the config lives at
+    ``<team>/memories/<persona>/tiger-memory.config.yaml``, so the team
+    root is two levels above the config's directory; a config loaded
+    without a file path falls back to the cwd, which persona sessions
+    pin to the team root). This keeps the per-persona configs free of
+    machine-specific absolute paths. An explicit path is used as-is,
+    with ``~`` expanded.
+    """
+    raw = str(field_path).strip()
+    if raw == "auto":
+        from tigerharness.init import expected_claude_project_path
+
+        team_root = repo_root.parent.parent if cfg.source_path else Path.cwd()
+        return expected_claude_project_path(team_root)
+    return Path(raw).expanduser()
 
 
 def _resolve_journal_root(field_root: str, repo_root: Path) -> Path:

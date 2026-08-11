@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -66,12 +67,19 @@ def _load_slack_bridge_dotenv() -> None:
 
 def _resolve_target_user_id() -> str | None:
     """Resolution order: explicit env override -> multi-team yaml ->
-    legacy env var -> None.
+    allowlist env vars -> None.
 
     The yaml step covers the multi-team team-folder layout: when an
     agent runs from a team root, ``configs/slack-bridge.yaml`` carries
     the authoritative ``allowed_user_ids`` -- the bridge's allowlist
     and notify's "who do I DM?" choice should agree.
+
+    The env step checks ``SLACK_ALLOWED_USER_IDS`` first (the canonical
+    name -- what ``tigerharness init`` writes to ``configs/.env`` and
+    the multi-root bridge loader reads) and falls back to the legacy
+    notify-only spelling ``ALLOWED_SLACK_USER_IDS``. Both accept
+    comma/whitespace-separated ids, matching the bridge loader's
+    format; the first usable id wins.
     """
     override = os.environ.get("SLACK_CEO_USER_ID", "").strip()
     if override:
@@ -79,11 +87,10 @@ def _resolve_target_user_id() -> str | None:
     from_yaml = _first_allowed_user_from_yaml(Path.cwd() / "configs" / "slack-bridge.yaml")
     if from_yaml:
         return from_yaml
-    allow = os.environ.get("ALLOWED_SLACK_USER_IDS", "")
-    for entry in allow.split(","):
-        entry = entry.strip()
-        if entry:
-            return entry
+    for env_name in ("SLACK_ALLOWED_USER_IDS", "ALLOWED_SLACK_USER_IDS"):
+        for entry in re.split(r"[,\s]+", os.environ.get(env_name, "")):
+            if entry:
+                return entry
     return None
 
 
@@ -152,7 +159,7 @@ def _load_creds() -> _Creds | None:
     if not target:
         log.warning(
             "notify: no target user id (set SLACK_CEO_USER_ID or "
-            "ALLOWED_SLACK_USER_IDS); skipping"
+            "SLACK_ALLOWED_USER_IDS); skipping"
         )
         return None
     return _Creds(bot_token=token, target_user_id=target)
