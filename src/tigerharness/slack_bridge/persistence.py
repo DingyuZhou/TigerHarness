@@ -202,8 +202,8 @@ class ThreadStore:
     def get(self, thread_ts: str) -> str | None:
         """Backward-compatible accessor: returns just the ``session_id``.
 
-        Single-persona callers (the existing single-tenant bridge and
-        all of its tests) only need the session_id; this preserves
+        Single-persona callers (the one-persona ``build_bridge`` path
+        and its tests) only need the session_id; this preserves
         their API. Routing-aware callers should use ``get_record()``.
         """
         rec = self._map.get(thread_ts)

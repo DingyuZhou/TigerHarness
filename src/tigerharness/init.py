@@ -363,7 +363,7 @@ End with "Next steps" if the work suggests follow-up.
 """
 
 _ENV_TEMPLATE = """\
-# Slack bridge environment variables (legacy single-tenant template).
+# Slack bridge environment variables (per-team .env, no-index mode).
 # Fill in your tokens from https://api.slack.com/apps
 
 # Required: Slack app-level token (starts with xapp-)
@@ -373,10 +373,7 @@ SLACK_APP_TOKEN=xapp-1-your-app-token
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 
 # Required: comma-separated Slack user IDs allowed to interact
-ALLOWED_SLACK_USER_IDS=U0123ABCDEF
-
-# Optional: working directory for the Claude agent
-TIGERHARNESS_AGENT_CWD=.
+SLACK_ALLOWED_USER_IDS=U0123ABCDEF
 """
 
 # Multi-team .env: tokens only. The allowlist lives in
@@ -1089,7 +1086,8 @@ def create_team(
 
     *multi_team* selects which .env template to use: the multi-team
     one carries tokens only (allowlist lives in the yaml fragment),
-    the legacy one bundles the allowlist via ``ALLOWED_SLACK_USER_IDS``.
+    the no-index one bundles the allowlist via ``SLACK_ALLOWED_USER_IDS``
+    (the canonical spelling -- both the lane loader and notify read it).
     *initial_goal* (optional, the Operator's words) seeds the charter's
     Mission section instead of the TODO placeholder.
     """
@@ -1377,8 +1375,8 @@ def _maybe_register_slack_bridge_lane(
     index exists from a previous run but the caller explicitly opted
     THIS team out (``--no-multi-team``): without ``enabled=False`` we'd
     register the team as a lane while ``create_team`` / ``add_persona``
-    wrote single-tenant artifacts -- a half-and-half state the bridge
-    can't safely load.
+    wrote unregistered no-index artifacts -- a half-and-half state the
+    bridge can't safely load.
     """
     if not enabled:
         return []
@@ -1486,7 +1484,8 @@ def init(
     # When *include_multi_team* is True and no top-level slack-bridge.yaml
     # index exists yet, touch it so `_maybe_register_slack_bridge_lane`
     # downstream picks up the team. ``None`` (scripted-default) preserves
-    # legacy single-tenant behavior; ``False`` is the explicit opt-out.
+    # the no-index default (no top-level slack-bridge.yaml is created);
+    # ``False`` is the explicit opt-out.
     # Interactive prompting happens in `main()` so callers (tests,
     # importing scripts) of `init()` don't hit stdin reads.
     index_path = root / "slack-bridge.yaml"
@@ -1643,7 +1642,8 @@ def init(
     # 5. multi-lane slack-bridge auto-registration. Gated on
     # *include_multi_team* (and the index file's existence) so that
     # `--no-multi-team` doesn't half-register a team into an existing
-    # multi-team index while writing single-tenant artifacts elsewhere.
+    # multi-team index while writing unregistered no-index artifacts
+    # elsewhere.
     for p in _maybe_register_slack_bridge_lane(
         root, final_team_dir, team, persona,
         enabled=bool(include_multi_team),
@@ -1807,7 +1807,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-multi-team",
         action="store_true",
-        help="Stay in legacy single-tenant mode. Skips the prompt.",
+        help="Skip multi-team Slack registration (no top-level "
+             "slack-bridge.yaml index; running the bridge requires "
+             "creating one later -- see docs/slack-bridge.md). "
+             "Skips the prompt.",
     )
     parser.add_argument(
         "--yes", "-y",

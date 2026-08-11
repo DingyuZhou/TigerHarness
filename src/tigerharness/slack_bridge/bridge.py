@@ -76,10 +76,10 @@ log = logging.getLogger("tigerharness.slack_bridge.bridge")
 _SUDO_DENY = ["Bash(sudo:*)", "Bash(sudo)"]
 
 
-# Internal name used for the single persona in a legacy single-tenant
-# bridge. Multi-persona configs name their personas explicitly; users
-# never see this string because the reply prefix is skipped for
-# one-persona teams.
+# Internal name used for the single persona in a one-persona bridge
+# built via `build_bridge` (the BridgeConfig factory). Multi-persona
+# configs name their personas explicitly; users never see this string
+# because the reply prefix is skipped for one-persona teams.
 _SINGLE_PERSONA_NAME = "default"
 
 
@@ -104,9 +104,10 @@ class PersonaSlot:
 class TeamBridgeContext:
     """One team's bridge wiring.
 
-    Multi-persona teams have N entries in ``personas``; single-persona
-    (legacy single-tenant) has exactly one with name ``"default"``.
-    The bridge skips the router and the reply prefix when N == 1.
+    Multi-persona teams have N entries in ``personas``; a single-persona
+    context (``_single_persona_team_context``) has exactly one with name
+    ``"default"``. The bridge skips the router and the reply prefix when
+    N == 1.
     """
     team_name: str
     slack_app_token: str
@@ -121,7 +122,8 @@ class TeamBridgeContext:
     # protocol owns it). See config.normalize_tiger_memory_trigger.
     tiger_memory_trigger: str = "rebuild"
     # Per-lane idle-compaction config (ADR 0004). None -> the bridge
-    # falls back to IdleCompactConfig.from_env() (single-tenant / legacy).
+    # falls back to IdleCompactConfig.from_env() (no lane config given
+    # -- e.g. a directly-embedded one-persona bridge).
     # Multi-lane builds one per lane from the team's slack-bridge.yaml
     # fragment (see multi._build_idle_compact), because one process-wide
     # os.environ cannot describe N lanes' separate journals.
@@ -201,7 +203,8 @@ class SlackBridge:
             or SlackThreadHistoryFetcher(self._team.slack_bot_token)
         )
         # Per-lane config wins (multi-team); fall back to the env surface
-        # only when no lane config was supplied (single-tenant / legacy).
+        # only when no lane config was supplied (a directly-embedded
+        # one-persona bridge).
         self._idle_compact_cfg = (
             self._team.idle_compact
             if self._team.idle_compact is not None
@@ -844,9 +847,9 @@ def _format_reply(text: str, persona_name: str, team: TeamBridgeContext) -> str:
 # ---------------------------------------------------------------------------
 
 def build_agent_config(cfg: BridgeConfig) -> AgentConfig:
-    """Build a single-persona AgentConfig from a (legacy) BridgeConfig.
+    """Build a single-persona AgentConfig from a BridgeConfig.
 
-    Used by the single-tenant `_run_single` entrypoint. Multi-persona
+    Used by `build_bridge` (the one-persona factory). Multi-persona
     callers use `build_persona_agent_config` instead so each persona
     gets the team-awareness preamble.
     """
@@ -858,16 +861,17 @@ def build_agent_config(cfg: BridgeConfig) -> AgentConfig:
         else:
             raise FileNotFoundError(
                 f"Agent prompt not found at {prompt_path}. "
-                "Set TIGERHARNESS_AGENT_PROMPT to a valid path."
+                "Set BridgeConfig.agent_prompt_path to a valid path."
             )
     else:
         # Loud at startup so operators notice they're running a generic
         # assistant. Easy to miss otherwise -- the bridge stays "up" but
         # replies have lost the persona.
         log.warning(
-            "TIGERHARNESS_AGENT_PROMPT is unset; falling back to a generic "
-            "'You are a helpful assistant.' prompt. Set it to a path "
-            "(e.g. personas/sai.md) to give the agent its real persona."
+            "BridgeConfig.agent_prompt_path is unset; falling back to a "
+            "generic 'You are a helpful assistant.' prompt. Set it to a "
+            "path (e.g. personas/sai.md) to give the agent its real "
+            "persona."
         )
         instructions = "You are a helpful assistant."
 
@@ -935,8 +939,8 @@ def build_persona_agent_config(
 def _single_persona_team_context(
     cfg: BridgeConfig, agent_cfg: AgentConfig
 ) -> TeamBridgeContext:
-    """Wrap a (legacy) single-tenant BridgeConfig + AgentConfig as a
-    1-persona team context, so the rest of SlackBridge has one code path.
+    """Wrap a BridgeConfig + AgentConfig as a 1-persona team context,
+    so the rest of SlackBridge has one code path.
 
     The single persona is named ``"default"`` and skips the routing call
     + reply prefix at runtime (see ``is_multi_persona``).
@@ -966,8 +970,11 @@ def _single_persona_team_context(
 def build_bridge(
     cfg: BridgeConfig, *, state_path: Path | None = None
 ) -> SlackBridge:
-    """Single-persona factory (legacy + single-tenant entrypoint).
+    """Single-persona factory for direct embedders (and the tests).
 
+    The single-tenant entrypoint that used to call this was removed on
+    2026-08-11 (ADR 0009); the factory itself stays as the documented
+    way to embed a one-persona bridge from a ``BridgeConfig``.
     Multi-lane callers in the multi-orchestrator use
     ``build_team_bridge`` instead. Kept stable so PR1's signature
     (``build_bridge(cfg, *, state_path=...)``) keeps working.

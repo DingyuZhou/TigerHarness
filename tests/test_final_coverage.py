@@ -31,20 +31,6 @@ class TestPersistenceSaveError:
                 store._write_map(store.records())
 
 
-# ----- slack_bridge/config.py: 70 (bad bot token prefix) -----------------
-
-class TestSlackConfigBadBotToken:
-    """Line 70: SLACK_BOT_TOKEN doesn't start with xoxb-."""
-
-    def test_wrong_bot_prefix(self, monkeypatch):
-        from tigerharness.slack_bridge.config import load
-        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-good")
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xapp-wrong-prefix")
-        monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U123")
-        with pytest.raises(SystemExit, match="xoxb-"):
-            load()
-
-
 # ----- slack_bridge/downloader.py: 146 (_human_size TB edge) --------------
 
 class TestHumanSizeTB:

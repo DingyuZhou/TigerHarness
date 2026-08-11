@@ -1,21 +1,18 @@
 """Run the Slack bridge: ``python -m tigerharness.slack_bridge``.
 
-There is **one** bridge; it serves 1..N teams (lanes). It is selected by
-one env var:
+There is **one** bridge; it serves 1..N teams (lanes).
+``TIGERHARNESS_BRIDGES_CONFIG`` must point at a ``slack-bridge.yaml``
+index: the bridge loads N lanes via ``multi.load_multi()``, builds N
+bridges, and opens N Socket-Mode connections in one process. A single
+team is just a one-lane index. Each lane's logs are tagged with
+``lane=<name>`` (contextvar-based, inherited by Bolt's dispatch tasks).
 
-* **Multi-lane (recommended).** When ``TIGERHARNESS_BRIDGES_CONFIG``
-  points at a ``slack-bridge.yaml`` index, loads N lanes via
-  ``multi.load_multi()``, builds N bridges, opens N Socket-Mode
-  connections in one process. A single team is just a one-lane index.
-  Each lane's logs are tagged with ``lane=<name>`` (contextvar-based,
-  inherited by Bolt's dispatch tasks).
-* **Single-tenant (DEPRECATED).** When that env var is unset, the bridge
-  falls back to a single-team deployment: tokens from ``.env`` / process
-  env via ``config.load()``, one bridge, one Socket-Mode connection. This
-  path is a one-lane case of the same module and is deprecated -- it
-  still works but emits a migration notice on startup (see
-  ``_warn_single_tenant_deprecated``). Migrate to a one-lane
-  ``TIGERHARNESS_BRIDGES_CONFIG`` index; nothing is removed today.
+The former single-tenant fallback (tokens read from process env /
+``.env`` when the index var was unset) was removed on 2026-08-11 after
+its announced deprecation -- see ADR 0009 and
+``docs/slack-bridge.md`` ("Migrating off single-tenant"). Startup now
+fails fast with a migration pointer instead of silently running a
+one-off deployment shape.
 
 On SIGTERM the bridge drains in-flight dispatches across all lanes
 before exiting so replies are posted before the process dies.
@@ -31,10 +28,8 @@ from pathlib import Path
 
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-from .bridge import SlackBridge, build_bridge, build_team_bridge
-from .config import load
+from .bridge import SlackBridge, build_team_bridge
 from .multi import MultiBridgeConfig, load_multi
-from .persistence import default_state_path
 
 log = logging.getLogger("tigerharness.slack_bridge")
 
@@ -67,30 +62,23 @@ class _LaneFilter(logging.Filter):
         return True
 
 
-def _setup_logging(*, multi: bool) -> None:
-    """Configure root logging. Multi-mode adds ``lane=`` to the format
-    + a filter that fills it from the contextvar. Single-tenant mode
-    keeps the original format -- zero output change for existing users.
+def _setup_logging() -> None:
+    """Configure root logging with the lane-aware format: ``lane=`` in
+    the format string + a filter that fills it from the contextvar (a
+    one-lane index reads naturally -- ``lane=<team>`` on every line).
 
     Uses ``force=True`` so this re-applies cleanly when tests have
     already configured logging in the same process.
     """
-    if multi:
-        fmt = "%(asctime)s lane=%(lane)s %(name)s %(levelname)s %(message)s"
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(fmt))
-        handler.addFilter(_LaneFilter())
-        logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
-    else:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s %(name)s %(levelname)s %(message)s",
-            force=True,
-        )
+    fmt = "%(asctime)s lane=%(lane)s %(name)s %(levelname)s %(message)s"
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(fmt))
+    handler.addFilter(_LaneFilter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle helpers (shared by single- and multi-tenant entrypoints)
+# Lifecycle helpers
 # ---------------------------------------------------------------------------
 
 async def _drive_handlers(
@@ -171,49 +159,11 @@ async def _drive_handlers(
 
 
 # ---------------------------------------------------------------------------
-# Single-tenant entrypoint (default; backward compatible)
-# ---------------------------------------------------------------------------
-
-def _warn_single_tenant_deprecated() -> None:
-    """Emit the single-tenant deprecation notice.
-
-    Single-tenant mode is a one-lane deployment of the same bridge module;
-    it is deprecated in favour of the multi-lane bridge driven by a
-    ``TIGERHARNESS_BRIDGES_CONFIG`` index. Extracted as a helper (rather
-    than an inline ``log.warning``) so the notice is unit-testable without
-    standing up a live Socket-Mode connection. The path still works today;
-    this only steers operators toward the migration.
-    """
-    log.warning(
-        "single-tenant mode is DEPRECATED -- it is a one-lane case of the "
-        "multi-lane bridge and may be removed in a future release. To "
-        "migrate, create a one-lane slack-bridge.yaml index and set "
-        "TIGERHARNESS_BRIDGES_CONFIG to it (run `tigerharness slack-bridge "
-        "gen-service` to emit the systemd unit); see docs/slack-bridge.md. "
-        "This bridge will keep running for now."
-    )
-
-
-async def _run_single() -> None:
-    _setup_logging(multi=False)
-    _warn_single_tenant_deprecated()
-    cfg = load()
-    bridge = build_bridge(cfg, state_path=default_state_path())
-    handler = AsyncSocketModeHandler(bridge.app, cfg.slack_app_token)
-    log.info(
-        "starting bridge -- cwd=%s allowed_users=%s",
-        cfg.agent_cwd,
-        sorted(cfg.allowed_user_ids),
-    )
-    await _drive_handlers([handler], [bridge])
-
-
-# ---------------------------------------------------------------------------
 # Multi-tenant entrypoint
 # ---------------------------------------------------------------------------
 
 async def _run_multi(multi_cfg: MultiBridgeConfig) -> None:
-    _setup_logging(multi=True)
+    _setup_logging()
     bridges: list[SlackBridge] = []
     handlers: list[AsyncSocketModeHandler] = []
     for lane in multi_cfg.lanes:
@@ -236,17 +186,25 @@ async def _run_multi(multi_cfg: MultiBridgeConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
-# main(): env var dispatches to single or multi
+# main(): the index env var is required (fail fast with the migration path)
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     try:
         index_env = os.environ.get("TIGERHARNESS_BRIDGES_CONFIG", "").strip()
-        if index_env:
-            multi_cfg = load_multi(Path(index_env))
-            asyncio.run(_run_multi(multi_cfg))
-        else:
-            asyncio.run(_run_single())
+        if not index_env:
+            raise SystemExit(
+                "slack-bridge: TIGERHARNESS_BRIDGES_CONFIG is not set. The "
+                "single-tenant fallback was REMOVED on 2026-08-11 (ADR 0009) "
+                "after its announced deprecation -- the bridge always runs "
+                "from a slack-bridge.yaml lanes index now, and a single team "
+                "is just a one-lane index. To migrate: create the index, set "
+                "TIGERHARNESS_BRIDGES_CONFIG to it, and run `tigerharness "
+                "slack-bridge gen-service` to emit the systemd unit; see "
+                "docs/slack-bridge.md ('Migrating off single-tenant')."
+            )
+        multi_cfg = load_multi(Path(index_env))
+        asyncio.run(_run_multi(multi_cfg))
     except KeyboardInterrupt:
         pass
 

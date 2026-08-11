@@ -2365,13 +2365,14 @@ class TestMultiTeamEnvTemplate:
         ])
         assert rc == 0
         env = (tmp_path / "shohoku" / "configs" / ".env").read_text()
-        assert "ALLOWED_SLACK_USER_IDS" not in env
+        assert "SLACK_ALLOWED_USER_IDS" not in env
+        assert "ALLOWED_SLACK_USER_IDS" not in env  # legacy spelling gone too
         assert "SLACK_APP_TOKEN" in env
         assert "SLACK_BOT_TOKEN" in env
 
-    def test_legacy_env_keeps_allowed_user_ids(self, tmp_path: Path):
-        """--no-multi-team uses the legacy template, which still bundles
-        the allowlist for backwards compat with single-tenant users."""
+    def test_no_index_env_keeps_allowed_user_ids(self, tmp_path: Path):
+        """--no-multi-team uses the no-index template, which bundles the
+        allowlist under its canonical name (`SLACK_ALLOWED_USER_IDS`)."""
         rc = main([
             "--dir", str(tmp_path),
             "--persona", "ayako",
@@ -2380,7 +2381,8 @@ class TestMultiTeamEnvTemplate:
         ])
         assert rc == 0
         env = (tmp_path / "shohoku" / "configs" / ".env").read_text()
-        assert "ALLOWED_SLACK_USER_IDS" in env
+        assert "SLACK_ALLOWED_USER_IDS" in env
+        assert "ALLOWED_SLACK_USER_IDS" not in env  # legacy spelling gone
 
     def test_multi_team_explicit_flag_works_without_yes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

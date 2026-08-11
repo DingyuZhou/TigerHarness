@@ -106,7 +106,7 @@ class TestBuildAgentConfig:
         assert "helpful assistant" in agent_cfg.instructions
         # Loud at startup so operators notice the persona is missing.
         assert any(
-            "TIGERHARNESS_AGENT_PROMPT" in rec.message
+            "BridgeConfig.agent_prompt_path" in rec.message
             for rec in caplog.records
         ), [r.message for r in caplog.records]
 
