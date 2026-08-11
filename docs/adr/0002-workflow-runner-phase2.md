@@ -37,7 +37,8 @@ This ADR records the design decisions for Phase 2, which closes the
 authoring-half gap, plus two adjacent fixes (write guardrail + spec
 deviation) that the audit surfaced.
 
-The full design spec is [`docs/workflow-runner-phase2.md`](../workflow-runner-phase2.md).
+The full design spec was `docs/workflow-runner-phase2.md`, removed with
+the runner ([ADR 0003](0003-remove-legacy-runners.md)).
 This document is only the decision log — what we chose, what we
 rejected, why.
 
@@ -235,10 +236,12 @@ Phase 2's much-larger landing.
 - Original design doc: attached by the Operator in the Slack thread
   `1779962188.223389` on 2026-05-28; archived at
   `/tmp/slack-attachments/1779962188.223389/F0B6TGBEY6Q.markdown`.
-- Phase 1 spec: [`docs/workflow-runner.md`](../workflow-runner.md).
+- Phase 1 spec: `docs/workflow-runner.md`, removed with the runner
+  ([ADR 0003](0003-remove-legacy-runners.md)).
 - Phase 1 ADR: [`docs/adr/0001-workflow-runner.md`](0001-workflow-runner.md).
 - Phase 1 final review report:
-  [`teams/Shohoku/task_journal/workflow-runner-phase1-akagi-final-review.md`](../../../teams/Shohoku/task_journal/workflow-runner-phase1-akagi-final-review.md).
+  `teams/Shohoku/task_journal/workflow-runner-phase1-akagi-final-review.md`
+  (a team-private record, not an in-repo doc).
 - Phase 1 adversarial audit verification: workflow run
   `wf_363a245e-a9d` (13 findings × 66 agents, 100% CONFIRMED at high
   confidence; 5 new gaps surfaced by the completeness critic, all

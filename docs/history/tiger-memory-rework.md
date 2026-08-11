@@ -3,10 +3,10 @@
 > **Status:** SHIPPED — this design has been implemented. Kept as the
 > historical design record (intent + rationale + rounds), not as a
 > description of current behavior. For shipped behavior see
-> [`tiger-memory.md`](tiger-memory.md) (module overview),
-> [`tiger-memory-sweep-protocol.md`](tiger-memory-sweep-protocol.md)
+> [`tiger-memory.md`](../tiger-memory.md) (module overview),
+> [`tiger-memory-sweep-protocol.md`](../tiger-memory-sweep-protocol.md)
 > (the in-session subscription-rail sweep contract), and
-> [`per-persona-journal-memory.md`](per-persona-journal-memory.md)
+> [`per-persona-journal-memory.md`](../per-persona-journal-memory.md)
 > (per-persona worklog memory, deployed & live-verified 2026-06-08).
 > **Date:** 2026-06-05 (rounds 1-2) · 2026-06-06 (round 3).
 > **Decision-makers:** Operator + Anzai.
@@ -25,7 +25,7 @@ same goal:
 
 1. **Make tiger-memory work under the subscription-only model** — the
    file-based, human-driven execution backend
-   ([`subscription-backend.md`](subscription-backend.md)) where AI
+   ([`subscription-backend.md`](../subscription-backend.md)) where AI
    work runs inside a human's interactive Claude Code session, not via
    programmatically-spawned `claude -p` children.
 2. **Make tiger-memory leaner on tokens and context** — both the cost
@@ -39,9 +39,9 @@ out of that one quota window. Leanness *is* subscription-fitness.
 
 ## The billing fact this whole design turns on
 
-From [`subscription-backend.md`](subscription-backend.md) (Push vs
+From [`subscription-backend.md`](../subscription-backend.md) (Push vs
 pull table) and
-[`skills/drive-journal/SKILL.md`](../skills/drive-journal/SKILL.md):
+[`skills/drive-journal/SKILL.md`](../../skills/drive-journal/SKILL.md):
 
 - A **programmatically-spawned `claude -p` child** bills as **API
   tokens**. The legacy runners (since retired, ADR 0003), **and
@@ -69,7 +69,7 @@ vendor-shaped state — appears:
 
 - **Summarizer backend** — already pluggable via the `Summarizer`
   base + `register_summarizer` registry
-  ([`tiger-memory.md`](tiger-memory.md), "Adding a new summarizer
+  ([`tiger-memory.md`](../tiger-memory.md), "Adding a new summarizer
   vendor"). Keep that contract; the rework must not reach around it.
 - **In-session summarization** (B1) — express it as a *vendor-neutral
   protocol* the interactive driver executes, the way the journal's
@@ -174,7 +174,7 @@ recurs. Levers:
    (current defaults: `short_summary_words: 400`,
    `must_memorize_rows: 60`; walking window 2 / 7 / 28 / 90 working
    days for shorts / dailies / weeklies / monthlies — see
-   [`tiger-memory.md`](tiger-memory.md)).
+   [`tiger-memory.md`](../tiger-memory.md)).
 
 **Trade-off, stated honestly:** a lean core + on-demand drill trades
 *resident context* for *extra retrieval calls*. Each drill is itself a
@@ -329,7 +329,7 @@ not the name alone. Single source of truth for `team` = the team's
 **Backward compat (two existing shapes to absorb).** Today's entries
 are `{thread_ts: {session_id, persona}}` where `persona` is a bare
 name; a pre-routing legacy entry is a bare `"session_id"` string with
-no persona at all (see [`tiger-memory.md`](tiger-memory.md),
+no persona at all (see [`tiger-memory.md`](../tiger-memory.md),
 "Per-persona filtering"). The reader upgrades a bare `persona` **name**
 to `{team: <from config>, name}`, and continues to treat a
 no-persona / pre-routing entry as *unattributed* (excluded under strict
