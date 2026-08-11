@@ -91,10 +91,7 @@ Past design narratives and decisions live in [adr/](adr/) and the design
 record below; don't treat a design narrative as current behavior —
 `src/tigerharness/` is the ground truth.
 
-**Design record / history (not current reference)** — superseded narratives,
-kept for context under [`history/`](history/):
-- [tiger-memory-rework.md](history/tiger-memory-rework.md) — the tiger-memory
-  redesign narrative (still cited from code for design rationale).
-- [DRIVE_JOURNAL_CRITIQUE.md](history/DRIVE_JOURNAL_CRITIQUE.md) and
-  [DRIVE_JOURNAL_REDESIGN_NOTE.md](history/DRIVE_JOURNAL_REDESIGN_NOTE.md) —
-  the drive-journal redesign working notes.
+The superseded design narratives that used to live under `docs/history/`
+(the tiger-memory rework and the drive-journal redesign notes) were
+deleted on 2026-08-11; consult git history if you need them. The durable
+decisions they carried live on in [adr/](adr/) and the design docs above.

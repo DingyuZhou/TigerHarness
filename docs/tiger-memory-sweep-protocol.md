@@ -1,8 +1,8 @@
 # tiger-memory team sweep — in-session sub-agent protocol (B1/B3)
 
 > **Status:** wired, shipped & live-verified. The full Python + CLI stack
-> this protocol drives is shipped and tested (see
-> `history/tiger-memory-rework.md`, B1/B3 sections), the bridge wiring +
+> this protocol drives is shipped and tested (the B1/B3 design narrative
+> was retired to git history on 2026-08-11), the bridge wiring +
 > convenience CLIs that activate it are live (see "Wiring + status"), and
 > the protocol was verified live on Shohoku on 2026-07-23 (topic-store
 > migration + first staged compaction) and again via an end-to-end
