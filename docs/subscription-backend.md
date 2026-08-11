@@ -701,6 +701,9 @@ skill, so the MVP is one chunk.
 
 ## Related
 
-- [`workflow-runner.md`](workflow-runner.md) — the multi-persona API
-  backend driven by a pre-compiled workflow graph; already file-based,
-  and the closest sibling to this design.
+- `docs/workflow-runner.md` — the multi-persona API backend driven by a
+  pre-compiled workflow graph; already file-based, and the closest
+  sibling to this design. Removed with the runner
+  ([ADR 0003](adr/0003-remove-legacy-runners.md)); its decisions are
+  recorded in [ADR 0001](adr/0001-workflow-runner.md) and
+  [ADR 0002](adr/0002-workflow-runner-phase2.md).
