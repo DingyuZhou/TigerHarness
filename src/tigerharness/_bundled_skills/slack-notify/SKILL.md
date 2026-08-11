@@ -49,5 +49,6 @@ python -m tigerharness.slack_bridge.notify file --file /tmp/chart.png \
 ## Environment variables
 
 - `SLACK_BOT_TOKEN` -- required
-- `SLACK_CEO_USER_ID` or `ALLOWED_SLACK_USER_IDS` -- target user
+- `SLACK_CEO_USER_ID` or `SLACK_ALLOWED_USER_IDS` -- target user
+  (the legacy spelling `ALLOWED_SLACK_USER_IDS` also works)
 - `TIGERHARNESS_SLACK_ENV` -- path to .env file (optional)
