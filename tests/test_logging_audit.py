@@ -54,6 +54,10 @@ NO_LOGGER_BY_AUDIT = {
     "tigerharness.journal.wfcore.validators", # pure validators (results
                                               # logged by compile_cli)
     "tigerharness.slack_bridge",          # re-exports
+    "tigerharness.slack_bridge.config",   # pure primitives (BridgeConfig,
+                                          # trigger normalize, redact_token);
+                                          # the token log line lives in
+                                          # multi._build_lane
     "tigerharness.tiger_memory",          # re-exports
     "tigerharness.tiger_memory.frontmatter",  # pure parser/writer
     "tigerharness.tiger_memory.indexes",      # pure index/detail renderers

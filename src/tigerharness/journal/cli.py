@@ -357,6 +357,13 @@ def cmd_defer(args: argparse.Namespace) -> int:
             playbook=args.playbook,
             requester=args.requester,
             thread_ts=args.thread_ts,
+            # Bridge sessions carry the origin channel in the env (same
+            # pattern as TIGERHARNESS_SLACK_THREAD_TS), so the sidecar
+            # records it even when the agent omits the flag.
+            channel=(
+                args.channel
+                or os.environ.get("TIGERHARNESS_SLACK_CHANNEL", "")
+            ),
         )
     except DeferredError as exc:
         print(json.dumps({"ok": False, "errors": [str(exc)]}))
@@ -1030,6 +1037,31 @@ def cmd_claim(args: argparse.Namespace) -> int:
     return 0
 
 
+def _origin_thread_line(task_dir: Path) -> str | None:
+    """One-line cue naming the task's Slack origin thread, read from
+    the ``deferred_origin.json`` sidecar that ``journal materialize``
+    archives into the task dir. ``None`` when the task wasn't
+    deferred-born, the sidecar is unreadable, or it records no
+    ``thread_ts``. Printed by ``release`` so a driver composing the
+    completion / park notify cannot miss where the Operator asked."""
+    sidecar = task_dir / "deferred_origin.json"
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    thread_ts = str(data.get("thread_ts") or "").strip()
+    if not thread_ts:
+        return None
+    channel = str(data.get("channel") or "").strip()
+    where = f"{thread_ts} (channel {channel})" if channel else thread_ts
+    return (
+        f"  origin thread: {where} -- thread the completion/park "
+        f"notify there (slack-notify supports --task for this)."
+    )
+
+
 def cmd_release(args: argparse.Namespace) -> int:
     """Release this session's hold on a task (the hand-off / stop).
 
@@ -1105,6 +1137,10 @@ def cmd_release(args: argparse.Namespace) -> int:
         if rc != 0:
             return rc
 
+    # Read the origin-thread cue BEFORE any tray move (the park below
+    # relocates the task dir out of active/).
+    origin_line = _origin_thread_line(paths.task_dir(status.id))
+
     status.state = new_state
     status.session_ref = None  # detach -> instantly resumable if still in_progress
     if args.next_action is not None:
@@ -1131,10 +1167,14 @@ def cmd_release(args: argparse.Namespace) -> int:
             f"questions.md, then runs "
             f"`tigerharness journal answer {status.id}`."
         )
+        if origin_line:
+            print(origin_line)
         return 0
 
     log.info("released %s state=%s detached", status.id, new_state.value)
     print(f"Released {status.id} (state={new_state.value}, detached)")
+    if origin_line:
+        print(origin_line)
     return 0
 
 
@@ -1814,6 +1854,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Who asked (recorded in the sidecar).")
     df.add_argument("--thread-ts", default="",
                     help="Slack thread_ts (recorded in the sidecar).")
+    df.add_argument(
+        "--channel", default="",
+        help="Slack channel id of the origin thread (recorded in the "
+             "sidecar; defaults to TIGERHARNESS_SLACK_CHANNEL when the "
+             "bridge set it).",
+    )
     df.set_defaults(func=cmd_defer)
 
     mz = sub.add_parser(

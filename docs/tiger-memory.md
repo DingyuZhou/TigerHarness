@@ -504,7 +504,7 @@ emits records where the stored persona matches.
 | Pre-routing Slack thread (PR1-era) | `"session_id"` bare string | ❌ excluded | ✅ in Ayako's memory |
 
 **Backward compat:** if `persona:` is omitted, the adapter emits every
-session (legacy single-tenant behavior, unchanged). The threads.json reader
+session (the pre-routing behavior, unchanged). The threads.json reader
 also accepts the pre-routing schema (bare `"session_id"` strings) so older
 state files still work.
 

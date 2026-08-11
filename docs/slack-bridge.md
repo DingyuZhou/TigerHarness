@@ -5,7 +5,7 @@
   and @mentions in, persona replies in-thread, with a `notify` CLI for
   proactive messages.
 - **When you need it:** standing up / operating the bridge, multi-lane config,
-  or migrating off the deprecated single-tenant mode.
+  or migrating off the removed single-tenant mode (ADR 0009).
 - **Must-not-miss:** `dismiss` is scoped to the operated root by content (the
   2026-06-12 cross-root incident class) — see "The bridge: one process, 1..N
   lanes" below.
@@ -44,7 +44,7 @@ Reply posted to thread
 | Module | Purpose |
 |---|---|
 | `bridge.py` | SlackBridge class: routing, dispatch, thread management |
-| `config.py` | BridgeConfig from env vars + .env |
+| `config.py` | BridgeConfig dataclass + shared config primitives |
 | `persistence.py` | ThreadStore: atomic JSON file for thread->session map |
 | `downloader.py` | SlackFileDownloader + prompt augmentation |
 | `history.py` | Thread-history fetch + transcript for untracked-thread joins |
@@ -57,38 +57,41 @@ Reply posted to thread
 
 ## Configuration
 
-> **One bridge, 1..N lanes.** The recommended way to run the bridge is a
+> **One bridge, 1..N lanes.** The bridge always runs from a
 > `TIGERHARNESS_BRIDGES_CONFIG` index (see [below](#the-bridge-one-process-1n-lanes));
-> a single team is just a one-lane index. The env vars in the table below
-> drive the **deprecated** single-tenant fallback (used only when
-> `TIGERHARNESS_BRIDGES_CONFIG` is unset) — see
-> [migrating off single-tenant](#migrating-off-single-tenant).
+> a single team is just a one-lane index. The former single-tenant
+> env-var fallback was **removed on 2026-08-11 (ADR 0009)** — startup
+> now fails fast with a migration pointer when the index var is unset;
+> see [migrating off single-tenant](#migrating-off-single-tenant).
+
+Process-wide env vars:
 
 | Env var | Default | Purpose |
 |---|---|---|
+| `TIGERHARNESS_BRIDGES_CONFIG` | (required) | Path to the top-level `slack-bridge.yaml` index — one team or many ([details below](#the-bridge-one-process-1n-lanes)) |
+| `TIGERHARNESS_SLACK_STATE_DIR` | XDG state | Default `threads.json` home for directly-embedded bridges (lane fragments set `state_dir` explicitly) |
+| `TIGERHARNESS_ATTACHMENT_DIR` | `/tmp/slack-attachments` | File staging dir |
+| `TIGERHARNESS_SLACK_ENV` | (none) | Explicit .env path for the `notify` CLI |
+
+Per-lane `.env` file keys (the fragment's `env:` path, default
+`<team>/configs/.env`):
+
+| Key | Default | Purpose |
+|---|---|---|
 | `SLACK_APP_TOKEN` | (required) | Socket Mode app token (xapp-...) |
 | `SLACK_BOT_TOKEN` | (required) | Bot OAuth token (xoxb-...) |
-| `ALLOWED_SLACK_USER_IDS` | (required) | Comma-separated user IDs (legacy spelling — the single-tenant loader reads only this name; see the allowlist note below) |
-| `TIGERHARNESS_AGENT_CWD` | `.` | Working directory for the agent |
-| `TIGERHARNESS_AGENT_PROMPT` | (none) | Path to system prompt .md file |
-| `TIGERHARNESS_SLACK_ENV` | (none) | Explicit .env file path |
-| `TIGERHARNESS_SLACK_STATE_DIR` | XDG state | Where threads.json lives |
-| `TIGERHARNESS_ATTACHMENT_DIR` | `/tmp/slack-attachments` | File staging dir |
-| `TIGER_MEMORY_CONFIG` | (none) | Auto-trigger memory rebuild on new threads |
-| `TIGER_MEMORY_CLI` | (none) | Path to tiger-memory binary |
-| `TIGERHARNESS_BRIDGES_CONFIG` | (none) | Path to a top-level `slack-bridge.yaml` index — the **recommended** way to run the bridge, for one team or many ([details below](#the-bridge-one-process-1n-lanes)). When set, the single-tenant vars above are ignored. |
+| `SLACK_ALLOWED_USER_IDS` | (see note) | Comma-separated user IDs — used when the lane fragment omits `allowed_user_ids` |
+| `TIGER_MEMORY_CLI` | (none) | Path to tiger-memory binary for this lane |
 
-> **Allowlist env spelling.** The canonical name is `SLACK_ALLOWED_USER_IDS`;
-> each component reads it differently:
+> **Allowlist env spelling.** The canonical name is `SLACK_ALLOWED_USER_IDS`:
 >
 > - **Multi-lane bridge** (`TIGERHARNESS_BRIDGES_CONFIG`): when a lane
 >   fragment omits `allowed_user_ids`, the lane env file must supply the
 >   canonical `SLACK_ALLOWED_USER_IDS`.
 > - **`notify` CLI** (`python -m tigerharness.slack_bridge.notify`): reads
 >   canonical `SLACK_ALLOWED_USER_IDS` first, then falls back to the legacy
->   `ALLOWED_SLACK_USER_IDS`.
-> - **Deprecated single-tenant fallback** (this table): reads the legacy
->   `ALLOWED_SLACK_USER_IDS` only.
+>   `ALLOWED_SLACK_USER_IDS` (the migration aid for older `.env` files —
+>   the removed single-tenant loader was the only legacy-only reader).
 
 ## Running
 
@@ -102,8 +105,9 @@ python -m tigerharness.slack_bridge
 ```
 
 Running `python -m tigerharness.slack_bridge` with **no**
-`TIGERHARNESS_BRIDGES_CONFIG` falls back to the **deprecated** single-tenant
-mode (it still works but logs a migration notice on startup). See
+`TIGERHARNESS_BRIDGES_CONFIG` exits at startup with a migration
+pointer — the single-tenant fallback was removed on 2026-08-11
+(ADR 0009). See
 [migrating off single-tenant](#migrating-off-single-tenant).
 
 ## Notify CLI
@@ -223,19 +227,18 @@ own persona, own `threads.json`), all multiplexed through one event loop.
 - Each team gets its own bot identity in Slack (different name + avatar).
 - Pairs with `tigerharness init`, which auto-registers each new team's lane.
 
-> **Single-tenant mode is deprecated.** Running the bridge with no
-> `TIGERHARNESS_BRIDGES_CONFIG` falls back to a legacy single-team
-> deployment of the same module. It still works and emits a migration
-> notice on startup, but it is deprecated and may be removed in a future
-> release — use a one-lane index instead (see
+> **Single-tenant mode was removed on 2026-08-11 (ADR 0009).** Running
+> the bridge with no `TIGERHARNESS_BRIDGES_CONFIG` now exits at startup
+> with a migration pointer — the announced removal of the deprecated
+> single-team env-var deployment. Use a one-lane index (see
 > [migrating off single-tenant](#migrating-off-single-tenant)).
 
-### Opt in
+### Set up the index
 
 Point `TIGERHARNESS_BRIDGES_CONFIG` at a top-level **index file**. (With it
-unset, the bridge falls back to the deprecated single-tenant mode.)
+unset, the bridge fails fast at startup.)
 
-To opt in once:
+To create it once:
 
 ```bash
 # In your teams directory (e.g. ~/projects/teams/)
@@ -248,9 +251,9 @@ lane to this index and writes a per-team fragment under
 
 ### Migrating off single-tenant
 
-If you run the legacy single-tenant bridge (no `TIGERHARNESS_BRIDGES_CONFIG`,
-tokens in a plain `.env`), move to a one-lane index — it reproduces your
-setup and is the supported path:
+If you ran the single-tenant bridge (no `TIGERHARNESS_BRIDGES_CONFIG`,
+tokens in a plain `.env` — removed 2026-08-11, ADR 0009), move to a
+one-lane index — it reproduces your setup and is the supported path:
 
 1. Make your single team a lane. Ensure the team dir has
    `configs/.env` (the same `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` you used)
@@ -272,9 +275,12 @@ setup and is the supported path:
    ```
 
 A one-lane index behaves exactly like the old single-team bridge — same
-module, same one bot — it just drops the deprecated env-var entrypoint. The
-single-tenant path keeps working until a future release removes it, so there
-is no rush, but new setups should start here.
+module, same one bot — it just drops the removed env-var entrypoint.
+Also switch the allowlist to the canonical `SLACK_ALLOWED_USER_IDS`
+spelling while you're in the `.env` (the legacy `ALLOWED_SLACK_USER_IDS`
+survives only as a `notify` CLI fallback). If a stale checkout still
+tries the old entrypoint, startup names this section — nothing runs
+half-migrated.
 
 ### Config layout
 
@@ -369,9 +375,8 @@ so the user can see who answered without scrolling up:
 [Ayako]: Hi! Yes, I can help you set up the playbook for tomorrow's match.
 ```
 
-Single-persona teams (legacy single-tenant bridge, or a team with only
-one entry in `personas.yaml`) skip the prefix — output stays identical
-to before.
+Single-persona teams (only one entry in `personas.yaml`) skip the
+prefix — output stays identical to before.
 
 #### Misroute recovery: the team-awareness preamble
 
@@ -451,9 +456,9 @@ thread's persona. Pre-PR4 entries (bare `"session_id"` strings) have
 no attribution, so per-persona memory filtering ([tiger-memory](tiger-memory.md))
 excludes them under strict mode.
 
-If you have an existing single-tenant bridge that you're migrating to
-multi-persona, run the migration tool once to attribute all old
-entries to a specific persona:
+If you are coming from the removed single-tenant bridge (or any
+pre-PR4 deployment) and migrating to multi-persona, run the migration
+tool once to attribute all old entries to a specific persona:
 
 ```bash
 # See what would change without writing:
@@ -631,11 +636,11 @@ real future turn can re-arm the lane). Records written by an older
 bridge lack the stamps and are simply skipped until their next turn.
 Every gate fails soft; the command prints a JSON report and exits 0.
 
-### Single-tenant / legacy: env surface
+### Env fallback (no per-lane config)
 
-When a lane supplies no `idle_compact` config (or you run the
-single-tenant bridge), the bridge falls back to this env surface
-(this section is the single home for these names):
+When a lane supplies no `idle_compact` config, the bridge falls back
+to this env surface (this section is the single home for these
+names):
 
 - `TIGERHARNESS_IDLE_COMPACT` — `1`/`true` to enable. **Default off.**
 - `TIGERHARNESS_IDLE_COMPACT_JOURNAL` — the journal root (REQUIRED;

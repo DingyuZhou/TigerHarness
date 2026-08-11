@@ -386,13 +386,75 @@ class SlackNotifier:
 # CLI
 # ---------------------------------------------------------------------------
 
+def resolve_task_origin(task_id: str) -> tuple[str, str]:
+    """Read ``(thread_ts, channel)`` from a journal task's
+    ``deferred_origin.json`` sidecar (archived into the task dir by
+    ``journal materialize``). Looks in ``active/`` then ``done/`` then
+    ``needs_input/`` under the resolved journal root.
+
+    Fallback contract (the wrong-thread fix's safety net): a missing or
+    corrupt sidecar, or one without a ``thread_ts``, logs a WARNING and
+    returns ``("", "")`` so the caller keeps the current default
+    behavior (top-level operator DM) instead of failing the notify.
+    ``channel`` is empty for pre-channel-field sidecars.
+    """
+    from tigerharness.journal.paths import default_journal_root
+
+    root = default_journal_root()
+    for tray in ("active", "done", "needs_input"):
+        sidecar = root / tray / task_id / "deferred_origin.json"
+        if not sidecar.is_file():
+            continue
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning(
+                "notify --task %s: %s unreadable (%s); falling back to "
+                "the default DM", task_id, sidecar, exc,
+            )
+            return "", ""
+        if not isinstance(data, dict):
+            data = {}
+        thread_ts = str(data.get("thread_ts") or "").strip()
+        channel = str(data.get("channel") or "").strip()
+        if not thread_ts:
+            log.warning(
+                "notify --task %s: %s has no thread_ts; falling back to "
+                "the default DM", task_id, sidecar,
+            )
+            return "", ""
+        return thread_ts, channel
+    log.warning(
+        "notify --task %s: no deferred_origin.json under %s "
+        "(active/done/needs_input); falling back to the default DM",
+        task_id, root,
+    )
+    return "", ""
+
+
+def _routing_from_args(args: argparse.Namespace) -> tuple[str, str]:
+    """Resolve ``(channel, thread_ts)`` for a CLI send. Explicit
+    ``--thread`` / ``--channel`` always win; otherwise ``--task``
+    threads to the task's recorded origin (thread_ts + channel when the
+    sidecar has one)."""
+    channel = getattr(args, "channel", "") or ""
+    thread = getattr(args, "thread", "") or ""
+    if not thread and getattr(args, "task", ""):
+        origin_thread, origin_channel = resolve_task_origin(args.task)
+        thread = origin_thread
+        if not channel:
+            channel = origin_channel
+    return channel, thread
+
+
 def _cmd_text(args: argparse.Namespace) -> int:
     n = SlackNotifier.try_load()
     if n is None:
         print("error: slack creds not configured", file=sys.stderr)
         return 2
+    channel, thread = _routing_from_args(args)
     ok = n.dm_text(
-        args.text, channel=args.channel or None, thread_ts=args.thread or None
+        args.text, channel=channel or None, thread_ts=thread or None
     )
     return 0 if ok else 1
 
@@ -402,7 +464,11 @@ def _cmd_file(args: argparse.Namespace) -> int:
     if n is None:
         print("error: slack creds not configured", file=sys.stderr)
         return 2
-    ok = n.dm_file(args.file, caption=args.comment or "", thread_ts=args.thread or None)
+    channel, thread = _routing_from_args(args)
+    ok = n.dm_file(
+        args.file, caption=args.comment or "",
+        channel=channel or None, thread_ts=thread or None,
+    )
     return 0 if ok else 1
 
 
@@ -415,19 +481,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    task_help = (
+        "Journal task id: thread the message into the task's recorded "
+        "origin thread (deferred_origin.json). Explicit --thread/"
+        "--channel override it; a task without a recorded origin falls "
+        "back to the default DM with a warning."
+    )
+
     t = sub.add_parser("text", help="Send a text DM.")
     t.add_argument("text")
     t.add_argument("--channel", default="",
                    help="Post to this channel id instead of the operator DM.")
     t.add_argument("--thread", default="",
                    help="Reply in this thread_ts.")
+    t.add_argument("--task", default="", help=task_help)
     t.set_defaults(func=_cmd_text)
 
     f = sub.add_parser("file", help="Upload a file.")
     f.add_argument("--file", required=True, help="Path to the file to upload.")
     f.add_argument("--comment", default="", help="Caption.")
+    f.add_argument("--channel", default="",
+                   help="Upload to this channel id instead of the operator DM.")
     f.add_argument("--thread", default="",
                    help="Share into this thread_ts.")
+    f.add_argument("--task", default="", help=task_help)
     f.set_defaults(func=_cmd_file)
 
     args = p.parse_args(argv)

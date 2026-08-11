@@ -186,7 +186,7 @@ class ClaudeTranscriptAdapter(SourceAdapter):
           (regardless of persona) -- its per-persona worklog owns that
           content; folding the fat transcript would double-count the
           driver.
-        - No filter set (legacy / single-tenant): everything else passes.
+        - No filter set (no per-persona routing): everything else passes.
         - Filter set + session in threads.json with matching persona: pass.
         - Filter set + session in threads.json with different persona: drop.
         - Filter set + session NOT in threads.json (local claude_p)

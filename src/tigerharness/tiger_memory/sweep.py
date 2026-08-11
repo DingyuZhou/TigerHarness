@@ -1,8 +1,10 @@
 """B3 team-sweep gating (non-AI bookkeeping).
 
 The B1/B3 in-session memory rebuild is triggered at **persona-session
-bootstrap, shared by all personas** (see ``docs/history/tiger-memory-rework.md``,
-"B3 — implementation design"). This module is the *gating* layer that
+bootstrap, shared by all personas** (protocol:
+``docs/tiger-memory-sweep-protocol.md``; the original design narrative
+was retired to git history on 2026-08-11). This module is the *gating*
+layer that
 decides whether THIS session should run the team sweep — the staleness
 floor + a soft-lease claim, coordinated through one team-scoped state
 file. No AI, no model spend: exactly the ``journal sweep`` mold.

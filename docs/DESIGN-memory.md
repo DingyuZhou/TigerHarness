@@ -427,8 +427,8 @@ protected-fresh and forget-eligible).
 
 - **2026-06-17** — the original bounded-store revamp: three stores
   (skills / must_remember / emotional-then-diary) + the in-process
-  meditation engine, replacing the chronological-rollup model
-  (`docs/history/tiger-memory-rework.md`).
+  meditation engine, replacing the chronological-rollup model (design
+  narrative retired to git history on 2026-08-11).
 - **2026-06-19** — the 4-store diary/fuzzy evolution: weighted dated diary
   bullets, the fuzzy coarsening store, associative reinforcement
   (evocation), `owner_explicit` → `operator_explicit`.

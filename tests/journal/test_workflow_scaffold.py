@@ -727,6 +727,41 @@ class TestResolveCompilePersonas:
             "ayako": "Ayako",
         }
 
+    def test_alias_override_resolves_to_canonical_name(self, tmp_path):
+        """An override may name a roster ALIAS (``ayako: Mumu``); the
+        resolver -- the single canonicalization home -- must hand every
+        downstream consumer (compile-context, land-compile stamping,
+        validate-personas) the canonical name the memory store is keyed
+        by, never the alias."""
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "personas.yaml").write_text(
+            "personas:\n"
+            "  - name: Anzai\n"
+            "  - name: Akagi\n"
+            "  - name: Ayako\n"
+            "  - name: Kogure\n"
+            "    aliases: [Mumu]\n"
+        )
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  ayako: Mumu\n"
+        )
+        assert resolve_compile_personas(team) == {
+            "drafter": "Anzai", "akagi": "Akagi", "ayako": "Kogure",
+        }
+
+    def test_unknown_override_name_passes_through_verbatim(self, tmp_path):
+        """No alias mapping -> verbatim pass-through, so
+        validate_personas still rejects a genuinely unknown name."""
+        from tigerharness.journal.scaffold import resolve_compile_personas
+        team = _make_team(tmp_path)
+        (team / "configs" / "workflow.yaml").write_text(
+            "compile_personas:\n"
+            "  akagi: Ghost\n"
+        )
+        assert resolve_compile_personas(team)["akagi"] == "Ghost"
+
     def test_unknown_role_key_silently_ignored(self, tmp_path):
         from tigerharness.journal.scaffold import resolve_compile_personas
         team = _make_team(tmp_path)

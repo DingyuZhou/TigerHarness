@@ -28,8 +28,8 @@ comments and formatting in files the user has personalized.
 ``lanes:`` / ``personas:`` lists (one ``- entry`` per line) -- the
 form ``tigerharness init`` writes. Flow-style lists
 (``lanes: [shohoku, tigers]``) are not recognized; converting the
-index to flow style will cause dismiss to silently treat the team as
-single-tenant. Stick with block style and edits remain safe.
+index to flow style will cause dismiss to silently see no lanes in
+the index. Stick with block style and edits remain safe.
 """
 from __future__ import annotations
 
@@ -461,8 +461,9 @@ def build_team_plan(
     those matching ``slack-bridge-*.service`` (the current per-root
     ``slack-bridge-<root>-<hash>``, the older
     ``slack-bridge-multi-<root>-<hash>``, and the legacy global
-    ``slack-bridge-multi.service``). A legacy single-tenant
-    ``slack-bridge.service`` predates the layout this tool scaffolds,
+    ``slack-bridge-multi.service``). A single-tenant
+    ``slack-bridge.service`` (from the single-tenant mode removed by
+    ADR 0009) predates the layout this tool scaffolds,
     cannot be attributed to one team safely, and is left untouched
     (audit T9, deliberate) -- the scan glob's trailing ``-`` excludes
     it by construction.

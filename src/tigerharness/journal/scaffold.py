@@ -61,6 +61,10 @@ _PRIOR_OPERATING_HASHES = {
     # Each entry is a previously-shipped rendered OPERATING.md an existing
     # journal may still have on disk; all refresh to the current (merged
     # cascade + per-persona-memory) template.
+    # 2026-08-11 (wrong-thread notify fix): pre origin-thread-routing
+    # render -- before step 5's "route task notifies to the task's origin
+    # thread" rule (notify --task) and the park-notify --task pointer.
+    "07f32e1eda187d026ac3d0a13bd0e76b3d7ef00b5733c8fe25cae88136c535b1",
     # 2026-08-02 (memory read-path wiring): pre persona-memory-read render
     # -- before step 3's adopt-with-memory instruction and the
     # persona-switch briefing read (practicality audit: drives never
@@ -631,27 +635,47 @@ def resolve_compile_personas(team_root: Path) -> dict[str, str]:
     The scaffolder's :func:`validate_personas` gate fires on the
     resolved persona names, so a config that points at a non-existent
     persona surfaces at scaffold time.
+
+    Configured names may be roster ALIASES (e.g. ``ayako: Mumu`` for a
+    Kogure-aliased persona). Every resolved name is canonicalised
+    through personas.yaml's alias map here -- the single home -- so
+    downstream consumers (compile-context prints, land-compile worklog
+    stamping, validate-personas) always see the canonical persona name
+    the memory store is keyed by. Unknown names pass through verbatim
+    for :func:`validate_personas` to reject.
     """
     out = dict(_DEFAULT_COMPILE_PERSONAS)
-    yaml_path = team_root / "configs" / "workflow.yaml"
+    overrides = _read_compile_persona_overrides(
+        team_root / "configs" / "workflow.yaml"
+    )
+    for role in _COMPILE_ROLES:
+        val = overrides.get(role)
+        if isinstance(val, str) and val.strip():
+            out[role] = val.strip()
+    return {
+        role: canonicalize_persona(team_root, name)
+        for role, name in out.items()
+    }
+
+
+def _read_compile_persona_overrides(yaml_path: Path) -> dict:
+    """Best-effort read of workflow.yaml's ``compile_personas`` dict.
+    Any failure (missing file, parse error, wrong shape) yields ``{}``
+    so the caller falls back to the defaults."""
     if not yaml_path.is_file():
-        return out
+        return {}
     try:
         import yaml
         with yaml_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
     except Exception:  # pragma: no cover - defensive
-        return out
+        return {}
     if not isinstance(data, dict):
-        return out
+        return {}
     overrides = data.get("compile_personas")
     if not isinstance(overrides, dict):
-        return out
-    for role in _COMPILE_ROLES:
-        val = overrides.get(role)
-        if isinstance(val, str) and val.strip():
-            out[role] = val.strip()
-    return out
+        return {}
+    return overrides
 
 
 def _required_workflow_personas(

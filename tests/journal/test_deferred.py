@@ -153,6 +153,75 @@ class TestDefer:
         assert sidecar["journal_root"] == str((team_env / "journal").resolve())
         assert list_deferred(paths) == [entry.id]
 
+    def test_defer_records_channel_in_sidecar_and_entry(self, team_env):
+        paths = JournalPaths(root=team_env / "journal")
+        entry = defer_entry(
+            paths, title="With channel", team="Shohoku",
+            payload_text="hi", thread_ts="1786460709.118669",
+            channel="D0B4L5V7RFG",
+        )
+        sidecar = json.loads((entry.path / "deferred.json").read_text())
+        assert sidecar["channel"] == "D0B4L5V7RFG"
+        assert entry.channel == "D0B4L5V7RFG"
+        assert read_entry(paths, entry.id).channel == "D0B4L5V7RFG"
+
+    def test_defer_channel_defaults_empty_and_old_sidecars_read(
+        self, team_env
+    ):
+        """Old sidecars predate the channel field; reading one must
+        yield "" rather than KeyError."""
+        paths = JournalPaths(root=team_env / "journal")
+        entry = defer_entry(
+            paths, title="No channel", team="Shohoku", payload_text="hi",
+        )
+        sidecar_path = entry.path / "deferred.json"
+        assert json.loads(sidecar_path.read_text())["channel"] == ""
+        data = json.loads(sidecar_path.read_text())
+        del data["channel"]  # simulate a pre-channel sidecar
+        sidecar_path.write_text(json.dumps(data))
+        assert read_entry(paths, entry.id).channel == ""
+
+    def test_cli_defer_channel_flag_and_env_fallback(
+        self, team_env, capsys, monkeypatch, tmp_path
+    ):
+        paths = JournalPaths(root=team_env / "journal")
+        payload = tmp_path / "ask.md"
+        payload.write_text("verbatim\n")
+        monkeypatch.setenv("TIGERHARNESS_SLACK_CHANNEL", "DENVCHAN")
+        rc = main([
+            "defer", "--title", "flag wins", "--team", "Shohoku",
+            "--payload-file", str(payload), "--channel", "DFLAGCHAN",
+        ])
+        assert rc == 0
+        capsys.readouterr()
+        entry_id = list_deferred(paths)[-1]
+        assert read_entry(paths, entry_id).channel == "DFLAGCHAN"
+
+        rc = main([
+            "defer", "--title", "env fallback", "--team", "Shohoku",
+            "--payload-file", str(payload),
+        ])
+        assert rc == 0
+        capsys.readouterr()
+        by_channel = {
+            read_entry(paths, did).title: read_entry(paths, did).channel
+            for did in list_deferred(paths)
+        }
+        assert by_channel["env fallback"] == "DENVCHAN"
+
+        monkeypatch.delenv("TIGERHARNESS_SLACK_CHANNEL", raising=False)
+        rc = main([
+            "defer", "--title", "no channel anywhere", "--team", "Shohoku",
+            "--payload-file", str(payload),
+        ])
+        assert rc == 0
+        capsys.readouterr()
+        by_channel = {
+            read_entry(paths, did).title: read_entry(paths, did).channel
+            for did in list_deferred(paths)
+        }
+        assert by_channel["no channel anywhere"] == ""
+
     @pytest.mark.parametrize("kwargs", [
         dict(title="x", team="Shohoku", payload_text="   \n"),
         dict(title="  ", team="Shohoku", payload_text="hi"),
@@ -286,6 +355,29 @@ class TestMaterialize:
             (task_dir / "deferred_origin.json").read_text()
         )
         assert materialized["journal_root"] == origin["journal_root"]
+
+    def test_origin_sidecar_carries_thread_and_channel(
+        self, team_env, capsys
+    ):
+        """The wrong-thread fix rides on this: the materialized task's
+        deferred_origin.json must keep the Slack origin (thread_ts +
+        channel) so notify --task can route back to it."""
+        journal = str(team_env / "journal")
+        paths = JournalPaths(root=team_env / "journal")
+        did = defer_entry(
+            paths, title="Slack ask", team="Shohoku",
+            payload_text="Do it.\n", thread_ts="1786460709.118669",
+            channel="D0B4L5V7RFG",
+        ).id
+        rc = main(["--journal-dir", journal, "materialize", did])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        task_id = out.split("Materialized: ")[1].splitlines()[0].strip()
+        origin = json.loads(
+            (paths.active / task_id / "deferred_origin.json").read_text()
+        )
+        assert origin["thread_ts"] == "1786460709.118669"
+        assert origin["channel"] == "D0B4L5V7RFG"
 
     def test_malformed_sidecar_exits_1_and_entry_stays(
         self, team_env, capsys

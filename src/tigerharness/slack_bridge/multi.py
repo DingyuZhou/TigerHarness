@@ -49,7 +49,7 @@ from .bridge import (
     TeamBridgeContext,
     build_persona_agent_config,
 )
-from .config import normalize_tiger_memory_trigger
+from .config import normalize_tiger_memory_trigger, redact_token
 from .idle_compact import IdleCompactConfig
 
 log = logging.getLogger("tigerharness.slack_bridge.multi")
@@ -146,9 +146,9 @@ def _validate_allowed_user_ids(raw: object, where: str) -> frozenset[str]:
 
 
 def _validate_tokens(env: dict[str, str], where: str) -> tuple[str, str]:
-    """Mirror the validation in ``config.load()`` but operate on a passed-in
-    dict instead of ``os.environ``. Kept structurally identical so the two
-    code paths can't drift."""
+    """Validate a lane env file's Slack tokens (presence + the xapp-/xoxb-
+    prefix checks that catch the easy-to-make app/bot token swap early).
+    Operates on a passed-in dict, never ``os.environ``."""
     app = (env.get("SLACK_APP_TOKEN") or "").strip()
     bot = (env.get("SLACK_BOT_TOKEN") or "").strip()
     missing = [k for k, v in (("SLACK_APP_TOKEN", app), ("SLACK_BOT_TOKEN", bot)) if not v]
@@ -324,6 +324,11 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
     env_path = _resolve(env_rel, team_dir)
     env_vars = _load_env_file(env_path)
     app_token, bot_token = _validate_tokens(env_vars, where)
+    # Redacted-token confirmation (log family V: never a full secret).
+    log.info(
+        "lane %r tokens loaded (bot=%s app=%s)",
+        lane_name, redact_token(bot_token), redact_token(app_token),
+    )
 
     # Allowlist: the YAML `allowed_user_ids:` list wins when present;
     # otherwise the lane's env file may carry SLACK_ALLOWED_USER_IDS

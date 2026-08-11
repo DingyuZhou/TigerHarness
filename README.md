@@ -226,7 +226,7 @@ one-lane index.
 
 ```bash
 # 1. Fill in each team's Slack tokens in <team>/configs/.env (from api.slack.com)
-#    SLACK_APP_TOKEN=xapp-...  SLACK_BOT_TOKEN=xoxb-...  ALLOWED_SLACK_USER_IDS=U0123ABC
+#    SLACK_APP_TOKEN=xapp-...  SLACK_BOT_TOKEN=xoxb-...  SLACK_ALLOWED_USER_IDS=U0123ABC
 # 2. Create a lanes index listing your team(s):
 printf 'lanes:\n  - tigers\n' > slack-bridge.yaml
 # 3. Point the bridge at it and run:
@@ -234,9 +234,10 @@ export TIGERHARNESS_BRIDGES_CONFIG=$PWD/slack-bridge.yaml
 python -m tigerharness.slack_bridge
 ```
 
-`tigerharness init` auto-registers each new team's lane. Running with **no**
-`TIGERHARNESS_BRIDGES_CONFIG` falls back to the **deprecated** single-tenant
-mode (still works, warns on startup). See
+`tigerharness init` auto-registers each new team's lane.
+`TIGERHARNESS_BRIDGES_CONFIG` is **required**: the former single-tenant
+fallback was removed on 2026-08-11 (ADR 0009), and the bridge now fails
+fast at startup with a migration pointer when it is unset. See
 [`docs/slack-bridge.md`](docs/slack-bridge.md#the-bridge-one-process-1n-lanes)
 for the full setup and
 [migrating off single-tenant](docs/slack-bridge.md#migrating-off-single-tenant).
@@ -277,11 +278,8 @@ All paths are resolved from environment variables -- no hardcoded paths.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TIGERHARNESS_PERSONAS_DIR` | (none) | Directory containing `<name>.md` prompt files |
-| `TIGERHARNESS_SLACK_ENV` | `.env` | Path to slack-bridge .env file |
-| `TIGERHARNESS_AGENT_CWD` | `.` | Working directory for the Claude agent |
-| `TIGERHARNESS_AGENT_PROMPT` | (none) | Path to the agent's system prompt |
-| `TIGERHARNESS_SLACK_BRIDGE_DIR` | (none) | Path to slack-bridge service dir (for notify CLI) |
+| `TIGERHARNESS_BRIDGES_CONFIG` | (none; **required** for the bridge) | Path to the `slack-bridge.yaml` lanes index (see [docs/slack-bridge.md](docs/slack-bridge.md)) |
+| `TIGERHARNESS_SLACK_ENV` | (none) | Explicit `.env` path for the notify CLI's credential lookup |
 | `TIGERHARNESS_ATTACHMENT_DIR` | `/tmp/slack-attachments` | Where to stage downloaded files |
 | `TIGER_MEMORY_CONFIG` | (none) | Path to tiger-memory YAML config |
 | `TIGER_MEMORY_CLI` | (none) | Path to tiger-memory CLI binary |

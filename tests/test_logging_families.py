@@ -100,22 +100,40 @@ def test_family_iv_spawn_nonzero_exit(tmp_path, caplog) -> None:
     ), [r.getMessage() for r in caplog.records]
 
 
-def test_family_v_secret_redaction(monkeypatch, tmp_path, caplog) -> None:
-    from tigerharness.slack_bridge import config as bridge_config
+def test_family_v_secret_redaction(tmp_path, caplog) -> None:
+    """The lane loader's token-confirmation line must never carry a full
+    secret -- only the redact_token() prefix/suffix rendering."""
+    from tigerharness.slack_bridge.multi import load_multi
 
     bot = "xoxb-very-secret-token-value-123456"
     app = "xapp-also-secret-token-value-654321"
-    monkeypatch.setenv("SLACK_BOT_TOKEN", bot)
-    monkeypatch.setenv("SLACK_APP_TOKEN", app)
-    monkeypatch.setenv("SLACK_CEO_USER_ID", "U123")
-    monkeypatch.setenv("ALLOWED_SLACK_USER_IDS", "U123")
-    monkeypatch.chdir(tmp_path)
-    with caplog.at_level(logging.INFO, "tigerharness.slack_bridge.config"):
-        try:
-            bridge_config.load()
-        except (Exception, SystemExit):
-            pass  # validation specifics aren't this test's subject
+    team = tmp_path / "shohoku"
+    (team / "configs").mkdir(parents=True)
+    (team / "configs" / ".env").write_text(
+        f"SLACK_APP_TOKEN={app}\nSLACK_BOT_TOKEN={bot}\n"
+    )
+    persona = team / "personas" / "ayako"
+    persona.mkdir(parents=True)
+    (persona / "prompt.md").write_text("You are ayako.")
+    (team / "memories" / "ayako").mkdir(parents=True)
+    (team / "memories" / "ayako" / "tiger-memory.config.yaml").write_text(
+        "agent: {name: test}\n"
+    )
+    (team / "configs" / "personas.yaml").write_text(
+        "personas:\n  - name: ayako\n"
+    )
+    (team / "configs" / "slack-bridge.yaml").write_text(
+        "default_persona: ayako\n"
+        "allowed_user_ids:\n  - U0CEO\n"
+        f"state_dir: {tmp_path / 'state'}\n"
+    )
+    index = tmp_path / "slack-bridge.yaml"
+    index.write_text("lanes:\n  - shohoku\n")
+
+    with caplog.at_level(logging.INFO, "tigerharness.slack_bridge.multi"):
+        cfg = load_multi(index)
+    assert len(cfg.lanes) == 1
     joined = " ".join(r.getMessage() for r in caplog.records)
-    if joined:  # the load reached the redacted log line
-        assert bot not in joined and app not in joined
-        assert "xoxb-" in joined  # prefix survives, secret does not
+    assert "tokens loaded" in joined  # the confirmation line fired
+    assert bot not in joined and app not in joined
+    assert "xoxb-" in joined and "xapp-" in joined  # prefixes survive

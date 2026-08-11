@@ -1,9 +1,9 @@
 """Tests for the multi-lane orchestrator in slack_bridge/__main__.py.
 
 Covers ``_LaneFilter``, ``_setup_logging``, ``_drive_handlers`` (with
-lane_names), ``_run_multi``, and ``main()`` env-var dispatch.
+lane_names), ``_run_multi``, and ``main()`` dispatch to the index.
 
-Single-tenant tests live in test_main_coverage.py / test_main_extra.py.
+Fail-fast (no index) tests live in test_main_failfast.py.
 """
 from __future__ import annotations
 
@@ -110,9 +110,10 @@ class TestLaneFilter:
 # ---------------------------------------------------------------------------
 
 class TestSetupLogging:
-    def test_multi_format_includes_lane(self, capsys: pytest.CaptureFixture):
-        """Multi mode emits records formatted with `lane=<value>`."""
-        _setup_logging(multi=True)
+    def test_format_includes_lane(self, capsys: pytest.CaptureFixture):
+        """Records are formatted with `lane=<value>` from the contextvar
+        (a one-lane index reads naturally: lane=<team> on every line)."""
+        _setup_logging()
         try:
             token = _lane_var.set("shohoku")
             try:
@@ -125,17 +126,8 @@ class TestSetupLogging:
             assert "lane=shohoku" in output
             assert "hello" in output
         finally:
-            # Reset to default config so subsequent tests aren't affected.
-            _setup_logging(multi=False)
-
-    def test_single_format_omits_lane(self, capsys: pytest.CaptureFixture):
-        """Single mode keeps the legacy format -- no lane= clutter."""
-        _setup_logging(multi=False)
-        logging.getLogger("tigerharness.slack_bridge").info("hello")
-        captured = capsys.readouterr()
-        output = captured.err + captured.out
-        assert "lane=" not in output
-        assert "hello" in output
+            # Reset to a plain config so subsequent tests aren't affected.
+            logging.basicConfig(force=True)
 
 
 # ---------------------------------------------------------------------------
@@ -287,42 +279,11 @@ class TestMainDispatch:
         ) as load_multi_mock, patch(
             "tigerharness.slack_bridge.__main__._run_multi",
             new_callable=AsyncMock,
-        ) as run_multi_mock, patch(
-            "tigerharness.slack_bridge.__main__._run_single",
-            new_callable=AsyncMock,
-        ) as run_single_mock:
+        ) as run_multi_mock:
             main()
 
         load_multi_mock.assert_called_once_with(Path(str(idx)))
         run_multi_mock.assert_awaited_once_with(fake_multi_cfg)
-        run_single_mock.assert_not_awaited()
-
-    def test_dispatches_to_single_when_bridges_config_unset(
-        self, monkeypatch
-    ):
-        monkeypatch.delenv("TIGERHARNESS_BRIDGES_CONFIG", raising=False)
-        with patch(
-            "tigerharness.slack_bridge.__main__._run_single",
-            new_callable=AsyncMock,
-        ) as run_single_mock, patch(
-            "tigerharness.slack_bridge.__main__._run_multi",
-            new_callable=AsyncMock,
-        ) as run_multi_mock:
-            main()
-        run_single_mock.assert_awaited_once()
-        run_multi_mock.assert_not_awaited()
-
-    def test_dispatches_to_single_when_bridges_config_empty_string(
-        self, monkeypatch
-    ):
-        """Whitespace-only env var is treated the same as unset."""
-        monkeypatch.setenv("TIGERHARNESS_BRIDGES_CONFIG", "   ")
-        with patch(
-            "tigerharness.slack_bridge.__main__._run_single",
-            new_callable=AsyncMock,
-        ) as run_single_mock:
-            main()
-        run_single_mock.assert_awaited_once()
 
     def test_keyboard_interrupt_in_multi_path(self, monkeypatch, tmp_path: Path):
         idx = tmp_path / "slack-bridge.yaml"
@@ -331,6 +292,10 @@ class TestMainDispatch:
         with patch(
             "tigerharness.slack_bridge.__main__.load_multi",
             return_value=MultiBridgeConfig(lanes=(_make_lane("dummy"),)),
+        ), patch(
+            # Non-async mock so no orphaned coroutine is created when
+            # asyncio.run raises before awaiting it.
+            "tigerharness.slack_bridge.__main__._run_multi",
         ), patch(
             "tigerharness.slack_bridge.__main__.asyncio.run",
             side_effect=KeyboardInterrupt(),

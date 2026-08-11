@@ -656,3 +656,197 @@ class TestResolveTargetUserIdFromYaml:
         assert len(pyyaml_msgs) == 1, (
             f"expected 1 pyyaml-missing log over 5 calls, got {len(pyyaml_msgs)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# --task routing: the wrong-thread fix (deferred_origin.json -> thread)
+# ---------------------------------------------------------------------------
+
+class TestResolveTaskOrigin:
+    """resolve_task_origin reads (thread_ts, channel) from the task's
+    deferred_origin.json; every failure mode falls back to ("", "")
+    with a WARNING so the notify still lands in the operator DM."""
+
+    def _journal(self, tmp_path, monkeypatch) -> Path:
+        root = tmp_path / "journal"
+        monkeypatch.setenv("TIGERHARNESS_JOURNAL_DIR", str(root))
+        return root
+
+    def _write_origin(self, root: Path, tray: str, task_id: str, data) -> Path:
+        task_dir = root / tray / task_id
+        task_dir.mkdir(parents=True)
+        sidecar = task_dir / "deferred_origin.json"
+        sidecar.write_text(
+            data if isinstance(data, str) else json.dumps(data)
+        )
+        return sidecar
+
+    def test_reads_thread_and_channel_from_active(self, tmp_path, monkeypatch):
+        from tigerharness.slack_bridge.notify import resolve_task_origin
+        root = self._journal(tmp_path, monkeypatch)
+        self._write_origin(root, "active", "t-1", {
+            "thread_ts": "1786460709.118669", "channel": "D0B4L5V7RFG",
+        })
+        assert resolve_task_origin("t-1") == (
+            "1786460709.118669", "D0B4L5V7RFG"
+        )
+
+    @pytest.mark.parametrize("tray", ["done", "needs_input"])
+    def test_searches_done_and_needs_input_trays(
+        self, tmp_path, monkeypatch, tray
+    ):
+        from tigerharness.slack_bridge.notify import resolve_task_origin
+        root = self._journal(tmp_path, monkeypatch)
+        self._write_origin(root, tray, "t-2", {"thread_ts": "1.2"})
+        assert resolve_task_origin("t-2") == ("1.2", "")
+
+    def test_pre_channel_sidecar_yields_empty_channel(
+        self, tmp_path, monkeypatch
+    ):
+        from tigerharness.slack_bridge.notify import resolve_task_origin
+        root = self._journal(tmp_path, monkeypatch)
+        self._write_origin(root, "active", "t-3", {"thread_ts": "9.9"})
+        assert resolve_task_origin("t-3") == ("9.9", "")
+
+    def test_missing_sidecar_warns_and_falls_back(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+        from tigerharness.slack_bridge.notify import resolve_task_origin
+        self._journal(tmp_path, monkeypatch)
+        with caplog.at_level(
+            logging.WARNING, logger="tigerharness.slack_bridge.notify"
+        ):
+            assert resolve_task_origin("ghost") == ("", "")
+        assert any("no deferred_origin.json" in r.message
+                   for r in caplog.records)
+
+    def test_corrupt_sidecar_warns_and_falls_back(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+        from tigerharness.slack_bridge.notify import resolve_task_origin
+        root = self._journal(tmp_path, monkeypatch)
+        self._write_origin(root, "active", "t-4", "{not json")
+        with caplog.at_level(
+            logging.WARNING, logger="tigerharness.slack_bridge.notify"
+        ):
+            assert resolve_task_origin("t-4") == ("", "")
+        assert any("unreadable" in r.message for r in caplog.records)
+
+    def test_no_thread_ts_warns_and_falls_back(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+        from tigerharness.slack_bridge.notify import resolve_task_origin
+        root = self._journal(tmp_path, monkeypatch)
+        self._write_origin(root, "active", "t-5", {"channel": "DONLY"})
+        with caplog.at_level(
+            logging.WARNING, logger="tigerharness.slack_bridge.notify"
+        ):
+            assert resolve_task_origin("t-5") == ("", "")
+        assert any("no thread_ts" in r.message for r in caplog.records)
+
+    def test_non_object_sidecar_falls_back(self, tmp_path, monkeypatch):
+        from tigerharness.slack_bridge.notify import resolve_task_origin
+        root = self._journal(tmp_path, monkeypatch)
+        self._write_origin(root, "active", "t-6", "[1, 2]")
+        assert resolve_task_origin("t-6") == ("", "")
+
+
+class TestCliTaskRouting:
+    """The CLI half: --task threads text/file sends into the recorded
+    origin; explicit --thread / --channel always win."""
+
+    def _origin(self, tmp_path, monkeypatch):
+        root = tmp_path / "journal"
+        monkeypatch.setenv("TIGERHARNESS_JOURNAL_DIR", str(root))
+        task_dir = root / "active" / "t-live"
+        task_dir.mkdir(parents=True)
+        (task_dir / "deferred_origin.json").write_text(json.dumps({
+            "thread_ts": "1786460709.118669", "channel": "D0B4L5V7RFG",
+        }))
+
+    def _mock_notifier(self):
+        n = MagicMock()
+        n.dm_text.return_value = True
+        n.dm_file.return_value = True
+        return n
+
+    def test_text_task_routes_to_origin(self, tmp_path, monkeypatch):
+        self._origin(tmp_path, monkeypatch)
+        n = self._mock_notifier()
+        with patch.object(SlackNotifier, "try_load", return_value=n):
+            assert main(["text", "done!", "--task", "t-live"]) == 0
+        n.dm_text.assert_called_once_with(
+            "done!", channel="D0B4L5V7RFG",
+            thread_ts="1786460709.118669",
+        )
+
+    def test_explicit_thread_overrides_task(self, tmp_path, monkeypatch):
+        self._origin(tmp_path, monkeypatch)
+        n = self._mock_notifier()
+        with patch.object(SlackNotifier, "try_load", return_value=n), patch(
+            "tigerharness.slack_bridge.notify.resolve_task_origin"
+        ) as resolver:
+            assert main([
+                "text", "hi", "--task", "t-live", "--thread", "42.42",
+            ]) == 0
+        resolver.assert_not_called()
+        n.dm_text.assert_called_once_with(
+            "hi", channel=None, thread_ts="42.42",
+        )
+
+    def test_explicit_channel_kept_thread_from_task(
+        self, tmp_path, monkeypatch
+    ):
+        self._origin(tmp_path, monkeypatch)
+        n = self._mock_notifier()
+        with patch.object(SlackNotifier, "try_load", return_value=n):
+            assert main([
+                "text", "hi", "--task", "t-live", "--channel", "COVERRIDE",
+            ]) == 0
+        n.dm_text.assert_called_once_with(
+            "hi", channel="COVERRIDE", thread_ts="1786460709.118669",
+        )
+
+    def test_task_without_origin_falls_back_to_dm(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "TIGERHARNESS_JOURNAL_DIR", str(tmp_path / "journal")
+        )
+        n = self._mock_notifier()
+        with patch.object(SlackNotifier, "try_load", return_value=n):
+            assert main(["text", "hi", "--task", "ghost"]) == 0
+        n.dm_text.assert_called_once_with(
+            "hi", channel=None, thread_ts=None,
+        )
+
+    def test_file_task_routes_to_origin(self, tmp_path, monkeypatch):
+        self._origin(tmp_path, monkeypatch)
+        f = tmp_path / "chart.png"
+        f.write_bytes(b"PNG")
+        n = self._mock_notifier()
+        with patch.object(SlackNotifier, "try_load", return_value=n):
+            assert main([
+                "file", "--file", str(f), "--comment", "cap",
+                "--task", "t-live",
+            ]) == 0
+        n.dm_file.assert_called_once_with(
+            str(f), caption="cap", channel="D0B4L5V7RFG",
+            thread_ts="1786460709.118669",
+        )
+
+    def test_file_explicit_channel_and_thread(self, tmp_path, monkeypatch):
+        f = tmp_path / "chart.png"
+        f.write_bytes(b"PNG")
+        n = self._mock_notifier()
+        with patch.object(SlackNotifier, "try_load", return_value=n):
+            assert main([
+                "file", "--file", str(f),
+                "--channel", "CX", "--thread", "7.7",
+            ]) == 0
+        n.dm_file.assert_called_once_with(
+            str(f), caption="", channel="CX", thread_ts="7.7",
+        )
