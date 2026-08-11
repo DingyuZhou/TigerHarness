@@ -68,7 +68,7 @@ Reply posted to thread
 |---|---|---|
 | `SLACK_APP_TOKEN` | (required) | Socket Mode app token (xapp-...) |
 | `SLACK_BOT_TOKEN` | (required) | Bot OAuth token (xoxb-...) |
-| `ALLOWED_SLACK_USER_IDS` | (required) | Comma-separated user IDs |
+| `ALLOWED_SLACK_USER_IDS` | (required) | Comma-separated user IDs (legacy spelling — the single-tenant loader reads only this name; see the allowlist note below) |
 | `TIGERHARNESS_AGENT_CWD` | `.` | Working directory for the agent |
 | `TIGERHARNESS_AGENT_PROMPT` | (none) | Path to system prompt .md file |
 | `TIGERHARNESS_SLACK_ENV` | (none) | Explicit .env file path |
@@ -77,6 +77,18 @@ Reply posted to thread
 | `TIGER_MEMORY_CONFIG` | (none) | Auto-trigger memory rebuild on new threads |
 | `TIGER_MEMORY_CLI` | (none) | Path to tiger-memory binary |
 | `TIGERHARNESS_BRIDGES_CONFIG` | (none) | Path to a top-level `slack-bridge.yaml` index — the **recommended** way to run the bridge, for one team or many ([details below](#the-bridge-one-process-1n-lanes)). When set, the single-tenant vars above are ignored. |
+
+> **Allowlist env spelling.** The canonical name is `SLACK_ALLOWED_USER_IDS`;
+> each component reads it differently:
+>
+> - **Multi-lane bridge** (`TIGERHARNESS_BRIDGES_CONFIG`): when a lane
+>   fragment omits `allowed_user_ids`, the lane env file must supply the
+>   canonical `SLACK_ALLOWED_USER_IDS`.
+> - **`notify` CLI** (`python -m tigerharness.slack_bridge.notify`): reads
+>   canonical `SLACK_ALLOWED_USER_IDS` first, then falls back to the legacy
+>   `ALLOWED_SLACK_USER_IDS`.
+> - **Deprecated single-tenant fallback** (this table): reads the legacy
+>   `ALLOWED_SLACK_USER_IDS` only.
 
 ## Running
 
