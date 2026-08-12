@@ -3,13 +3,16 @@
 ## At a glance
 
 - **What:** the [`tigerharness autodrive`](autodrive.md) daemon posts a
-  **heartbeat to a Slack channel on every fire**, then **threads a real drive
-  status + summary** under that heartbeat once the fire's drive finishes. The
-  steady rhythm of heartbeats is the health signal; the threaded reply is the
-  substance.
+  **heartbeat to a Slack channel on every cycle** — a fire heartbeat when it
+  launches a drive, a skip pulse when the queue probe declines to — then
+  **threads a real drive status + summary** under each fire heartbeat once
+  that drive finishes. The steady rhythm of heartbeats is the health signal;
+  the threaded reply is the substance.
 - **Why:** autodrive is an *unattended, detached* daemon. Notifications are the
-  Operator's only live window into it. A heartbeat every fire means **its
-  absence tells you the daemon died** — no separate watchdog needed.
+  Operator's only live window into it. A heartbeat every cycle means **its
+  absence tells you the daemon died** — no separate watchdog needed. That is
+  why a cycle which spends nothing still pulses: silence must mean exactly one
+  thing.
 - **Must-not-miss:** notifications are **model-free** (a plain Slack HTTP POST,
   never a spawned agent), they **never break a drive** (every failure is
   swallowed + logged), and they are **mutable** (`--notify none`). When muted,
@@ -53,6 +56,25 @@ The summary line is the drive's own closing message
 Because fires **overlap** (the loop never waits for a drive), several heartbeat
 threads can be open at once; each in-flight drive carries its own thread handle,
 so every completion lands under the right heartbeat.
+
+3. **On a cycle that fires nothing — post a skip pulse.** The ADR 0010 queue
+   probe lets a cycle decline to spend a drive (queue busy, or a drive still
+   settling). Such a cycle still pulses, with the same prefix so the channel
+   reads as one rhythm:
+
+   ```
+   autodrive heartbeat - no fire at 2026-08-12T23:10:00Z - queue busy - a
+   live session owns the in-flight task (in-flight 1, 1 drive(s) so far)
+   ```
+
+   A skip pulse is a parent message with no thread: there is no drive, so
+   there is no completion to thread under it.
+
+   **Why this exists.** The probe originally made the no-work cycle both free
+   *and* silent, so a long busy stretch looked identical to a dead daemon --
+   the exact failure the heartbeat is meant to rule out. The rhythm must
+   track the daemon's *health*, not its *spending*. Restoring it costs
+   nothing: a pulse is a plain HTTP POST, never a drive.
 
 ### Why a beat *per fire*, not a digest
 

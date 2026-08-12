@@ -376,6 +376,75 @@ async def test_loop_busy_skips_the_fire(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_loop_busy_stretch_never_goes_silent(tmp_path):
+    """Regression: the queue probe made a busy cycle free *and* silent, so a
+    long busy stretch was indistinguishable from a crashed daemon. Every
+    cycle must still pulse -- and still without spending a drive."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    notifier = _RecordingNotifier()
+    drives = []
+
+    async def fake_drive(cfg, *, backend=None):
+        drives.append(1)
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        return None
+
+    n = await runner.run_loop(
+        _cfg(), p,
+        run_drive=fake_drive, sleep=fake_sleep, now=lambda: "T",
+        probe=lambda cfg: runner.QUEUE_BUSY,
+        notifier=notifier,
+        max_ticks=3,
+    )
+    assert n == 0 and drives == []          # still costs nothing
+    assert len(notifier.heartbeats) == 3    # ...but is no longer silent
+    assert all("no fire at T" in h for h in notifier.heartbeats)
+    assert all(runner.SKIP_BUSY in h for h in notifier.heartbeats)
+    # A skip has no drive to thread a completion under, so it must not
+    # invent one -- the pulse is a parent message and nothing else.
+    assert notifier.updates == []
+
+
+@pytest.mark.asyncio
+async def test_loop_pulses_while_waiting_on_an_in_flight_drive(tmp_path):
+    """The other silent path: queue idle but a drive still settling."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    notifier = _RecordingNotifier()
+    gate = {"open": False}
+
+    async def fake_drive(cfg, *, backend=None):
+        while not gate["open"]:
+            await runner.asyncio.sleep(0)
+        return _FakeResult()
+
+    sleeps = {"n": 0}
+
+    async def fake_sleep(secs):
+        # Hold the drive in flight across one full cycle, so the next probe
+        # genuinely lands on "idle, but a drive is still settling". Opening
+        # the gate on the first sleep would let `_reap_done` clear it before
+        # the branch is ever reached.
+        sleeps["n"] += 1
+        if sleeps["n"] >= 2:
+            gate["open"] = True
+        await runner.asyncio.sleep(0)
+
+    verdicts = [runner.QUEUE_ACTIONABLE] + [runner.QUEUE_IDLE] * 8
+    await runner.run_loop(
+        _cfg(), p,
+        run_drive=fake_drive, sleep=fake_sleep, now=lambda: "T",
+        probe=lambda cfg: verdicts.pop(0),
+        notifier=notifier,
+        max_ticks=10,
+    )
+    assert any(runner.SKIP_WAITING in h for h in notifier.heartbeats)
+
+
+@pytest.mark.asyncio
 async def test_loop_work_arriving_resets_the_maintenance_latch(tmp_path):
     """Idle, then work, then idle again must run maintenance a second time
     -- otherwise the daemon exits without sweeping the memory it just
@@ -485,6 +554,20 @@ async def test_loop_stop_requested_posts_no_drained_message(tmp_path):
 
 async def _noop():
     return None
+
+
+def test_skip_text_shares_the_heartbeat_prefix():
+    """The rhythm is the health signal, so a skip pulse must read as the
+    same pulse as a fire -- a differently-shaped message would break the
+    channel's continuity and re-open the "is it dead?" question."""
+    txt = runner.skip_text(2, "T", runner.SKIP_BUSY, 1)
+    fire = runner.heartbeat_text(2, "T", 1)
+    prefix = "autodrive heartbeat - "
+    assert txt.startswith(prefix) and fire.startswith(prefix)
+    assert "no fire at T" in txt
+    assert "queue busy" in txt
+    assert "in-flight 1" in txt
+    assert "2 drive(s) so far" in txt
 
 
 def test_drained_text_names_the_restart_path():
