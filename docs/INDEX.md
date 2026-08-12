@@ -22,7 +22,7 @@ plain `claude -p` subprocess.
 | Know how a crashed/idle task resumes | [journal-instant-resume.md](journal-instant-resume.md) |
 | Park a task on an Operator question instead of blocking the drive | [journal-operator-questions.md](journal-operator-questions.md) |
 | Schedule from Slack **cheaply**, or understand rails/billing + `status.json` | [subscription-backend.md](subscription-backend.md) |
-| Drive the journal queue automatically on a timer (the sanctioned exception) | [autodrive.md](autodrive.md) |
+| Drive the journal queue automatically (the sanctioned exception; auto-start + auto-stop) | [autodrive.md](autodrive.md) |
 | Get Slack heartbeats + threaded drive summaries from the autodrive daemon (or mute them) | [autodrive-notifications.md](autodrive-notifications.md) |
 | Understand per-persona memory from journal work (the worklog rail) | [per-persona-journal-memory.md](per-persona-journal-memory.md) |
 | Set up / operate the Slack bridge (1..N lanes) | [slack-bridge.md](slack-bridge.md) |
@@ -30,14 +30,20 @@ plain `claude -p` subprocess.
 | Understand the memory design (stores + staged compaction, the rationale) | [DESIGN-memory.md](DESIGN-memory.md) |
 | Run the team-wide memory sweep | [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md) |
 | Use the backend-agnostic agent SDK | [agent_sdk.md](agent_sdk.md) |
-| Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep, 0007 topic-store revamp, 0008 team event log) |
+| Make the queue self-driving (scheduling starts the daemon, draining stops it) | [adr/0010](adr/0010-self-driving-journal.md), [autodrive.md](autodrive.md) |
+| Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep, 0007 topic-store revamp, 0008 team event log, 0009 remove single-tenant bridge, 0010 self-driving journal) |
 
 ## Must-not-miss rules (one hop, never bury these)
 
 - **Slack rail rule** — a Slack-triggered session may SCHEDULE journal tasks
-  but must NEVER drive them (driving is the subscription rail). See
+  but must NEVER drive them (driving is the subscription rail). Unchanged by
+  [adr/0010](adr/0010-self-driving-journal.md): a `defer` may now *wake* the
+  autodrive daemon, but the Slack session is still not the driver. See
   [subscription-backend.md](subscription-backend.md) and
   [slack-bridge.md](slack-bridge.md#journal-tasks-over-slack-scheduling-discipline).
+- **Auto-start is safe only while `claude -p` bills the subscription.** If
+  that changes, set `TIGERHARNESS_AUTODRIVE_AUTOSTART=0` — no code change.
+  See [autodrive.md](autodrive.md).
 - **Cross-root dismiss safety** — `dismiss` tears down only the operated
   root's bridge, scoped by content (the 2026-06-12 incident class). See
   [slack-bridge.md](slack-bridge.md#the-bridge-one-process-1n-lanes).
@@ -79,7 +85,10 @@ plain `claude -p` subprocess.
   is a typed, backend-agnostic API over the `claude -p` and Claude Agent SDK
   runtimes. `autodrive` periodically drives the journal queue via that SDK
   (the Operator-authorized exception to the human-only drive rule —
-  [autodrive.md](autodrive.md)).
+  [autodrive.md](autodrive.md)). Opt in with
+  `TIGERHARNESS_AUTODRIVE_AUTOSTART` and it becomes self-driving: scheduling
+  work starts it, a drained queue stops it, and an idle tick costs a file
+  walk instead of a model session ([adr/0010](adr/0010-self-driving-journal.md)).
 - **Logs.** Every CLI reads `TIGERHARNESS_LOG_LEVEL` (default WARNING) via one
   helper; one named logger per module; `tests/test_logging_audit.py` enforces
   coverage.

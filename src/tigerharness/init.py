@@ -127,11 +127,20 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "e882a7820610975b9bbd24d0594dc0f5fd89d3db5557ec0a1208869476f37e10",
     },
     "journal-autodrive": {
+        # 2026-08-12 (self-driving journal, ADR 0010): anzai: pre auto-stop
+        #   ship -- described a daemon that fires forever and told the reader
+        #   to prefer `stop`, which is now wrong advice for a self-stopping
+        #   daemon (a drained-queue exit would read as a crash).
+        "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
         # 2026-06-25 (initial ship): anzai: autodrive daemon skill, pre the
         #   notifications + one-per-team rewrite.
         "5271f7d54ad66c2c9c1d4449305d01dff682531def965b3260ddaa4221fac0c3",
     },
     "journal-new": {
+        # 2026-08-12 (self-driving journal, ADR 0010): anzai: pre defer-test
+        #   ship -- the skill only triggered on explicit "scaffold this"
+        #   phrasing, so an ask that was simply too big never reached it.
+        "958276c5bd03a13b106b06790cd57186440c11df99898a71fbe600734f99832a",
         # 2026-08-11 (wrong-thread notify fix): miyagi: pre link-fix ship --
         #   intro still carried relative markdown links to ../../docs/*.md,
         #   dead in every scaffolded team copy.
@@ -257,8 +266,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
     "drive-journal": "20d8521342086b2c6702097396da6b1beda5258f8aa5451580799e3cdc9ac627",
-    "journal-autodrive": "de0b080bf182a5dd74a7cd59d45edfe692c4e385daa57bc98ba3156c8a7c9034",
-    "journal-new": "958276c5bd03a13b106b06790cd57186440c11df99898a71fbe600734f99832a",
+    "journal-autodrive": "02e3b943e6257fabd148d184864e4b174e4394b8b709a9aca9a19009f001f7fc",
+    "journal-new": "c0f2384f0d3313ba4821d15ca82714a48a1704268b4c546fd25e5986dc9d6466",
     "slack-notify": "bc182b0f0dc5e07f3e7fa3506b3b1658d63fbedfb4e5d69c2cb7e6ad97767a99",
     "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",

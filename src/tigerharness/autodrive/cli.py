@@ -20,21 +20,35 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import logging
 import os
 import signal
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, Mapping
 
 from ..journal.paths import default_journal_root
 from ..journal.scaffold import resolve_default_persona
 from .notifier import build_notifier
+from .settings import (
+    AUTOSTART_ENV,
+    DRIVER_ENV,
+    INTERVAL_ENV,
+    MAX_BUDGET_ENV,
+    NOTIFY_CHANNEL_ENV,
+    NOTIFY_ENV,
+    Settings,
+)
 from .runner import (
     DEFAULT_BACKEND,
+    DEFAULT_INTERVAL_SECONDS,
     DEFAULT_NOTIFY,
     DEFAULT_PERMISSION_MODE,
+    MIN_INTERVAL_SECONDS,
+    QUEUE_IDLE,
     AutodriveConfig,
     clamp_interval,
     clear_state,
@@ -43,6 +57,7 @@ from .runner import (
     default_prompt,
     is_running,
     log_path,
+    probe_queue,
     read_state,
     run_loop,
     state_path,
@@ -50,12 +65,97 @@ from .runner import (
     write_state,
 )
 
-#: Env override for the daemon-level notify channel (lowest priority after the
-#: ``--notify-channel`` flag, before the operator-DM fallback). Kept here so
-#: both the resolver and the docs point at one name.
-NOTIFY_CHANNEL_ENV = "TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL"
+#: Exit code from ``cmd_start`` meaning "a daemon was already up, so nothing
+#: was started". Distinct from 2 (bad argument) so :func:`ensure_running` can
+#: treat it as success -- the invariant it wants is "a daemon is running",
+#: and one already running satisfies it.
+RC_ALREADY_RUNNING = 1
 
 log = logging.getLogger(__name__)
+
+#: Advisory lock file guarding the check-and-spawn critical section. Separate
+#: from the state file because the state file is rewritten (tmp + rename)
+#: constantly, and ``flock`` follows the *inode* -- locking a file that gets
+#: replaced under you locks nothing.
+LOCK_FILE_NAME = ".autodrive.lock"
+
+#: Turn-scoped Slack markers the bridge injects into a persona's subprocess
+#: (``slack_bridge/bridge.py:_with_thread_env``). They must NOT reach the
+#: detached daemon.
+#:
+#: This is not hypothetical: ``journal defer`` is the flagship auto-start
+#: trigger and it runs *inside* a Slack turn, so an unscrubbed env would pin
+#: the daemon -- and every drive it ever spawns, for as long as it lives -- to
+#: that one thread. Three things then go wrong quietly: the journal claim gate
+#: reads the marker and refuses the drive as "a Slack session" (only the
+#: prompt's ``--allow-api-drive`` saves it); a ``journal defer`` from inside a
+#: drive records the stale thread/channel as its origin, so the completion
+#: notice threads back into an unrelated conversation; and drive-transcript
+#: suppression registers against that conversation, hiding it from the memory
+#: sweep. Scrubbed at the spawn boundary rather than in the drive prompt,
+#: because a boundary holds whether or not a model reads its instructions.
+#:
+#: Slack *credential* vars are deliberately NOT scrubbed -- the daemon needs
+#: them to post its own heartbeats.
+TURN_SCOPED_ENV_VARS = (
+    "TIGERHARNESS_SLACK_THREAD_TS",
+    "TIGERHARNESS_SLACK_CHANNEL",
+)
+
+
+def daemon_env(base: Mapping[str, str], journal_root: Path) -> dict[str, str]:
+    """The environment the detached daemon runs with (and hence every drive
+    it spawns): the caller's env minus the turn-scoped Slack markers, plus
+    the journal pin so a custom ``--journal-dir`` or a personal journal
+    resolves to exactly the one this daemon manages."""
+    env = {k: v for k, v in base.items() if k not in TURN_SCOPED_ENV_VARS}
+    env["TIGERHARNESS_JOURNAL_DIR"] = str(journal_root)
+    return env
+
+
+def lock_path(state_root: Path) -> Path:
+    return state_root / LOCK_FILE_NAME
+
+
+@contextmanager
+def start_lock(state_root: Path) -> Iterator[None]:
+    """Serialize ``start``'s check-and-spawn against every other process in
+    the same team (ADR 0010).
+
+    Without this the guard was a read-then-write: two ``journal new`` calls in
+    the same second both saw "not running" and both spawned a daemon. Once
+    scheduling *auto-starts* the daemon that race stops being theoretical, so
+    the whole decision runs under an exclusive advisory lock.
+
+    **Two** critical sections take this lock, and they are two halves of one
+    invariant -- "exactly one daemon per team, and never zero while work is
+    queued":
+
+    * ``cmd_start``/``ensure_running`` -- check the state file, then spawn.
+    * ``cmd_loop``'s ``confirm_exit`` -- re-probe, then clear the state file.
+
+    They must exclude each other or a scheduler reads a live pid from a daemon
+    that is already committed to exiting, stands down, and strands its task.
+
+    Blocking (not ``LOCK_NB``) on purpose: a waiter is delayed and then
+    correctly observes whichever decision won. Keep both sections short --
+    ``start``'s is a few small writes plus a ``Popen`` that returns
+    immediately; ``confirm_exit``'s is one journal sweep, a bounded file walk.
+    Anything genuinely slow does not belong in here, because every scheduler
+    in the team queues behind it. The kernel releases the lock if the holder
+    dies, so a crash mid-start (or mid-exit) cannot wedge the team.
+    """
+    path = lock_path(state_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "w", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 # ----- context resolution -----
@@ -162,7 +262,11 @@ def cmd_start(
     *,
     spawn: Callable[..., int] = spawn_loop_process,
     now: Callable[[], str] = utcnow_iso,
+    quiet: bool = False,
 ) -> int:
+    """Start the team's daemon. ``quiet`` collapses the operator banner to a
+    single line -- what :func:`ensure_running` wants, since its caller is a
+    ``journal`` command whose own output should stay readable."""
     journal_root = _resolve_journal_root(args)
     journal_root.mkdir(parents=True, exist_ok=True)
     # The lock (state file) is team-canonical so the guard is one-per-team,
@@ -170,81 +274,114 @@ def cmd_start(
     state_root = _state_root(args)
     state_root.mkdir(parents=True, exist_ok=True)
     sfile = state_path(state_root)
+    team_root = _team_root_for(journal_root)
+    settings = Settings(team_root=team_root)
 
-    running, state = is_running(sfile)
-    if running:
-        assert state is not None
-        print(
-            f"autodrive already running (pid {state.get('pid')}) for this "
-            "team. Stop it first: tigerharness autodrive stop",
-            file=sys.stderr,
-        )
-        return 1
-
+    # Every knob: flag > process env > team configs/.env > built-in default.
     try:
-        interval = clamp_interval(float(args.interval))
+        raw_interval = args.interval
+        if raw_interval is None:
+            raw_interval = settings.number(INTERVAL_ENV)
+        interval = clamp_interval(
+            DEFAULT_INTERVAL_SECONDS if raw_interval is None
+            else float(raw_interval)
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
-    team_root = _team_root_for(journal_root)
-    driver = args.driver
+    driver = args.driver or settings.get(DRIVER_ENV)
     if driver is None and team_root is not None:
         driver = resolve_default_persona(team_root)
+    max_budget = args.max_budget
+    if max_budget is None:
+        max_budget = settings.number(MAX_BUDGET_ENV)
+    notify = args.notify or settings.get(NOTIFY_ENV) or DEFAULT_NOTIFY
+    if notify not in ("slack", "none"):
+        print(
+            f"error: {NOTIFY_ENV}={notify!r} is not 'slack' or 'none'.",
+            file=sys.stderr,
+        )
+        return 2
+    # Notify channel resolution: flag > env > team .env > operator DM (None).
+    notify_channel = args.notify_channel or settings.get(NOTIFY_CHANNEL_ENV)
 
     cwd = str(team_root if team_root is not None else journal_root.parent)
     prompt = args.prompt if args.prompt else default_prompt(driver)
-    # Notify channel resolution: flag > env > operator DM (None). Empty
-    # string from either source means "unset" -> fall through.
-    notify_channel = (
-        args.notify_channel
-        or os.environ.get(NOTIFY_CHANNEL_ENV, "").strip()
-        or None
-    )
     cfg = AutodriveConfig(
         interval_seconds=interval,
         driver=driver,
         backend=args.backend,
         model=args.model,
-        max_budget_usd=args.max_budget,
+        max_budget_usd=max_budget,
         permission_mode=args.permission_mode,
         prompt=prompt,
         cwd=cwd,
-        notify=args.notify,
+        notify=notify,
         notify_channel=notify_channel,
+        journal_root=str(journal_root),
     )
-
-    # Write the state file BEFORE spawning so the child can read its
-    # config the instant it starts; fill in the pid right after.
-    state = {
-        **config_to_dict(cfg),
-        "pid": None,
-        "started_at": now(),
-        "fire_count": 0,
-        "last_fire_at": None,
-        "in_flight": 0,
-        "tick_count": 0,
-        "last_tick_at": None,
-        "stop_requested": False,
-        "last_stop_reason": None,
-        "last_cost_usd": None,
-        "last_error": None,
-    }
-    write_state(sfile, state)
     logf = log_path(state_root)
-    # Pin the journal the spawned drives target (so a custom --journal-dir,
-    # or a personal journal, resolves to exactly the one autodrive manages),
-    # then run the daemon in `cwd` (the team root) so the persona's CLAUDE.md
-    # / team detection / memory attribution all line up.
-    child_env = {**os.environ, "TIGERHARNESS_JOURNAL_DIR": str(journal_root)}
-    pid = spawn(sfile, cwd=cwd, log_file=logf, env=child_env)
-    fresh = read_state(sfile) or state
-    fresh["pid"] = pid
-    write_state(sfile, fresh)
+    # Pin the journal the spawned drives target and drop the caller's
+    # turn-scoped Slack markers (see TURN_SCOPED_ENV_VARS -- auto-start is
+    # normally triggered from inside a Slack turn), then run the daemon in
+    # `cwd` (the team root) so the persona's CLAUDE.md / team detection /
+    # memory attribution all line up.
+    child_env = daemon_env(os.environ, journal_root)
+
+    # The whole decision -- "is one already up?" through "spawn it" -- runs
+    # under the team lock, so concurrent schedulers can never both spawn.
+    with start_lock(state_root):
+        running, state = is_running(sfile)
+        if running:
+            assert state is not None
+            if quiet:
+                # Auto-start's normal, uninteresting case: the daemon is
+                # already doing its job. Log it; don't nag the operator.
+                log.info(
+                    "autodrive already running (pid %s); nothing to start",
+                    state.get("pid"),
+                )
+            else:
+                print(
+                    f"autodrive already running (pid {state.get('pid')}) for "
+                    "this team. Stop it first: tigerharness autodrive stop",
+                    file=sys.stderr,
+                )
+            return RC_ALREADY_RUNNING
+
+        # Write the state file BEFORE spawning so the child can read its
+        # config the instant it starts; fill in the pid right after.
+        state = {
+            **config_to_dict(cfg),
+            "pid": None,
+            "started_at": now(),
+            "fire_count": 0,
+            "last_fire_at": None,
+            "in_flight": 0,
+            "tick_count": 0,
+            "last_tick_at": None,
+            "stop_requested": False,
+            "last_stop_reason": None,
+            "last_cost_usd": None,
+            "last_error": None,
+        }
+        write_state(sfile, state)
+        pid = spawn(sfile, cwd=cwd, log_file=logf, env=child_env)
+        fresh = read_state(sfile) or state
+        fresh["pid"] = pid
+        write_state(sfile, fresh)
     log.info(
         "autodrive started pid=%s interval=%ss backend=%s driver=%s",
         pid, int(interval), cfg.backend, driver,
     )
+
+    if quiet:
+        print(
+            f"autodrive auto-started (pid {pid}); checking the queue every "
+            f"{int(interval)}s until it drains."
+        )
+        return 0
 
     print(
         f"autodrive started (pid {pid}) -- firing a drive every "
@@ -266,6 +403,69 @@ def cmd_start(
         )
     print("  stop:  tigerharness autodrive stop")
     return 0
+
+
+def ensure_running(
+    journal_root: Path,
+    *,
+    start: Callable[..., int] = cmd_start,
+    settings: Settings | None = None,
+) -> bool:
+    """Make sure the team's autodrive daemon is up after work was queued.
+
+    This is the auto-start half of ADR 0010: a persona that defers or
+    schedules a task should not also need a human to press play. Called by
+    ``journal new`` / ``defer`` / ``materialize`` / ``answer`` **after** the
+    queue write succeeds.
+
+    Three properties matter more than the happy path:
+
+    - **Opt-in.** A no-op unless ``TIGERHARNESS_AUTODRIVE_AUTOSTART`` is set
+      in the process env or the team's ``configs/.env``. Auto-start is only
+      safe while ``claude -p`` bills the subscription, and the harness ships
+      to deployments we cannot see (see ADR 0010 / docs/autodrive.md).
+    - **Never fatal.** Any failure logs and returns False. The task is
+      already safely on disk; losing the daemon must not lose the task, and
+      a scheduling command must not start failing because a daemon did not.
+    - **Idempotent.** "Already running" is success -- the invariant is "a
+      daemon is up", and the lock makes concurrent callers converge on one.
+
+    Returns True when a daemon is running as a result of this call.
+    """
+    cfg = Settings(team_root=_team_root_for(journal_root)) \
+        if settings is None else settings
+    if not cfg.autostart:
+        return False
+    args = argparse.Namespace(
+        journal_dir=str(journal_root),
+        interval=None,
+        driver=None,
+        backend=DEFAULT_BACKEND,
+        model=None,
+        max_budget=None,
+        permission_mode=DEFAULT_PERMISSION_MODE,
+        prompt=None,
+        notify=None,
+        notify_channel="",
+    )
+    try:
+        rc = int(start(args, quiet=True))
+    except Exception as exc:
+        log.warning(
+            "autodrive auto-start failed (%s: %s); the task is queued -- "
+            "start the driver by hand with `tigerharness autodrive start`",
+            type(exc).__name__, exc,
+        )
+        return False
+    if rc == 0:
+        log.info("autodrive auto-started for %s", journal_root)
+        return True
+    if rc == RC_ALREADY_RUNNING:
+        return True
+    log.warning(
+        "autodrive auto-start refused (exit %s); the task is still queued", rc
+    )
+    return False
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -351,19 +551,56 @@ def cmd_loop(
         )
         return 1
     cfg = config_from_state(state)
+    # The lock lives beside the state file, by construction: `start` derives
+    # both from the same team-canonical state root.
+    state_root = sfile.parent
+    surrendered = False
 
     def should_stop() -> bool:
         cur = read_state(sfile)
         return cur is None or bool(cur.get("stop_requested"))
+
+    def confirm_exit() -> bool:
+        """Commit to the drained-queue exit atomically against auto-start.
+
+        :func:`ensure_running` decides "a daemon is already up" by reading
+        this state file under the team lock. Between the loop's last probe
+        and this file being removed there is a gap in which a ``journal
+        defer`` sees a live pid, stands down -- and then we exit, leaving its
+        task queued with nothing to drive it. Silent, and it strands the task
+        until the next queue write, which is the one failure that would make
+        the whole self-driving story untrustworthy.
+
+        Taking the same lock and re-probing collapses that gap: either the
+        scheduler's write is already visible here (veto, stay up and work
+        it), or we remove the state file first and the scheduler -- blocked
+        on the lock, reading after us -- finds no daemon and starts a fresh
+        one. Removing it here rather than after the loop is what makes the
+        handover atomic, so the trailing clear below must not fire too.
+        """
+        nonlocal surrendered
+        with start_lock(state_root):
+            if probe_queue(cfg) != QUEUE_IDLE:
+                return False
+            clear_state(sfile)
+            surrendered = True
+            return True
 
     # Build the notifier from the persisted config. ``build_notifier`` never
     # raises: muted (``notify=none``) or unloadable creds degrade to a no-op
     # notifier, never a crash that would take the daemon down.
     notifier = build_notifier(cfg.notify, cfg.notify_channel)
     asyncio.run(
-        runner(cfg, sfile, should_stop=should_stop, notifier=notifier)
+        runner(
+            cfg, sfile, should_stop=should_stop, notifier=notifier,
+            confirm_exit=confirm_exit,
+        )
     )
-    clear_state(sfile)
+    if not surrendered:
+        # Only clear a file we still own. A surrendered exit already removed
+        # it under the lock, and a successor daemon may have written its own
+        # in the meantime -- deleting *that* would strand the successor.
+        clear_state(sfile)
     return 0
 
 
@@ -391,13 +628,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument(
         "--interval",
         type=float,
-        default=600.0,
-        help="Seconds between drives (floor 60; default 600 = 10 min).",
+        default=None,
+        help=(
+            "Seconds between fires (floor "
+            f"{int(MIN_INTERVAL_SECONDS)}). Default: {INTERVAL_ENV} from the "
+            f"env / team configs/.env, else {int(DEFAULT_INTERVAL_SECONDS)} "
+            "(10 min)."
+        ),
     )
     p_start.add_argument(
         "--driver",
         default=None,
-        help="Persona to attribute work to (default: team default_persona).",
+        help=(
+            f"Persona to attribute work to. Default: {DRIVER_ENV}, else the "
+            "team default_persona."
+        ),
     )
     p_start.add_argument(
         "--backend",
@@ -412,7 +657,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         dest="max_budget",
-        help="Per-drive USD cap (passed to the backend). Strongly advised.",
+        help=(
+            "Per-drive USD cap (passed to the backend). Strongly advised. "
+            f"Default: {MAX_BUDGET_ENV} from the env / team configs/.env."
+        ),
     )
     p_start.add_argument(
         "--permission-mode",
@@ -430,12 +678,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument(
         "--notify",
         choices=("slack", "none"),
-        default=DEFAULT_NOTIFY,
+        default=None,
         help=(
             "Daemon-level notifications: 'slack' posts a heartbeat per fire "
             "plus a threaded status/summary on completion; 'none' mutes "
-            f"(default {DEFAULT_NOTIFY!r}). Muted still has `autodrive "
-            "status` as the pull-based health check."
+            f"(default: {NOTIFY_ENV} from the env / team configs/.env, else "
+            f"{DEFAULT_NOTIFY!r}). Muted still has `autodrive status` as the "
+            "pull-based health check."
         ),
     )
     p_start.add_argument(

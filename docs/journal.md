@@ -165,6 +165,17 @@ scaffold. Malformed entries exit 1 with a JSON envelope and stay in
 the inbox for repair; `journal sweep` surfaces the inbox so the driver
 materializes the oldest when nothing else is actionable.
 
+**Scheduling can start the driver (opt-in).** Per
+[ADR 0010](adr/0010-self-driving-journal.md), `journal new`, `defer`,
+`materialize`, and `answer` call `autodrive.ensure_running()` after the
+queue write succeeds. It is a **no-op unless
+`TIGERHARNESS_AUTODRIVE_AUTOSTART` is truthy** in the team's `configs/.env`,
+and it **never fails the scheduling command** — a daemon that cannot start
+logs a warning and the task is still queued. Combined with the daemon's
+auto-stop, the effect is: scheduling work starts the driver, draining the
+queue stops it, and nothing runs in between. The Slack rule is unchanged —
+Slack schedules, never drives. See [autodrive.md](autodrive.md).
+
 ## Team-level defaults (`configs/personas.yaml`)
 
 A team's `personas.yaml` carries two optional knobs that make the
@@ -293,7 +304,25 @@ The driver is **skill-only by design**: there is no
 reintroduce programmatic billing and defeat the subscription model.
 Driving only happens inside an interactive Claude Code session.
 
-## Scheduled (recurring) tasks
+## Scheduled (recurring) tasks -- DEPRECATED
+
+> **Deprecated as of 2026-08-12**
+> ([ADR 0010](adr/0010-self-driving-journal.md)). Definitions materialize
+> **only inside a sweep**, and a sweep only happens while a daemon is awake.
+> Now that autodrive correctly stops on an empty queue, a recurring
+> definition's due time can pass with nothing running to notice it --
+> auto-stop and recurring schedules are structurally incompatible as built.
+>
+> Per the Operator, recurring tasks are not load-bearing today.
+> `journal schedule add` emits a deprecation warning naming the ADR; the
+> code, the trays, and existing definitions keep working exactly as
+> described below (the daemon still materializes due definitions while it is
+> awake). Removal is a separate, announced step -- the ADR 0003 / ADR 0009
+> pattern.
+>
+> If the feature comes back it needs a design that does not depend on a
+> long-lived process: an OS-level timer that runs the materialization sweep
+> and then calls `autodrive.ensure_running()` is the obvious shape.
 
 Recurring definitions live in `schedule/` beside `active/`, one JSON
 file each, and are materialized into normal pending tasks by the lazy

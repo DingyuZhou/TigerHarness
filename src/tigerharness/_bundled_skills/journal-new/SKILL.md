@@ -1,6 +1,6 @@
 ---
 name: journal-new
-description: Scaffold a new journal task -- either kind=task (single persona from a PRD) or kind=workflow (multi-persona compiled from a team playbook). Use when the user asks to "create a task", "start a journal entry", "scaffold a PRD as a journal task", "compile a workflow", "scaffold a workflow run from a playbook", or hands over a markdown brief they want tracked in the file-based subscription backend. Wraps `tigerharness journal new ...`.
+description: Scaffold a new journal task -- either kind=task (single persona from a PRD) or kind=workflow (multi-persona compiled from a team playbook). Use when the user asks to "create a task", "start a journal entry", "scaffold a PRD as a journal task", "compile a workflow", "scaffold a workflow run from a playbook", or hands over a markdown brief they want tracked in the file-based subscription backend. ALSO use when an ask arriving in chat is too big for the turn it arrived in -- more than one working session, several files, or another persona's hands -- because that ask belongs in the queue, not inline. Wraps `tigerharness journal new ...` and `tigerharness journal defer ...`.
 ---
 
 # journal-new
@@ -15,6 +15,28 @@ Code app instead of through a programmatic `claude -p` driver (rails
 and billing: `docs/subscription-backend.md`). See `docs/journal.md`
 for the architecture and `docs/journal-workflow-mode.md` for the
 workflow-mode details.
+
+## The defer test -- when an ask is too big for the turn
+
+Most asks are answerable where they land. Some are not, and the cost
+of guessing wrong is asymmetric: a deferred task can be picked up in
+seconds, but an ask half-done inline leaves no record anyone else can
+resume. So apply this test to every ask before starting it:
+
+> If the ask needs more than one working session, spans several
+> files, or needs another persona's hands, do not start it inline --
+> `journal defer` it and say so in one line.
+
+Any ONE of the three is enough. You are not being asked to judge
+importance or difficulty, only *shape*: a big ask deferred is still
+answered, just by a session with room to do it properly.
+
+Deferring is no longer a promise someone will notice. A team with
+`TIGERHARNESS_AUTODRIVE_AUTOSTART` enabled starts its autodrive daemon
+on the write, works the queue, and stops when the queue drains
+(ADR 0010) -- so `defer` *is* the trigger, not a note asking for one.
+Say which it was in your one line, e.g. "Deferred as
+`20260812-1030-refactor-x` -- too big for a chat turn."
 
 ## Slack-triggered? Stay lean
 

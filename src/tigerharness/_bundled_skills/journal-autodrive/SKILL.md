@@ -1,17 +1,21 @@
 ---
 name: journal-autodrive
-description: Start, check, or stop a background process that drives the journal on a fixed interval via the agent SDK (vendor-agnostic; default backend `claude -p`). Use when the user asks to "drive the journal every N minutes", "autodrive the journal", "keep working the queue automatically", "start/stop the auto-driver", or "is the autodrive running?". Wraps `tigerharness autodrive`. This is the Operator-authorized exception to the journal's human-only drive rule -- read the safety note before starting one.
+description: Start, check, or stop a background process that drives the journal on a fixed interval via the agent SDK (vendor-agnostic; default backend `claude -p`). Use when the user asks to "drive the journal every N minutes", "autodrive the journal", "keep working the queue automatically", "start/stop the auto-driver", "is the autodrive running?", or "why did the autodrive stop?". Wraps `tigerharness autodrive`. This is the Operator-authorized exception to the journal's human-only drive rule -- read the safety note before starting one.
 ---
 
 # journal-autodrive
 
 A small daemon that **fires "drive the journal" on a fixed cadence**. Every
-`interval` seconds it spawns an agentic backend (default `claude -p`) with a
-self-contained, Operator-authorized drive prompt and immediately goes back to
-waiting -- it does **not** wait for the drive to finish, so **overlap is
-allowed** and each fire is a **fresh, context-clean session**. It is **not**
-built on Claude Code's `/loop`; it is a plain detached OS process you can
-`stop` any time.
+`interval` seconds it checks the queue and, if there is work, spawns an
+agentic backend (default `claude -p`) with a self-contained,
+Operator-authorized drive prompt and immediately goes back to waiting -- it
+does **not** wait for the drive to finish, so **overlap is allowed** and each
+fire is a **fresh, context-clean session**. It is **not** built on Claude
+Code's `/loop`; it is a plain detached OS process you can `stop` any time.
+
+**It also stops itself.** Read "It probes before it fires, and it stops
+itself" below before you tell anyone something is wrong because "the
+autodrive isn't running" -- on a drained queue, that is the correct state.
 
 ## Read this before you start one (safety)
 
@@ -37,6 +41,38 @@ unattended autodrive spends real dollars on **every fire**. Guardrails:
 If the user asks for this and you are unsure billing is still on the
 subscription, **say so** before starting it.
 
+A team can also opt into **auto-start**: with
+`TIGERHARNESS_AUTODRIVE_AUTOSTART` truthy in the team's `configs/.env`,
+`journal new` / `defer` / `materialize` / `answer` start the daemon
+themselves after writing queue state. Off by default in the package -- a
+team turns it on deliberately, in a file it owns. To revert the whole
+system to human-triggered, set `TIGERHARNESS_AUTODRIVE_AUTOSTART=0`; no
+code change is needed.
+
+## It probes before it fires, and it stops itself
+
+Before each fire the daemon runs the journal's plain-Python sweep **itself**
+and acts on the verdict:
+
+- **actionable** (pending / resumable / crashed tasks, or a `deferred/`
+  entry) -- fire a drive.
+- **busy** (a live session owns the in-flight task) -- **skip the fire.** A
+  drive would only sweep, see busy, and exit; the tick is free instead.
+- **idle** (nothing actionable, nothing busy) -- fire **one** drive, the
+  maintenance one whose tail runs `slack-bridge compact-idle` + the
+  `sweep-memory` skill. When that finishes and the queue is still idle, the
+  **daemon exits** and clears its state file.
+
+So an idle interval costs a file walk, not a `claude -p` session, and a
+drained queue costs nothing at all. This applies to **every** daemon,
+including one you started by hand.
+
+**When a user asks "why did the autodrive stop?"** -- check
+`<team>/journal/.autodrive.log` and the Slack notifications. A clean
+auto-stop posts a final message saying "queue drained after N drive(s);
+idle maintenance complete." That is healthy, not a crash. Scheduling new
+work brings it straight back (auto-start), or `start` it again by hand.
+
 ## Commands
 
 Run from the **team root** (so the team's own journal is the target).
@@ -45,6 +81,11 @@ Start (the common request -- "drive every 10 minutes"):
 
     tigerharness autodrive start --interval 600 --driver <persona> \
         --max-budget 5
+
+Every flag below resolves **flag > process env > the team's `configs/.env`
+> built-in default**, so a team that set `TIGERHARNESS_AUTODRIVE_INTERVAL` /
+`_MAX_BUDGET` / `_DRIVER` / `_NOTIFY` / `_NOTIFY_CHANNEL` once does not need
+them on the command line.
 
 - `--interval` seconds between *fires* (cadence, not spacing -- the loop
   does not wait for a drive to finish; default 600 = 10 min; floor 60).
@@ -78,6 +119,9 @@ Stop:
 - "every 5 minutes" -> `start --interval 300`. (Below 60s is refused.)
 - "stop the autodrive" / "stop driving automatically" -> `stop`.
 - "is it still running?" / "autodrive status" -> `status`.
+- "why did it stop?" / "the autodrive died" -> `status`, then the log's
+  tail. A drained-queue exit is the healthy case; say so plainly rather
+  than restarting reflexively.
 - A bare "keep the queue moving automatically" -> `start` at the default
   10-minute interval; mention the `stop` command and the budget cap.
 
@@ -101,11 +145,15 @@ under it once that fire finishes.
 State (and the team-canonical lock) lives in `<team>/journal/.autodrive.json`
 with two gauges -- **launched** (`fire_count`, `last_fire_at`, `in_flight`)
 and **completed** (`tick_count`, `last_tick_at`, last stop reason / error);
-`status` reads it, `stop` clears it.
+`status` reads it, `stop` clears it, and a drained-queue auto-stop clears it
+too. A sibling `<team>/journal/.autodrive.lock` is the `flock` file that
+makes the one-per-team check-and-spawn atomic -- it is empty by design;
+never read or edit it.
 
 ## If you get confused
 
 It is just a wrapper around `tigerharness autodrive {start,status,stop}`.
-When in doubt, run `status` to see whether a daemon is live, and prefer
-`stop` over leaving an unattended driver running once the user's immediate
-need is met.
+When in doubt, run `status` to see whether a daemon is live. You no longer
+need to babysit the off-switch: the daemon stops on its own once the queue
+drains and the idle maintenance is done. Use `stop` when the user wants
+work **halted early**, not merely finished.
