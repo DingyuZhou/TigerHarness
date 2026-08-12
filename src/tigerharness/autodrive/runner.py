@@ -635,6 +635,15 @@ async def run_loop(
         # flight, so a higher `launched` means real work was fired while it
         # ran -- and that work dirtied memory the tail has not swept yet.
         # Arming here would exit without a second maintenance pass.
+        #
+        # `fire.maintenance` is load-bearing too, and the cost of requiring it
+        # is one extra fire per drain: an *actionable* drive that empties the
+        # queue was told to run the same tail itself (`drive_prompt` is the
+        # same for every fire), but we observe a session exiting, not what it
+        # chose to do, never its tail. Arming from "the drive finished and
+        # the next probe says idle" would arm identically for a drive that
+        # died early, stopping the daemon with team memory unswept. One
+        # no-op-when-fresh session buys an observed stop.
         if fire.maintenance and fire.fire_no == launched:
             maintenance_done = True
         if is_error:
