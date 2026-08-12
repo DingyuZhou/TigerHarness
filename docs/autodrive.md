@@ -103,7 +103,7 @@ Once that fire **completes**, nothing is in flight, and the next probe is
 still `idle`, the loop exits cleanly and the state file is cleared. Nothing is
 left to hold a process open for, and new work brings the daemon straight back.
 
-Three details keep the stop honest:
+Four details keep the stop honest:
 
 - The auto-stop latch arms on a **failed** maintenance drive too, so a
   crashing tail cannot pin the daemon open forever (the error is recorded and
@@ -112,6 +112,16 @@ Three details keep the stop honest:
   arrived while the tail ran, a real drive was fired after it — so the daemon
   runs a **second** maintenance pass for the memory that work dirtied rather
   than exiting on the stale latch.
+- **Only a maintenance fire arms the latch — a drive that drains the queue
+  does not**, even though it was told to run the same tail when its cascade
+  ran dry (the per-tick prompt is identical for every fire). The runner
+  observes a session exiting, not what the session chose to do, so a drain
+  costs one extra fire before the stop. That is deliberate, not an oversight:
+  arming on "the drive finished and the next probe says `idle`" would infer
+  the tail ran from evidence equally consistent with a drive that died early,
+  and the daemon would then stop with team memory unswept. One extra
+  session — both chores are no-ops when fresh — buys a stop that is
+  *observed* rather than assumed.
 - **The stop is handed over under the team lock, so a wakeup cannot be lost.**
   Auto-start decides "a daemon is already up" by reading the state file. Left
   unguarded, a `journal defer` landing in the gap between the daemon's final
@@ -195,7 +205,7 @@ invocation:
 |---|---|---|
 | `TIGERHARNESS_AUTODRIVE_AUTOSTART` | unset (off) | Enable the auto-start hook (below) |
 | `TIGERHARNESS_AUTODRIVE_INTERVAL` | `600` | Seconds between fires (floor 60) |
-| `TIGERHARNESS_AUTODRIVE_MAX_BUDGET` | unset | Per-drive USD cap |
+| `TIGERHARNESS_AUTODRIVE_MAX_BUDGET` | unset (uncapped) | Per-drive USD cap |
 | `TIGERHARNESS_AUTODRIVE_DRIVER` | team `default_persona` | Attribution persona |
 | `TIGERHARNESS_AUTODRIVE_NOTIFY` | `slack` | `slack` or `none` |
 | `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` | `SLACK_NOTIFY_CHANNEL`, else operator DM | Slack channel id, or `dm` |
