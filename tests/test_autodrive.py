@@ -1091,8 +1091,10 @@ def test_cmd_start_notify_defaults(tmp_path, capsys, monkeypatch):
     _make_team(tmp_path)
     jr = tmp_path / "journal"
     # Hermetic: this asserts the *default* (no flag, no env) resolves to the
-    # operator DM, so clear any ambient NOTIFY_CHANNEL_ENV the host may set.
+    # operator DM, so clear both channel keys the host may have exported --
+    # SLACK_NOTIFY_CHANNEL is set on any machine running a slack bridge.
     monkeypatch.delenv(cli.NOTIFY_CHANNEL_ENV, raising=False)
+    monkeypatch.delenv(cli.SLACK_NOTIFY_CHANNEL_ENV, raising=False)
     args = _args(["start", "--journal-dir", str(jr)])
     cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
     st = runner.read_state(runner.state_path(jr))
@@ -1133,6 +1135,34 @@ def test_cmd_start_notify_flag_beats_env(tmp_path, monkeypatch):
     cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
     st = runner.read_state(runner.state_path(jr))
     assert st["notify_channel"] == "C0FLAG"
+
+
+def test_cmd_start_inherits_slack_notify_channel(tmp_path, capsys, monkeypatch):
+    """End-to-end at the CLI layer: a team that only ever set the well-known
+    team-wide key gets its daemon events in that channel, not a DM."""
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    monkeypatch.delenv(cli.NOTIFY_CHANNEL_ENV, raising=False)
+    monkeypatch.setenv(cli.SLACK_NOTIFY_CHANNEL_ENV, "C0OPS")
+    args = _args(["start", "--journal-dir", str(jr)])
+    cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
+    st = runner.read_state(runner.state_path(jr))
+    assert st["notify_channel"] == "C0OPS"
+    assert "notify: slack -> C0OPS" in capsys.readouterr().out
+
+
+def test_cmd_start_dm_sentinel_declines_the_inherited_channel(
+    tmp_path, capsys, monkeypatch
+):
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    monkeypatch.setenv(cli.NOTIFY_CHANNEL_ENV, cli.DM_SENTINEL)
+    monkeypatch.setenv(cli.SLACK_NOTIFY_CHANNEL_ENV, "C0OPS")
+    args = _args(["start", "--journal-dir", str(jr)])
+    cli.cmd_start(args, spawn=lambda *a, **k: 1, now=lambda: "T")
+    st = runner.read_state(runner.state_path(jr))
+    assert st["notify_channel"] is None
+    assert "notify: slack -> operator DM" in capsys.readouterr().out
 
 
 def test_cmd_start_notify_none(tmp_path, capsys):

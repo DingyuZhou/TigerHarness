@@ -35,11 +35,13 @@ from ..journal.scaffold import resolve_default_persona
 from .notifier import build_notifier
 from .settings import (
     AUTOSTART_ENV,
+    DM_SENTINEL,
     DRIVER_ENV,
     INTERVAL_ENV,
     MAX_BUDGET_ENV,
     NOTIFY_CHANNEL_ENV,
     NOTIFY_ENV,
+    SLACK_NOTIFY_CHANNEL_ENV,
     Settings,
 )
 from .runner import (
@@ -303,8 +305,10 @@ def cmd_start(
             file=sys.stderr,
         )
         return 2
-    # Notify channel resolution: flag > env > team .env > operator DM (None).
-    notify_channel = args.notify_channel or settings.get(NOTIFY_CHANNEL_ENV)
+    # Notify channel resolution: flag > TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL
+    # > SLACK_NOTIFY_CHANNEL > operator DM (None), each layer reading process
+    # env before the team .env. Any layer may say "dm" to force the DM.
+    notify_channel = settings.notify_channel(args.notify_channel)
 
     cwd = str(team_root if team_root is not None else journal_root.parent)
     prompt = args.prompt if args.prompt else default_prompt(driver)
@@ -692,9 +696,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         dest="notify_channel",
         help=(
-            "Slack channel id for daemon events (e.g. C0ABC123). Default: "
-            "operator DM. Resolution: this flag > env "
-            f"{NOTIFY_CHANNEL_ENV} > DM."
+            "Slack channel id for daemon events (e.g. C0ABC123). Resolution: "
+            f"this flag > {NOTIFY_CHANNEL_ENV} > {SLACK_NOTIFY_CHANNEL_ENV} > "
+            f"operator DM. Pass {DM_SENTINEL!r} at any layer to force the DM "
+            "when a team-wide channel key is set."
         ),
     )
     p_start.set_defaults(func=cmd_start)

@@ -166,7 +166,7 @@ tigerharness autodrive stop
 | `--prompt` | built-in | Override the built-in "drive the journal" instruction. |
 | `--journal-dir` | env / cwd-as-team / XDG | Journal root to manage. |
 | `--notify` | `slack` | Daemon-level notifications: `slack` posts a heartbeat per fire + a threaded status/summary on completion; `none` mutes. See [autodrive-notifications.md](autodrive-notifications.md). |
-| `--notify-channel` | operator DM | Slack channel id for daemon events. Resolution: flag > env `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` > DM. |
+| `--notify-channel` | `SLACK_NOTIFY_CHANNEL` if set, else operator DM | Slack channel id for daemon events. Resolution: flag > `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` > `SLACK_NOTIFY_CHANNEL` > DM. Pass `dm` at any layer to force the DM. |
 
 Guardrails baked in: the 60s interval floor, **one autodrive per team**, the
 cooperative `stop` off-switch, and the optional `--max-budget` cap.
@@ -198,7 +198,28 @@ invocation:
 | `TIGERHARNESS_AUTODRIVE_MAX_BUDGET` | unset | Per-drive USD cap |
 | `TIGERHARNESS_AUTODRIVE_DRIVER` | team `default_persona` | Attribution persona |
 | `TIGERHARNESS_AUTODRIVE_NOTIFY` | `slack` | `slack` or `none` |
-| `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` | operator DM | Slack channel id |
+| `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` | `SLACK_NOTIFY_CHANNEL`, else operator DM | Slack channel id, or `dm` |
+
+#### The notify channel inherits `SLACK_NOTIFY_CHANNEL`
+
+`SLACK_NOTIFY_CHANNEL` is where a team already declares its ops channel — the
+slack bridge and the `slack-notify` skill both read it. Autodrive reads it too,
+as the **last** config layer, so naming that channel once is enough:
+
+    flag > TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL > SLACK_NOTIFY_CHANNEL > DM
+
+Requiring the same channel id under a second, autodrive-only name produced
+exactly one outcome in practice: teams set the well-known key, never the alias,
+and their heartbeats went quietly to a DM while the ops channel stayed silent.
+Set the specific key only when heartbeats belong somewhere *other* than the
+team's general notification channel.
+
+Any layer may be the literal `dm` (case-insensitive) to mean the operator DM,
+deliberately. That is the opt-out, and it is not decoration: blanking a key
+reads as *unset* and falls straight back through to `SLACK_NOTIFY_CHANNEL`, so
+without a value that says "DM" a team could not decline the inherited channel
+— including the team whose bot was never invited to it, whose posts would then
+fail `channel_not_found` and vanish (see the README's known limitations).
 
 The reader is a dependency-free parser of the same `KEY=value` shape
 `slack_bridge` already uses — core `tigerharness` must not grow a hard

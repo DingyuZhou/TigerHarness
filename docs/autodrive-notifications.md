@@ -70,7 +70,7 @@ Two new `autodrive start` flags, persisted into the state file so the detached
 | Flag | Default | Purpose |
 |---|---|---|
 | `--notify {slack,none}` | `slack` | Notification backend. `none` **mutes** all daemon-level notifications (the loop runs unchanged; only the posting is suppressed). |
-| `--notify-channel <id>` | operator DM | Slack channel id (e.g. `C0ABC123`) for daemon-level events. When unset, falls back to a DM to the Operator. Resolution: flag > env `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` > DM. |
+| `--notify-channel <id>` | `SLACK_NOTIFY_CHANNEL` if set, else operator DM | Slack channel id (e.g. `C0ABC123`) for daemon-level events. Resolution: flag > `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` > `SLACK_NOTIFY_CHANNEL` > DM. Inheriting the team-wide key means a team names its ops channel once; pass the literal `dm` at any layer to decline it and get the DM. |
 
 Credentials come from the same place
 [`slack-notify`](../src/tigerharness/_bundled_skills/slack-notify/SKILL.md)
