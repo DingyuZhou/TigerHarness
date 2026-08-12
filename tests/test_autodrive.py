@@ -752,7 +752,8 @@ def test_cmd_loop_runs_and_clears(tmp_path):
     )
     seen = {}
 
-    async def fake_runner(cfg, state_file, *, should_stop, notifier):
+    async def fake_runner(cfg, state_file, *, should_stop, notifier,
+                          confirm_exit=None):
         seen["cfg"] = cfg
         seen["stop"] = should_stop()  # exercises the closure
         seen["notifier"] = notifier
@@ -776,7 +777,8 @@ def test_cmd_loop_should_stop_when_flagged(tmp_path):
     )
     captured = {}
 
-    async def fake_runner(cfg, state_file, *, should_stop, notifier):
+    async def fake_runner(cfg, state_file, *, should_stop, notifier,
+                          confirm_exit=None):
         captured["stop"] = should_stop()
         return 0
 
@@ -1180,7 +1182,8 @@ def test_cmd_loop_builds_null_notifier_without_creds(tmp_path, monkeypatch):
     )
     seen = {}
 
-    async def fake_runner(cfg, state_file, *, should_stop, notifier):
+    async def fake_runner(cfg, state_file, *, should_stop, notifier,
+                          confirm_exit=None):
         seen["notifier"] = notifier
         return 0
 

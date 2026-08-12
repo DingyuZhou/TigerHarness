@@ -58,6 +58,43 @@ def truthy(value: str | None) -> bool:
     return False
 
 
+def clean_value(raw: str) -> str:
+    """Normalise one ``KEY=`` right-hand side the way ``python-dotenv`` does.
+
+    A value that *opens* with a quote ends at its closing quote and is taken
+    verbatim from between them (so a ``#`` inside quotes is data, and a
+    trailing comment outside them is ignored); an unquoted value ends at the
+    first whitespace-preceded ``#``.
+
+    The comment rule is not cosmetic. Without it ``MAX_BUDGET=5  # cap``
+    parses as the string ``"5  # cap"``, :meth:`Settings.number` rejects it,
+    and the budget guard silently degrades to *uncapped* -- the exact failure
+    that knob exists to prevent, announced only in a log nobody reads. The
+    same file is already parsed with dotenv's rules by the slack bridge, so
+    matching them also stops one file from meaning two different things
+    depending on who read it.
+
+    The *order* matters as much as the rules: closing on the quote rather
+    than testing whether the value happens to end in one is what makes
+    ``CHANNEL="D0B4L5V7RFG"  # operator DM`` read as the bare channel id
+    instead of one still wearing its quotes -- which Slack rejects, silently,
+    in exactly the same shape as the budget failure above.
+
+    An unterminated opening quote is malformed; it falls through and is
+    returned literally rather than guessed at.
+    """
+    value = raw.strip()
+    # Tuple, not a string: ``"" in "\"'"`` is True, which would route every
+    # empty value into the quoted branch.
+    if value[:1] in ('"', "'"):
+        end = value.find(value[0], 1)
+        if end != -1:
+            return value[1:end]
+    for sep in (" #", "\t#"):
+        value = value.split(sep, 1)[0]
+    return value.strip()
+
+
 def read_env_file(path: Path) -> dict[str, str]:
     """Parse ``KEY=value`` lines from *path*. Missing or unreadable file →
     ``{}``: team config is an optimisation, never a hard requirement, so a
@@ -77,7 +114,7 @@ def read_env_file(path: Path) -> dict[str, str]:
         key = key.strip()
         if not key:
             continue
-        out[key] = value.strip().strip('"').strip("'")
+        out[key] = clean_value(value)
     return out
 
 

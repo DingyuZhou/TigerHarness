@@ -16,6 +16,7 @@ real signal, or calls a model: every seam is injected.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import json
 import logging
@@ -860,3 +861,362 @@ def test_schedule_add_warns_that_it_is_deprecated(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "DEPRECATED" in err
     assert "ADR 0010" in err
+
+
+# ==========================================================================
+# settings: a trailing comment must not eat a numeric knob
+# ==========================================================================
+
+def test_env_value_drops_a_trailing_comment(tmp_path):
+    """`MAX_BUDGET=5  # cap` has to read as 5. Before this, it parsed as the
+    string "5  # cap", `number()` rejected it, and the budget guard degraded
+    to *uncapped* -- the exact failure the knob exists to prevent, announced
+    only in a log line nobody reads."""
+    _make_team(tmp_path, env_lines=[
+        f"{settings.MAX_BUDGET_ENV}=5  # per-drive cap",
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.number(settings.MAX_BUDGET_ENV) == 5.0
+
+
+def test_env_tab_before_a_comment_is_also_a_comment(tmp_path):
+    _make_team(tmp_path, env_lines=[
+        f"{settings.INTERVAL_ENV}=900\t# fifteen minutes",
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.number(settings.INTERVAL_ENV) == 900.0
+
+
+def test_env_hash_without_leading_space_stays_in_the_value(tmp_path):
+    """Only a *whitespace-preceded* `#` starts a comment (dotenv's rule), so
+    a value that legitimately contains one survives."""
+    _make_team(tmp_path, env_lines=[
+        f"{settings.NOTIFY_CHANNEL_ENV}=C0AB#123",
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.get(settings.NOTIFY_CHANNEL_ENV) == "C0AB#123"
+
+
+def test_env_quoted_value_is_taken_verbatim(tmp_path):
+    _make_team(tmp_path, env_lines=[
+        f"{settings.NOTIFY_CHANNEL_ENV}='C0AB #123'",
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.get(settings.NOTIFY_CHANNEL_ENV) == "C0AB #123"
+
+
+def test_env_quoted_value_then_a_comment_keeps_neither_quotes_nor_comment(
+    tmp_path,
+):
+    """Quotes AND a trailing comment together -- the ordinary way an operator
+    annotates a channel id. A parser that asks "does it end in a quote?"
+    answers no here and hands Slack the literal `"C0AB"`, quotes included,
+    which fails to post and says nothing about why."""
+    _make_team(tmp_path, env_lines=[
+        f'{settings.NOTIFY_CHANNEL_ENV}="C0AB"  # operator DM',
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.get(settings.NOTIFY_CHANNEL_ENV) == "C0AB"
+
+
+def test_env_quoted_number_then_a_comment_still_reads_as_a_number(tmp_path):
+    """Same shape on the knob that matters most: a budget cap that fails to
+    parse degrades to *uncapped*."""
+    _make_team(tmp_path, env_lines=[
+        f'{settings.MAX_BUDGET_ENV}="5"   # per-drive cap',
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.number(settings.MAX_BUDGET_ENV) == 5.0
+
+
+def test_env_unterminated_quote_is_returned_literally(tmp_path):
+    """Malformed input: we do not guess where the value was meant to end."""
+    _make_team(tmp_path, env_lines=[f'{settings.NOTIFY_CHANNEL_ENV}="C0AB'])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.get(settings.NOTIFY_CHANNEL_ENV) == '"C0AB'
+
+
+def test_env_empty_value_reads_as_unset(tmp_path):
+    """A commented-out knob left as a bare `KEY=` must fall through to the
+    default, not force an empty string."""
+    _make_team(tmp_path, env_lines=[f"{settings.MAX_BUDGET_ENV}="])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.number(settings.MAX_BUDGET_ENV) is None
+
+
+# ==========================================================================
+# cli: the daemon must not inherit the Slack turn that started it
+# ==========================================================================
+
+def test_daemon_env_drops_turn_scoped_markers_and_pins_the_journal(tmp_path):
+    env = cli.daemon_env(
+        {
+            "PATH": "/usr/bin",
+            "SLACK_BOT_TOKEN": "xoxb-keep",
+            "TIGERHARNESS_SLACK_THREAD_TS": "1786545466.429719",
+            "TIGERHARNESS_SLACK_CHANNEL": "D0B4L5V7RFG",
+        },
+        tmp_path / "journal",
+    )
+    assert "TIGERHARNESS_SLACK_THREAD_TS" not in env
+    assert "TIGERHARNESS_SLACK_CHANNEL" not in env
+    # Credentials stay: the daemon posts its own heartbeats.
+    assert env["SLACK_BOT_TOKEN"] == "xoxb-keep"
+    assert env["PATH"] == "/usr/bin"
+    assert env["TIGERHARNESS_JOURNAL_DIR"] == str(tmp_path / "journal")
+
+
+def test_daemon_env_does_not_mutate_the_caller_env(tmp_path):
+    base = {"TIGERHARNESS_SLACK_THREAD_TS": "1.1"}
+    cli.daemon_env(base, tmp_path / "journal")
+    assert base == {"TIGERHARNESS_SLACK_THREAD_TS": "1.1"}
+
+
+def test_start_scrubs_the_slack_turn_from_the_spawned_daemon(
+    tmp_path, monkeypatch
+):
+    """Auto-start's normal trigger is `journal defer`, which runs *inside* a
+    Slack turn. Unscrubbed, the daemon -- and every drive it ever spawns --
+    would look like that one thread to the claim gate, to `journal defer`'s
+    origin sidecar, and to drive-transcript suppression."""
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "1786545466.429719")
+    monkeypatch.setenv("TIGERHARNESS_SLACK_CHANNEL", "D0B4L5V7RFG")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-keep")
+    seen = {}
+
+    def fake_spawn(state_file, *, cwd, log_file, env):
+        seen["env"] = env
+        return 1
+
+    rc = cli.cmd_start(
+        _args(["start", "--journal-dir", str(jr)]),
+        spawn=fake_spawn, now=lambda: "T",
+    )
+    assert rc == 0
+    assert "TIGERHARNESS_SLACK_THREAD_TS" not in seen["env"]
+    assert "TIGERHARNESS_SLACK_CHANNEL" not in seen["env"]
+    assert seen["env"]["SLACK_BOT_TOKEN"] == "xoxb-keep"
+    assert seen["env"]["TIGERHARNESS_JOURNAL_DIR"] == str(jr)
+
+
+# ==========================================================================
+# the drained-exit veto: no lost wakeups
+# ==========================================================================
+
+@pytest.mark.asyncio
+async def test_run_loop_exits_when_the_veto_agrees(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    notifier = _RecordingNotifier()
+    calls = []
+
+    async def fake_drive(cfg, *, backend=None):
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        return None
+
+    def confirm():
+        calls.append(1)
+        return True
+
+    n = await runner.run_loop(
+        _cfg(), p,
+        run_drive=fake_drive, sleep=fake_sleep, now=lambda: "T",
+        probe=lambda cfg: runner.QUEUE_IDLE,
+        confirm_exit=confirm, notifier=notifier, max_ticks=10,
+    )
+    assert n == 1                      # the one maintenance drive
+    assert calls == [1]
+    assert any("queue drained" in h for h in notifier.heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_stays_up_when_the_veto_refuses(tmp_path):
+    """The lost-wakeup case. A scheduler that queued work in the gap saw our
+    live pid and stood down, so exiting would strand its task: the veto keeps
+    us alive and the next cycle fires on that work."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    asked = []
+
+    async def fake_drive(cfg, *, backend=None):
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        return None
+
+    def confirm():
+        # Refuse once (work arrived), then agree.
+        asked.append(len(asked))
+        return len(asked) > 1
+
+    n = await runner.run_loop(
+        _cfg(), p,
+        run_drive=fake_drive, sleep=fake_sleep, now=lambda: "T",
+        probe=lambda cfg: runner.QUEUE_IDLE,
+        confirm_exit=confirm, max_ticks=20,
+    )
+    # Fire #1 was the first maintenance drive; the veto forced fire #2 rather
+    # than an exit. Without the veto this is 1 and the queued task is orphaned.
+    assert n == 2
+    assert len(asked) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refused_veto_never_spins(tmp_path):
+    """The veto is the one path that ``continue``s without sleeping, so a
+    daemon whose exit keeps being vetoed must not busy-loop -- every cycle runs
+    a full journal sweep, so a spin burns CPU *and* writes to the journal as
+    fast as it can.
+
+    It cannot, and the reason is structural rather than lucky: re-arming
+    ``maintenance_done`` requires a maintenance drive to be launched and
+    completed, and every launch is followed by ``sleep(interval)``. So a sleep
+    is necessarily interposed between any two vetoes. This test pins that,
+    because the invariant is invisible at the call site -- deleting the
+    trailing sleep, or arming the latch from somewhere else, would turn it
+    into a hot loop silently.
+    """
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    events: list[str] = []
+
+    async def fake_drive(cfg, *, backend=None):
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        events.append("sleep")
+
+    def confirm():
+        events.append("veto")
+        return False          # never let it exit
+
+    await runner.run_loop(
+        _cfg(), p,
+        run_drive=fake_drive, sleep=fake_sleep, now=lambda: "T",
+        probe=lambda cfg: runner.QUEUE_IDLE,
+        confirm_exit=confirm, max_ticks=6,
+    )
+
+    # The veto really did fire repeatedly (otherwise this proves nothing)...
+    assert events.count("veto") >= 2, events
+    # ...and no two vetoes are adjacent: something slept in between.
+    vetoes = [i for i, e in enumerate(events) if e == "veto"]
+    assert all(b - a > 1 for a, b in zip(vetoes, vetoes[1:])), events
+
+
+def test_cmd_loop_veto_refuses_while_the_journal_still_has_work(tmp_path):
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    paths = _make_journal(jr)
+    _write_task(paths, "20260812-work", state=State.PENDING)
+    sfile = runner.state_path(jr)
+    runner.write_state(sfile, {
+        "interval_seconds": 600, "prompt": "go", "journal_root": str(jr),
+    })
+    seen = {}
+
+    async def fake_runner(cfg, state_file, *, should_stop, notifier,
+                          confirm_exit=None):
+        seen["confirmed"] = confirm_exit()
+        # A refused veto must leave the daemon's state file in place -- it is
+        # staying up, and a scheduler asking "is one running?" must say yes.
+        seen["kept"] = state_file.is_file()
+        return 0
+
+    cli.cmd_loop(_args(["_loop", "--state-file", str(sfile)]),
+                 runner=fake_runner)
+    assert seen["confirmed"] is False
+    assert seen["kept"] is True
+
+
+def test_cmd_loop_veto_agrees_on_an_empty_journal_and_surrenders(tmp_path):
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    _make_journal(jr)
+    sfile = runner.state_path(jr)
+    runner.write_state(sfile, {
+        "interval_seconds": 600, "prompt": "go", "journal_root": str(jr),
+    })
+    seen = {}
+
+    async def fake_runner(cfg, state_file, *, should_stop, notifier,
+                          confirm_exit=None):
+        seen["confirmed"] = confirm_exit()
+        seen["gone_at_confirm"] = not state_file.exists()
+        return 0
+
+    cli.cmd_loop(_args(["_loop", "--state-file", str(sfile)]),
+                 runner=fake_runner)
+    assert seen["confirmed"] is True
+    # The handover is the *removal*, and it happens inside the veto's lock --
+    # not after the loop returns.
+    assert seen["gone_at_confirm"] is True
+
+
+def test_cmd_loop_does_not_delete_a_successor_daemons_state(tmp_path):
+    """The hazard the veto introduces: once we surrender the state file, a
+    scheduler may start a fresh daemon that writes its own. The trailing
+    clear must not reach across and delete it."""
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    _make_journal(jr)
+    sfile = runner.state_path(jr)
+    runner.write_state(sfile, {
+        "interval_seconds": 600, "prompt": "go", "journal_root": str(jr),
+    })
+
+    async def fake_runner(cfg, state_file, *, should_stop, notifier,
+                          confirm_exit=None):
+        assert confirm_exit() is True          # we surrender the file
+        runner.write_state(state_file, {       # a successor takes over
+            "interval_seconds": 600, "prompt": "go", "pid": 4242,
+        })
+        return 0
+
+    cli.cmd_loop(_args(["_loop", "--state-file", str(sfile)]),
+                 runner=fake_runner)
+    surviving = runner.read_state(sfile)
+    assert surviving is not None and surviving["pid"] == 4242
+
+
+def test_cmd_loop_veto_probes_inside_the_team_lock(tmp_path, monkeypatch):
+    """The veto is only worth anything if it cannot interleave with a
+    scheduler's `is_running` check -- i.e. if the probe and the removal both
+    happen under the same lock the scheduler takes."""
+    _make_team(tmp_path)
+    jr = tmp_path / "journal"
+    _make_journal(jr)
+    sfile = runner.state_path(jr)
+    runner.write_state(sfile, {
+        "interval_seconds": 600, "prompt": "go", "journal_root": str(jr),
+    })
+    order: list[str] = []
+    real_lock = cli.start_lock
+
+    @contextlib.contextmanager
+    def spy_lock(root):
+        order.append("lock")
+        with real_lock(root):
+            yield
+        order.append("unlock")
+
+    def spy_probe(cfg):
+        order.append("probe")
+        return runner.QUEUE_IDLE
+
+    monkeypatch.setattr(cli, "start_lock", spy_lock)
+    monkeypatch.setattr(cli, "probe_queue", spy_probe)
+
+    async def fake_runner(cfg, state_file, *, should_stop, notifier,
+                          confirm_exit=None):
+        confirm_exit()
+        return 0
+
+    cli.cmd_loop(_args(["_loop", "--state-file", str(sfile)]),
+                 runner=fake_runner)
+    assert order == ["lock", "probe", "unlock"]
+    assert not sfile.exists()

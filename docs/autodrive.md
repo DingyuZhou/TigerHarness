@@ -58,6 +58,13 @@ raises, the verdict degrades to `actionable` (the pre-ADR-0010 always-fire
 behaviour), because an over-fire costs one drive while a false `idle` would
 strand the entire queue.
 
+It is **not a read-only walk**, despite the name — it is the journal's real
+`sweep()`, so it archives `state=done` tasks and materializes any due schedule
+definition. That is on purpose: the probe has to classify the queue exactly as
+a drive would, or the daemon could stop on a queue the drive considers full.
+The consequence to know about is that a live daemon writes to the journal once
+per interval even on ticks that fire nothing.
+
 When it does fire, the loop launches a fresh drive and immediately goes back
 to waiting for the next tick; it does **not** block on the drive finishing, so
 a slow drive and the next fire can run at the same time. Each fire is a
@@ -96,7 +103,7 @@ Once that fire **completes**, nothing is in flight, and the next probe is
 still `idle`, the loop exits cleanly and the state file is cleared. Nothing is
 left to hold a process open for, and new work brings the daemon straight back.
 
-Two details keep the stop honest:
+Three details keep the stop honest:
 
 - The auto-stop latch arms on a **failed** maintenance drive too, so a
   crashing tail cannot pin the daemon open forever (the error is recorded and
@@ -105,6 +112,17 @@ Two details keep the stop honest:
   arrived while the tail ran, a real drive was fired after it — so the daemon
   runs a **second** maintenance pass for the memory that work dirtied rather
   than exiting on the stale latch.
+- **The stop is handed over under the team lock, so a wakeup cannot be lost.**
+  Auto-start decides "a daemon is already up" by reading the state file. Left
+  unguarded, a `journal defer` landing in the gap between the daemon's final
+  probe and the state file being removed would see a live pid, stand down —
+  and then the daemon exits, leaving that task queued with nobody to drive it,
+  silently, until the next queue write. So before committing to the stop the
+  daemon takes the **same `.autodrive.lock`** a scheduler takes, re-probes, and
+  either **vetoes its own exit** (work arrived: stay up, fire on it next cycle)
+  or removes the state file *inside* the lock. The scheduler, blocked on that
+  lock, then reads after the removal, finds no daemon, and starts a fresh one.
+  Exactly one of the two outcomes happens.
 
 This applies to **every** daemon, hand-started `autodrive start` included.
 
@@ -184,9 +202,16 @@ invocation:
 
 The reader is a dependency-free parser of the same `KEY=value` shape
 `slack_bridge` already uses — core `tigerharness` must not grow a hard
-`python-dotenv` dependency (it is a `[slack]` extra). Unrecognised truthiness
-and non-numeric values warn and fall back to the default rather than failing a
-scheduling command.
+`python-dotenv` dependency (it is a `[slack]` extra). It follows dotenv's value
+rules: a value that opens with a quote ends at its closing quote and is taken
+verbatim from between them, and an unquoted one ends at the first
+whitespace-preceded `#`. So `MAX_BUDGET=5  # cap` reads as `5` rather than
+silently failing the numeric read and leaving the drive **uncapped**;
+`NOTIFY_CHANNEL="C0AB"  # operator DM` reads as `C0AB` rather than as a
+channel id still wearing its quotes, which Slack rejects just as quietly; and
+a `#` *inside* quotes stays part of the value.
+Unrecognised truthiness and non-numeric values warn and fall back to the
+default rather than failing a scheduling command.
 
 ### Auto-start on schedule (opt-in, off by default)
 
@@ -215,7 +240,21 @@ child runs **in the team root** (`cwd`) so the persona's `CLAUDE.md`, team
 detection, and memory attribution all line up, and `start` pins
 `TIGERHARNESS_JOURNAL_DIR` in the child's environment so the spawned drive
 resolves exactly the journal autodrive manages (even with a custom
-`--journal-dir`). The backend is resolved **by name** via the agent SDK and
+`--journal-dir`).
+
+**The daemon does not inherit the Slack turn that started it.** Auto-start's
+normal trigger is `journal defer`, which runs *inside* a bridge turn, so
+`start` strips the two turn-scoped markers the bridge injects
+(`TIGERHARNESS_SLACK_THREAD_TS`, `TIGERHARNESS_SLACK_CHANNEL`) from the child
+environment. Without that, the daemon — and every drive it spawns, for its
+whole life — would look like that one thread: the claim gate would refuse each
+drive as "a Slack session", a `journal defer` from inside a drive would record
+the stale thread as its origin so completion notices thread into an unrelated
+conversation, and drive-transcript suppression would register against that
+conversation and hide it from the memory sweep. Slack **credentials** are
+deliberately kept — the daemon needs them to post its own heartbeats.
+
+The backend is resolved **by name** via the agent SDK and
 given a plain `AgentConfig` — autodrive never passes `cwd` to the backend
 constructor (not every backend accepts one); the agentic backend inherits the
 child's working directory instead. That name-resolution seam is what keeps
@@ -230,7 +269,7 @@ and clears the state file.
 | Path | What |
 |---|---|
 | `<team>/journal/.autodrive.json` | State **and the team-canonical lock**: pid, interval, backend, driver, max_budget, notify config, started_at, plus two gauges — **launched** (`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`, `last_tick_at`, `last_stop_reason` / `last_error`). With overlap the two diverge while drives are in flight. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. Anchored to the team's canonical journal regardless of `--journal-dir`, so the one-per-team guard holds (a personal, non-team journal keeps the lock under its own root). |
-| `<team>/journal/.autodrive.lock` | `flock` target guarding the check-and-spawn critical section, so two simultaneous `start`/auto-start calls cannot both spawn. Deliberately **not** `.autodrive.json`: that file is replaced on every write and `flock` follows the inode. Zero-length; never read. |
+| `<team>/journal/.autodrive.lock` | `flock` target serializing the two decisions that must not interleave: `start`'s check-and-spawn (so two simultaneous `start`/auto-start calls cannot both spawn) and the daemon's drained-exit handover (so a stop cannot lose a wakeup). Deliberately **not** `.autodrive.json`: that file is replaced on every write and `flock` follows the inode. Zero-length; never read. |
 | `<team>/journal/.autodrive.log` | Appended stdout/stderr of the detached `_loop` process. |
 
 ### Skill

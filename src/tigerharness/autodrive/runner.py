@@ -392,6 +392,13 @@ def probe_queue(cfg: AutodriveConfig) -> str:
     they are waiting on the Operator, and spinning a daemon against them
     would burn an interval forever for no progress.
 
+    **Not a read-only walk**, despite the name: this is the journal's real
+    sweep, so it archives ``state=done`` tasks and materializes any due
+    schedule definition. That is deliberate -- the probe must classify the
+    queue exactly as a drive would, or the daemon would stop on a queue the
+    drive considers full -- but it does mean the daemon writes to the journal
+    once per interval even on a tick that fires nothing.
+
     Fail-soft by design: no configured journal root, or any error reading
     the journal, returns ``actionable``. That degrades to the pre-ADR-0010
     "always fire" behaviour -- the drive then does its own sweep and reports
@@ -510,6 +517,10 @@ StopFn = Callable[[], bool]
 
 ProbeFn = Callable[[AutodriveConfig], str]
 
+#: Last-moment veto on the drained-queue exit. Returns True to commit to
+#: stopping, False to stay up because work arrived. See ``run_loop``.
+ConfirmExitFn = Callable[[], bool]
+
 
 @dataclass
 class _Fire:
@@ -536,6 +547,7 @@ async def run_loop(
     run_drive: DriveFn = run_one_drive,
     notifier: Notifier | None = None,
     probe: ProbeFn = probe_queue,
+    confirm_exit: ConfirmExitFn | None = None,
 ) -> int:
     """Fire a fresh drive on a fixed cadence; never wait for it. Returns
     the number of drives *launched*.
@@ -555,6 +567,19 @@ async def run_loop(
     finished and nothing new has arrived, exits the loop -- the daemon stops
     itself on a drained queue. ``cmd_loop`` clears the state file on that
     clean return, so a later ``ensure_running`` starts a fresh daemon.
+
+    ``confirm_exit`` is the last-moment veto on that stop, and it exists to
+    close a lost-wakeup race. Auto-start decides "a daemon is already up" by
+    reading the state file; a scheduler that reads it in the gap between this
+    loop's final probe and the state file being removed sees a live pid,
+    stands down, and its task is left with nobody to drive it. ``cmd_loop``
+    supplies a callback that re-probes while holding the same lock the
+    scheduler takes, so the two decisions cannot interleave. A veto clears
+    the maintenance latch and re-probes immediately (no sleep) -- the work
+    that vetoed the exit is the work the next cycle fires on. That is the one
+    path here that skips the sleep, and it cannot spin: re-arming the latch
+    needs a maintenance drive to be launched *and* completed, and every launch
+    is followed by a sleep, so two vetoes can never be adjacent.
 
     Also stops when ``should_stop()`` is true, or after ``max_ticks`` fires
     (both injectable for tests; in production neither is set). ``max_ticks``
@@ -675,9 +700,24 @@ async def run_loop(
             if maintenance_done and not in_flight:
                 # Queue drained AND the idle-maintenance tail has run. There
                 # is nothing left for this daemon to do; stop rather than
-                # hold a process open on an empty journal.
-                exit_reason = EXIT_DRAINED
-                break
+                # hold a process open on an empty journal -- but only once
+                # the veto agrees, under the same lock a scheduler takes.
+                # `to_thread` for the same reason the probe above uses it:
+                # the veto blocks on a flock and then runs a full sweep, and
+                # neither belongs on the event loop -- notification posts are
+                # still draining, and a contended lock or a network-backed
+                # journal makes "briefly" untrue.
+                if confirm_exit is None or await asyncio.to_thread(confirm_exit):
+                    exit_reason = EXIT_DRAINED
+                    break
+                # Work landed after the probe. Whoever queued it saw our pid
+                # and stood down, so exiting now would strand it.
+                log.info(
+                    "autodrive: drained exit vetoed -- work queued during "
+                    "the stop; staying up"
+                )
+                maintenance_done = False
+                continue
             if in_flight:
                 # A drive is still finishing; let it settle before deciding.
                 log.info("autodrive: queue idle, waiting on in-flight drive")

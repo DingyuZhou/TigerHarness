@@ -76,6 +76,22 @@ New work brings it straight back, so there is no reason to hold a process open.
 
 The probe is the reason auto-stop is cheap rather than clever: `sweep()` is
 non-AI Python, so an idle tick costs a file walk instead of a model session.
+It is the *real* sweep, not a read-only variant — it archives done tasks and
+materializes due schedule definitions — because a probe that classified the
+queue differently from a drive could stop on a queue the drive considers full.
+
+**The stop is a handover, not just an exit.** Auto-start decides "a daemon is
+already up" by reading the state file, so the interval between the daemon's
+last probe and the state file being removed is a window in which a scheduler
+sees a live pid, stands down, and has its task stranded — silently, until the
+next queue write. Since that is precisely the promise this ADR makes ("queue
+work and it gets driven"), the exit is committed under the same lock as
+§3: the daemon re-probes while holding `.autodrive.lock` and either **vetoes
+its own exit** (work arrived — stay up, fire next cycle) or clears the state
+file inside the lock, so a scheduler blocked on that lock reads after the
+removal and starts a fresh daemon. Exactly one of the two happens. The
+corollary is that the daemon must not clear the state file again after the
+loop returns: by then the file may belong to its successor.
 
 ### 3. One daemon per team, atomically
 
@@ -99,6 +115,19 @@ team's canonical journal. `ensure_running` passes the journal root the
 `ensure_running()` treats "already running" as **success**, not an error — the
 invariant it wants is "a daemon is up", and one already being up satisfies it.
 
+The spawn also **scrubs the Slack turn that triggered it**. `journal defer` is
+the flagship auto-start trigger and it runs inside a bridge turn, so the
+child's environment drops `TIGERHARNESS_SLACK_THREAD_TS` and
+`TIGERHARNESS_SLACK_CHANNEL`. Inherited, they would pin the daemon *and every
+drive it ever spawns* to one thread: the claim gate would refuse each drive as
+"a Slack session" (only the prompt's `--allow-api-drive` saving it), an
+in-drive `defer` would record that stale thread as its origin, and
+drive-transcript suppression would register against an unrelated conversation
+and hide it from the memory sweep. Scrubbed at the spawn boundary rather than
+handled in the drive prompt, because a boundary holds whether or not a model
+reads its instructions. Slack *credentials* are kept — the daemon needs them
+to post its own heartbeats.
+
 ### 4. Configuration lives in the team's `.env`
 
 `autodrive start` (and therefore auto-start) reads defaults from the team's
@@ -115,7 +144,17 @@ invariant it wants is "a daemon is up", and one already being up satisfies it.
 
 The parser is a dependency-free reader of the same `KEY=value` shape
 `slack_bridge` already uses; core `tigerharness` must not grow a hard
-`python-dotenv` dependency (it is a `[slack]` extra).
+`python-dotenv` dependency (it is a `[slack]` extra). It follows dotenv's
+value rules — a value that opens with a quote ends at its closing quote and is
+taken verbatim from between them; an unquoted value ends at the first
+whitespace-preceded `#`. That is load-bearing, not tidiness:
+`MAX_BUDGET=5  # cap` parsed as the literal string `"5  # cap"` makes the
+numeric read fail, and the budget guard then degrades to *uncapped* — the one
+outcome the knob exists to prevent, announced only in a log line nobody reads.
+The quote rule has to *close on the quote* rather than test whether the value
+happens to end in one, or the very common `CHANNEL="C0AB"  # operator DM` keeps
+its quotes and Slack refuses the post, equally quietly. One file must not mean
+two different things depending on which parser read it.
 
 ### 5. Recurring schedule definitions are deprecated
 

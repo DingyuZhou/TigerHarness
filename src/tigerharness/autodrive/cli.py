@@ -28,7 +28,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 from ..journal.paths import default_journal_root
 from ..journal.scaffold import resolve_default_persona
@@ -48,6 +48,7 @@ from .runner import (
     DEFAULT_NOTIFY,
     DEFAULT_PERMISSION_MODE,
     MIN_INTERVAL_SECONDS,
+    QUEUE_IDLE,
     AutodriveConfig,
     clamp_interval,
     clear_state,
@@ -56,6 +57,7 @@ from .runner import (
     default_prompt,
     is_running,
     log_path,
+    probe_queue,
     read_state,
     run_loop,
     state_path,
@@ -69,13 +71,46 @@ from .runner import (
 #: and one already running satisfies it.
 RC_ALREADY_RUNNING = 1
 
+log = logging.getLogger(__name__)
+
 #: Advisory lock file guarding the check-and-spawn critical section. Separate
 #: from the state file because the state file is rewritten (tmp + rename)
 #: constantly, and ``flock`` follows the *inode* -- locking a file that gets
 #: replaced under you locks nothing.
 LOCK_FILE_NAME = ".autodrive.lock"
 
-log = logging.getLogger(__name__)
+#: Turn-scoped Slack markers the bridge injects into a persona's subprocess
+#: (``slack_bridge/bridge.py:_with_thread_env``). They must NOT reach the
+#: detached daemon.
+#:
+#: This is not hypothetical: ``journal defer`` is the flagship auto-start
+#: trigger and it runs *inside* a Slack turn, so an unscrubbed env would pin
+#: the daemon -- and every drive it ever spawns, for as long as it lives -- to
+#: that one thread. Three things then go wrong quietly: the journal claim gate
+#: reads the marker and refuses the drive as "a Slack session" (only the
+#: prompt's ``--allow-api-drive`` saves it); a ``journal defer`` from inside a
+#: drive records the stale thread/channel as its origin, so the completion
+#: notice threads back into an unrelated conversation; and drive-transcript
+#: suppression registers against that conversation, hiding it from the memory
+#: sweep. Scrubbed at the spawn boundary rather than in the drive prompt,
+#: because a boundary holds whether or not a model reads its instructions.
+#:
+#: Slack *credential* vars are deliberately NOT scrubbed -- the daemon needs
+#: them to post its own heartbeats.
+TURN_SCOPED_ENV_VARS = (
+    "TIGERHARNESS_SLACK_THREAD_TS",
+    "TIGERHARNESS_SLACK_CHANNEL",
+)
+
+
+def daemon_env(base: Mapping[str, str], journal_root: Path) -> dict[str, str]:
+    """The environment the detached daemon runs with (and hence every drive
+    it spawns): the caller's env minus the turn-scoped Slack markers, plus
+    the journal pin so a custom ``--journal-dir`` or a personal journal
+    resolves to exactly the one this daemon manages."""
+    env = {k: v for k, v in base.items() if k not in TURN_SCOPED_ENV_VARS}
+    env["TIGERHARNESS_JOURNAL_DIR"] = str(journal_root)
+    return env
 
 
 def lock_path(state_root: Path) -> Path:
@@ -92,11 +127,23 @@ def start_lock(state_root: Path) -> Iterator[None]:
     scheduling *auto-starts* the daemon that race stops being theoretical, so
     the whole decision runs under an exclusive advisory lock.
 
-    Blocking (not ``LOCK_NB``) on purpose: the critical section contains no
-    blocking calls -- a few small writes and a ``Popen`` that returns
-    immediately -- so a waiter is delayed by milliseconds and then correctly
-    observes the daemon its rival just started. The kernel releases the lock
-    if the holder dies, so a crash mid-start cannot wedge the team.
+    **Two** critical sections take this lock, and they are two halves of one
+    invariant -- "exactly one daemon per team, and never zero while work is
+    queued":
+
+    * ``cmd_start``/``ensure_running`` -- check the state file, then spawn.
+    * ``cmd_loop``'s ``confirm_exit`` -- re-probe, then clear the state file.
+
+    They must exclude each other or a scheduler reads a live pid from a daemon
+    that is already committed to exiting, stands down, and strands its task.
+
+    Blocking (not ``LOCK_NB``) on purpose: a waiter is delayed and then
+    correctly observes whichever decision won. Keep both sections short --
+    ``start``'s is a few small writes plus a ``Popen`` that returns
+    immediately; ``confirm_exit``'s is one journal sweep, a bounded file walk.
+    Anything genuinely slow does not belong in here, because every scheduler
+    in the team queues behind it. The kernel releases the lock if the holder
+    dies, so a crash mid-start (or mid-exit) cannot wedge the team.
     """
     path = lock_path(state_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -275,11 +322,12 @@ def cmd_start(
         journal_root=str(journal_root),
     )
     logf = log_path(state_root)
-    # Pin the journal the spawned drives target (so a custom --journal-dir,
-    # or a personal journal, resolves to exactly the one autodrive manages),
-    # then run the daemon in `cwd` (the team root) so the persona's CLAUDE.md
-    # / team detection / memory attribution all line up.
-    child_env = {**os.environ, "TIGERHARNESS_JOURNAL_DIR": str(journal_root)}
+    # Pin the journal the spawned drives target and drop the caller's
+    # turn-scoped Slack markers (see TURN_SCOPED_ENV_VARS -- auto-start is
+    # normally triggered from inside a Slack turn), then run the daemon in
+    # `cwd` (the team root) so the persona's CLAUDE.md / team detection /
+    # memory attribution all line up.
+    child_env = daemon_env(os.environ, journal_root)
 
     # The whole decision -- "is one already up?" through "spawn it" -- runs
     # under the team lock, so concurrent schedulers can never both spawn.
@@ -503,19 +551,56 @@ def cmd_loop(
         )
         return 1
     cfg = config_from_state(state)
+    # The lock lives beside the state file, by construction: `start` derives
+    # both from the same team-canonical state root.
+    state_root = sfile.parent
+    surrendered = False
 
     def should_stop() -> bool:
         cur = read_state(sfile)
         return cur is None or bool(cur.get("stop_requested"))
+
+    def confirm_exit() -> bool:
+        """Commit to the drained-queue exit atomically against auto-start.
+
+        :func:`ensure_running` decides "a daemon is already up" by reading
+        this state file under the team lock. Between the loop's last probe
+        and this file being removed there is a gap in which a ``journal
+        defer`` sees a live pid, stands down -- and then we exit, leaving its
+        task queued with nothing to drive it. Silent, and it strands the task
+        until the next queue write, which is the one failure that would make
+        the whole self-driving story untrustworthy.
+
+        Taking the same lock and re-probing collapses that gap: either the
+        scheduler's write is already visible here (veto, stay up and work
+        it), or we remove the state file first and the scheduler -- blocked
+        on the lock, reading after us -- finds no daemon and starts a fresh
+        one. Removing it here rather than after the loop is what makes the
+        handover atomic, so the trailing clear below must not fire too.
+        """
+        nonlocal surrendered
+        with start_lock(state_root):
+            if probe_queue(cfg) != QUEUE_IDLE:
+                return False
+            clear_state(sfile)
+            surrendered = True
+            return True
 
     # Build the notifier from the persisted config. ``build_notifier`` never
     # raises: muted (``notify=none``) or unloadable creds degrade to a no-op
     # notifier, never a crash that would take the daemon down.
     notifier = build_notifier(cfg.notify, cfg.notify_channel)
     asyncio.run(
-        runner(cfg, sfile, should_stop=should_stop, notifier=notifier)
+        runner(
+            cfg, sfile, should_stop=should_stop, notifier=notifier,
+            confirm_exit=confirm_exit,
+        )
     )
-    clear_state(sfile)
+    if not surrendered:
+        # Only clear a file we still own. A surrendered exit already removed
+        # it under the lock, and a successor daemon may have written its own
+        # in the meantime -- deleting *that* would strand the successor.
+        clear_state(sfile)
     return 0
 
 
