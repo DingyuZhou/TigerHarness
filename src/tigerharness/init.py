@@ -127,6 +127,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "e882a7820610975b9bbd24d0594dc0f5fd89d3db5557ec0a1208869476f37e10",
     },
     "journal-autodrive": {
+        # 2026-08-12 (notify-channel inheritance, ADR 0010 amendment): anzai:
+        #   pre SLACK_NOTIFY_CHANNEL fallback -- documented a channel chain
+        #   that stopped at the autodrive-only key, so a reader following it
+        #   would still conclude a team-wide ops channel is not inherited.
+        "02e3b943e6257fabd148d184864e4b174e4394b8b709a9aca9a19009f001f7fc",
         # 2026-08-12 (self-driving journal, ADR 0010): anzai: pre auto-stop
         #   ship -- described a daemon that fires forever and told the reader
         #   to prefer `stop`, which is now wrong advice for a self-stopping
@@ -266,7 +271,7 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
     "drive-journal": "20d8521342086b2c6702097396da6b1beda5258f8aa5451580799e3cdc9ac627",
-    "journal-autodrive": "02e3b943e6257fabd148d184864e4b174e4394b8b709a9aca9a19009f001f7fc",
+    "journal-autodrive": "94d59329ee4456cc7f8bfb1fe6c63be23fb1a5a88f2664d4c2fa19c1bedb13f2",
     "journal-new": "c0f2384f0d3313ba4821d15ca82714a48a1704268b4c546fd25e5986dc9d6466",
     "slack-notify": "bc182b0f0dc5e07f3e7fa3506b3b1658d63fbedfb4e5d69c2cb7e6ad97767a99",
     "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",

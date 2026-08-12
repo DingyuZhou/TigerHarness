@@ -131,6 +131,9 @@ def _scrub_autodrive_env(monkeypatch):
         settings.DRIVER_ENV,
         settings.NOTIFY_ENV,
         settings.NOTIFY_CHANNEL_ENV,
+        # Not autodrive-owned, but autodrive now inherits it -- and any host
+        # running a slack bridge has it exported.
+        settings.SLACK_NOTIFY_CHANNEL_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -942,6 +945,110 @@ def test_env_empty_value_reads_as_unset(tmp_path):
     _make_team(tmp_path, env_lines=[f"{settings.MAX_BUDGET_ENV}="])
     s = settings.Settings(team_root=tmp_path, env={})
     assert s.number(settings.MAX_BUDGET_ENV) is None
+
+
+# ==========================================================================
+# settings: notify-channel resolution (inherits SLACK_NOTIFY_CHANNEL)
+# ==========================================================================
+
+def test_notify_channel_unset_is_the_operator_dm(tmp_path):
+    _make_team(tmp_path)
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel("") is None
+
+
+def test_notify_channel_reads_the_autodrive_key(tmp_path):
+    _make_team(tmp_path, env_lines=[f"{settings.NOTIFY_CHANNEL_ENV}=C0OWN"])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel("") == "C0OWN"
+
+
+def test_notify_channel_falls_back_to_the_team_wide_key(tmp_path):
+    """The fix: a team that declared its ops channel once, under the
+    well-known name, gets daemon notifications there without also declaring
+    an autodrive-only alias for the same id."""
+    _make_team(
+        tmp_path, env_lines=[f"{settings.SLACK_NOTIFY_CHANNEL_ENV}=C0OPS"]
+    )
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel("") == "C0OPS"
+
+
+def test_notify_channel_autodrive_key_beats_the_team_wide_key(tmp_path):
+    """Both set: the specific key wins, so a team can send noisy per-fire
+    heartbeats somewhere other than its general notification channel."""
+    _make_team(tmp_path, env_lines=[
+        f"{settings.NOTIFY_CHANNEL_ENV}=C0OWN",
+        f"{settings.SLACK_NOTIFY_CHANNEL_ENV}=C0OPS",
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel("") == "C0OWN"
+
+
+def test_notify_channel_flag_beats_every_key(tmp_path):
+    _make_team(tmp_path, env_lines=[
+        f"{settings.NOTIFY_CHANNEL_ENV}=C0OWN",
+        f"{settings.SLACK_NOTIFY_CHANNEL_ENV}=C0OPS",
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel("C0FLAG") == "C0FLAG"
+
+
+@pytest.mark.parametrize("sentinel", ["dm", "DM", " Dm "])
+def test_notify_channel_flag_sentinel_forces_the_dm(tmp_path, sentinel):
+    _make_team(
+        tmp_path, env_lines=[f"{settings.SLACK_NOTIFY_CHANNEL_ENV}=C0OPS"]
+    )
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel(sentinel) is None
+
+
+def test_notify_channel_autodrive_key_sentinel_opts_out_of_inheriting(
+    tmp_path,
+):
+    """The escape hatch that makes inheritance safe. Blanking the autodrive
+    key reads as *unset* and would fall through to the team-wide one again,
+    so "I want the DM" needs a value it can actually say -- otherwise a team
+    whose bot was never invited to SLACK_NOTIFY_CHANNEL loses every daemon
+    notification to `channel_not_found` with no way back."""
+    _make_team(tmp_path, env_lines=[
+        f"{settings.NOTIFY_CHANNEL_ENV}=dm",
+        f"{settings.SLACK_NOTIFY_CHANNEL_ENV}=C0OPS",
+    ])
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel("") is None
+
+
+def test_notify_channel_team_wide_sentinel_also_means_dm(tmp_path):
+    """Accepted at every layer, so the sentinel means one thing everywhere
+    rather than being a special case of the autodrive key."""
+    _make_team(
+        tmp_path, env_lines=[f"{settings.SLACK_NOTIFY_CHANNEL_ENV}=dm"]
+    )
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel("") is None
+
+
+def test_notify_channel_process_env_beats_the_team_file(tmp_path):
+    _make_team(
+        tmp_path, env_lines=[f"{settings.SLACK_NOTIFY_CHANNEL_ENV}=C0FILE"]
+    )
+    s = settings.Settings(
+        team_root=tmp_path,
+        env={settings.SLACK_NOTIFY_CHANNEL_ENV: "C0PROC"},
+    )
+    assert s.notify_channel("") == "C0PROC"
+
+
+def test_notify_channel_flag_defaults_to_none(tmp_path):
+    """`ensure_running` passes `""`; a hand-built Namespace may pass `None`.
+    Both mean "no flag", not "empty channel"."""
+    _make_team(
+        tmp_path, env_lines=[f"{settings.SLACK_NOTIFY_CHANNEL_ENV}=C0OPS"]
+    )
+    s = settings.Settings(team_root=tmp_path, env={})
+    assert s.notify_channel(None) == "C0OPS"
+    assert s.notify_channel() == "C0OPS"
 
 
 # ==========================================================================

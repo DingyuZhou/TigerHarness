@@ -102,8 +102,9 @@ them on the command line.
   control daemon-level notifications: by default the daemon posts a Slack
   **heartbeat per fire** plus a **threaded status/summary on completion**;
   `none` mutes the push (status is then the pull-based health check). Channel
-  resolution: flag > env `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` > operator
-  DM.
+  resolution: flag > `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` >
+  `SLACK_NOTIFY_CHANNEL` (the team-wide key, so an ops channel is named once)
+  > operator DM. The literal `dm` at any layer forces the DM.
 
 Check:
 

@@ -4,6 +4,11 @@ Precedence for every knob is **flag > process env > team ``.env`` > built-in
 default**. The team file is the Operator-owned surface: a team decides its own
 cadence and budget without anyone editing code or a systemd unit.
 
+One knob reads *two* keys in that order: the notify channel falls back from
+``TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL`` to the team-wide
+``SLACK_NOTIFY_CHANNEL`` before defaulting to the operator DM. See
+:meth:`Settings.notify_channel` for why.
+
 The reader is deliberately dependency-free. ``python-dotenv`` lives behind the
 ``[slack]`` extra, and autodrive is core -- a core module must not acquire an
 optional dependency. The accepted shape is the same ``KEY=value`` subset the
@@ -31,6 +36,21 @@ NOTIFY_ENV = "TIGERHARNESS_AUTODRIVE_NOTIFY"
 #: Kept at its historical name -- it predates ADR 0010 and is already
 #: documented; renaming it would break live configs for no gain.
 NOTIFY_CHANNEL_ENV = "TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL"
+#: The team-wide "where agent notifications go" key the slack bridge and the
+#: ``slack-notify`` skill already document. Autodrive reads it as the *last*
+#: config layer so a team that named its ops channel once is not required to
+#: name it a second time under an autodrive-only alias -- the omission that
+#: silently routed a live team's heartbeats to a DM (ADR 0010, amendment).
+SLACK_NOTIFY_CHANNEL_ENV = "SLACK_NOTIFY_CHANNEL"
+#: Explicit "operator DM" value, accepted at every channel layer. It exists so
+#: the inherited team-wide key above stays *overridable*: blanking a key reads
+#: as unset (see :meth:`Settings.get`) and would just fall through to it again.
+#: Without an opt-out, a team whose bot was never invited to its
+#: ``SLACK_NOTIFY_CHANNEL`` (the ``channel_not_found`` trap in the README) would
+#: lose daemon notifications on upgrade with no way to get them back. Not a
+#: valid Slack id -- those are uppercase and start C/D/G -- so it cannot
+#: collide with a real channel.
+DM_SENTINEL = "dm"
 
 #: Relative to the team root. Matches what ``tigerharness init`` scaffolds
 #: and what the slack-bridge lane index defaults to.
@@ -174,3 +194,30 @@ class Settings:
     @property
     def autostart(self) -> bool:
         return self.flag(AUTOSTART_ENV)
+
+    def notify_channel(self, flag: str | None = None) -> str | None:
+        """Where daemon notifications post, or ``None`` for the operator DM.
+
+        Order: ``--notify-channel`` *flag* > :data:`NOTIFY_CHANNEL_ENV` >
+        :data:`SLACK_NOTIFY_CHANNEL_ENV` > DM. The last layer is the point:
+        ``SLACK_NOTIFY_CHANNEL`` is where a team already declares its ops
+        channel, and requiring the *same id* under a second, autodrive-only
+        name meant the near-universal outcome was setting only the well-known
+        key and quietly getting DMs instead.
+
+        Any layer may be :data:`DM_SENTINEL` (case-insensitive) to mean "the
+        operator DM, deliberately" -- the escape hatch for a team that wants
+        channel posts from the ``slack-notify`` skill but DM heartbeats, or
+        whose bot is not a member of the shared channel.
+        """
+        # ``get`` already strips and treats blank as unset; the flag arrives
+        # raw from argparse (default ``""``), so only it needs normalising.
+        for value in (
+            (flag or "").strip(),
+            self.get(NOTIFY_CHANNEL_ENV),
+            self.get(SLACK_NOTIFY_CHANNEL_ENV),
+        ):
+            if not value:
+                continue
+            return None if value.lower() == DM_SENTINEL else value
+        return None

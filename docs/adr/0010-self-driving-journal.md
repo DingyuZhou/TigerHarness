@@ -142,6 +142,9 @@ to post its own heartbeats.
 | `TIGERHARNESS_AUTODRIVE_NOTIFY` | `slack` | `slack` or `none` |
 | `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` | operator DM | Slack channel id |
 
+(The notify-channel default was revised the day after this shipped — see the
+amendment at the end.)
+
 The parser is a dependency-free reader of the same `KEY=value` shape
 `slack_bridge` already uses; core `tigerharness` must not grow a hard
 `python-dotenv` dependency (it is a `[slack]` extra). It follows dotenv's
@@ -202,3 +205,34 @@ skills — **one place each**, not nine persona prompts:
   human-triggered with no code change.
 - **Recurring schedules are on notice.** Documented as deprecated, warned at
   the CLI, still functional while a daemon is awake.
+
+## Amendment (2026-08-12): the notify channel inherits `SLACK_NOTIFY_CHANNEL`
+
+The first live team hit this within a day. Its `configs/.env` had
+`SLACK_NOTIFY_CHANNEL=<ops channel>` — the key the slack bridge and the
+`slack-notify` skill read, the one place a team declares "notifications go
+here." Autodrive did not read it. Hand-started daemons had been given
+`--notify-channel` explicitly, so heartbeats landed in the ops channel and
+everything looked right; the first *auto*-started daemon had no flag, fell
+through to the operator DM, and the ops channel went silent with no error
+anywhere. Nothing was broken — the two channel keys had simply never met.
+
+The decision above was "one knob per concern," and on that reading a separate
+`TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` is correct. What it missed is that a
+config knob whose only job is to repeat a value the team already stated will
+be left unset by almost everyone, and its failure mode is silence rather than
+an error. So the chain gains a final layer:
+
+    flag > TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL > SLACK_NOTIFY_CHANNEL > DM
+
+The specific key still wins, for the team that wants noisy per-fire heartbeats
+somewhere other than its general notification channel.
+
+Inheriting a key has to stay declinable, and blanking one reads as *unset*
+(deliberately — see the empty-value rule above), which would fall right back
+through to it. So every channel layer also accepts the literal `dm`, meaning
+"the operator DM, on purpose". Without it the team most exposed by this change
+would have been the one the README already warns about: a bot never invited to
+its `SLACK_NOTIFY_CHANNEL`, whose daemon notifications would move from a
+working DM to a channel that answers `channel_not_found` — trading one silent
+failure for a worse one.
