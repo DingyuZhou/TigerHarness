@@ -37,6 +37,26 @@ pile-up of redundant fires cheap, and each individual drive is still
 bounded by its own ``max_budget_usd``. (Note the multiplier, though: N
 concurrent drives can spend up to N x the per-drive cap within one
 interval.)
+
+THE QUEUE PROBE AND AUTO-STOP (ADR 0010)
+-----------------------------------------
+Before each fire the loop runs the journal's **plain-Python** sweep itself
+(:func:`probe_queue`) and acts on the verdict, so an empty queue costs a
+file walk instead of a model session:
+
+- ``actionable`` -- fire a drive (the legacy behaviour).
+- ``busy`` -- a live session already owns the in-flight task; **skip** the
+  fire entirely. The redundant-fire-is-cheap argument above still holds as
+  the safety net, but not paying for it at all is cheaper.
+- ``idle`` -- nothing actionable and nothing busy. Fire **one** last drive
+  (its prompt ends with the idle-maintenance tail), and once that drive has
+  completed with nothing new in the queue, **exit the loop**: the daemon
+  stops itself rather than burning an interval forever on an empty journal.
+
+Any ``actionable``/``busy`` verdict resets the maintenance latch, so work
+arriving mid-maintenance keeps the daemon alive. The probe is fail-soft: an
+unreadable journal degrades to ``actionable``, i.e. exactly the pre-ADR-0010
+always-fire behaviour, never a silent stall.
 """
 
 from __future__ import annotations
@@ -63,6 +83,10 @@ log = logging.getLogger(__name__)
 #: allowed by design, but the floor keeps the pile-up rate sane.
 MIN_INTERVAL_SECONDS = 60.0
 
+#: Default cadence when neither ``--interval`` nor the team's
+#: ``TIGERHARNESS_AUTODRIVE_INTERVAL`` says otherwise: 10 minutes.
+DEFAULT_INTERVAL_SECONDS = 600.0
+
 #: Default per-tick prompt is built from :func:`default_prompt`; the
 #: permission mode defaults to ``bypassPermissions`` because the driver
 #: runs unattended and must never stall on a permission prompt.
@@ -77,6 +101,18 @@ DEFAULT_NOTIFY = "slack"
 #: Slack messages have generous limits, but a drive's closing summary can be
 #: long; cap it so a heartbeat thread stays skimmable.
 SUMMARY_MAX_CHARS = 600
+
+#: Queue-probe verdicts (ADR 0010). Plain strings so they serialize into
+#: logs and the state file without a codec.
+QUEUE_ACTIONABLE = "actionable"
+QUEUE_BUSY = "busy"
+QUEUE_IDLE = "idle"
+
+#: Why the loop exited. ``queue-drained`` is the ADR 0010 self-stop; the
+#: others are the pre-existing external exits.
+EXIT_DRAINED = "queue-drained"
+EXIT_STOP_REQUESTED = "stop-requested"
+EXIT_MAX_TICKS = "max-ticks"
 
 
 # ----- config -----
@@ -104,6 +140,13 @@ class AutodriveConfig:
     # operator DM.
     notify: str = DEFAULT_NOTIFY
     notify_channel: str | None = None
+    # The journal the daemon drives, as an absolute path string. Used by the
+    # in-daemon queue probe (ADR 0010). ``None`` means "no probe configured"
+    # -- the loop then fires unconditionally, i.e. the pre-ADR-0010
+    # behaviour. That is what a state file written by an older version
+    # deserializes to, so an upgrade never silently changes an existing
+    # daemon's shape mid-flight.
+    journal_root: str | None = None
 
 
 def default_prompt(driver: str | None) -> str:
@@ -165,6 +208,7 @@ def config_to_dict(cfg: AutodriveConfig) -> dict[str, Any]:
         "cwd": cfg.cwd,
         "notify": cfg.notify,
         "notify_channel": cfg.notify_channel,
+        "journal_root": cfg.journal_root,
     }
 
 
@@ -181,6 +225,7 @@ def config_from_state(state: dict[str, Any]) -> AutodriveConfig:
         cwd=state.get("cwd", "."),
         notify=state.get("notify", DEFAULT_NOTIFY),
         notify_channel=state.get("notify_channel"),
+        journal_root=state.get("journal_root"),
     )
 
 
@@ -330,6 +375,52 @@ def is_running(
     return False, state
 
 
+# ----- the queue probe (ADR 0010) -----
+
+def probe_queue(cfg: AutodriveConfig) -> str:
+    """Classify the journal queue **without spending a model call**.
+
+    Returns one of :data:`QUEUE_ACTIONABLE`, :data:`QUEUE_BUSY`,
+    :data:`QUEUE_IDLE`. This is the journal's own lazy sweep -- plain,
+    non-AI Python -- run inside the daemon so an empty queue costs a file
+    walk instead of a whole ``claude -p`` session.
+
+    ``deferred/`` entries count as **actionable**: a deferred conversation is
+    queued work that the drive materializes at the top of OPERATING.md. Miss
+    that and the daemon would cheerfully stop with an inbox full of Slack
+    asks. ``needs_input`` and ``blocked`` deliberately do **not** count --
+    they are waiting on the Operator, and spinning a daemon against them
+    would burn an interval forever for no progress.
+
+    Fail-soft by design: no configured journal root, or any error reading
+    the journal, returns ``actionable``. That degrades to the pre-ADR-0010
+    "always fire" behaviour -- the drive then does its own sweep and reports
+    properly -- rather than silently stalling a queue that has real work in
+    it. Stalling is the worse failure: an over-fire costs one drive, a
+    false idle costs every task in the queue.
+    """
+    if not cfg.journal_root:
+        return QUEUE_ACTIONABLE
+    try:
+        from ..journal.deferred import list_deferred
+        from ..journal.paths import JournalPaths
+        from ..journal.sweep import sweep
+
+        paths = JournalPaths(Path(cfg.journal_root))
+        result = sweep(paths)
+        if result.has_actionable() or list_deferred(paths):
+            return QUEUE_ACTIONABLE
+        if result.in_progress_busy:
+            return QUEUE_BUSY
+        return QUEUE_IDLE
+    except Exception as exc:
+        log.warning(
+            "autodrive queue probe failed (%s: %s); assuming actionable",
+            type(exc).__name__, exc,
+        )
+        return QUEUE_ACTIONABLE
+
+
 # ----- the drive + the loop -----
 
 async def run_one_drive(
@@ -402,9 +493,22 @@ def error_text(fire_no: int, exc: Any) -> str:
     return f"fire #{fire_no} FAILED: {type(exc).__name__}: {exc}"
 
 
+def drained_text(launched: int, at: str) -> str:
+    """The closing message when the daemon stops itself (ADR 0010). Makes a
+    deliberate stop legible: without it, silence after the last heartbeat
+    would read as a crash."""
+    return (
+        f"autodrive stopped {at} - queue drained after {launched} drive(s); "
+        "idle maintenance complete. Scheduling new work starts it again."
+    )
+
+
 DriveFn = Callable[..., Awaitable[Any]]
 SleepFn = Callable[[float], Awaitable[Any]]
 StopFn = Callable[[], bool]
+
+
+ProbeFn = Callable[[AutodriveConfig], str]
 
 
 @dataclass
@@ -415,6 +519,9 @@ class _Fire:
     task: "asyncio.Task[Any]"
     thread: str | None
     fire_no: int
+    #: True when this fire was launched *because* the queue went idle -- i.e.
+    #: it is the maintenance drive. Its completion is what arms the auto-stop.
+    maintenance: bool = False
 
 
 async def run_loop(
@@ -428,23 +535,33 @@ async def run_loop(
     now: Callable[[], str] = utcnow_iso,
     run_drive: DriveFn = run_one_drive,
     notifier: Notifier | None = None,
+    probe: ProbeFn = probe_queue,
 ) -> int:
     """Fire a fresh drive on a fixed cadence; never wait for it. Returns
     the number of drives *launched*.
 
-    Each iteration posts a heartbeat (the parent message), launches a drive
-    (fire-and-forget via ``asyncio.create_task``), records the fire, then
-    sleeps one interval -- it does **not** block on the drive finishing, so a
-    slow drive overlaps the next fire. When a drive completes, its status +
-    summary is threaded under that fire's heartbeat. There is no concurrency
-    cap: the journal's busy-lease makes a redundant overlapping fire a cheap
-    no-op, and each drive is still bounded by its own ``max_budget_usd``.
+    Each cycle probes the queue (:func:`probe_queue`, plain Python, no model
+    call), and when there is work to do posts a heartbeat (the parent
+    message), launches a drive (fire-and-forget via ``asyncio.create_task``),
+    records the fire, then sleeps one interval -- it does **not** block on the
+    drive finishing, so a slow drive overlaps the next fire. When a drive
+    completes, its status + summary is threaded under that fire's heartbeat.
+    There is no concurrency cap: the journal's busy-lease makes a redundant
+    overlapping fire a cheap no-op, and each drive is still bounded by its
+    own ``max_budget_usd``.
 
-    Stops when ``should_stop()`` is true, or after ``max_ticks`` fires
-    (both injectable for tests; in production neither is set and the loop
-    runs until the process is killed by ``autodrive stop``). On exit it
-    drains any still-running drives so their results/errors are recorded and
-    notified, then flushes pending notification posts.
+    **Auto-stop (ADR 0010).** A ``busy`` verdict skips the fire; an ``idle``
+    verdict fires the maintenance drive once and then, once that drive has
+    finished and nothing new has arrived, exits the loop -- the daemon stops
+    itself on a drained queue. ``cmd_loop`` clears the state file on that
+    clean return, so a later ``ensure_running`` starts a fresh daemon.
+
+    Also stops when ``should_stop()`` is true, or after ``max_ticks`` fires
+    (both injectable for tests; in production neither is set). ``max_ticks``
+    additionally bounds *cycles*, so a test whose probe never returns
+    ``actionable`` cannot spin forever. On exit it drains any still-running
+    drives so their results/errors are recorded and notified, then flushes
+    pending notification posts.
 
     A drive that raises is recorded as ``last_error`` and the loop
     continues -- one bad drive must not take the daemon down. Notifications
@@ -457,6 +574,13 @@ async def run_loop(
 
     launched = 0
     completed = 0
+    cycles = 0
+    # True once an idle-triggered maintenance drive has *completed*. Armed by
+    # that drive's completion, disarmed by any sign of work. Set on failure
+    # too: a maintenance drive that keeps crashing must not pin the daemon
+    # open forever -- the error is recorded and notified instead.
+    maintenance_done = False
+    exit_reason = EXIT_STOP_REQUESTED
     in_flight: list[_Fire] = []
     notif_tasks: list[asyncio.Task[Any]] = []
 
@@ -479,8 +603,10 @@ async def run_loop(
                 pass
 
     def _record_completion(fire: _Fire, outcome: Any, *, is_error: bool) -> None:
-        nonlocal completed
+        nonlocal completed, maintenance_done
         completed += 1
+        if fire.maintenance:
+            maintenance_done = True
         if is_error:
             log.warning("autodrive drive failed: %s", outcome)
             record_tick(
@@ -525,9 +651,46 @@ async def run_loop(
         _reap_done()
         _prune_notifs()
         if max_ticks is not None and launched >= max_ticks:
+            exit_reason = EXIT_MAX_TICKS
             break
         if should_stop is not None and should_stop():
+            exit_reason = EXIT_STOP_REQUESTED
             break
+        if max_ticks is not None and cycles >= max_ticks:
+            # Cycle bound: a probe that never says "actionable" must not
+            # spin a bounded test forever.
+            exit_reason = EXIT_MAX_TICKS
+            break
+        cycles += 1
+
+        # --- queue probe (ADR 0010): decide whether to spend a drive ---
+        verdict = await asyncio.to_thread(probe, cfg)
+        is_maintenance = False
+        if verdict == QUEUE_IDLE:
+            if maintenance_done and not in_flight:
+                # Queue drained AND the idle-maintenance tail has run. There
+                # is nothing left for this daemon to do; stop rather than
+                # hold a process open on an empty journal.
+                exit_reason = EXIT_DRAINED
+                break
+            if in_flight:
+                # A drive is still finishing; let it settle before deciding.
+                log.info("autodrive: queue idle, waiting on in-flight drive")
+                await sleep(cfg.interval_seconds)
+                continue
+            # First idle cycle: fire the maintenance drive (its prompt ends
+            # with compact-idle + sweep-memory) and arm the auto-stop.
+            is_maintenance = True
+            log.info("autodrive: queue idle -- firing maintenance drive")
+        elif verdict == QUEUE_BUSY:
+            # A live session owns the in-flight task; a fire would only
+            # sweep, see busy, and exit. Skip it and keep the daemon alive.
+            maintenance_done = False
+            log.info("autodrive: queue busy, skipping fire")
+            await sleep(cfg.interval_seconds)
+            continue
+        else:
+            maintenance_done = False
 
         launched += 1
         # Post the heartbeat first so its `ts` is the thread handle the
@@ -538,7 +701,14 @@ async def run_loop(
             heartbeat_text(launched, now(), len(in_flight) + 1),
         )
         task = asyncio.create_task(run_drive(cfg, backend=backend))
-        in_flight.append(_Fire(task=task, thread=thread, fire_no=launched))
+        in_flight.append(
+            _Fire(
+                task=task,
+                thread=thread,
+                fire_no=launched,
+                maintenance=is_maintenance,
+            )
+        )
         record_fire(
             state_file,
             fire_count=launched,
@@ -548,8 +718,10 @@ async def run_loop(
         log.info("autodrive fire %d launched", launched)
 
         if max_ticks is not None and launched >= max_ticks:
+            exit_reason = EXIT_MAX_TICKS
             break
         if should_stop is not None and should_stop():
+            exit_reason = EXIT_STOP_REQUESTED
             break
         await sleep(cfg.interval_seconds)
 
@@ -567,6 +739,15 @@ async def run_loop(
                 _record_completion(fire, res, is_error=True)
             else:
                 _record_completion(fire, res, is_error=False)
+
+    if exit_reason == EXIT_DRAINED:
+        # The heartbeat rhythm is the health signal, so its disappearance
+        # would otherwise be indistinguishable from a crash. Say plainly
+        # that the daemon stopped on purpose.
+        log.info("autodrive stopping: queue drained after %d drives", launched)
+        await asyncio.to_thread(
+            notifier.heartbeat, drained_text(launched, now())
+        )
 
     # Flush any pending notification posts before returning, so a stop never
     # drops an in-flight drive's final status. Errors are swallowed.

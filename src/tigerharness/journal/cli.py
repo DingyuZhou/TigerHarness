@@ -62,6 +62,21 @@ from tigerharness.journal import drive_sessions, walk, worklog
 
 log = logging.getLogger("tigerharness.journal.cli")
 
+#: Recurring schedule definitions materialize only *inside* a sweep, and a
+#: sweep only happens while a driver is awake. Since ADR 0010 the autodrive
+#: daemon stops itself on a drained queue, so a definition due at 09:00 with
+#: no other work in the journal has nothing alive to fire it. Rather than
+#: quietly leaving a feature that misses its due times, we say so at the
+#: point of use. The code still works while a daemon is up; removal is a
+#: separate announced step.
+SCHEDULE_DEPRECATION_NOTE = (
+    "warning: recurring schedule definitions are DEPRECATED (ADR 0010). "
+    "They materialize only during a sweep, and autodrive now stops itself "
+    "when the queue drains -- so a definition can miss its due time with no "
+    "driver awake. Prefer scheduling the work directly (`journal new` / "
+    "`journal defer`), which auto-starts the driver."
+)
+
 
 def _paths_from_args(args: argparse.Namespace) -> JournalPaths:
     """Resolve the journal root. ``--journal-dir`` wins over the env."""
@@ -70,6 +85,34 @@ def _paths_from_args(args: argparse.Namespace) -> JournalPaths:
     else:
         root = default_journal_root()
     return JournalPaths(root=root)
+
+
+def _autostart(paths: JournalPaths) -> None:
+    """Wake the team's autodrive daemon after a scheduling verb queued work
+    (ADR 0010) -- the "auto-start" half of the self-driving journal.
+
+    Call it *after* the queue write has succeeded, never before: the task
+    landing on disk is the thing that must not fail. A no-op unless the team
+    opted in via ``TIGERHARNESS_AUTODRIVE_AUTOSTART``; the import is lazy so
+    the journal CLI keeps working if autodrive is unavailable, and every
+    failure is swallowed with a warning. Worst case the operator starts the
+    driver by hand, exactly as before this hook existed.
+
+    Note the rail is *not* widened by this: the daemon is a separate,
+    detached, budget-capped process. A Slack-triggered session that calls
+    ``journal defer`` still cannot claim a task itself -- it only rings the
+    bell (see ``docs/subscription-backend.md``).
+    """
+    try:
+        from tigerharness.autodrive import ensure_running
+
+        ensure_running(paths.root)
+    except Exception as exc:
+        log.warning(
+            "autodrive auto-start skipped (%s: %s); work is queued -- "
+            "run `tigerharness autodrive start` to drive it",
+            type(exc).__name__, exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +249,7 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
         "Open Claude Code and invoke the `drive-journal` skill to "
         "start working it."
     )
+    _autostart(paths)
     return 0
 
 
@@ -313,6 +357,7 @@ def _cmd_new_workflow(args: argparse.Namespace, paths: JournalPaths) -> int:
         "Open Claude Code and invoke the `drive-journal` skill to "
         "start the compile + walk."
     )
+    _autostart(paths)
     return 0
 
 
@@ -375,6 +420,7 @@ def cmd_defer(args: argparse.Namespace) -> int:
         "  next:    a drive-journal session materializes it "
         f"(`tigerharness journal materialize {entry.id}`) and runs it."
     )
+    _autostart(paths)
     return 0
 
 
@@ -431,6 +477,7 @@ def cmd_materialize(args: argparse.Namespace) -> int:
     print(f"  kind:         {result.status.kind}")
     print(f"  playbook:     {entry.playbook}")
     print(f"  task_dir:     {result.task_dir}")
+    _autostart(paths)
     return 0
 
 
@@ -848,6 +895,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
         f"Answered {task_id}: moved needs_input/ -> active/ "
         f"(state=in_progress, idle). The next drive resumes it."
     )
+    _autostart(paths)
     return 0
 
 
@@ -1573,6 +1621,7 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
     print(f"  title:    {d.title}")
     print(f"  cadence:  {d.period} at {d.at} (local wall clock)")
     print(f"  next_due: {d.next_due}")
+    print(SCHEDULE_DEPRECATION_NOTE, file=sys.stderr)
     return 0
 
 
@@ -1785,11 +1834,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sch = sub.add_parser(
         "schedule",
-        help="Recurring task definitions materialized by the sweep.",
+        help=(
+            "[DEPRECATED, ADR 0010] Recurring task definitions materialized "
+            "by the sweep."
+        ),
     )
     sch_sub = sch.add_subparsers(dest="schedule_cmd", required=True)
 
-    sa = sch_sub.add_parser("add", help="Add a recurring definition.")
+    sa = sch_sub.add_parser(
+        "add", help="[DEPRECATED] Add a recurring definition."
+    )
     sa.add_argument("--title", required=True)
     sa.add_argument("--period", choices=("daily", "weekly"),
                     default="daily")

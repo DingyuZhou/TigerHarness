@@ -1,5 +1,15 @@
 """Recurring task definitions materialized by the drive (T8).
 
+DEPRECATED since 2026-08-12 (ADR 0010). Materialization happens only
+inside a sweep, and a sweep only happens while a driver is awake --
+but autodrive now stops itself once the queue drains, so a definition
+whose due time falls in a quiet period has nothing alive to fire it.
+The code below is unchanged and still correct *while a driver runs*;
+it stays working, is warned about at the CLI, and is slated for either
+removal or a redesign that does not depend on a long-lived process (an
+OS-level timer that sweeps, then calls ``autodrive.ensure_running``).
+Do not build new features on it.
+
 A ``schedule/`` store sits beside ``active/``. Each definition is one
 JSON file with a ``next_due`` gate; the lazy sweep materializes a due
 definition into a normal pending task via the existing scaffolders.
