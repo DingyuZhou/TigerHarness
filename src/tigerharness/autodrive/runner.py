@@ -93,9 +93,11 @@ DEFAULT_INTERVAL_SECONDS = 600.0
 DEFAULT_PERMISSION_MODE = "bypassPermissions"
 DEFAULT_BACKEND = "claude_p"
 
-#: Notification backend. ``"slack"`` posts a heartbeat per fire + a threaded
-#: status/summary on completion; ``"none"`` mutes (the loop runs unchanged,
-#: only the posting is suppressed). See ``docs/autodrive-notifications.md``.
+#: Notification backend. ``"slack"`` posts a heartbeat per *cycle* -- a fire
+#: heartbeat when it launches a drive, a skip pulse when the probe declines
+#: to (see :func:`skip_text`) -- plus a threaded status/summary on
+#: completion; ``"none"`` mutes (the loop runs unchanged, only the posting
+#: is suppressed). See ``docs/autodrive-notifications.md``.
 DEFAULT_NOTIFY = "slack"
 
 #: Slack messages have generous limits, but a drive's closing summary can be
@@ -500,6 +502,28 @@ def error_text(fire_no: int, exc: Any) -> str:
     return f"fire #{fire_no} FAILED: {type(exc).__name__}: {exc}"
 
 
+#: Why a cycle declined to fire. Rides in the skip pulse so the channel
+#: says *why* the rhythm ticked without launching a drive.
+SKIP_BUSY = "queue busy - a live session owns the in-flight task"
+SKIP_WAITING = "queue idle - waiting on an in-flight drive"
+
+
+def skip_text(launched: int, at: str, reason: str, in_flight: int) -> str:
+    """The pulse for a cycle that probes and fires *nothing* (ADR 0010).
+
+    Before the queue probe every cycle fired, so every cycle posted a
+    heartbeat and the rhythm itself was the health signal. The probe made
+    the no-work cycle free, but it also made it *silent* -- and a long busy
+    stretch then reads exactly like a crash. This restores the rhythm at
+    zero model cost: same ``autodrive heartbeat`` prefix as
+    :func:`heartbeat_text`, so the channel reads as one continuous pulse.
+    """
+    return (
+        f"autodrive heartbeat - no fire at {at} - {reason} "
+        f"(in-flight {in_flight}, {launched} drive(s) so far)"
+    )
+
+
 def drained_text(launched: int, at: str) -> str:
     """The closing message when the daemon stops itself (ADR 0010). Makes a
     deliberate stop legible: without it, silence after the last heartbeat
@@ -562,6 +586,10 @@ async def run_loop(
     overlapping fire a cheap no-op, and each drive is still bounded by its
     own ``max_budget_usd``.
 
+    A cycle that fires *nothing* still pulses (:func:`skip_text`), so the
+    heartbeat rhythm tracks the daemon's health rather than its spending --
+    a long busy stretch must never be indistinguishable from a crash.
+
     **Auto-stop (ADR 0010).** A ``busy`` verdict skips the fire; an ``idle``
     verdict fires the maintenance drive once and then, once that drive has
     finished and nothing new has arrived, exits the loop -- the daemon stops
@@ -612,6 +640,19 @@ async def run_loop(
     def _schedule_update(thread: str | None, text: str) -> None:
         notif_tasks.append(
             asyncio.create_task(asyncio.to_thread(notifier.update, thread, text))
+        )
+
+    async def _pulse_skip(reason: str) -> None:
+        """Keep the heartbeat rhythm alive on a cycle that fires nothing.
+
+        Model-free by construction: a plain Slack POST, never a drive, so
+        visibility on a busy queue costs nothing. Awaited (not scheduled)
+        so the pulse lands before the cycle sleeps -- the notifier never
+        raises, and ``to_thread`` keeps a slow POST off the event loop.
+        """
+        await asyncio.to_thread(
+            notifier.heartbeat,
+            skip_text(launched, now(), reason, len(in_flight)),
         )
 
     def _prune_notifs() -> None:
@@ -730,6 +771,7 @@ async def run_loop(
             if in_flight:
                 # A drive is still finishing; let it settle before deciding.
                 log.info("autodrive: queue idle, waiting on in-flight drive")
+                await _pulse_skip(SKIP_WAITING)
                 await sleep(cfg.interval_seconds)
                 continue
             # First idle cycle: fire the maintenance drive (its prompt ends
@@ -741,6 +783,7 @@ async def run_loop(
             # sweep, see busy, and exit. Skip it and keep the daemon alive.
             maintenance_done = False
             log.info("autodrive: queue busy, skipping fire")
+            await _pulse_skip(SKIP_BUSY)
             await sleep(cfg.interval_seconds)
             continue
         else:
