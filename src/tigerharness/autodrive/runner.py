@@ -605,7 +605,12 @@ async def run_loop(
     def _record_completion(fire: _Fire, outcome: Any, *, is_error: bool) -> None:
         nonlocal completed, maintenance_done
         completed += 1
-        if fire.maintenance:
+        # Arm auto-stop only if this maintenance drive is still the *newest*
+        # fire. A maintenance drive is only ever launched with nothing in
+        # flight, so a higher `launched` means real work was fired while it
+        # ran -- and that work dirtied memory the tail has not swept yet.
+        # Arming here would exit without a second maintenance pass.
+        if fire.maintenance and fire.fire_no == launched:
             maintenance_done = True
         if is_error:
             log.warning("autodrive drive failed: %s", outcome)
