@@ -355,6 +355,14 @@ class TestFirstTurnBootstrapInjection:
         assert "heads-up BEFORE sweeping" in prompt
         # (d) the persona name as the sweep's own persona
         assert "as persona beta" in prompt
+        # (e) the defer test (ADR 0010) -- all three triggers plus the verb,
+        #     so a persona has a mechanical rule for "this is too big for a
+        #     chat turn" instead of no trigger at all.
+        assert "defer test" in prompt
+        assert "more than one working session" in prompt
+        assert "spans several files" in prompt
+        assert "another persona's hands" in prompt
+        assert "journal defer" in prompt
 
     @pytest.mark.asyncio
     async def test_resumed_session_gets_no_injection(self, tmp_path):

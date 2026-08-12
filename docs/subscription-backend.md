@@ -515,6 +515,33 @@ The driver has no CLI form on purpose: a CLI driver would be a
 programmatic entry point and defeat the subscription model. Driving
 only happens inside an interactive session a human started.
 
+### The one exception, and what ADR 0010 changed about it
+
+[`autodrive`](autodrive.md) is the single Operator-authorized break in that
+rule, and it rests on one load-bearing fact: **`claude -p` bills the
+subscription, not the API.** Re-confirmed by the Operator on 2026-08-12.
+
+[ADR 0010](adr/0010-self-driving-journal.md) moved autodrive's *trigger* from
+a human hand to a queue write: with `TIGERHARNESS_AUTODRIVE_AUTOSTART` set in
+a team's `configs/.env`, `journal new` / `defer` / `materialize` / `answer`
+start the daemon, and the daemon stops itself once the queue drains.
+
+That **narrows** the rails doctrine rather than widening it:
+
+- Slack still **schedules, never drives.** `journal claim` refuses a bridge
+  session mechanically (`TIGERHARNESS_SLACK_THREAD_TS` set, no
+  `--allow-api-drive`). A `defer` from Slack rings a bell; it does not become
+  a driver.
+- The driver is still the **same single, budget-capped, killable,
+  Operator-authorized daemon** — one per team, now guarded by an atomic
+  `flock` rather than a read-then-write check.
+- Idle cost went **down**, not up: the daemon probes the queue with plain
+  Python and only spends a `claude -p` session when there is something to do.
+
+If `claude -p` ever moves to API billing, set
+`TIGERHARNESS_AUTODRIVE_AUTOSTART=0` — the system reverts to human-triggered
+with no code change.
+
 **Adopting protocol updates on an existing team.** The skill and
 `OPERATING.md` propagate to already-scaffolded teams **hash-gated**, so
 an upgrade reaches them without clobbering local edits:

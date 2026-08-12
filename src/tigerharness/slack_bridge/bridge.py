@@ -397,6 +397,14 @@ class SlackBridge:
                     # when nothing is pending. A resumed thread/session
                     # gets no injection and no bootstrap sweep — by
                     # design.
+                    #
+                    # The closing sentence is the "defer test" (ADR 0010):
+                    # personas had no trigger telling them an ask was too
+                    # big for a chat turn, so big asks got started inline
+                    # and left no resumable record. Injected once per
+                    # session rather than written into nine persona
+                    # prompts; a resumed session still has it in context
+                    # from its own first turn.
                     prompt = (
                         f"{prompt}\n\n[bridge-context] first turn of a new "
                         "session: before answering, read "
@@ -410,7 +418,12 @@ class SlackBridge:
                         "transcripts before the requested work, and "
                         "dispatch other personas' extraction in the "
                         "background. Skip silently if the sweep-memory "
-                        "skill is not installed."
+                        "skill is not installed. Finally, apply the defer "
+                        "test to the ask itself: if it needs more than one "
+                        "working session, spans several files, or needs "
+                        "another persona's hands, do not start it inline "
+                        "-- `tigerharness journal defer` it (see the "
+                        "journal-new skill) and say so in one line."
                     )
                 log.info(
                     "thread=%s persona=%s dispatch (resume=%s, chars=%d, files=%d)",
