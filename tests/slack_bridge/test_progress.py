@@ -265,6 +265,40 @@ async def test_d2_parent_post_carries_the_prose_and_not_the_secret() -> None:
     assert parent == ':hourglass: Mitsui still working — "deploy now"'
 
 
+# ---------- Item 3 (D2): where the shape rule stops ------------------------
+#
+# The rule is token-shaped by design, so it has edges. These two pin the
+# edges that an operator could plausibly walk into, so that the docs are
+# forced to describe the same boundary the code implements. If a later
+# change narrows a leak here, these tests go RED -- which is the correct
+# signal, not a regression. Update them with the fix.
+
+def test_d2_header_spaces_around_the_equals_defeat_the_shape_rule() -> None:
+    """``KEY = value`` is three tokens, none of them an assignment.
+
+    ``KEY`` and ``value`` carry no ``=``; the bare ``=`` has an empty
+    right-hand side and is kept by the ``--profile=`` exemption. Nothing
+    is dropped and the secret is posted verbatim.
+    """
+    out = sanitize_header("run SLACK_TOKEN = xoxb-deadbeef against staging")
+    assert out == "run SLACK_TOKEN = xoxb-deadbeef against staging"
+
+
+def test_d2_backticking_the_value_defeats_the_shape_rule() -> None:
+    """Backtick-stripping splits one assignment into two safe-looking tokens.
+
+    ``SECRET=`xoxb-...``` is a single assignment-shaped token until the
+    backticks become spaces. After that it is ``SECRET=`` -- empty
+    right-hand side, deliberately kept -- plus a bare value with no
+    ``=`` at all. Backticking a value is idiomatic in Slack, and the
+    unbackticked form of the same input IS dropped, so the two differ.
+    """
+    backticked = sanitize_header("run SECRET=`xoxb-deadbeef` against staging")
+    plain = sanitize_header("run SECRET=xoxb-deadbeef against staging")
+    assert backticked == "run SECRET= xoxb-deadbeef against staging"
+    assert plain == "run against staging"
+
+
 @pytest.mark.asyncio
 async def test_c3_pulse_carries_the_hint_and_not_the_secret() -> None:
     """Both halves: absence alone is satisfied by posting nothing."""
