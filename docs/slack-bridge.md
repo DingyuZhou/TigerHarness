@@ -607,6 +607,13 @@ enforced, because it is, and the multi-turn drain as reasoned but
 unexercised. Closing it means a test with two concurrent dispatches
 where the first to finish must *not* set `_drained`.
 
+This gap is also listed in the README under *Known limitations &
+roadmap* → *Bridge shutdown*, and the pragma itself points back at both.
+If you write that test and remove the pragma, **retract all three** — a
+known limitation that outlives its fix is a reassurance pointing the
+wrong way, and it is the one kind of stale doc a reader will not think
+to check.
+
 ### Systemd unit
 
 The fastest path: have tigerharness generate a unit file customized

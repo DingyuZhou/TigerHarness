@@ -720,7 +720,11 @@ class SlackBridge:
                     self._store.mark_in_flight(thread_key, False)
                 self._in_flight -= 1
                 # `no branch`: only single-request flows are tested,
-                # so the "still in flight" side never runs.
+                # so the "still in flight" side never runs. The gap is
+                # written up in docs/slack-bridge.md ("Concurrency (does
+                # not)") and listed in README.md under Known limitations
+                # -> Bridge shutdown; removing this pragma means
+                # retracting both.
                 if self._in_flight == 0:  # pragma: no branch
                     self._drained.set()
 
