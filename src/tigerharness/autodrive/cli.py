@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
+from .._logging import configure_cli_logging
 from ..journal.paths import default_journal_root
 from ..journal.scaffold import resolve_default_persona
 from .notifier import build_notifier
@@ -597,6 +598,15 @@ def cmd_loop(
 ) -> int:
     """The detached daemon body. Reads config from the state file, runs
     the drive loop, and clears the state file on a clean exit."""
+    # Give the daemon's own INFO logging somewhere to land. `start` points
+    # this process's stdout+stderr at `.autodrive.log`, but nothing ever
+    # configured a handler, so `logging.lastResort` dropped everything below
+    # WARNING and the log stayed empty -- which is why a six-fire rescue
+    # stampede left no forensics at all and had to be reconstructed from
+    # file timestamps and the kernel OOM log. INFO by default (like
+    # `notify`) because this is an unattended process nobody is watching:
+    # its log IS the record. `TIGERHARNESS_LOG_LEVEL` still overrides.
+    configure_cli_logging(default="INFO")
     sfile = Path(args.state_file)
     state = read_state(sfile)
     if state is None:
