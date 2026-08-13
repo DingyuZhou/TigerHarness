@@ -860,22 +860,39 @@ and it is token-shaped, so **all** of these are posted verbatim:
   does not eat ordinary command-line prose.
 
 Read that list as samples from one side of a boundary, not as a
-checklist. The boundary is: a token is dropped **only** if it contains
-`=` with something after it. Everything else survives.
+checklist. `sanitize_header`, in
+`src/tigerharness/slack_bridge/progress.py`, is the entire rule, and it
+is four steps:
 
-The unit there is the whitespace-separated token, not the message, so a
-message can be half-dropped: `Cookie: session=abc123` posts as `Cookie:`
-— the label survives, the value does not. Do not read that as colon
-forms being protected. Nothing about the colon saved anything; the `=`
-inside the *value* is what got caught, and `Authorization: Bearer
+1. delete backticks;
+2. split on whitespace;
+3. drop every token containing `=` with something after it — the unit is
+   the **token**, never the message;
+4. rejoin and truncate to 120 characters.
+
+Three consequences follow that step 3 alone does not suggest.
+
+**A message can be half-dropped.** `Cookie: session=abc123` posts as
+`Cookie:` — the label survives, the value does not. Do not read that as
+colon forms being protected. Nothing about the colon saved anything; the
+`=` inside the *value* is what got caught, and `Authorization: Bearer
 xoxb-…` has no `=` to catch.
 
-It also over-drops, which the rest of this section does not prepare you
-for. Any token with a non-empty right-hand side goes, and URLs qualify —
-`curl https://example.invalid/a?token=…` posts as `curl`, losing the
-whole URL. Benign content disappearing from your own quoted words is
-intended, not a bug: loosening the rule to preserve query strings would
-reopen the commonest way a token reaches a channel.
+**It over-drops.** Any token with a non-empty right-hand side goes, and
+URLs qualify — `curl https://example.invalid/a?token=…` posts as `curl`,
+losing the whole URL. Benign content disappearing from your own quoted
+words is intended, not a bug: loosening the rule to preserve query
+strings would reopen the commonest way a token reaches a channel.
+
+**Step 4 is truncation, which is not redaction and must not be read as
+any.** Survival is bounded by length as well as by shape, and the length
+bound is *positional*: the same secret, in the same shape, posts or does
+not depending only on how much text precedes it. `token: xoxb-…` near
+the start of a message reaches the channel; the identical token pushed
+past character 120 by a longer preamble does not. So if you paste
+something long and see
+it cut off, nothing was scrubbed — the message ran out of room, and the
+same paste in a shorter message posts the secret.
 
 Assume anything you paste can reach the channel unless it is
 `KEY=value` with no spaces. The excerpt is sanitised, not safe to leak:

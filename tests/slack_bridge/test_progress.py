@@ -300,6 +300,48 @@ def test_d2_backticking_the_value_does_not_defeat_the_shape_rule() -> None:
     assert backticked == plain == "run against staging"
 
 
+def test_d2_header_leaks_every_colon_shape_the_docs_promise_it_leaks() -> None:
+    """Pins the *leak* side, which `docs/slack-bridge.md` documents at length.
+
+    The drop side above is thoroughly covered; what leaks was described
+    only in prose, and that prose shipped wrong twice. These are the
+    shapes credentials actually arrive in, and an operator decides what
+    is safe to paste from the doc's word that they survive -- so the doc
+    is wrong the moment this test goes red, in either direction.
+    """
+    for text in (
+        "token: xoxb-deadbeef",
+        '{"token": "xoxb-deadbeef"}',
+        "Authorization: Bearer xoxb-deadbeef",
+        "the token is xoxb-deadbeef",
+    ):
+        assert sanitize_header(text) == text
+
+
+def test_d2_header_drops_per_token_so_a_colon_line_is_only_half_dropped() -> None:
+    """A colon form whose *value* carries an ``=`` loses that token alone.
+
+    The unit is the whitespace-delimited token, not the message. Pinned
+    because the natural misreading -- that the colon protected it -- is
+    the one the docs warn against, and because it bounds the claim above:
+    colon shapes survive when their values carry no ``=``, not always.
+    """
+    assert sanitize_header("Cookie: session=abc123") == "Cookie:"
+
+
+def test_d2_header_over_drops_a_url_carrying_a_query_parameter() -> None:
+    """Documented as intended, and pinned so it is not "fixed" away.
+
+    ``docs/slack-bridge.md`` predicts exactly this edit -- someone
+    loosening the rule to preserve query strings -- and says it would
+    reopen the commonest way a token reaches a channel. Prose cannot stop
+    that; this can.
+    """
+    out = sanitize_header("curl https://example.invalid/a?token=deadbeef")
+    assert "deadbeef" not in out
+    assert out == "curl"
+
+
 @pytest.mark.asyncio
 async def test_c3_pulse_carries_the_hint_and_not_the_secret() -> None:
     """Both halves: absence alone is satisfied by posting nothing."""
