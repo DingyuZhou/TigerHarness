@@ -62,11 +62,19 @@ _DOC_ANCHORS = (
     "worst-case total wait is",
     "drain budget is shared across lanes",
     "in-flight turns to finish",
+    # The fifth site this file's docstring anticipated, landed by
+    # `b5-doc-draft`: the prose that spells the chain out. Anchored like
+    # the rest, because an unpinned docs site is one that rots quietly --
+    # exactly the failure this guard exists to catch.
+    "is the middle link",
 )
 
-#: A floor, never an equality: `b5-doc-draft` writes about this budget
-#: later in the same walk, and an equality would fail on the sentence.
-_DOC_SITE_FLOOR = 4
+#: A floor, never an equality, and it counts the ANCHORED sites:
+#: docs/slack-bridge.md carries the number on more lines than this, so a
+#: reword that merges two sentences of one site must not fail here. The
+#: fix for a drop is the docs site that lost the number, never a lower
+#: floor.
+_DOC_SITE_FLOOR = 5
 
 
 def _rendered_timeout_stop_sec(tmp_path: Path) -> int:

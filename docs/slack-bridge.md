@@ -528,6 +528,53 @@ On SIGTERM (e.g. `systemctl restart`), the multi-bridge:
 
 If a lane's drain times out, the others still get their full window and the process logs a per-lane warning before continuing.
 
+#### The drain budget is a chain, not a number
+
+That 90 s is the middle link of an ordering that spans three files which
+do not import each other:
+
+```
+STOP_DRAIN_S + FINISH_POST_S  <=  _DRAIN_TIMEOUT_S  <=  TimeoutStopSec
+   35 + 35 = 70                       90                    120
+   bridge.py                      __main__.py         gen_service.py
+```
+
+Read it outside in. `TimeoutStopSec=120` is how long systemd waits
+before SIGKILL, so the drain must finish **and** the process must exit
+inside it. The drain budget is 90 s, leaving 30 s for that exit — sized
+against `notify.py`'s `urlopen(timeout=30)`, which is the last post a
+lane may still owe. Inside that, a lane's own teardown costs at most
+70 s, leaving 20 s of slack before the shared budget expires.
+
+Both margins are enforced as **floors** (≥ 20 s, ≥ 30 s), not as "> 0":
+one second of headroom is the same wedge failure wearing a passing test.
+And the 70 s floor is not arbitrary either — it is sized *above* the
+30 s `urlopen` timeout on purpose, so the budget fires during a genuine
+wedge rather than during a normal-but-slow Slack POST. `asyncio.to_thread`
+is not cancellable, so a worker cut off early keeps posting and lands its
+message *after* the closer, which is a visible lie in the channel rather
+than a silent timeout.
+
+Edit any one link in isolation and the failure is silent and remote:
+systemd SIGKILLs a bridge that was draining correctly, and the reply the
+Operator is waiting for dies with the process. Nothing in the code
+connects the three, so
+[`tests/slack_bridge/test_drain_budget_invariant.py`](../tests/slack_bridge/test_drain_budget_invariant.py)
+does — it reads all three from their real sources, including
+`TimeoutStopSec` parsed out of the **rendered** unit rather than a
+literal, so a template edit trips it too. It also pins these prose sites,
+so a docs reword that drops a number fails CI.
+
+**One bound no test can see:** the guard reads `gen_service.py`'s
+template, not your installed unit. An already-installed
+`slack-bridge-*.service` keeps the old `TimeoutStopSec` until someone
+re-runs `gen-service` and `systemctl --user daemon-reload`. If you are
+reconciling a live box, check the unit itself:
+
+```bash
+systemctl --user show <unit> -p TimeoutStopUSec   # expect 2min
+```
+
 ### Systemd unit
 
 The fastest path: have tigerharness generate a unit file customized
