@@ -844,12 +844,29 @@ unbackticked form; spacing them out used to split it into a valueless
 through is not short. The rule is shape-based, not a credential regex,
 and it is token-shaped, so **all** of these are posted verbatim:
 
+- **anything colon-shaped** — `token: xoxb-…`, a JSON body
+  `{"token": "xoxb-…"}`, an `Authorization: Bearer xoxb-…` header. The
+  rule keys on `=`, so **no colon form is ever dropped**. This is the
+  one to remember: most credentials arrive by colon, not by equals, and
+  a Bearer header is the shape least likely to look like a secret at a
+  glance while you are pasting a failing request into a prompt;
 - a secret written as prose — "the token is xoxb-…";
 - a secret with spaces around the equals — `SECRET = xoxb-…` is three
   tokens, none of them an assignment, and no token-shaped rule catches
   it without lookahead that would also eat "the answer = 42";
 - a `--flag=` whose value is empty, which is kept on purpose so the rule
   does not eat ordinary command-line prose.
+
+Read that list as samples from one side of a boundary, not as a
+checklist. The boundary is: a token is dropped **only** if it contains
+`=` with something after it. Everything else survives.
+
+It also over-drops, which the rest of this section does not prepare you
+for. Any token with a non-empty right-hand side goes, and URLs qualify —
+`curl https://example.invalid/a?token=…` posts as `curl`, losing the
+whole URL. Benign content disappearing from your own quoted words is
+intended, not a bug: loosening the rule to preserve query strings would
+reopen the commonest way a token reaches a channel.
 
 Assume anything you paste can reach the channel unless it is
 `KEY=value` with no spaces. The excerpt is sanitised, not safe to leak:
