@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 
 import pytest
@@ -737,6 +738,37 @@ def test_cmd_stop_stale(tmp_path, capsys):
 # --------------------------------------------------------------------------
 # CLI: cmd_loop
 # --------------------------------------------------------------------------
+
+def test_cmd_loop_configures_logging_so_the_daemon_log_is_not_empty(
+    tmp_path, monkeypatch,
+):
+    """`start` redirects the daemon's stdout+stderr into `.autodrive.log`,
+    but nothing ever configured a handler, so every record below WARNING
+    went to `logging.lastResort` and the file stayed empty -- a six-fire
+    rescue stampede left zero forensics as a result. The daemon body must
+    turn its own INFO logging on.
+
+    The ``delenv`` matters: ``configure_cli_logging`` lets
+    ``TIGERHARNESS_LOG_LEVEL`` override the default, and the autouse
+    scrub in ``conftest`` only covers the Slack family. Without this, a
+    dev shell exporting ``DEBUG`` false-fails the level assertion.
+    """
+    monkeypatch.delenv("TIGERHARNESS_LOG_LEVEL", raising=False)
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    try:
+        # Stand in for the fresh `_loop` subprocess: no handlers yet, so
+        # basicConfig actually applies rather than no-opping.
+        root.handlers = []
+        root.setLevel(logging.WARNING)
+        args = _args(["_loop", "--state-file", str(tmp_path / "gone.json")])
+        assert cli.cmd_loop(args) == 1
+        assert root.handlers, "daemon left the root logger without a handler"
+        assert root.level == logging.INFO
+    finally:
+        root.handlers, root.level = saved_handlers, saved_level
+
 
 def test_cmd_loop_no_state(tmp_path, capsys):
     args = _args(["_loop", "--state-file", str(tmp_path / "gone.json")])
