@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 
 import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -173,6 +175,56 @@ class SweepResult:
         return "Journal: " + ", ".join(parts) + "."
 
 
+def newest_mtime_age_seconds(task_dir: Path, *, now_epoch: float) -> float:
+    """Seconds since the most recently modified file under ``task_dir``.
+
+    A second, independent liveness signal. ``status.updated_at`` moves only
+    when something remembers to write it; file mtimes move whenever the
+    session actually does anything -- a worklog note, a plan revision, an
+    artifact. A working session that has not refreshed its heartbeat is
+    still visibly working on disk.
+
+    Safe as a liveness signal precisely because :func:`sweep` performs no
+    writes into an ``in_progress`` task's directory (see its docstring).
+    Were that to change, a dead task would look alive forever and could
+    never be reclaimed -- so that "no other writes" guarantee is
+    load-bearing here, not incidental.
+
+    Returns ``inf`` when the directory is missing, empty, or unreadable, so
+    a task with no evidence degrades to "no liveness signal" and the caller
+    falls back to the heartbeat rather than being pinned alive.
+    """
+    newest = 0.0
+    try:
+        for p in task_dir.rglob("*"):
+            try:
+                if p.is_file():
+                    newest = max(newest, p.stat().st_mtime)
+            except OSError:  # pragma: no cover - racing file removal
+                continue
+    except OSError:  # pragma: no cover - unreadable task dir
+        return float("inf")
+    if newest <= 0.0:
+        return float("inf")
+    return max(0.0, now_epoch - newest)
+
+
+def _epoch_from_iso(ts: str) -> float:
+    """``ts`` as a POSIX timestamp, or the real clock if unparseable.
+
+    Tests inject a frozen ``now`` so heartbeat ages are deterministic; the
+    mtime comparison has to share that clock, or a frozen-clock test would
+    read every fixture file as wildly stale (or wildly fresh).
+    """
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:  # pragma: no cover - Status parsing guards this
+        return time.time()
+    if parsed.tzinfo is None:  # pragma: no cover - _utcnow_iso is aware
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 def sweep(
     paths: JournalPaths,
     *,
@@ -181,7 +233,12 @@ def sweep(
 ) -> SweepResult:
     """Run one sweep over ``paths.active`` and return the classification.
 
-    Side effects: archives any ``state=done`` task. No other writes.
+    Side effects: archives any ``state=done`` task. **No other writes** --
+    and that is a contract now, not a convenience. Crash classification
+    consults file mtimes under the task directory as a liveness signal
+    (:func:`newest_mtime_age_seconds`), so a sweep that touched an
+    ``in_progress`` task would keep refreshing its own evidence and no dead
+    task could ever be reclaimed. Do not add writes here.
 
     ``now`` is injected for tests so heartbeat ages are deterministic;
     in production it defaults to UTC now via ``_utcnow_iso``.
@@ -275,6 +332,24 @@ def sweep(
                 error=f"heartbeat unreadable: {exc}",
             ))
             continue
+        if klass == "crashed":
+            # Second opinion before declaring a death. A long step can run
+            # well past the timeout without refreshing the heartbeat, and
+            # calling that "crashed" invites a rescue drive to fight the
+            # session that is still working -- which is how an overloaded
+            # box gets a pile-up. Recent writes in the task dir are proof
+            # of life, so treat it as busy and wait one more sweep.
+            # Only crashed is re-judged: `idle` means *detached*, which is
+            # resumable by design and has nothing to do with liveness.
+            age = newest_mtime_age_seconds(
+                paths.active / task_id, now_epoch=_epoch_from_iso(ts_now),
+            )
+            if age <= timeout:
+                log.info(
+                    "sweep: %s heartbeat stale but files touched %.0fs ago "
+                    "-- alive, not crashed", task_id, age,
+                )
+                klass = "busy"
         log.info("sweep: %s classified %s", task_id, klass)
         if klass == "idle":
             result.in_progress_idle.append(status)

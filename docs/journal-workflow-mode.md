@@ -221,6 +221,16 @@ each drafter turn, each Tier 1 call, each critic verdict, each round
 completion, each land step). ~5–6 bumps per round, comfortably under
 the 30-minute `stuck_timeout`.
 
+**`step-done` bumps it too**, and that is not decoration. The graph-walk
+cursor lives in `walk.json`, not `status.json` (`Status` rejects the
+field), so advancing a step used to leave `status.updated_at` frozen at
+the last claim. A workflow could then run for hours — landing a worklog
+entry per step — while reading as *crashed* to the sweep, which had
+autodrive firing rescue drives on top of the live session. Advancing the
+walk **is** progress and must stamp the heartbeat; see
+[`autodrive.md`](autodrive.md#the-daemon-never-rescues-on-top-of-its-own-drive)
+for the two further defences layered behind this one.
+
 ## State machine
 
 The four-state top-level machine (`pending / in_progress / blocked /
@@ -229,7 +239,8 @@ not a fifth top-level state. The sweep classifier is identical for
 compile-phase and graph-walk-phase workflows: an `in_progress` task is
 **idle** (detached `session_ref` → resumable now), **busy** (attached +
 fresh heartbeat → a live session owns it), or **crashed** (attached +
-stale heartbeat → reclaimable). See
+stale heartbeat **and** a task directory nobody has written to inside
+the timeout → reclaimable). See
 [`journal-instant-resume.md`](journal-instant-resume.md).
 
 A new `compile_phase: str` field on `status.json` tracks the

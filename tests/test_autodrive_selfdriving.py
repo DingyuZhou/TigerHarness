@@ -120,6 +120,23 @@ def _write_task(paths: JournalPaths, task_id: str, **over) -> None:
     )
 
 
+def _make_crashed(paths: JournalPaths, task_id: str) -> None:
+    """Write a task the sweep will call *crashed*.
+
+    Two independent signals must both be stale: an ``updated_at`` older
+    than the stuck timeout, *and* a task dir nobody has touched. The sweep
+    checks file mtimes as a second opinion precisely so a live worker with
+    a lagging heartbeat is not mistaken for a corpse -- which means a
+    fixture written a millisecond ago reads as alive unless it is aged."""
+    _write_task(
+        paths, task_id,
+        state=State.IN_PROGRESS, session_ref="tok",
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    old = time.time() - 86_400
+    os.utime(paths.active / task_id / "status.json", (old, old))
+
+
 @pytest.fixture(autouse=True)
 def _scrub_autodrive_env(monkeypatch):
     """The knobs are read from the *process* env first, so a developer's own
@@ -275,6 +292,73 @@ def test_probe_busy_task_is_busy(tmp_path):
     )
     assert runner.probe_queue(_cfg(journal_root=str(tmp_path))) == \
         runner.QUEUE_BUSY
+
+
+def test_probe_crashed_only_is_rescue(tmp_path):
+    """A crashed task alone is real work -- but the loop, not the probe,
+    decides whether now is the moment. Reported as its own verdict so the
+    loop can tell "somebody else's crash" from "our own drive whose
+    heartbeat went stale"."""
+    paths = _make_journal(tmp_path)
+    _make_crashed(paths, "20260812-000000-x")
+    assert runner.probe_queue(_cfg(journal_root=str(tmp_path))) == \
+        runner.QUEUE_RESCUE
+
+
+def test_probe_stale_heartbeat_over_a_live_task_is_busy(tmp_path):
+    """The two fixes composing: a workflow that advances its walk without
+    stamping status.json looks crashed by heartbeat alone. Recent writes in
+    the task dir out-vote the stale timestamp, so the probe says busy --
+    the daemon neither fires nor even considers a rescue."""
+    paths = _make_journal(tmp_path)
+    _write_task(
+        paths, "20260812-000000-x",
+        state=State.IN_PROGRESS, session_ref="tok",
+        updated_at="2026-01-01T00:00:00Z",
+    )  # files written just now: stale heartbeat, live on disk
+    assert runner.probe_queue(_cfg(journal_root=str(tmp_path))) == \
+        runner.QUEUE_BUSY
+
+
+def test_probe_crashed_outranks_pending_so_it_is_still_a_rescue(tmp_path):
+    """A pending task in the queue must NOT downgrade the verdict.
+
+    Tempting to reason "there is real new work, so fire normally" -- and
+    wrong. `SweepResult.actionable()` returns idle+crashed *before*
+    pending, so a drive fired for the pending task sweeps, finds the
+    crashed one ranked higher, and takes that instead. The verdict has to
+    describe what a fire would actually do, not what queued it."""
+    paths = _make_journal(tmp_path)
+    _make_crashed(paths, "20260812-000000-x")
+    _write_task(paths, "20260812-000001-y")
+    assert runner.probe_queue(_cfg(journal_root=str(tmp_path))) == \
+        runner.QUEUE_RESCUE
+
+
+def test_probe_crashed_plus_deferred_is_still_a_rescue(tmp_path):
+    """Same reasoning via the other actionable source: the drive
+    materializes an inbox entry into a *pending* task, which the crashed
+    one then outranks."""
+    paths = _make_journal(tmp_path)
+    _make_crashed(paths, "20260812-000000-x")
+    entry = paths.deferred / "20260812-000000-slack-ask"
+    entry.mkdir(parents=True)
+    (entry / "deferred.json").write_text("{}", encoding="utf-8")
+    assert runner.probe_queue(_cfg(journal_root=str(tmp_path))) == \
+        runner.QUEUE_RESCUE
+
+
+def test_probe_idle_task_without_a_crash_is_plain_actionable(tmp_path):
+    """The gate stays narrow where it can: a cleanly-detached task is
+    resumable, not a rescue, so overlap is still allowed."""
+    paths = _make_journal(tmp_path)
+    _write_task(
+        paths, "20260812-000000-z",
+        state=State.IN_PROGRESS, session_ref=None,
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    assert runner.probe_queue(_cfg(journal_root=str(tmp_path))) == \
+        runner.QUEUE_ACTIONABLE
 
 
 def test_probe_deferred_entry_is_actionable(tmp_path):
@@ -442,6 +526,81 @@ async def test_loop_pulses_while_waiting_on_an_in_flight_drive(tmp_path):
         max_ticks=10,
     )
     assert any(runner.SKIP_WAITING in h for h in notifier.heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_loop_rescue_with_nothing_in_flight_fires(tmp_path):
+    """A crash the daemon did not cause is genuinely its to pick up."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    notifier = _RecordingNotifier()
+    drives = []
+
+    async def fake_drive(cfg, *, backend=None):
+        drives.append(1)
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        return None
+
+    n = await runner.run_loop(
+        _cfg(), p,
+        run_drive=fake_drive, sleep=fake_sleep, now=lambda: "T",
+        probe=lambda cfg: runner.QUEUE_RESCUE,
+        notifier=notifier,
+        max_ticks=1,
+    )
+    assert n == 1 and len(drives) == 1
+    assert not any(runner.SKIP_RESCUE_HELD in h for h in notifier.heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_loop_holds_the_rescue_while_a_drive_is_in_flight(tmp_path):
+    """The stampede regression, in miniature. A workflow task whose
+    heartbeat lags reads as crashed; the sweep calls that actionable; the
+    daemon fires a rescue *on top of the drive already working it* -- and
+    because the stale verdict never clears, again every interval, until
+    six sessions on a 3.8 GiB box brought the OOM killer down on the whole
+    cgroup. The loop must hold a rescue whenever it has a drive out, and
+    say so rather than going quiet."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    notifier = _RecordingNotifier()
+    drives = []
+    gate = {"open": False}
+
+    async def fake_drive(cfg, *, backend=None):
+        drives.append(1)
+        while not gate["open"]:
+            await runner.asyncio.sleep(0)
+        return _FakeResult()
+
+    sleeps = {"n": 0}
+
+    async def fake_sleep(secs):
+        # Keep the first drive in flight for several cycles, so the rescue
+        # verdict lands repeatedly while it is still working -- the shape
+        # of the real incident, not a single unlucky tick.
+        sleeps["n"] += 1
+        if sleeps["n"] >= 4:
+            gate["open"] = True
+        await runner.asyncio.sleep(0)
+
+    # One real fire to get a drive in flight, then nothing but rescue.
+    verdicts = [runner.QUEUE_ACTIONABLE] + [runner.QUEUE_RESCUE] * 20
+    await runner.run_loop(
+        _cfg(), p,
+        run_drive=fake_drive, sleep=fake_sleep, now=lambda: "T",
+        probe=lambda cfg: verdicts.pop(0),
+        notifier=notifier,
+        max_ticks=4,
+    )
+    held = [h for h in notifier.heartbeats if runner.SKIP_RESCUE_HELD in h]
+    assert len(held) >= 2            # held every cycle, not just once
+    assert "in-flight 1" in held[0]  # and says what it is waiting on
+    # The point of the whole fix: no second session piled onto the task
+    # the first one still owns.
+    assert len(drives) == 1
 
 
 @pytest.mark.asyncio
@@ -669,6 +828,49 @@ def test_start_holds_the_lock_across_check_and_spawn(tmp_path):
     rc = cli.cmd_start(args, spawn=fake_spawn, now=lambda: "T")
     assert rc == 0
     assert "locked" in held  # spawn ran inside the with-block
+
+
+# ==========================================================================
+# cli: cgroup isolation for the spawned daemon
+# ==========================================================================
+
+def test_cgroup_scope_prefix_wraps_the_spawn_when_systemd_is_available(
+    monkeypatch,
+):
+    """The OOM shared-fate fix: a daemon auto-started from inside the Slack
+    bridge inherits the bridge's cgroup, so a memory spike in a drive takes
+    the bridge down with it. A transient scope under user.slice breaks
+    that. --collect so repeated starts leave no failed units behind."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/" + name)
+    prefix = cli.cgroup_scope_prefix({"XDG_RUNTIME_DIR": "/run/user/1000"})
+    assert prefix == [
+        "systemd-run", "--user", "--scope", "--quiet", "--collect",
+    ]
+
+
+def test_cgroup_scope_prefix_empty_without_systemd_run(monkeypatch):
+    """Containers, non-systemd hosts, CI. Degrading to a plain spawn is the
+    safe direction: a wrong "yes" stops the daemon starting at all, a wrong
+    "no" only forfeits the isolation."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    assert cli.cgroup_scope_prefix({"XDG_RUNTIME_DIR": "/run/user/1000"}) == []
+
+
+def test_cgroup_scope_prefix_empty_without_a_user_runtime_dir(monkeypatch):
+    """No per-user runtime dir means no user bus to register a scope on --
+    `systemd-run --user` would fail outright."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/" + name)
+    assert cli.cgroup_scope_prefix({}) == []
+
+
+def test_cgroup_scope_prefix_defaults_to_the_process_environment(
+    monkeypatch,
+):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    assert cli.cgroup_scope_prefix() == []
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    assert cli.cgroup_scope_prefix()[0] == "systemd-run"
 
 
 # ==========================================================================

@@ -48,7 +48,8 @@ model session:
 
 | Verdict | Meaning | Action |
 |---|---|---|
-| `actionable` | resumable / crashed / pending tasks, or a `deferred/` entry | fire a drive |
+| `actionable` | resumable / pending tasks, or a `deferred/` entry | fire a drive |
+| `rescue` | a **crashed** task is in the queue | fire only if **no drive is in flight** — see below |
 | `busy` | a live session already owns the in-flight task | **skip the fire** (a free tick) |
 | `idle` | nothing actionable, nothing busy | fire the maintenance tail once, then **stop** |
 
@@ -79,6 +80,53 @@ concurrency cap** — the busy-lease no-op makes a pile-up of redundant fires
 cheap, and each drive is still bounded by its own `--max-budget`. **Mind the
 multiplier, though:** N concurrent drives can spend up to N × the per-drive cap
 within one interval, so size `--interval` and `--max-budget` together.
+
+That self-limiting argument has exactly one hole, and it is the reason the
+`rescue` verdict exists: the busy lease only deters a fire while the task
+*reads* as busy. A task the sweep calls **crashed** is unleased by definition,
+so every fire claims it — see the next section.
+
+### The daemon never rescues on top of its own drive
+
+A long-running task can look crashed while it is perfectly healthy. Two
+independent things have to go stale for that: `status.updated_at` (the
+heartbeat) and every file in the task directory. It happened — a `kind=workflow`
+task advanced its cursor in `walk.json` on every step without stamping
+`status.json`, so past `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` (30 min default) the
+sweep declared a working task crashed. Crashed is actionable, and unlike busy it
+carries no lease to deter the next fire, so the daemon launched a rescue drive
+on top of the live one — **every interval**, because the stale verdict never
+cleared. Six `claude` sessions later the OOM killer took the whole cgroup, which
+at the time included the Slack bridge that had auto-started the daemon.
+
+Three defences now, deliberately layered — each covers the case the one before
+it misses:
+
+1. **Advancing the walk refreshes the heartbeat.** `journal step-done` stamps
+   `status.updated_at` after it advances the cursor, so a working task stops
+   *looking* crashed in the first place. Non-fatal if the write fails: the step
+   is already recorded, and failing the command would invite a retry that
+   duplicates the worklog entry.
+2. **File mtimes are a second opinion.** Classifying crashed now needs a stale
+   heartbeat *and* a task directory nobody has written to inside the timeout.
+   This catches any worker with a lagging heartbeat, including ones the daemon
+   did not spawn (an interactive Slack drive, a hand-started session). It is
+   safe only because `sweep()` guarantees it performs no writes into an
+   `in_progress` task directory — that guarantee is load-bearing here, not
+   incidental. Break it and a dead task would look alive forever.
+3. **The daemon holds a rescue while it has a drive in flight.** The last
+   resort, for when both signals go stale legitimately — a drive that thinks
+   for longer than the timeout without writing anything. The hold is blunt on
+   purpose: *any* crashed task triggers it, not just a queue that holds nothing
+   else, because `SweepResult.actionable()` ranks a rescue **above** pending
+   work. A fire nominally launched for a pending task would sweep, find the
+   crashed one ranked higher, and take that instead.
+
+The daemon says so rather than going quiet — each held cycle posts a
+`rescue held - a drive is already out` skip pulse
+([autodrive-notifications.md](autodrive-notifications.md)). The cost is one
+interval of forfeited overlap, and the hold lifts the moment the in-flight
+drive lands.
 
 A drive that hits its budget cap or context ceiling returns a non-terminal
 `stop_reason`; the journal task simply stays `in_progress`/idle and a later
@@ -272,6 +320,26 @@ detection, and memory attribution all line up, and `start` pins
 `TIGERHARNESS_JOURNAL_DIR` in the child's environment so the spawned drive
 resolves exactly the journal autodrive manages (even with a custom
 `--journal-dir`).
+
+**The daemon does not inherit its launcher's cgroup either.** Where systemd
+allows it, the spawn is wrapped in
+`systemd-run --user --scope --quiet --collect`, putting the daemon in a
+transient scope under `user.slice`. `start_new_session=True` detaches the
+process *session*, but a cgroup is inherited and only systemd can move a
+process out of one — so a daemon auto-started from inside the long-lived Slack
+bridge service landed in the bridge's cgroup and shared its memory accounting.
+When drives piled up, the OOM killer took the whole unit: daemon, drives, **and
+the bridge**, which had only ever been the launcher. A separate scope breaks
+that shared fate.
+
+`--scope` (rather than a transient service) is chosen because it preserves the
+pid: systemd-run registers the unit and then `execve`s the command in its own
+process, so the pid `start` records is the daemon's own and the existing
+liveness checks and process-group SIGTERM keep working unchanged. Where there
+is no `systemd-run` or no user manager — a container, a non-systemd host, CI —
+the wrapper degrades to a plain spawn, exactly the old behaviour. Detection is
+deliberately conservative: a wrong "yes" would stop the daemon starting at all,
+while a wrong "no" only forfeits the isolation.
 
 **The daemon does not inherit the Slack turn that started it.** Auto-start's
 normal trigger is `journal defer`, which runs *inside* a bridge turn, so

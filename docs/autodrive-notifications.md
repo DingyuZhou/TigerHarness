@@ -58,9 +58,9 @@ threads can be open at once; each in-flight drive carries its own thread handle,
 so every completion lands under the right heartbeat.
 
 3. **On a cycle that fires nothing — post a skip pulse.** The ADR 0010 queue
-   probe lets a cycle decline to spend a drive (queue busy, or a drive still
-   settling). Such a cycle still pulses, with the same prefix so the channel
-   reads as one rhythm:
+   probe lets a cycle decline to spend a drive (queue busy, a drive still
+   settling, or a rescue held back). Such a cycle still pulses, with the same
+   prefix so the channel reads as one rhythm:
 
    ```
    autodrive heartbeat - no fire at 2026-08-12T23:10:00Z - queue busy - a
@@ -69,6 +69,18 @@ so every completion lands under the right heartbeat.
 
    A skip pulse is a parent message with no thread: there is no drive, so
    there is no completion to thread under it.
+
+   The three reasons, and what each tells you:
+
+   | Reason | Means |
+   | --- | --- |
+   | `queue busy - a live session owns the in-flight task` | Someone is working; nothing for the daemon to add. |
+   | `queue idle - waiting on an in-flight drive` | The daemon's own drive is still settling. |
+   | `rescue held - a drive is already out` | The queue shows a crashed task, but the daemon has a drive in flight and will not pile a second session onto it. See [autodrive.md](autodrive.md#the-daemon-never-rescues-on-top-of-its-own-drive). |
+
+   A `rescue held` pulse repeating for many cycles is worth a look: it means
+   an in-flight drive is not landing. That is a *reported* stall, which is
+   the point — the alternative it replaced was an unreported stampede.
 
    **Why this exists.** The probe originally made the no-work cycle both free
    *and* silent, so a long busy stretch looked identical to a dead daemon --
