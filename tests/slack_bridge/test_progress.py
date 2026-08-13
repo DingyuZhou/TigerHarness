@@ -790,12 +790,23 @@ def test_build_returns_a_live_reporter_when_fully_configured(
     monkeypatch.setattr(
         progress_mod, "_load_slack_bridge_dotenv", lambda: None
     )
+    monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
     monkeypatch.setenv(CHANNEL_ENV_VARS[0], "C-OPS")
     with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
         reporter = build_turn_progress("h")
     assert reporter._inert is False
     assert reporter._channel == "C-OPS"
-    assert not [r for r in caplog.records if r.name == PROGRESS_LOGGER]
+    # It must not COMPLAIN. It does now announce readiness once — the
+    # positive case being silent was itself a finding, so this asserts
+    # the absence of the complaint rather than the absence of logging.
+    assert not [
+        r for r in caplog.records
+        if r.name == PROGRESS_LOGGER and "no ops-log channel" in r.message
+    ]
+    assert len([
+        r for r in caplog.records
+        if r.name == PROGRESS_LOGGER and "ARMED" in r.message
+    ]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -932,3 +943,118 @@ def test_lane_name_cannot_break_the_one_line_parent() -> None:
     rendered = reporter._render_parent()
     assert "\n" not in rendered
     assert "[Sho hoku Team]" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Readiness signal — the positive case must not be silent either.
+# ---------------------------------------------------------------------------
+
+def test_armed_heartbeats_announce_themselves_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Configured-and-quiet and broken-and-quiet were indistinguishable
+    until a turn happened to run past the interval."""
+    monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
+        build_turn_progress(
+            "h", bot_token="xoxb-1", channel="C-OPS", lane="Shohoku"
+        )
+    armed = [
+        r for r in caplog.records
+        if r.name == PROGRESS_LOGGER and "ARMED" in r.message
+    ]
+    assert len(armed) == 1
+    rendered = armed[0].getMessage()
+    assert "Shohoku" in rendered and "C-OPS" in rendered
+
+
+def test_readiness_line_does_not_repeat_every_turn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``build_turn_progress`` runs on every dispatch; an unguarded INFO
+    would log a line per message the bridge ever handles."""
+    monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
+        for _ in range(5):
+            build_turn_progress(
+                "h", bot_token="xoxb-1", channel="C-OPS", lane="Shohoku"
+            )
+    assert len([
+        r for r in caplog.records
+        if r.name == PROGRESS_LOGGER and "ARMED" in r.message
+    ]) == 1
+
+
+def test_each_lane_announces_separately(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One quiet lane in a multi-lane bridge must still be visible."""
+    monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
+        build_turn_progress(
+            "h", bot_token="xoxb-1", channel="C-ONE", lane="TeamOne"
+        )
+        build_turn_progress(
+            "h", bot_token="xoxb-2", channel="C-TWO", lane="TeamTwo"
+        )
+    armed = [
+        r.getMessage() for r in caplog.records
+        if r.name == PROGRESS_LOGGER and "ARMED" in r.message
+    ]
+    assert len(armed) == 2
+    assert any("TeamOne" in m for m in armed)
+    assert any("TeamTwo" in m for m in armed)
+
+
+def test_inert_reporter_never_claims_to_be_armed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    for name in CHANNEL_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
+        reporter = build_turn_progress("h", bot_token="xoxb-1")
+    assert reporter._inert is True
+    assert not [
+        r for r in caplog.records
+        if r.name == PROGRESS_LOGGER and "ARMED" in r.message
+    ]
+
+
+def test_enabled_is_the_public_readiness_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documented probe must not have to read a private attribute."""
+    monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    live = build_turn_progress(
+        "h", bot_token="xoxb-1", channel="C-OPS", lane="Shohoku"
+    )
+    assert live.enabled is True
+
+    for name in CHANNEL_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    inert = build_turn_progress("h", bot_token="xoxb-1")
+    assert inert.enabled is False
+
+
+def test_enabled_answers_before_started_does() -> None:
+    """`started` stays False for the whole first interval of a healthy
+    turn, so it cannot serve as the readiness check."""
+    reporter = TurnProgress(_FakeNotifier(), "C-OPS", header="h")
+    assert reporter.enabled is True
+    assert reporter.started is False

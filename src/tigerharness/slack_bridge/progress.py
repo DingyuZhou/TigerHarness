@@ -209,6 +209,19 @@ class TurnProgress:
         """True once the parent message posted."""
         return self._started
 
+    @property
+    def enabled(self) -> bool:
+        """True when this reporter resolved creds AND a channel.
+
+        The supported way to ask "did my configuration take?" without
+        waiting for a turn to outlive the interval. ``started`` cannot
+        answer that -- it stays False for the first five minutes of a
+        perfectly configured turn -- and the alternative was operators
+        reading the private ``_inert``, which the docs would then have
+        been promising to keep.
+        """
+        return not self._inert
+
     # ---- rendering ----
 
     def _render_parent(self) -> str:
@@ -370,6 +383,36 @@ def resolve_progress_channel() -> str | None:
     return None
 
 
+#: Lane+channel pairs already announced by this process. The readiness
+#: line below must fire ONCE, not once per turn: `build_turn_progress`
+#: runs on every dispatch, so an unguarded INFO would put a line in the
+#: log for every message the bridge ever handles.
+_ANNOUNCED: set[tuple[str | None, str]] = set()
+
+
+def _announce_ready(
+    lane: str | None, channel: str, interval_s: float
+) -> None:
+    """Say once, per lane, that heartbeats are actually armed.
+
+    Without this the configured-and-quiet state and the
+    broken-and-quiet state are indistinguishable until some turn
+    happens to run past the interval -- and "I cannot tell working from
+    hung" is the complaint this whole feature exists to answer. Logging
+    it at the first turn after a restart turns a 5-minute wait into an
+    immediate answer.
+    """
+    key = (lane, channel)
+    if key in _ANNOUNCED:
+        return
+    _ANNOUNCED.add(key)
+    log.info(
+        "progress: turn heartbeats ARMED for %s -> channel %s "
+        "(first pulse after %.0fs, then every %.0fs)",
+        lane or "this bridge", channel, interval_s, interval_s,
+    )
+
+
 def _notifier_for_token(bot_token: str) -> SlackNotifier | None:
     """A notifier bound to ONE lane's bot token, built without reading
     the process environment.
@@ -432,6 +475,8 @@ def build_turn_progress(
             "(set %s); turn progress heartbeats are off",
             CHANNEL_ENV_VARS[0],
         )
+    elif notifier is not None:
+        _announce_ready(lane, resolved, interval_s)
     return TurnProgress(
         notifier,
         resolved,

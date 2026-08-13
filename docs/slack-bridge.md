@@ -71,7 +71,7 @@ Process-wide env vars:
 | `TIGERHARNESS_BRIDGES_CONFIG` | (required) | Path to the top-level `slack-bridge.yaml` index — one team or many ([details below](#the-bridge-one-process-1n-lanes)) |
 | `TIGERHARNESS_SLACK_STATE_DIR` | XDG state | Default `threads.json` home for directly-embedded bridges (lane fragments set `state_dir` explicitly) |
 | `TIGERHARNESS_ATTACHMENT_DIR` | `/tmp/slack-attachments` | File staging dir |
-| `TIGERHARNESS_SLACK_ENV` | (none) | Explicit .env path for the `notify` CLI |
+| `TIGERHARNESS_SLACK_ENV` | (none) | Explicit .env path for the `notify` CLI **and** for the turn-progress env fallback (see *Turn-progress heartbeats*). Not notify-only — removing it can silence more than one feature |
 
 Per-lane `.env` file keys (the fragment's `env:` path, default
 `<team>/configs/.env`):
@@ -650,3 +650,168 @@ names):
   `0.30`.
 - `TIGERHARNESS_IDLE_COMPACT_WINDOW` — window tokens, default
   `200000`.
+
+## Turn-progress heartbeats (ops-log)
+
+A Slack turn emits nothing until it finishes, so a healthy 40-minute
+turn and one that died after 8 minutes look identical from the DM. The
+bridge can post a mid-flight pulse about each long turn to a **separate
+ops-log channel**, leaving the conversation thread clean.
+
+What lands in the ops-log channel:
+
+```
+:hourglass: [Shohoku] Anzai still working — "refresh the knowledge index"
+    5m · 34 tool calls · last: Edit(src/tigerharness/slack_bridge/bridge.py)
+    10m · 71 tool calls · last: Bash(pytest)
+    15m · 71 tool calls · no activity for 6m :warning:
+    :white_check_mark: done in 17m · 96 tool calls
+```
+
+The indentation above is Slack's thread rendering, not part of the
+message text — each pulse is posted as a threaded reply whose payload is
+exactly the line shown, with no leading decoration.
+
+One parent per turn, one threaded line **every 5 minutes**, one closer
+on success or failure. **A turn shorter than 5 minutes posts nothing at
+all** — not even a parent — so ordinary question-and-answer turns stay
+out of the channel entirely and only the long ones you actually want to
+watch show up. The interval is fixed at 5 minutes and is not
+configurable.
+
+The pulse is a plain Slack HTTP POST driven by the turn's own event
+stream. It spawns no agent and costs no model tokens.
+
+### Configuration: per lane (the normal path)
+
+The channel is read from the **lane's own** `.env` — `configs/.env`
+unless that lane's `slack-bridge.yaml` fragment sets `env:` to another
+path — the same file that holds its bot token:
+
+```
+# <team>/configs/.env
+TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL=C0B4HMXJSRE   # explicit ops-log
+SLACK_NOTIFY_CHANNEL=C0B4HMXJSRE                   # or reuse this one
+```
+
+First non-empty value wins; a blank value does **not** count as set, so
+an empty override cannot silently disable the feature. Declare neither
+and the lane's heartbeats are **off** — that is the default.
+
+A team that already declared `SLACK_NOTIFY_CHANNEL` for autodrive gets
+turn heartbeats by adding nothing at all.
+
+Each lane resolves its **own** channel and posts with its **own** bot
+token, read from that lane's parsed `.env` rather than from the process
+environment — the same reason idle compaction takes a per-lane fragment
+(one process-wide `os.environ` cannot describe N lanes). Lanes may share
+one ops-log channel if you want a single feed: the `[lane]` prefix on
+each parent is what keeps a shared channel attributable.
+
+### Env fallback (embedded single-team bridge)
+
+A directly-embedded one-team bridge has no lane config to read, so it
+falls back to the same two names in the process environment, in the same
+order:
+
+- `TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL` — the explicit ops-log channel.
+- `SLACK_NOTIFY_CHANNEL` — reused if the first is unset.
+
+**There is deliberately no DM fallback.** Every other notifier in this
+package falls back to the Operator's DM when no channel resolves; this
+one must not, because keeping the DM thread clean is the entire point.
+A reporter that cannot resolve a channel goes silent instead.
+
+### What reaches the channel, and what never does
+
+Pulses carry elapsed time, a per-attempt tool-call count, and a
+**redacted** hint about the last tool. The hint is an allowlist, so a
+tool added next month renders nothing rather than leaking by default:
+
+| Tool | Rendered |
+|---|---|
+| `Read` / `Edit` / `Write` | the `file_path` only |
+| `Bash` | the first token of the command (dropped if it looks like `VAR=value`) |
+| anything else | the tool name alone |
+
+Tool arguments, file contents, and command bodies never reach Slack.
+
+The **parent message** is the exception worth deciding about
+deliberately: it quotes up to 120 characters of the message that started
+the turn, so you can tell two concurrent turns apart.
+
+This excerpt is a **deliberate, reviewed exception** to the "no prompt
+text" rule the rest of this feature follows. It was kept on purpose:
+without it, two concurrent turns from the same persona are
+indistinguishable in the channel. It is bounded to 120 characters,
+stripped of backticks and flattened to one line, and it is the *only*
+prompt-derived text that is ever posted. Treat its presence as intended,
+not as a defect to file — and the precondition below as the thing that
+makes it safe.
+
+> **Precondition — check this before enabling.** The ops-log channel
+> must be **private**, and its membership must be exactly the set of
+> people allowed to read the Operator's DMs with the bot. The excerpt is
+> the Operator's own words. This is a precondition, not a caveat: a
+> channel that fails it should not be configured in the first place.
+>
+> **This check is manual and unenforced.** The bridge does not inspect
+> the channel's visibility or membership and will not warn you if it is
+> public — the responsibility is yours, not the code's.
+
+### Operational notes
+
+- **Enabling requires a bridge restart** — the channel is read at lane
+  load. Restarting is safe: the bridge stops accepting new dispatches
+  and then waits up to 90s for in-flight turns to finish (see *Graceful
+  shutdown*), so a restart does not drop a running turn.
+- **Failure is silent *in Slack*, not in the log.** A Slack outage, a
+  bad channel id, or missing credentials degrades to no pulses, and
+  never fails, delays, or alters a turn — including the reply the
+  Operator is waiting for. It is not silent on stderr: see *Confirming
+  it works* below.
+- **A bad channel id stops retrying.** If the parent post fails, the
+  reporter goes inert for that turn rather than re-posting every
+  interval into a channel that will never accept it.
+- **`no activity for Nm`** appears after roughly two idle intervals.
+  Windows that are quiet *by design* — a retry backoff, an idle
+  compaction — are labelled as such instead of raising a false stall.
+
+### Confirming it works
+
+Enabling is silent by design, so the bridge says so itself. On the
+**first turn after a restart** each lane logs one line to stderr:
+
+```
+INFO tigerharness.slack_bridge.progress: progress: turn heartbeats ARMED
+     for Shohoku -> channel C0B4HMXJSRE (first pulse after 300s, then
+     every 300s)
+```
+
+Send any message — it does not have to be a long one — and check the
+bridge log. That line means the channel and credentials resolved for
+that lane. It is logged **once per lane per process**, not per turn, so
+a busy bridge does not bury it.
+
+The other two outcomes are equally short:
+
+| Log line for a lane | Means |
+|---|---|
+| `... heartbeats ARMED for <lane> -> channel ...` | working |
+| `... no ops-log channel (set TIGERHARNESS_...)` | creds resolved, channel did not — fix the lane's `configs/.env` |
+| *neither line* | the lane's credentials did not resolve |
+
+To check without touching Slack at all (run from the teams root, beside `slack-bridge.yaml`):
+
+```bash
+python - <<'EOF'
+from pathlib import Path
+from tigerharness.slack_bridge.multi import load_multi
+from tigerharness.slack_bridge.progress import build_turn_progress
+for lane in load_multi(Path("slack-bridge.yaml")).lanes:
+    t = lane.team_ctx
+    r = build_turn_progress("probe", bot_token=t.slack_bot_token,
+                            channel=t.progress_channel, lane=t.team_name)
+    print(t.team_name, "armed" if r.enabled else "INERT")
+EOF
+```

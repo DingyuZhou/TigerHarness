@@ -167,5 +167,10 @@ team-canonical.
 ## Related
 
 - [autodrive.md](autodrive.md) — the daemon these notifications describe.
+- [slack-bridge.md](slack-bridge.md#turn-progress-heartbeats-ops-log)
+  — the *other* Slack heartbeat. These pulse per autodrive **cycle**;
+  those pulse inside a single long **bridge turn**. Both can target
+  the same channel, so check which one you expected before
+  concluding a quiet ops-log is broken.
 - [slack-notify](../src/tigerharness/_bundled_skills/slack-notify/SKILL.md) —
   the outbound Slack path the notifier reuses.
