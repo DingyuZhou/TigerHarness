@@ -846,10 +846,12 @@ and it is token-shaped, so **all** of these are posted verbatim:
 
 - **anything colon-shaped** — `token: xoxb-…`, a JSON body
   `{"token": "xoxb-…"}`, an `Authorization: Bearer xoxb-…` header. The
-  rule keys on `=`, so **no colon form is ever dropped**. This is the
-  one to remember: most credentials arrive by colon, not by equals, and
-  a Bearer header is the shape least likely to look like a secret at a
-  glance while you are pasting a failing request into a prompt;
+  rule never looks at a colon at all, so a colon-shaped secret survives
+  whenever its own value carries no `=` — which is the usual case, and
+  all three of those. This is the one to remember: most credentials
+  arrive by colon, not by equals, and a Bearer header is the shape least
+  likely to look like a secret at a glance while you are pasting a
+  failing request into a prompt;
 - a secret written as prose — "the token is xoxb-…";
 - a secret with spaces around the equals — `SECRET = xoxb-…` is three
   tokens, none of them an assignment, and no token-shaped rule catches
@@ -860,6 +862,13 @@ and it is token-shaped, so **all** of these are posted verbatim:
 Read that list as samples from one side of a boundary, not as a
 checklist. The boundary is: a token is dropped **only** if it contains
 `=` with something after it. Everything else survives.
+
+The unit there is the whitespace-separated token, not the message, so a
+message can be half-dropped: `Cookie: session=abc123` posts as `Cookie:`
+— the label survives, the value does not. Do not read that as colon
+forms being protected. Nothing about the colon saved anything; the `=`
+inside the *value* is what got caught, and `Authorization: Bearer
+xoxb-…` has no `=` to catch.
 
 It also over-drops, which the rest of this section does not prepare you
 for. Any token with a non-empty right-hand side goes, and URLs qualify —
