@@ -267,11 +267,11 @@ async def test_d2_parent_post_carries_the_prose_and_not_the_secret() -> None:
 
 # ---------- Item 3 (D2): where the shape rule stops ------------------------
 #
-# The rule is token-shaped by design, so it has edges. These two pin the
-# edges that an operator could plausibly walk into, so that the docs are
-# forced to describe the same boundary the code implements. If a later
-# change narrows a leak here, these tests go RED -- which is the correct
-# signal, not a regression. Update them with the fix.
+# The rule is token-shaped by design, so it has an edge, and QA found two
+# ways over it. The backtick one was closed (backticks are deleted, not
+# spaced out). The spaces-around-equals one cannot be closed by any
+# token-shaped rule and is documented instead -- pinned here so the code
+# and `docs/slack-bridge.md` describe the same boundary.
 
 def test_d2_header_spaces_around_the_equals_defeat_the_shape_rule() -> None:
     """``KEY = value`` is three tokens, none of them an assignment.
@@ -284,19 +284,20 @@ def test_d2_header_spaces_around_the_equals_defeat_the_shape_rule() -> None:
     assert out == "run SLACK_TOKEN = xoxb-deadbeef against staging"
 
 
-def test_d2_backticking_the_value_defeats_the_shape_rule() -> None:
-    """Backtick-stripping splits one assignment into two safe-looking tokens.
+def test_d2_backticking_the_value_does_not_defeat_the_shape_rule() -> None:
+    """Backticking a value must scrub identically to not backticking it.
 
-    ``SECRET=`xoxb-...``` is a single assignment-shaped token until the
-    backticks become spaces. After that it is ``SECRET=`` -- empty
-    right-hand side, deliberately kept -- plus a bare value with no
-    ``=`` at all. Backticking a value is idiomatic in Slack, and the
-    unbackticked form of the same input IS dropped, so the two differ.
+    Spacing backticks out split ``SECRET=`xoxb-...``` into ``SECRET=``
+    -- empty right-hand side, kept by the ``--profile=`` exemption --
+    plus a bare value with no ``=`` at all, so the backticked form
+    leaked where the plain form did not. Backticking a value is
+    idiomatic in Slack, so the two forms must not disagree. Asserted as
+    equality between them, not just as absence, so a scrubber that ate
+    the whole excerpt could not satisfy it.
     """
     backticked = sanitize_header("run SECRET=`xoxb-deadbeef` against staging")
     plain = sanitize_header("run SECRET=xoxb-deadbeef against staging")
-    assert backticked == "run SECRET= xoxb-deadbeef against staging"
-    assert plain == "run against staging"
+    assert backticked == plain == "run against staging"
 
 
 @pytest.mark.asyncio

@@ -749,13 +749,27 @@ stripped of backticks and flattened to one line, and it is the *only*
 prompt-derived text that is ever posted. Any whitespace-delimited token
 shaped like an assignment carrying a value — `SECRET=xoxb-…`, the same
 shape `tool_hint` already drops from a `Bash` command — is removed
-*before* the excerpt is truncated, so a credential pasted into a prompt
-does not reach the channel. What that does **not** do is redact: the
-rule is shape-based, not a credential regex, so a secret written as
-prose ("the token is xoxb-…") is still posted verbatim, and so is a
-`--flag=` whose value is empty. The excerpt is sanitised, not safe to
-leak. Treat its presence as intended, not as a defect to file — and the
-precondition below as the thing that makes it safe.
+*before* the excerpt is truncated. Backticks are **deleted** rather than
+turned into spaces, so ``SECRET=`xoxb-…`` scrubs exactly like the
+unbackticked form; spacing them out used to split it into a valueless
+`SECRET=` plus a bare secret, and leak it.
+
+**What that does not do is redact**, and the list of things it lets
+through is not short. The rule is shape-based, not a credential regex,
+and it is token-shaped, so **all** of these are posted verbatim:
+
+- a secret written as prose — "the token is xoxb-…";
+- a secret with spaces around the equals — `SECRET = xoxb-…` is three
+  tokens, none of them an assignment, and no token-shaped rule catches
+  it without lookahead that would also eat "the answer = 42";
+- a `--flag=` whose value is empty, which is kept on purpose so the rule
+  does not eat ordinary command-line prose.
+
+Assume anything you paste can reach the channel unless it is
+`KEY=value` with no spaces. The excerpt is sanitised, not safe to leak:
+the dropping is a courtesy against the common accident, **not** a
+control you may rely on. Treat its presence as intended, not as a defect
+to file — and the precondition below as the thing that makes it safe.
 
 > **Precondition — check this before enabling.** The ops-log channel
 > must be **private**, and its membership must be exactly the set of
