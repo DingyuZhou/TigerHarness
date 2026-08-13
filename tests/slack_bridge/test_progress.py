@@ -296,6 +296,34 @@ def test_d2_header_of_nothing_but_a_secret_renders_an_empty_excerpt() -> None:
     assert reporter._render_parent() == ':hourglass: still working — ""'
 
 
+def test_d2_lane_prefix_is_cut_at_forty_collapsed_and_drops_nothing() -> None:
+    """The third bounded field, pinned because the docs now name its 40.
+
+    ``HEADER_MAX`` and ``HINT_MAX`` are named constants with tests behind
+    them; this limit is a bare literal in ``_render_parent``, and it
+    applies no shape rule at all. Both facts are documented, so if a
+    filter is ever added here this test is what says the page has to move
+    with it.
+    """
+    cut = TurnProgress(
+        None, None, header="hi", lane="L" * 60, clock=_FakeClock()
+    )
+    assert cut._render_parent() == (
+        f':hourglass: [{"L" * 39}…] still working — "hi"'
+    )
+
+    messy = TurnProgress(
+        None,
+        None,
+        header="hi",
+        lane="Team\n\tSECRET=xoxb-abc",
+        clock=_FakeClock(),
+    )
+    assert messy._render_parent() == (
+        ':hourglass: [Team SECRET=xoxb-abc] still working — "hi"'
+    )
+
+
 @pytest.mark.asyncio
 async def test_d2_parent_post_carries_the_prose_and_not_the_secret() -> None:
     """End to end: the scrubber runs at the post site, not at the caller."""

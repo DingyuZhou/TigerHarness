@@ -755,11 +755,14 @@ What lands in the ops-log channel:
     :white_check_mark: done in 22m · 96 tool calls
 ```
 
-The stall warning replaces the `last:` field once the turn has been
-quiet for **two intervals — 10 minutes**, not one, so a single slow tool
-call does not raise it. `10m` is therefore the smallest number that can
-appear in that line; the pulse at 15m above still reports the last tool
-because only 5 minutes had passed since it.
+The 15m pulse still names the last tool because only 5 minutes had
+passed since it. For when `no activity for Nm` appears instead, what
+suppresses it, and why `N` usually reads larger than the threshold, see
+*Operational notes* below. That bullet is deliberately the only
+statement of the rule in this document — the example above once showed a
+pulse the code cannot produce, with the rule written nowhere to check it
+against, and restating it here would just give the next edit two places
+to disagree.
 
 The indentation above is Slack's thread rendering, not part of the
 message text — each pulse is posted as a threaded reply whose payload is
@@ -845,8 +848,9 @@ without it, two concurrent turns from the same persona are
 indistinguishable in the channel. It is bounded to 120 characters,
 stripped of backticks and flattened to one line, and it is the *only*
 prompt-derived text that is ever posted. Any whitespace-delimited token
-shaped like an assignment carrying a value — `SECRET=xoxb-…`, the same
-shape `tool_hint` already drops from a `Bash` command — is removed
+shaped like an assignment carrying a value — `SECRET=xoxb-…`, which a
+`Bash` hint also refuses, though by a stricter rule of its own — is
+removed
 *before* the excerpt is truncated. Backticks are **deleted** rather than
 turned into spaces, so ``SECRET=`xoxb-…`` scrubs exactly like the
 unbackticked form; spacing them out used to split it into a valueless
@@ -859,11 +863,27 @@ them apart while reading: a sentence that is true of one is routinely
 false of the other, and a sentence about "what gets through" that does
 not say which bound it means is not a claim you can act on.
 
-Keep the **channel** straight too, because the hint above does not obey
-either of these. Nothing drops an assignment from a `file_path`; its
-only bound is the 60-character cut. So the two bounds below describe the
-excerpt and nothing else — and the shape the excerpt is best at dropping
-is the one a `file_path` carries through untouched.
+Keep the **channel** straight too, and the two bounds stop resembling
+each other. Three things carry text into that channel and each is cut at
+its own limit — the excerpt at 120, the tool hint at 60, the lane prefix
+at 40. So the position bound is the ordinary case: present everywhere,
+varying only in its number.
+
+The shape bound is nothing like that. It is **two different rules**, and
+between them they cover the excerpt and one branch of the hint. The
+excerpt drops assignment-shaped tokens one at a time and keeps the rest
+of the message. The `Bash` hint drops the *entire* hint when its first
+token contains `=` — including a valueless `--flag=`, which the excerpt
+keeps on purpose, so the one shape the excerpt is documented below as
+preserving is the one the hint refuses to render. The `file_path` hint
+drops nothing at all: `SECRET=xoxb-…` inside a path posts whole, and
+that is the shape the excerpt is *best* at catching. (The lane prefix
+drops nothing either; it is named here and not again, because it comes
+from bridge config, not from anything you type.)
+
+Read the rest of this section as being about the excerpt. It is the only
+one of the three that both bounds touch, and the two rules below are its
+two rules — not the channel's.
 
 The shape bound is not a credential regex, and it is token-shaped, so
 none of these is dropped by it:
@@ -961,9 +981,16 @@ below as the thing that makes it safe.
 - **A bad channel id stops retrying.** If the parent post fails, the
   reporter goes inert for that turn rather than re-posting every
   interval into a channel that will never accept it.
-- **`no activity for Nm`** appears after roughly two idle intervals.
-  Windows that are quiet *by design* — a retry backoff, an idle
-  compaction — are labelled as such instead of raising a false stall.
+- **`no activity for Nm`** — the threshold is exact and the number you
+  read is not. The warning is due the moment idle reaches **two
+  intervals** (`>=`, so 10 minutes exactly at the fixed 5-minute
+  interval), but a pulse only renders on its own cadence, so it first
+  appears at the next pulse after that — up to one interval later — and
+  `N` is floored. Expect to read **10 through 14**, and usually not 10;
+  the example above shows 10 only because its last event happened to
+  land on a pulse. Windows that are quiet *by design* — a retry backoff,
+  an idle compaction — are labelled as such **instead**, and suppress
+  the warning for as long as they last, however quiet the turn goes.
 
 ### Confirming it works
 
