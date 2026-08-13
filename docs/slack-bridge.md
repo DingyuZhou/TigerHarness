@@ -565,7 +565,25 @@ does — it reads all three from their real sources, including
 literal, so a template edit trips it too. It also pins these prose sites,
 so a docs reword that drops a number fails CI.
 
-**One bound no test can see:** the guard reads `gen_service.py`'s
+**Do not replace the test with a derivation.** Three hand-maintained
+numbers policed by a test looks like tech debt with an obvious fix:
+compute `_DRAIN_TIMEOUT_S` from `STOP_DRAIN_S + FINISH_POST_S` and be
+done with it. That was considered and rejected, for two reasons that
+have not changed. The margins are two *independent* headroom judgments,
+not one factor — 30 s sizes a process exit against `notify.py`'s
+timeout, 20 s buys slack inside a budget every lane shares, and a
+formula relating them would invent a constant nobody can defend. And an
+import-time derivation would freeze the values, defeating the
+module-level monkeypatching the tests rely on (`bridge.py` keeps them
+module-level and read at call time, never bound into a default argument,
+on purpose). A test is also the only form that reaches the systemd
+template at all, which no Python expression can.
+
+**Two bounds the guard does not cover** — one it *cannot*, one it
+currently *does not*. The difference matters: the first is permanent,
+the second is a gap someone can close.
+
+*The installed unit (cannot).* The guard reads `gen_service.py`'s
 template, not your installed unit. An already-installed
 `slack-bridge-*.service` keeps the old `TimeoutStopSec` until someone
 re-runs `gen-service` and `systemctl --user daemon-reload`. If you are
@@ -574,6 +592,20 @@ reconciling a live box, check the unit itself:
 ```bash
 systemctl --user show <unit> -p TimeoutStopUSec   # expect 2min
 ```
+
+*Concurrency (does not).* The budget's arithmetic has only ever been
+observed draining **one** turn. Outside its initial set in the
+constructor, `_drained` is set in exactly one place — the dispatch
+`finally` block in `bridge.py`, when the in-flight counter reaches zero
+— and that line carries a `# pragma: no branch` whose own comment
+records why: only single-request flows are tested, so the "still in
+flight" side never runs. With a single dispatch the counter falls to
+zero trivially. The case these margins exist *for* — several turns
+winding down together against one shared 90 s budget — sits inside the
+coverage percentage and outside any assertion. Treat the ordering as
+enforced, because it is, and the multi-turn drain as reasoned but
+unexercised. Closing it means a test with two concurrent dispatches
+where the first to finish must *not* set `_drained`.
 
 ### Systemd unit
 
