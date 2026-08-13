@@ -130,6 +130,9 @@ def sanitize_header(text: str) -> str:
 
     Scrubbing runs BEFORE truncation: truncating first can cut a secret
     mid-token and leave a prefix that no longer reads as an assignment.
+    That ordering also has a leak consequence in the other direction --
+    dropping makes room, so a longer paste can leak where a shorter one
+    does not. ``docs/slack-bridge.md`` carries it; do not restate it here.
 
     Backticks are DELETED, not replaced with a space. Spacing them out
     split ``SECRET=`xoxb-...``` into ``SECRET=`` -- empty right-hand

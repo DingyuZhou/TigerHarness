@@ -846,11 +846,17 @@ unbackticked form; spacing them out used to split it into a valueless
 `SECRET=` plus a bare secret, and leak it.
 
 **What that does not do is redact.** Two separate bounds decide whether
-a piece of your text reaches the channel — its **shape** and its
+a piece of the **excerpt** reaches the channel — its **shape** and its
 **position** — and only the first is a rule about secrets at all. Keep
 them apart while reading: a sentence that is true of one is routinely
 false of the other, and a sentence about "what gets through" that does
 not say which bound it means is not a claim you can act on.
+
+Keep the **channel** straight too, because the hint above does not obey
+either of these. Nothing drops an assignment from a `file_path`; its
+only bound is the 60-character cut. So the two bounds below describe the
+excerpt and nothing else — and the shape the excerpt is best at dropping
+is the one a `file_path` carries through untouched.
 
 The shape bound is not a credential regex, and it is token-shaped, so
 none of these is dropped by it:
@@ -916,11 +922,13 @@ length is not protection. What decides is how much *surviving* text
 precedes the secret — which is not something you can judge by looking at
 what you pasted.
 
-Assume anything you paste can reach the channel unless it is
-`KEY=value` with no spaces. The excerpt is sanitised, not safe to leak:
-the dropping is a courtesy against the common accident, **not** a
-control you may rely on. Treat its presence as intended, not as a defect
-to file — and the precondition below as the thing that makes it safe.
+Assume anything you paste can reach the channel. `KEY=value` with no
+spaces is the shape the excerpt drops, and it is dropped *there only* —
+the identical string inside a `file_path` posts whole through the hint.
+The excerpt is sanitised, not safe to leak: the dropping is a courtesy
+against the common accident, **not** a control you may rely on. Treat
+its presence as intended, not as a defect to file — and the precondition
+below as the thing that makes it safe.
 
 > **Precondition — check this before enabling.** The ops-log channel
 > must be **private**, and its membership must be exactly the set of

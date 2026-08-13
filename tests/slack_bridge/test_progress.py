@@ -152,6 +152,23 @@ def test_c3_path_tools_render_file_path_only(name: str) -> None:
     assert hint == "src/x.py"
 
 
+def test_c3_file_path_is_allowlisted_by_tool_not_scrubbed_by_shape() -> None:
+    """The hint obeys neither of the excerpt's two bounds.
+
+    ``docs/slack-bridge.md`` documents this pass-through, and a reader of
+    ``tool_hint`` alone would take it for an oversight -- the table three
+    lines above calls the hint "redacted", and the assignment shape is the
+    one ``sanitize_header`` exists to drop. Characterisation, not
+    endorsement: if the allowlist ever grows a shape filter, this test is
+    the thing that says the docs need rewriting too.
+    """
+    secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIleak"
+    assert sanitize_header("deploy broke " + secret) == "deploy broke"
+    assert tool_hint("Read", {"file_path": f"/tmp/{secret}.env"}) == (
+        f"/tmp/{secret}.env"
+    )
+
+
 def test_c3_bash_renders_first_token_only() -> None:
     assert tool_hint("Bash", {"command": "pytest -k secret --token=x"}) == (
         "pytest"
