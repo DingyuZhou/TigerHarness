@@ -115,11 +115,28 @@ def sanitize_header(text: str) -> str:
     """Flatten an excerpt of the Operator's message for a shared channel.
 
     Collapses all whitespace (a multi-line prompt would otherwise become
-    a wall of text), drops backticks and fences, and truncates. This runs
-    at the post site on whatever string the caller supplied, so a caller
-    cannot leak by forgetting to sanitise.
+    a wall of text), drops backticks and fences, drops assignment-shaped
+    tokens, and truncates. This runs at the post site on whatever string
+    the caller supplied, so a caller cannot leak by forgetting to
+    sanitise.
+
+    The assignment rule is ``tool_hint``'s, applied to every token rather
+    than only the first: the excerpt is the Operator's own prose quoted
+    into a channel other people read, and ``SECRET=xoxb-...`` is a
+    perfectly ordinary thing to paste into a prompt. It is shape-based on
+    purpose -- a credential regex loses exactly the secret format nobody
+    thought to add to it. A token whose right-hand side is empty
+    (``--flag=``) carries nothing, so it survives.
+
+    Scrubbing runs BEFORE truncation: truncating first can cut a secret
+    mid-token and leave a prefix that no longer reads as an assignment.
     """
-    return _truncate(" ".join(text.replace("`", " ").split()), HEADER_MAX)
+    kept = [
+        token
+        for token in text.replace("`", " ").split()
+        if "=" not in token or not token.partition("=")[2]
+    ]
+    return _truncate(" ".join(kept), HEADER_MAX)
 
 
 def _minutes(seconds: float) -> int:

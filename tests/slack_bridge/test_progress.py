@@ -202,6 +202,69 @@ def test_c3_header_is_flattened_unfenced_and_truncated() -> None:
     assert out.startswith("line one line two python")
 
 
+# ---------- Item 3 (D2): the header scrubber -------------------------------
+#
+# Every test here asserts BOTH halves. "The secret is absent" is satisfied
+# by a scrubber that eats the whole excerpt, or by a reporter that posts
+# nothing at all -- so each case also pins the prose that must survive.
+
+def test_d2_header_drops_an_assignment_and_keeps_the_prose() -> None:
+    out = sanitize_header("run SLACK_TOKEN=xoxb-deadbeef against staging")
+    # Absent.
+    assert "xoxb-deadbeef" not in out
+    assert "SLACK_TOKEN" not in out
+    # Present -- the excerpt still says what the turn was about.
+    assert out == "run against staging"
+
+
+def test_d2_header_keeps_an_assignment_with_an_empty_value() -> None:
+    """``--flag=`` carries nothing, so the shape rule lets it through.
+
+    Pinned because the obvious implementation -- drop any token with an
+    ``=`` -- would silently eat ordinary command-line prose.
+    """
+    out = sanitize_header("re-run it with --profile= and see")
+    assert out == "re-run it with --profile= and see"
+
+
+def test_d2_header_scrubs_before_it_truncates() -> None:
+    """Ordering, pinned by what survives rather than by reading the code.
+
+    Scrub-then-truncate spends all 120 characters on prose. The reverse
+    order spends the first 21 of them on a token it is about to throw
+    away, and the excerpt comes back short.
+    """
+    out = sanitize_header("SECRET=xoxb-deadbeef " + "w" * 130)
+    assert "xoxb-deadbeef" not in out
+    assert len(out) == progress_mod.HEADER_MAX
+    assert out == "w" * (progress_mod.HEADER_MAX - 1) + "…"
+
+
+def test_d2_header_of_nothing_but_a_secret_renders_an_empty_excerpt() -> None:
+    """The whole excerpt can legitimately scrub to nothing.
+
+    Asserted as the exact rendered line, not as "a message exists": the
+    failure this guards against is a caller that special-cases the empty
+    string and posts something else, or nothing.
+    """
+    reporter, _, _ = _make(_FakeNotifier(), header="SLACK_TOKEN=xoxb-deadbeef")
+    assert reporter._render_parent() == ':hourglass: still working — ""'
+
+
+@pytest.mark.asyncio
+async def test_d2_parent_post_carries_the_prose_and_not_the_secret() -> None:
+    """End to end: the scrubber runs at the post site, not at the caller."""
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(
+        notifier, header="deploy AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI now"
+    )
+    reporter.set_persona("Mitsui")
+    await _run_until(reporter, notifier, posts=1)
+    parent = notifier.texts[0]
+    assert "wJalrXUtnFEMI" not in parent
+    assert parent == ':hourglass: Mitsui still working — "deploy now"'
+
+
 @pytest.mark.asyncio
 async def test_c3_pulse_carries_the_hint_and_not_the_secret() -> None:
     """Both halves: absence alone is satisfied by posting nothing."""

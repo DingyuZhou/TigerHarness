@@ -97,7 +97,12 @@ Restart=on-failure
 RestartSec=5
 
 # Drain budget across all lanes (concurrent). Must exceed the bridge's
-# internal _DRAIN_TIMEOUT_S (90s in current source).
+# internal _DRAIN_TIMEOUT_S (90s in current source). The ordering is
+# enforced by tests/slack_bridge/test_drain_budget_invariant.py, which
+# parses this value out of the rendered template -- the template is all
+# it can see. If you are reading this inside an installed unit, it is a
+# snapshot: a change to the source reaches you only on a `gen-service`
+# re-run, and no test can tell that you have not done one.
 TimeoutStopSec=120
 
 # Only SIGTERM the parent so claude_p children finish posting their

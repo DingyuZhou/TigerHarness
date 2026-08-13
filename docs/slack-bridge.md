@@ -738,16 +738,24 @@ Tool arguments, file contents, and command bodies never reach Slack.
 
 The **parent message** is the exception worth deciding about
 deliberately: it quotes up to 120 characters of the message that started
-the turn, so you can tell two concurrent turns apart.
+the turn — with assignment-shaped tokens dropped — so you can tell two
+concurrent turns apart.
 
 This excerpt is a **deliberate, reviewed exception** to the "no prompt
 text" rule the rest of this feature follows. It was kept on purpose:
 without it, two concurrent turns from the same persona are
 indistinguishable in the channel. It is bounded to 120 characters,
 stripped of backticks and flattened to one line, and it is the *only*
-prompt-derived text that is ever posted. Treat its presence as intended,
-not as a defect to file — and the precondition below as the thing that
-makes it safe.
+prompt-derived text that is ever posted. Any whitespace-delimited token
+shaped like an assignment carrying a value — `SECRET=xoxb-…`, the same
+shape `tool_hint` already drops from a `Bash` command — is removed
+*before* the excerpt is truncated, so a credential pasted into a prompt
+does not reach the channel. What that does **not** do is redact: the
+rule is shape-based, not a credential regex, so a secret written as
+prose ("the token is xoxb-…") is still posted verbatim, and so is a
+`--flag=` whose value is empty. The excerpt is sanitised, not safe to
+leak. Treat its presence as intended, not as a defect to file — and the
+precondition below as the thing that makes it safe.
 
 > **Precondition — check this before enabling.** The ops-log channel
 > must be **private**, and its membership must be exactly the set of
