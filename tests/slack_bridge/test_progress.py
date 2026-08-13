@@ -1,0 +1,798 @@
+"""Tests for ``slack_bridge.progress`` — the turn-progress substrate.
+
+Rows map onto the plan's acceptance criteria; the criterion id is in
+each test's name so review is a grep. Criteria that assert what
+``_dispatch`` *passes* (3b, 5 mode 4, 6, 6a, 6d, 6e(c), 6f, 7b(b),
+7c(b), 7c(c)) belong to the bridge-wiring seat and live with it.
+
+Every test drives a millisecond ``interval_s`` through the constructor
+seam and a fake clock for measurement — the two are different jobs
+(cadence runs on real loop time, elapsed/stall render off ``clock``), so
+a test that conflates them either renders ``0m`` on every line or hangs
+forever waiting for a fake clock to wake an event.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+import time
+
+import pytest
+
+from tigerharness.agent_sdk.types import (
+    ErrorEvent,
+    RunStart,
+    ToolCall,
+    ToolResult,
+    ToolOutput,
+)
+from tigerharness.slack_bridge import progress as progress_mod
+from tigerharness.slack_bridge.progress import (
+    CHANNEL_ENV_VARS,
+    DEFAULT_INTERVAL_S,
+    TurnProgress,
+    build_turn_progress,
+    resolve_progress_channel,
+    sanitize_header,
+    tool_hint,
+)
+
+
+PROGRESS_LOGGER = "tigerharness.slack_bridge.progress"
+TICK = 0.002
+
+
+# ---------- Fakes ----------------------------------------------------------
+
+class _FakeNotifier:
+    """Records ``(text, channel, thread_ts)`` for every post.
+
+    ``post_text`` is what the real ``SlackNotifier`` exposes: it returns
+    the message ``ts`` or ``None`` — failure is a falsy return, not an
+    exception — so both failure shapes are configurable here.
+    """
+
+    def __init__(
+        self,
+        *,
+        ts: str | None = "parent-ts",
+        raises: bool = False,
+        block: threading.Event | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, str | None, str | None]] = []
+        self._ts = ts
+        self._raises = raises
+        self._block = block
+        self._n = 0
+
+    def post_text(
+        self,
+        text: str,
+        *,
+        channel: str | None = None,
+        thread_ts: str | None = None,
+    ) -> str | None:
+        self.calls.append((text, channel, thread_ts))
+        self._n += 1
+        if self._block is not None and self._n == 1:
+            self._block.wait(timeout=5.0)
+        if self._raises:
+            raise RuntimeError("slack transport exploded")
+        return self._ts
+
+    @property
+    def texts(self) -> list[str]:
+        return [call[0] for call in self.calls]
+
+
+class _FakeClock:
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _make(
+    notifier: _FakeNotifier | None = None,
+    *,
+    channel: str | None = "C-OPS",
+    header: str = "refresh the knowledge index",
+    interval_s: float = TICK,
+    clock: _FakeClock | None = None,
+) -> tuple[TurnProgress, _FakeNotifier | None, _FakeClock]:
+    clk = clock or _FakeClock()
+    return (
+        TurnProgress(
+            notifier,  # type: ignore[arg-type]
+            channel,
+            header=header,
+            interval_s=interval_s,
+            clock=clk,
+        ),
+        notifier,
+        clk,
+    )
+
+
+async def _run_until(
+    reporter: TurnProgress,
+    notifier: _FakeNotifier,
+    *,
+    posts: int,
+    timeout: float = 2.0,
+) -> asyncio.Task:
+    """Start the pulse loop and stop it once *posts* posts have landed."""
+    task = asyncio.create_task(reporter.run())
+    deadline = time.monotonic() + timeout
+    while len(notifier.calls) < posts and time.monotonic() < deadline:
+        await asyncio.sleep(0.001)
+    reporter.request_stop()
+    await asyncio.wait_for(task, timeout=timeout)
+    return task
+
+
+def _tool(name: str, **arguments: object) -> ToolCall:
+    return ToolCall(id="t1", name=name, arguments=dict(arguments))
+
+
+# ---------- Criterion 3 / 4a: redaction is an allowlist --------------------
+
+@pytest.mark.parametrize("name", ["Read", "Edit", "Write"])
+def test_c3_path_tools_render_file_path_only(name: str) -> None:
+    hint = tool_hint(
+        name,
+        {"file_path": "src/x.py", "content": "SECRET=xoxb-abc123"},
+    )
+    assert hint == "src/x.py"
+
+
+def test_c3_bash_renders_first_token_only() -> None:
+    assert tool_hint("Bash", {"command": "pytest -k secret --token=x"}) == (
+        "pytest"
+    )
+
+
+def test_c3_bash_env_assignment_renders_no_hint() -> None:
+    """``SECRET=... cmd`` is a legal command whose first token is the
+    secret; the naive first-word rule would post it verbatim."""
+    assert tool_hint("Bash", {"command": "SECRET=xoxb-abc123 curl x"}) == ""
+
+
+def test_c3_bash_empty_command_renders_no_hint() -> None:
+    assert tool_hint("Bash", {"command": "   "}) == ""
+
+
+def test_c3_unwhitelisted_tool_renders_no_hint() -> None:
+    """A tool added next month is safe without anyone editing this."""
+    assert tool_hint("Grep", {"pattern": "xoxb-abc123"}) == ""
+    assert tool_hint("mcp__vendor__do", {"token": "xoxb-abc"}) == ""
+
+
+def test_c3_missing_or_non_string_argument_renders_no_hint() -> None:
+    assert tool_hint("Read", {}) == ""
+    assert tool_hint("Read", {"file_path": 17}) == ""
+    assert tool_hint("Bash", {"command": None}) == ""
+
+
+def test_c3_non_dict_arguments_render_no_hint() -> None:
+    """``claude -p`` builds arguments from ``blk.get("input") or {}``, so
+    a non-dict can arrive off the wire."""
+    assert tool_hint("Read", ["file_path"]) == ""
+
+
+def test_c3_hint_is_truncated() -> None:
+    hint = tool_hint("Read", {"file_path": "a/" * 200})
+    assert len(hint) == progress_mod.HINT_MAX
+    assert hint.endswith("…")
+
+
+def test_c3_header_is_flattened_unfenced_and_truncated() -> None:
+    raw = "line one\nline two ```python\nprint('x')\n``` " + "z" * 200
+    out = sanitize_header(raw)
+    assert "\n" not in out
+    assert "`" not in out
+    assert len(out) == progress_mod.HEADER_MAX
+    assert out.endswith("…")
+    assert out.startswith("line one line two python")
+
+
+@pytest.mark.asyncio
+async def test_c3_pulse_carries_the_hint_and_not_the_secret() -> None:
+    """Both halves: absence alone is satisfied by posting nothing."""
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier)
+    reporter.on_event(_tool("Bash", command="pytest -k xoxb-secret"))
+    reporter.on_event(
+        ToolResult(id="t1", name="Bash", output=ToolOutput.of("xoxb-secret"))
+    )
+    await _run_until(reporter, notifier, posts=2)
+    pulse = notifier.texts[1]
+    assert "Bash(pytest)" in pulse
+    assert "xoxb-secret" not in pulse
+    assert "1 tool calls" in pulse
+
+
+# ---------- Criterion 2: pulse content -------------------------------------
+
+# The render-only tests take the real interval rather than ``_make``'s
+# millisecond default: under a 2 ms interval every clock advance below is
+# past ``2 * interval_s``, so the stall branch would win and hide the
+# very text under assertion.
+
+def test_c2_pulse_renders_elapsed_count_and_last_tool() -> None:
+    reporter, _, clock = _make(
+        _FakeNotifier(), interval_s=DEFAULT_INTERVAL_S
+    )
+    reporter.on_event(RunStart(session_id="s", model="m"))
+    reporter.on_event(_tool("Edit", file_path="docs/slack-bridge.md"))
+    clock.advance(300.0)
+    line = reporter._render_pulse()
+    assert line == (
+        "5m · 1 tool calls · last: Edit(docs/slack-bridge.md)"
+    )
+
+
+def test_c2_tool_without_hint_renders_bare_name() -> None:
+    reporter, _, clock = _make(
+        _FakeNotifier(), interval_s=DEFAULT_INTERVAL_S
+    )
+    reporter.on_event(_tool("Grep", pattern="x"))
+    clock.advance(300.0)
+    assert reporter._render_pulse().endswith("last: Grep")
+
+
+def test_c2_no_events_yet_renders_elapsed_and_count_only() -> None:
+    reporter, _, clock = _make(
+        _FakeNotifier(), interval_s=DEFAULT_INTERVAL_S
+    )
+    clock.advance(300.0)
+    assert reporter._render_pulse() == "5m · 0 tool calls"
+
+
+def test_c2_stall_boundary_is_inclusive_at_two_intervals() -> None:
+    """``>=``, at pulse time, on monotonic timestamps — both sides."""
+    clock = _FakeClock()
+    reporter, _, _ = _make(
+        _FakeNotifier(), interval_s=300.0, clock=clock
+    )
+    reporter.on_event(_tool("Read", file_path="a.py"))
+    clock.advance(599.0)
+    assert "no activity" not in reporter._render_pulse()
+    clock.advance(1.0)
+    line = reporter._render_pulse()
+    assert line == "10m · 1 tool calls · no activity for 10m :warning:"
+
+
+def test_c2_run_start_resets_the_per_attempt_tool_count() -> None:
+    """Attempt 2 redoes the work, so tool calls repeat; elapsed does not
+    reset because wall time is the honest answer to "still running?"."""
+    reporter, _, clock = _make(_FakeNotifier())
+    reporter.on_event(_tool("Read", file_path="a.py"))
+    reporter.on_event(_tool("Read", file_path="b.py"))
+    clock.advance(300.0)
+    reporter.on_event(RunStart(session_id="s", model="m"))
+    line = reporter._render_pulse()
+    assert line.startswith("5m · 0 tool calls")
+
+
+def test_c2_non_tool_events_only_refresh_liveness() -> None:
+    reporter, _, clock = _make(_FakeNotifier(), interval_s=10.0)
+    reporter.on_event(_tool("Read", file_path="a.py"))
+    clock.advance(19.0)
+    reporter.on_event(ErrorEvent(message="xoxb-secret", fatal=False))
+    line = reporter._render_pulse()
+    assert "no activity" not in line
+    assert "xoxb-secret" not in line
+    assert "1 tool calls" in line
+
+
+# ---------- Criterion 7b(a)/3.4: backoff is not a stall --------------------
+
+def test_c7b_retrying_replaces_the_stall_warning() -> None:
+    clock = _FakeClock()
+    reporter, _, _ = _make(_FakeNotifier(), interval_s=10.0, clock=clock)
+    reporter.on_event(_tool("Bash", command="uv run pytest"))
+    clock.advance(60.0)
+    reporter.retrying(1)
+    line = reporter._render_pulse()
+    assert "retrying (attempt 2)" in line
+    assert "no activity" not in line
+
+
+def test_c7b_next_run_start_reverts_and_names_the_attempt() -> None:
+    clock = _FakeClock()
+    reporter, _, _ = _make(_FakeNotifier(), interval_s=10.0, clock=clock)
+    reporter.retrying(1)
+    reporter.on_event(RunStart(session_id="s", model="m"))
+    reporter.on_event(_tool("Read", file_path="a.py"))
+    clock.advance(300.0)
+    line = reporter._render_pulse()
+    assert "retrying" not in line
+    # A silent counter reset reads as a bug to whoever is watching.
+    assert line.endswith("attempt 2")
+
+
+# ---------- Criterion 7c(a): the idle-compact window -----------------------
+
+def test_c7c_compacting_replaces_the_stall_and_freezes_the_count() -> None:
+    clock = _FakeClock()
+    reporter, _, _ = _make(_FakeNotifier(), interval_s=10.0, clock=clock)
+    reporter.on_event(_tool("Read", file_path="a.py"))
+    reporter.on_event(_tool("Read", file_path="b.py"))
+    clock.advance(600.0)
+    reporter.compacting()
+    line = reporter._render_pulse()
+    assert line == "10m · 2 tool calls · compacting session"
+
+
+def test_c7c_compacting_is_idempotent_and_never_clears() -> None:
+    """Nothing follows a compaction except teardown, so a clear would be
+    a branch with one reachable side."""
+    clock = _FakeClock()
+    reporter, _, _ = _make(_FakeNotifier(), interval_s=10.0, clock=clock)
+    reporter.compacting()
+    reporter.compacting()
+    reporter.on_event(RunStart(session_id="s", model="m"))
+    clock.advance(600.0)
+    assert "compacting session" in reporter._render_pulse()
+
+
+# ---------- Criterion 6e(a)/(b): the persona arrives late -------------------
+
+def test_c6e_parent_renders_without_a_persona() -> None:
+    reporter, _, _ = _make(_FakeNotifier(), header="fix the drain bug")
+    parent = reporter._render_parent()
+    assert parent == ':hourglass: still working — "fix the drain bug"'
+
+
+def test_c6e_set_persona_names_the_turn() -> None:
+    reporter, _, _ = _make(_FakeNotifier(), header="fix the drain bug")
+    reporter.set_persona("Anzai")
+    reporter.set_persona("Anzai")
+    assert reporter._render_parent().startswith(
+        ':hourglass: Anzai still working'
+    )
+
+
+@pytest.mark.asyncio
+async def test_c6e_parent_posts_even_if_persona_never_arrives() -> None:
+    """A turn wedged before the persona resolves is precisely a turn
+    worth pulsing through, so the parent must not wait for the name."""
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier)
+    await _run_until(reporter, notifier, posts=1)
+    assert notifier.texts[0].startswith(":hourglass: still working")
+
+
+# ---------- Criterion 1 / 6: suppression and the happy path ----------------
+
+@pytest.mark.asyncio
+async def test_c1_short_turn_posts_nothing_at_all() -> None:
+    """Not even a parent. Exactly zero — the deterministic half."""
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier, interval_s=30.0)
+    task = asyncio.create_task(reporter.run())
+    await asyncio.sleep(0.005)
+    reporter.request_stop()
+    await asyncio.wait_for(task, timeout=2.0)
+    await reporter.finish(ok=True)
+    assert notifier.calls == []
+    assert reporter.started is False
+
+
+@pytest.mark.asyncio
+async def test_c1_long_turn_posts_parent_then_pulses_then_closer() -> None:
+    notifier = _FakeNotifier()
+    reporter, _, clock = _make(notifier)
+    reporter.set_persona("Mitsui")
+    reporter.on_event(_tool("Bash", command="uv run pytest"))
+    await _run_until(reporter, notifier, posts=3)
+    clock.advance(1020.0)
+    await reporter.finish(ok=True)
+    assert reporter.started is True
+    # Lower bound + ordering, not an exact count: an exact count off
+    # real millisecond sleeps is a flake, and a flaky test gating this
+    # feature gets deleted in six months.
+    assert len(notifier.calls) >= 3
+    assert notifier.texts[0].startswith(":hourglass: Mitsui still working")
+    assert notifier.texts[-1] == (
+        ":white_check_mark: done in 17m · 1 tool calls"
+    )
+    for text in notifier.texts[1:-1]:
+        assert text.startswith("0m · 1 tool calls")
+
+
+@pytest.mark.asyncio
+async def test_c1_closer_reports_failure_with_detail() -> None:
+    notifier = _FakeNotifier()
+    reporter, _, clock = _make(notifier)
+    await _run_until(reporter, notifier, posts=1)
+    clock.advance(1020.0)
+    await reporter.finish(ok=False, detail="TimeoutError")
+    assert notifier.texts[-1] == ":x: failed after 17m · TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_c1_closer_without_detail_omits_the_suffix() -> None:
+    notifier = _FakeNotifier()
+    reporter, _, clock = _make(notifier)
+    await _run_until(reporter, notifier, posts=1)
+    clock.advance(60.0)
+    await reporter.finish(ok=False)
+    assert notifier.texts[-1] == ":x: failed after 1m"
+
+
+@pytest.mark.asyncio
+async def test_c1_pulses_thread_under_the_parent() -> None:
+    notifier = _FakeNotifier(ts="P123")
+    reporter, _, _ = _make(notifier)
+    await _run_until(reporter, notifier, posts=2)
+    await reporter.finish(ok=True)
+    assert notifier.calls[0][2] is None
+    assert all(call[2] == "P123" for call in notifier.calls[1:])
+
+
+# ---------- Criterion 4: the DM thread is never touched --------------------
+
+@pytest.mark.asyncio
+async def test_c4a_every_post_carries_the_resolved_ops_channel() -> None:
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier, channel="C-OPS")
+    await _run_until(reporter, notifier, posts=2)
+    await reporter.finish(ok=True)
+    assert notifier.calls
+    assert all(call[1] == "C-OPS" for call in notifier.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", [None, ""])
+async def test_c4b_unconfigured_channel_produces_zero_calls(
+    channel: str | None,
+) -> None:
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier, channel=channel)
+    task = asyncio.create_task(reporter.run())
+    await asyncio.wait_for(task, timeout=2.0)
+    await reporter.finish(ok=True)
+    assert notifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_c4b_missing_notifier_produces_zero_calls() -> None:
+    reporter, _, _ = _make(None, channel="C-OPS")
+    await asyncio.wait_for(
+        asyncio.create_task(reporter.run()), timeout=2.0
+    )
+    await reporter.finish(ok=True)
+    assert reporter.started is False
+
+
+@pytest.mark.asyncio
+async def test_c4c_post_site_guard_runs_on_a_live_reporter() -> None:
+    """The guard is per-post, not per-construction: ``post_text`` treats
+    a falsy channel as the Operator's DM, so a reporter that validated
+    once and cached the answer is one edit away from posting into the
+    thread this feature exists to protect.
+
+    Constructed LIVE so the inert short-circuit does not fire — then the
+    channel is emptied before the post site is reached.
+    """
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier, channel="C-OPS")
+    assert reporter._inert is False
+    reporter._channel = ""
+    task = asyncio.create_task(reporter.run())
+    await asyncio.wait_for(task, timeout=2.0)
+    await reporter.finish(ok=True)
+    assert notifier.calls == []
+
+
+# ---------- Criterion 5 / 6c: everything fails to silence ------------------
+
+@pytest.mark.asyncio
+async def test_c5_slack_outage_degrades_to_silence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    notifier = _FakeNotifier(raises=True)
+    reporter, _, _ = _make(notifier)
+    with caplog.at_level(logging.WARNING, logger=PROGRESS_LOGGER):
+        task = asyncio.create_task(reporter.run())
+        await asyncio.wait_for(task, timeout=2.0)
+        await reporter.finish(ok=True)
+    assert reporter.started is False
+    assert len(notifier.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_c6c_failed_parent_post_makes_the_reporter_inert(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Exactly ONE attempt for the whole turn, not one per interval:
+    retrying a permanently bad channel id never succeeds and would log
+    forever."""
+    notifier = _FakeNotifier(ts=None)
+    reporter, _, _ = _make(notifier)
+    with caplog.at_level(logging.WARNING, logger=PROGRESS_LOGGER):
+        task = asyncio.create_task(reporter.run())
+        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.sleep(0.01)
+        await reporter.finish(ok=True)
+    assert len(notifier.calls) == 1
+    assert reporter.started is False
+    failure_1 = [
+        r for r in caplog.records
+        if r.name == PROGRESS_LOGGER and "post failed" in r.message
+    ]
+    assert len(failure_1) == 1
+
+
+@pytest.mark.asyncio
+async def test_c5b_failure_1_logs_on_a_falsy_return(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    notifier = _FakeNotifier(ts=None)
+    reporter, _, _ = _make(notifier)
+    with caplog.at_level(logging.WARNING, logger=PROGRESS_LOGGER):
+        await asyncio.wait_for(
+            asyncio.create_task(reporter.run()), timeout=2.0
+        )
+    records = [r for r in caplog.records if r.name == PROGRESS_LOGGER]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "slack post failed for channel C-OPS" in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_c5b_failure_1_logs_a_distinct_line_on_a_raise(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    notifier = _FakeNotifier(raises=True)
+    reporter, _, _ = _make(notifier)
+    with caplog.at_level(logging.WARNING, logger=PROGRESS_LOGGER):
+        await asyncio.wait_for(
+            asyncio.create_task(reporter.run()), timeout=2.0
+        )
+    records = [r for r in caplog.records if r.name == PROGRESS_LOGGER]
+    assert len(records) == 1
+    assert "slack post raised for channel C-OPS" in records[0].getMessage()
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_c5_a_crashing_render_never_escapes_the_loop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The pulse loop's own last-resort guard. A reporter that raised
+    into ``_dispatch`` would be a progress feature that breaks turns."""
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier)
+    boom = RuntimeError("render blew up")
+
+    def _explode() -> str:
+        raise boom
+
+    reporter._render_parent = _explode  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING, logger=PROGRESS_LOGGER):
+        task = asyncio.create_task(reporter.run())
+        await asyncio.sleep(0.02)
+        reporter.request_stop()
+        await asyncio.wait_for(task, timeout=2.0)
+    assert notifier.calls == []
+    assert any(
+        "pulse failed" in r.getMessage()
+        for r in caplog.records
+        if r.name == PROGRESS_LOGGER
+    )
+
+
+# ---------- Criterion 6b: the cooperative stop -----------------------------
+
+@pytest.mark.asyncio
+async def test_c6b_post_in_flight_at_stop_is_not_orphaned() -> None:
+    """``asyncio.to_thread`` is not cancellable — cancelling only
+    abandons the wait, so a cancel-first stop leaves a lone
+    ":hourglass: still working" in the channel with no closer under it.
+    """
+    gate = threading.Event()
+    notifier = _FakeNotifier(block=gate)
+    reporter, _, clock = _make(notifier)
+    task = asyncio.create_task(reporter.run())
+    try:
+        while not notifier.calls:
+            await asyncio.sleep(0.001)
+        reporter.request_stop()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+    finally:
+        gate.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    clock.advance(120.0)
+    await reporter.finish(ok=True)
+    assert notifier.texts[0].startswith(":hourglass:")
+    assert notifier.texts[-1].startswith(":white_check_mark:")
+
+
+@pytest.mark.asyncio
+async def test_c6b_request_stop_is_idempotent() -> None:
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier, interval_s=30.0)
+    reporter.request_stop()
+    reporter.request_stop()
+    await asyncio.wait_for(
+        asyncio.create_task(reporter.run()), timeout=2.0
+    )
+    assert notifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_c6b_cancellation_propagates_out_of_run() -> None:
+    """``run`` and ``finish`` must both let ``CancelledError`` through:
+    the bridge bounds them with ``wait_for``, and that bound works only
+    by cancelling at the ``to_thread`` await."""
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(notifier, interval_s=30.0)
+    task = asyncio.create_task(reporter.run())
+    await asyncio.sleep(0.005)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_c6b_cancellation_propagates_out_of_finish() -> None:
+    gate = threading.Event()
+    notifier = _FakeNotifier(block=gate)
+    reporter, _, _ = _make(notifier)
+    reporter._started = True
+    try:
+        task = asyncio.create_task(reporter.finish(ok=True))
+        while not notifier.calls:
+            await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        gate.set()
+
+
+# ---------- Criterion 1b + channel resolution ------------------------------
+
+def test_c1b_shipped_interval_is_five_minutes() -> None:
+    """Every other test injects a millisecond interval through §9's
+    seam, so the one number the Operator specified is the one number
+    nothing else checks."""
+    assert DEFAULT_INTERVAL_S == 300.0
+    reporter = TurnProgress(None, None, header="h")
+    assert reporter._interval_s == 300.0
+
+
+def test_c1b_build_passes_the_default_interval_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        progress_mod.SlackNotifier, "try_load", staticmethod(lambda: None)
+    )
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    assert build_turn_progress("h")._interval_s == 300.0
+    assert build_turn_progress("h", interval_s=1.0)._interval_s == 1.0
+
+
+def test_channel_precedence_prefers_the_bridge_specific_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    monkeypatch.setenv(CHANNEL_ENV_VARS[0], "C-BRIDGE")
+    monkeypatch.setenv(CHANNEL_ENV_VARS[1], "C-NOTIFY")
+    assert resolve_progress_channel() == "C-BRIDGE"
+
+
+def test_channel_falls_through_to_the_notify_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    monkeypatch.setenv(CHANNEL_ENV_VARS[1], "C-NOTIFY")
+    assert resolve_progress_channel() == "C-NOTIFY"
+
+
+def test_empty_value_does_not_count_as_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An or-chain would let an empty override win and silently disable
+    the feature — indistinguishable from "not configured"."""
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    monkeypatch.setenv(CHANNEL_ENV_VARS[0], "   ")
+    monkeypatch.setenv(CHANNEL_ENV_VARS[1], "C-NOTIFY")
+    assert resolve_progress_channel() == "C-NOTIFY"
+
+
+def test_no_channel_configured_resolves_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    assert resolve_progress_channel() is None
+
+
+def test_channel_is_read_from_the_bridge_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A team that declared its ops channel once in ``.env`` should not
+    have to declare it again."""
+    env = tmp_path / ".env"
+    env.write_text(f"{CHANNEL_ENV_VARS[0]}=C-FROM-DOTENV\n")
+    monkeypatch.setenv("TIGERHARNESS_SLACK_ENV", str(env))
+    assert resolve_progress_channel() == "C-FROM-DOTENV"
+
+
+def test_build_returns_an_inert_reporter_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never ``None``: the caller must not branch on configuration."""
+    monkeypatch.setattr(
+        progress_mod.SlackNotifier, "try_load", staticmethod(lambda: None)
+    )
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    reporter = build_turn_progress("h")
+    assert isinstance(reporter, TurnProgress)
+    assert reporter._inert is True
+
+
+def test_c5b_failure_2_logs_creds_without_a_channel(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """§6 promises the logs distinguish "configured but failing" from
+    "not configured"; without this line the two look identical."""
+    monkeypatch.setattr(
+        progress_mod.SlackNotifier,
+        "try_load",
+        staticmethod(lambda: _FakeNotifier()),
+    )
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
+        reporter = build_turn_progress("h")
+    assert reporter._inert is True
+    records = [
+        r for r in caplog.records
+        if r.name == PROGRESS_LOGGER and "no ops-log channel" in r.message
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    assert CHANNEL_ENV_VARS[0] in records[0].getMessage()
+
+
+def test_build_returns_a_live_reporter_when_fully_configured(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        progress_mod.SlackNotifier,
+        "try_load",
+        staticmethod(lambda: _FakeNotifier()),
+    )
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    monkeypatch.setenv(CHANNEL_ENV_VARS[0], "C-OPS")
+    with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
+        reporter = build_turn_progress("h")
+    assert reporter._inert is False
+    assert reporter._channel == "C-OPS"
+    assert not [r for r in caplog.records if r.name == PROGRESS_LOGGER]
