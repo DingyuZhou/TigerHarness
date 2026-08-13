@@ -1612,3 +1612,183 @@ def test_cmd_loop_veto_probes_inside_the_team_lock(tmp_path, monkeypatch):
                  runner=fake_runner)
     assert order == ["lock", "probe", "unlock"]
     assert not sfile.exists()
+
+
+# ---------------------------------------------------------------------------
+# Busy-pulse task detail — restoring the status the queue probe removed.
+#
+# Before ADR 0010's probe, every cycle fired a drive and the drive's own
+# closing summary said what was happening. The probe made the busy cycle
+# free and silently took that prose with it, leaving an hour of identical
+# "queue busy" lines in which a hung drive and a healthy one look the
+# same. These cover the model-free replacement.
+# ---------------------------------------------------------------------------
+
+def _busy_task(root, *, task_id="T1", step="b3-chief-akagi", notes=42,
+               title="Slack-turn progress heartbeats",
+               updated="2026-08-13T05:00:00Z", walk=True):
+    import json as _json
+    d = root / "active" / task_id
+    (d / "worklog").mkdir(parents=True)
+    (d / "status.json").write_text(_json.dumps({
+        "id": task_id, "title": title, "kind": "workflow",
+        "state": "in_progress", "persona": "Anzai", "sessions": 4,
+        "max_sessions": 10, "playbook_name": "default",
+        "created_at": "2026-08-12T22:38:37Z", "updated_at": updated,
+        "next_action": "", "session_ref": "abc", "early_exit": False,
+        "autonomy": "ask", "compile_pending": False,
+        "compile_phase": "complete",
+    }))
+    if walk:
+        (d / "walk.json").write_text(_json.dumps(
+            {"task_id": task_id, "current": step, "history": []}))
+    for i in range(notes):
+        (d / "worklog" / f"{i:04d}-x.md").write_text("x")
+    return d
+
+
+def test_busy_detail_names_step_notes_and_write_age(tmp_path):
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    root = tmp_path / "journal"
+    _busy_task(root)
+    detail = busy_task_detail(_cfg(journal_root=str(root)))
+
+    assert "Slack-turn progress heartbeats" in detail
+    assert "at b3-chief-akagi" in detail
+    assert "42 notes" in detail
+    assert "last write" in detail and "m ago" in detail
+
+
+def test_busy_detail_is_empty_without_a_journal_root():
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    assert busy_task_detail(_cfg(journal_root=None)) == ""
+
+
+def test_busy_detail_is_empty_when_no_task_is_attached(tmp_path):
+    """`in_progress` with no `session_ref` is idle, not busy."""
+    import json as _json
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    root = tmp_path / "journal"
+    d = _busy_task(root)
+    s = _json.loads((d / "status.json").read_text())
+    s["session_ref"] = None
+    (d / "status.json").write_text(_json.dumps(s))
+
+    assert busy_task_detail(_cfg(journal_root=str(root))) == ""
+
+
+def test_one_malformed_task_does_not_blind_the_pulse(tmp_path):
+    """A task earlier in walk order with unreadable status must not hide
+    the busy task behind it."""
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    root = tmp_path / "journal"
+    (root / "active" / "AAA-broken").mkdir(parents=True)
+    (root / "active" / "AAA-broken" / "status.json").write_text("{not json")
+    _busy_task(root)
+
+    assert "at b3-chief-akagi" in busy_task_detail(_cfg(journal_root=str(root)))
+
+
+def test_busy_detail_skips_dirs_without_a_status_file(tmp_path):
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    root = tmp_path / "journal"
+    (root / "active" / "AAA-empty").mkdir(parents=True)
+    _busy_task(root)
+
+    assert "42 notes" in busy_task_detail(_cfg(journal_root=str(root)))
+
+
+def test_busy_detail_survives_a_task_with_no_walk(tmp_path):
+    """`kind=task` has no walk.json; the pulse still reports the rest."""
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    root = tmp_path / "journal"
+    _busy_task(root, walk=False)
+    detail = busy_task_detail(_cfg(journal_root=str(root)))
+
+    assert "at " not in detail
+    assert "42 notes" in detail
+
+
+def test_busy_detail_truncates_a_long_title(tmp_path):
+    """One long title must not turn a skimmable pulse into a paragraph."""
+    from tigerharness.autodrive.runner import busy_task_detail, BUSY_TITLE_MAX
+
+    root = tmp_path / "journal"
+    _busy_task(root, title="x" * 200)
+    detail = busy_task_detail(_cfg(journal_root=str(root)))
+
+    assert "…" in detail
+    assert "x" * (BUSY_TITLE_MAX + 1) not in detail
+
+
+def test_busy_detail_tolerates_an_unparseable_timestamp(tmp_path):
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    root = tmp_path / "journal"
+    _busy_task(root, updated="not-a-timestamp")
+    detail = busy_task_detail(_cfg(journal_root=str(root)))
+
+    assert "at b3-chief-akagi" in detail
+    assert "last write" not in detail
+
+
+def test_busy_detail_never_raises_into_the_heartbeat(tmp_path, caplog):
+    """Decorating a pulse must never be able to break it."""
+    import logging
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    # active/ is a FILE, so iterdir() raises rather than returning empty.
+    root = tmp_path / "journal"
+    root.mkdir()
+    (root / "active").write_text("not a directory")
+
+    with caplog.at_level(logging.WARNING):
+        assert busy_task_detail(_cfg(journal_root=str(root))) == ""
+    assert any("busy-task detail failed" in r.message for r in caplog.records)
+
+
+def test_age_minutes_handles_naive_and_zulu_stamps():
+    from tigerharness.autodrive.runner import _age_minutes
+    from datetime import datetime, timezone
+
+    at = datetime(2026, 8, 13, 6, 0, 0, tzinfo=timezone.utc)
+    assert _age_minutes("2026-08-13T05:00:00Z", at=at) == 60
+    assert _age_minutes("2026-08-13T05:30:00", at=at) == 30
+    assert _age_minutes("garbage") is None
+    # A clock skew into the future clamps at 0 rather than going negative.
+    assert _age_minutes("2026-08-13T07:00:00Z", at=at) == 0
+
+
+def test_busy_detail_skips_a_walk_with_no_current_step(tmp_path):
+    """A compiled-but-not-started walk has no `current`; report the rest
+    rather than rendering `at None`."""
+    import json as _json
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    root = tmp_path / "journal"
+    d = _busy_task(root)
+    (d / "walk.json").write_text(_json.dumps({"task_id": "T1", "history": []}))
+    detail = busy_task_detail(_cfg(journal_root=str(root)))
+
+    assert "at " not in detail
+    assert "42 notes" in detail
+
+
+def test_busy_detail_survives_a_task_with_no_worklog_dir(tmp_path):
+    """A task claimed but not yet worked has no worklog/ at all."""
+    import shutil
+    from tigerharness.autodrive.runner import busy_task_detail
+
+    root = tmp_path / "journal"
+    d = _busy_task(root)
+    shutil.rmtree(d / "worklog")
+    detail = busy_task_detail(_cfg(journal_root=str(root)))
+
+    assert "notes" not in detail
+    assert "at b3-chief-akagi" in detail

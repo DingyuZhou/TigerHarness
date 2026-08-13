@@ -26,6 +26,7 @@ plain `claude -p` subprocess.
 | Get Slack heartbeats + threaded drive summaries from the autodrive daemon (or mute them) | [autodrive-notifications.md](autodrive-notifications.md) |
 | Understand per-persona memory from journal work (the worklog rail) | [per-persona-journal-memory.md](per-persona-journal-memory.md) |
 | Set up / operate the Slack bridge (1..N lanes) | [slack-bridge.md](slack-bridge.md) |
+| See mid-flight progress for a long Slack turn in an ops-log channel | [slack-bridge.md](slack-bridge.md#turn-progress-heartbeats-ops-log) |
 | Use tiger-memory (the three bounded stores, CLI, config) | [tiger-memory.md](tiger-memory.md) |
 | Understand the memory design (stores + staged compaction, the rationale) | [DESIGN-memory.md](DESIGN-memory.md) |
 | Run the team-wide memory sweep | [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md) |

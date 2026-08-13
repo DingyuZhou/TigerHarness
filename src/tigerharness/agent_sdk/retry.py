@@ -38,12 +38,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from .types import (
     AgentBackend,
     AgentConfig,
     ApprovalCallback,
+    Event,
     InputMessage,
     RunResult,
     Session,
@@ -57,6 +59,56 @@ DEFAULT_MAX_ATTEMPTS: int = 3
 DEFAULT_BASE_DELAY_S: float = 1.0
 
 
+def _fire(callback: Callable[[Any], None], arg: Any, *, what: str) -> None:
+    """Call a caller-supplied progress callback, swallowing anything it
+    raises.
+
+    The guard lives here rather than in the callback's owner because
+    ``on_event``/``on_retry`` are now part of this module's public
+    signature and the next caller to pass one will not have read the
+    design. An unguarded raise from ``on_event`` would be caught by the
+    general handler below and trigger a full retry of the turn — a
+    progress callback silently causing a duplicate agent run. From
+    ``on_retry`` it is worse: that fires from inside the ``except``
+    handler, so the callback's traceback would REPLACE the backend
+    exception that actually broke the turn.
+    """
+    try:
+        callback(arg)
+    except Exception:
+        log.warning(
+            "run_with_retry: %s callback raised (ignored)",
+            what,
+            exc_info=True,
+        )
+
+
+async def _run_tapped(
+    backend: AgentBackend,
+    config: AgentConfig,
+    prompt: str | list[InputMessage],
+    *,
+    session: Session | None,
+    approval: ApprovalCallback | None,
+    on_event: Callable[[Event], None],
+) -> RunResult:
+    """One attempt, driven through the stream so events are observable.
+
+    Behaviour-neutral versus ``backend.run``: every backend implements
+    ``run()`` as ``run_via_stream(self.run_stream(...))``
+    (``backends/_base.py``). The ``async with`` satisfies the documented
+    ``StreamHandle`` cleanup contract on normal completion, on exception
+    AND on cancellation, and ``.result`` is read inside the block after
+    the loop finishes — reading it earlier raises by design.
+    """
+    async with backend.run_stream(
+        config, prompt, session=session, approval=approval
+    ) as handle:
+        async for event in handle:
+            _fire(on_event, event, what="on_event")
+        return handle.result
+
+
 async def run_with_retry(
     backend: AgentBackend,
     config: AgentConfig,
@@ -67,6 +119,8 @@ async def run_with_retry(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     base_delay_s: float = DEFAULT_BASE_DELAY_S,
     label: str = "",
+    on_event: Callable[[Event], None] | None = None,
+    on_retry: Callable[[int], None] | None = None,
 ) -> RunResult:
     """Wrap ``backend.run`` with at most ``max_attempts`` total tries.
 
@@ -83,6 +137,19 @@ async def run_with_retry(
         base_delay_s: initial sleep before retry 1 (a.k.a. attempt 2).
         label: free-text tag included in log lines so the operator can
             tell which call retried (thread id, job id, etc.).
+        on_event: optional progress tap. When supplied, each attempt is
+            driven through ``backend.run_stream`` and every Event is
+            forwarded. When ``None`` (the default) the ``backend.run``
+            path is untouched, so existing callers are unchanged by
+            construction rather than by assertion.
+        on_retry: optional notification, called with the attempt number
+            that just failed, immediately BEFORE the backoff sleep. The
+            ordering is the point: called after the sleep it would only
+            describe a window that has already closed, and a progress
+            reporter would render a scheduled wait as a hang.
+
+    Neither callback can break or retry a turn: both are invoked through
+    a guard that logs and swallows.
 
     Raises:
         The last exception observed if every attempt failed.
@@ -94,8 +161,17 @@ async def run_with_retry(
     last_exc: BaseException | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            return await backend.run(
-                config, prompt, session=session, approval=approval
+            if on_event is None:
+                return await backend.run(
+                    config, prompt, session=session, approval=approval
+                )
+            return await _run_tapped(
+                backend,
+                config,
+                prompt,
+                session=session,
+                approval=approval,
+                on_event=on_event,
             )
         except asyncio.CancelledError:
             # User cancellation — never retry.
@@ -117,6 +193,8 @@ async def run_with_retry(
                 f"[{label}] " if label else "",
                 delay, exc,
             )
+            if on_retry is not None:
+                _fire(on_retry, attempt, what="on_retry")
             await asyncio.sleep(delay)
 
     # Unreachable: loop either returned, raised on the final attempt,

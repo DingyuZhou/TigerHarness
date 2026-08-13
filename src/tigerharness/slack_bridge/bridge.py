@@ -66,10 +66,43 @@ from .history import (
 )
 from .idle_compact import IdleCompactConfig, maybe_compact
 from .persistence import ThreadStore, default_state_path
+from .progress import build_turn_progress
 from .router import detect_persona
 
 
 log = logging.getLogger("tigerharness.slack_bridge.bridge")
+
+
+#: Teardown budgets for the turn-progress reporter, both DERIVED from
+#: `notify.py`'s `urlopen(req, timeout=30)`: 30s is the longest a single
+#: Slack POST can legitimately take, so a budget below that would fire
+#: during a normal-but-slow post instead of during a genuine wedge --
+#: and `asyncio.to_thread` is not cancellable, so the worker thread
+#: would keep posting and land its message after the closer. **If
+#: notify.py's timeout changes, both of these move with it, and the sum
+#: must be re-checked against `_DRAIN_TIMEOUT_S` (__main__.py) -- 70s of
+#: a 90s budget shared by every lane.** They are numerically equal and
+#: do different jobs: STOP_DRAIN_S is sized so it does not fire (a
+#: pulse landing after the closer is a visible lie), FINISH_POST_S
+#: merely bounds the last post of the thread, where a late arrival has
+#: no ordering left to violate. Module-level so tests can monkeypatch
+#: them; read at call time, never bound into a default argument.
+STOP_DRAIN_S: float = 35.0
+FINISH_POST_S: float = 35.0
+
+
+def _closer_detail(err: BaseException | None) -> str:
+    """Render the turn's failure for the closer line.
+
+    The type name always shows: `CancelledError` carries no message,
+    and `f"{type(e).__name__}: {e}"` would render it as a stray
+    trailing colon in the ops channel.
+    """
+    if err is None:
+        return ""
+    text = str(err).strip()
+    name = type(err).__name__
+    return (f"{name}: {text}" if text else name)[:100]
 
 
 # Bash patterns blocked from the agent.
@@ -128,6 +161,13 @@ class TeamBridgeContext:
     # fragment (see multi._build_idle_compact), because one process-wide
     # os.environ cannot describe N lanes' separate journals.
     idle_compact: "IdleCompactConfig | None" = None
+    # Per-lane ops-log channel for turn-progress heartbeats, for exactly
+    # the reason stated above: one process-wide os.environ cannot
+    # describe N lanes. Multi-lane fills this from the lane's own
+    # env_vars dict; None -> the reporter falls back to resolving from
+    # the process environment (the directly-embedded single-team
+    # bridge, where one process really is one team).
+    progress_channel: str | None = None
 
     @property
     def is_multi_persona(self) -> bool:
@@ -344,7 +384,31 @@ class SlackBridge:
         # owned by another dispatch that is still mid-turn (e.g. when we
         # bail on shutdown before ever taking the state lock).
         in_flight_marked = False
+        # Captured explicitly rather than re-derived from `bridge_body`:
+        # a message body is a display artifact, and parsing it to decide
+        # whether the turn succeeded is how the closer starts lying the
+        # day someone rewords the error text.
+        turn_error: BaseException | None = None
         try:
+            # Mid-flight heartbeats for a long turn, posted to a separate
+            # ops-log channel (silent unless one is configured). Created
+            # as the FIRST statement inside this try so the finally below
+            # is guaranteed a task to tear down, and BEFORE `state`
+            # exists so the router call and session open -- the phase the
+            # drain slot above was widened to cover, and a phase worth a
+            # heartbeat -- are pulsed through too. The persona is not
+            # known yet; set_persona supplies it below. The header is the
+            # Operator's own `text`, deliberately NOT `prompt`, which by
+            # now carries attachment scaffolding and a long injected
+            # instruction block.
+            progress = build_turn_progress(
+                text,
+                bot_token=self._team.slack_bot_token,
+                channel=self._team.progress_channel,
+                lane=self._team.team_name,
+            )
+            progress_task = asyncio.create_task(progress.run())
+
             # Untracked-thread join (e.g. a reply to a notification DM
             # posted outside the bridge): fetch the thread's earlier
             # messages so the fresh session can see what the user is
@@ -359,6 +423,10 @@ class SlackBridge:
             state = await self._get_or_open_thread(
                 thread_key, text, thread_context=join_transcript
             )
+            # The reporter predates the routing decision, so it learns
+            # the persona here. A parent posted before this renders
+            # without a name rather than waiting for one.
+            progress.set_persona(state.persona)
 
             # The router LLM call took ~500ms-1s. Shutdown may have been
             # requested while we were waiting for the routing decision.
@@ -450,6 +518,13 @@ class SlackBridge:
                         session=state.session,
                         max_attempts=3,
                         label=f"thread={thread_key} persona={state.persona}",
+                        # The stream is already parsed and thrown away;
+                        # tapping it costs no tokens and spawns nothing.
+                        # `retry.py` gets bare callables, never the
+                        # reporter -- agent_sdk must not import
+                        # slack_bridge.
+                        on_event=progress.on_event,
+                        on_retry=progress.retrying,
                     )
                     if result.final_output:
                         persona_body = result.final_output
@@ -487,6 +562,21 @@ class SlackBridge:
                     )
 
                     async def _compact_turn(prompt_text: str) -> None:
+                        # First statement, and the call site is part of
+                        # the contract: this callable runs if and only
+                        # if a compaction actually runs, so the quiet
+                        # window is marked without reimplementing
+                        # maybe_compact's gate. Placed before
+                        # maybe_compact instead, it would mark a phase
+                        # that is not happening on the overwhelming
+                        # majority of turns -- and because the flag
+                        # never clears, stall detection would then be
+                        # dead for the rest of EVERY turn. A compaction
+                        # deliberately gets no on_event: its events
+                        # belong to a different agent run, and RunStart
+                        # would reset the tool count so a 200-call turn
+                        # would end up rendering "3 tool calls".
+                        progress.compacting()
                         await run_with_retry(
                             self._backend,
                             _agent_config,
@@ -517,6 +607,7 @@ class SlackBridge:
                 except Exception as exc:
                     log.exception("backend failure for thread %s", thread_key)
                     bridge_body = f":warning: backend error: `{exc}`"
+                    turn_error = exc
 
             if persona_body is not None:
                 reply_text = _format_reply(persona_body, state.persona, self._team)
@@ -524,16 +615,103 @@ class SlackBridge:
                 # Bridge voice -- no persona prefix.
                 reply_text = bridge_body or ""
             await say(text=reply_text, thread_ts=thread_key)
+        except asyncio.CancelledError as exc:
+            # Captured, then re-raised untouched. §7 annotates
+            # `turn_error` as BaseException for exactly this case: the
+            # closer runs in the finally below whether or not the turn
+            # was killed, and with `turn_error` still None it would
+            # post ":white_check_mark: done" for a turn that never
+            # finished -- the same lie §7 refuses when it forbids
+            # hardcoding ok=True, arriving by the other door.
+            turn_error = exc
+            raise
         finally:
-            # Clear the persisted in_flight guard -- but only if THIS
-            # dispatch set it; a dispatch that bailed early (shutdown,
-            # error before the state lock) must not clear a marker a
-            # concurrent dispatch still owns.
-            if in_flight_marked:
-                self._store.mark_in_flight(thread_key, False)
-            self._in_flight -= 1
-            if self._in_flight == 0:  # pragma: no branch  # tested with single-request flows
-                self._drained.set()
+            # Two nested blocks, and the nesting is the point: this
+            # finally had NO await in it before, and the accounting
+            # below must stay unreachable-proof. Two awaits at the same
+            # level as the decrement would let a shutdown cancellation
+            # raise past it -- `_drained` would never be set and
+            # `wait_for_drain` would block until timeout on every
+            # SIGTERM, which is worse than the undercount the comment
+            # above records as already fixed once.
+            try:
+                # Stop, THEN close -- not the order that reads
+                # naturally. `finish` needs exclusive ownership of the
+                # reporter's state: called while `run()` is between
+                # posting the parent and setting `started`, it drops
+                # the closer; called while `run()` is mid-POST, it
+                # lands "done" above the final pulse.
+                #
+                # The stop is COOPERATIVE. `asyncio.to_thread` is not
+                # cancellable, so cancelling the task would abandon the
+                # wait while the worker thread posted anyway, leaving a
+                # lone parent with no closer under it -- exactly the
+                # "looks abandoned" failure this feature exists to
+                # prevent. `run()` sleeps ON the stop event, so this
+                # wakes it at its next boundary and any in-flight post
+                # completes naturally. Cancellation is the backstop
+                # (wait_for below), not the mechanism.
+                progress.request_stop()
+                try:
+                    await asyncio.wait_for(
+                        progress_task, timeout=STOP_DRAIN_S
+                    )
+                except asyncio.TimeoutError:
+                    # Failure 5, NOT failure 3: "would not stop in
+                    # time" is a hung POST or a budget mis-set against
+                    # notify.py -- a different file from a crash.
+                    log.warning(
+                        "thread=%s progress reporter did not stop "
+                        "within %.0fs",
+                        thread_key, STOP_DRAIN_S,
+                    )
+                except Exception:
+                    # Failure 3. Awaiting the task is also what
+                    # retrieves the exception, so a crashed reporter
+                    # cannot surface later as asyncio's "Task exception
+                    # was never retrieved" at GC.
+                    log.warning(
+                        "thread=%s progress reporter crashed",
+                        thread_key, exc_info=True,
+                    )
+                # CancelledError is deliberately NOT caught, here or
+                # below: wait_for raises it when _dispatch itself is
+                # cancelled, and swallowing it would have this dispatch
+                # return normally from a cancelled task while holding
+                # the unwind open for a fresh 30s POST.
+                try:
+                    await asyncio.wait_for(
+                        progress.finish(
+                            ok=turn_error is None,
+                            detail=_closer_detail(turn_error),
+                        ),
+                        timeout=FINISH_POST_S,
+                    )
+                except asyncio.TimeoutError:
+                    # Failure 6. Separate from 5 on purpose: together
+                    # they are the only early warning that this
+                    # teardown is eating the drain budget.
+                    log.warning(
+                        "thread=%s progress closer did not post "
+                        "within %.0fs",
+                        thread_key, FINISH_POST_S,
+                    )
+                # No `except Exception` here: §2 freezes `finish` as
+                # non-raising, and there is no task to re-raise a crash
+                # through, so the handler would be a branch with one
+                # reachable side against a 100% branch floor.
+            finally:
+                # Clear the persisted in_flight guard -- but only if THIS
+                # dispatch set it; a dispatch that bailed early (shutdown,
+                # error before the state lock) must not clear a marker a
+                # concurrent dispatch still owns.
+                if in_flight_marked:
+                    self._store.mark_in_flight(thread_key, False)
+                self._in_flight -= 1
+                # `no branch`: only single-request flows are tested,
+                # so the "still in flight" side never runs.
+                if self._in_flight == 0:  # pragma: no branch
+                    self._drained.set()
 
     def _is_untracked_thread_reply(self, event: dict[str, Any], thread_key: str) -> bool:
         """True iff this message replies into a thread the bridge has

@@ -51,6 +51,10 @@ from .bridge import (
 )
 from .config import normalize_tiger_memory_trigger, redact_token
 from .idle_compact import IdleCompactConfig
+# Single-homed: the lane lookup below and the process-environment
+# fallback in `progress` must agree on the names AND their order, or a
+# lane and its fallback could resolve to different channels.
+from .progress import CHANNEL_ENV_VARS as PROGRESS_CHANNEL_KEYS
 
 log = logging.getLogger("tigerharness.slack_bridge.multi")
 
@@ -193,6 +197,26 @@ def _coerce_flag(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in ("1", "true", "yes", "on")
     return False
+
+
+def _progress_channel(env_vars: dict[str, str]) -> str | None:
+    """This lane's ops-log channel, read from the lane's OWN parsed
+    ``.env`` dict rather than ``os.environ``.
+
+    ``_load_env_file`` deliberately never exports a lane's ``.env``, so a
+    reporter that resolved its own channel from the process environment
+    found nothing on every multi-lane deployment. Reading the dict here
+    is what makes the feature work per lane -- and keeps two lanes from
+    sharing one channel-and-token pair.
+
+    Precedence matches ``progress.CHANNEL_ENV_VARS``; an empty value does
+    not count as set, so a blank override cannot silently disable it.
+    """
+    for name in PROGRESS_CHANNEL_KEYS:
+        value = (env_vars.get(name) or "").strip()
+        if value:
+            return value
+    return None
 
 
 def _build_idle_compact(spec: dict, team_dir: Path, where: str) -> IdleCompactConfig:
@@ -368,6 +392,7 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
         persona_aliases=persona_aliases or None,
         tiger_memory_trigger=tiger_memory_trigger,
         idle_compact=idle_compact,
+        progress_channel=_progress_channel(env_vars),
     )
     return LaneConfig(name=lane_name, team_ctx=team_ctx, state_path=state_path)
 

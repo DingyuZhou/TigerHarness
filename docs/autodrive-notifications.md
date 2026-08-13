@@ -96,6 +96,30 @@ dead or wedged — something it cannot self-report any other way. The threaded
 reply keeps the channel readable: the top level is a clean pulse, and the detail
 is one click down.
 
+### The busy pulse says what the drive is doing
+
+A cycle that declines to fire because a live session owns the in-flight
+task pulses anyway, and names that task:
+
+```
+autodrive heartbeat - no fire at 2026-08-13T05:17:30Z - queue busy -
+  "Slack-turn progress heartbeats", at b3-chief-akagi, 42 notes,
+  last write 9m ago (in-flight 1, 1 drive(s) so far)
+```
+
+Step, worklog count and last-write age are what make a **stalled** drive
+visible: a healthy one advances its step and its last-write age keeps
+resetting, while a hung one repeats the same step with an age that
+climbs. Without them an hour of identical `queue busy` lines says the
+daemon is alive and nothing about whether the work is.
+
+This is read from the journal's files — no model call, no extra process.
+Before the queue probe (ADR 0010) every cycle fired a drive and the
+drive's own closing summary carried this; the probe made the busy cycle
+free and took the status prose with it. This restores it at the same
+zero cost. If the files cannot be read the pulse falls back to its flat
+wording rather than failing.
+
 ## Configuration
 
 Two new `autodrive start` flags, persisted into the state file so the detached
@@ -167,5 +191,10 @@ team-canonical.
 ## Related
 
 - [autodrive.md](autodrive.md) — the daemon these notifications describe.
+- [slack-bridge.md](slack-bridge.md#turn-progress-heartbeats-ops-log)
+  — the *other* Slack heartbeat. These pulse per autodrive **cycle**;
+  those pulse inside a single long **bridge turn**. Both can target
+  the same channel, so check which one you expected before
+  concluding a quiet ops-log is broken.
 - [slack-notify](../src/tigerharness/_bundled_skills/slack-notify/SKILL.md) —
   the outbound Slack path the notifier reuses.
