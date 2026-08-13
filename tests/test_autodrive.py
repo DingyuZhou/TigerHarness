@@ -795,6 +795,74 @@ def test_cmd_status_live_pid_still_calls_in_flight_running_now(tmp_path, capsys)
 
 
 # --------------------------------------------------------------------------
+# CLI: cmd_status when --journal-dir cannot move the state anchor
+#
+# Haruko's walk: standing in a team root, `status --journal-dir <other>`
+# answered about the TEAM's daemon -- `running`, for a journal whose own state
+# file said the pid was dead -- and said nothing about the substitution. Even a
+# nonexistent path reported `running`. The anchor itself is correct and must
+# stay (a daemon started in this team keeps its state at the team's journal
+# while driving another root, so reading the flag's path would report
+# `stopped` for a live daemon); what was wrong was the silence.
+#
+# Whole lines again, and the negative assertion is the load-bearing half: a
+# test that only checks the note APPEARS would pass just as well if the note
+# were printed unconditionally, which would be noise on every ordinary call.
+# --------------------------------------------------------------------------
+
+_ANCHOR_TAIL = "                (team-canonical: one autodrive per team, so"
+
+
+def _team_root(tmp_path):
+    (tmp_path / "team" / "configs").mkdir(parents=True)
+    (tmp_path / "team" / "configs" / "personas.yaml").write_text("personas: []\n")
+    return tmp_path / "team"
+
+
+def test_cmd_status_from_team_root_names_the_state_file_it_actually_read(
+    tmp_path, capsys, monkeypatch
+):
+    team = _team_root(tmp_path)
+    runner.write_state(
+        runner.state_path(team / "journal"),
+        {
+            "pid": os.getpid(), "interval_seconds": 600, "tick_count": 0,
+            "journal_root": str(team / "journal"),
+        },
+    )
+    monkeypatch.chdir(team)
+    args = _args(["status", "--journal-dir", str(tmp_path / "elsewhere" / "journal")])
+    assert cli.cmd_status(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+
+    assert f"  read:         {runner.state_path(team / 'journal')}" in lines
+    assert _ANCHOR_TAIL in lines
+    # and the operator can now see which journal that daemon actually drives
+    assert f"  journal:      {team / 'journal'}" in lines
+
+
+def test_cmd_status_no_state_file_also_names_the_anchor(tmp_path, capsys, monkeypatch):
+    team = _team_root(tmp_path)
+    monkeypatch.chdir(team)
+    args = _args(["status", "--journal-dir", str(tmp_path / "elsewhere" / "journal")])
+    assert cli.cmd_status(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+
+    assert "autodrive: stopped (no state file)" in lines
+    assert f"  read:         {runner.state_path(team / 'journal')}" in lines
+
+
+def test_cmd_status_stays_quiet_when_the_flag_matches_the_anchor(tmp_path, capsys):
+    lines = _status_lines(
+        tmp_path, capsys,
+        {"pid": os.getpid(), "interval_seconds": 600, "tick_count": 0},
+    )
+    assert not [line for line in lines if line.startswith("  read:")]
+    assert _ANCHOR_TAIL not in lines
+    assert "  journal:      (unknown)" in lines
+
+
+# --------------------------------------------------------------------------
 # CLI: cmd_stop
 # --------------------------------------------------------------------------
 

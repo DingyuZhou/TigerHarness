@@ -541,13 +541,30 @@ def ensure_running(
     return False
 
 
+def _print_state_anchor(sfile: Path) -> None:
+    print(f"  read:         {sfile}")
+    print("                (team-canonical: one autodrive per team, so")
+    print("                 --journal-dir does not move this anchor)")
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     # Read from the team-canonical lock (same anchor `start` wrote), so a
     # muted operator standing anywhere in the team still sees daemon health.
-    sfile = state_path(_state_root(args))
+    state_root = _state_root(args)
+    sfile = state_path(state_root)
+    # `--journal-dir` cannot move that anchor: a daemon started inside this
+    # team keeps its state at the team's journal even while driving another
+    # root, so honouring the flag here would report `stopped` for a daemon
+    # that is genuinely running. Name the file read instead of answering
+    # silently about a journal the operator did not ask about.
+    misaimed = bool(getattr(args, "journal_dir", None)) and (
+        _resolve_journal_root(args) != state_root
+    )
     state = read_state(sfile)
     if state is None:
         print("autodrive: stopped (no state file)")
+        if misaimed:
+            _print_state_anchor(sfile)
         return 0
     running, _ = is_running(sfile)
     label = "running" if running else "stopped (stale state file)"
@@ -565,10 +582,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         else "none (muted)"
     )
     print(f"autodrive: {label}")
+    if misaimed:
+        _print_state_anchor(sfile)
     if not running:
         print("  note:         counters below are frozen at the daemon's")
         print("                last write; nothing is running now.")
     print(f"  pid:          {state.get('pid')}")
+    print(f"  journal:      {state.get('journal_root') or '(unknown)'}")
     print(f"  interval:     {int(float(state.get('interval_seconds', 0)))}s")
     print(f"  backend:      {state.get('backend')}")
     print(f"  driver:       {state.get('driver') or '(none)'}")
