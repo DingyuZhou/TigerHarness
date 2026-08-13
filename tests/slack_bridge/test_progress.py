@@ -240,6 +240,34 @@ def test_d2_header_scrubs_before_it_truncates() -> None:
     assert out == "w" * (progress_mod.HEADER_MAX - 1) + "…"
 
 
+def test_d2_header_dropping_makes_room_so_a_longer_paste_can_leak_more() -> None:
+    """The two halves of the position bound, asserted against each other.
+
+    Scrub-before-truncate means the 120 characters are counted on what
+    survived, so a longer message can leak where a shorter one does not.
+    The lengths are asserted because ``docs/slack-bridge.md`` quotes
+    these exact two messages by their character counts; nothing links
+    the doc to this file, so at least let the strings not drift.
+    """
+    token = "token: xoxb-deadbeefcafe"
+    prose = (
+        "Here is the failing request I keep getting from the staging "
+        "deploy, please look at what the gateway is doing: " + token
+    )
+    assignments = (
+        "SECRET=" + "a" * 40 + " OTHER=" + "b" * 40 + " THIRD=" + "c" * 40 + " " + token
+    )
+    assert (len(prose), len(assignments)) == (134, 166)
+
+    cut = sanitize_header(prose)
+    assert cut.endswith("token: xo…")
+    assert "xoxb-deadbeefcafe" not in cut
+
+    whole = sanitize_header(assignments)
+    assert whole == token
+    assert len(whole) == 24
+
+
 def test_d2_header_of_nothing_but_a_secret_renders_an_empty_excerpt() -> None:
     """The whole excerpt can legitimately scrub to nothing.
 

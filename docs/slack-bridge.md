@@ -820,7 +820,12 @@ tool added next month renders nothing rather than leaking by default:
 | `Bash` | the first token of the command (dropped if it looks like `VAR=value`) |
 | anything else | the tool name alone |
 
-Tool arguments, file contents, and command bodies never reach Slack.
+Nothing else does: file contents never reach Slack, no argument of any
+other tool does, and no more of a `Bash` command than that first token.
+Note what the table already implies about the two arguments it *does*
+render — they are allowlisted by **tool**, not scrubbed by **shape**. A
+`file_path` is posted as it stands, truncated at 60 characters and not
+otherwise inspected.
 
 The **parent message** is the exception worth deciding about
 deliberately: it quotes up to 120 characters of the message that started
@@ -840,9 +845,15 @@ turned into spaces, so ``SECRET=`xoxb-…`` scrubs exactly like the
 unbackticked form; spacing them out used to split it into a valueless
 `SECRET=` plus a bare secret, and leak it.
 
-**What that does not do is redact**, and the list of things it lets
-through is not short. The rule is shape-based, not a credential regex,
-and it is token-shaped, so **all** of these are posted verbatim:
+**What that does not do is redact.** Two separate bounds decide whether
+a piece of your text reaches the channel — its **shape** and its
+**position** — and only the first is a rule about secrets at all. Keep
+them apart while reading: a sentence that is true of one is routinely
+false of the other, and a sentence about "what gets through" that does
+not say which bound it means is not a claim you can act on.
+
+The shape bound is not a credential regex, and it is token-shaped, so
+none of these is dropped by it:
 
 - **anything colon-shaped** — `token: xoxb-…`, a JSON body
   `{"token": "xoxb-…"}`, an `Authorization: Bearer xoxb-…` header. The
@@ -868,9 +879,11 @@ is four steps:
 2. split on whitespace;
 3. drop every token containing `=` with something after it — the unit is
    the **token**, never the message;
-4. rejoin and truncate to 120 characters.
+4. rejoin with single spaces — this is what flattens a multi-line paste
+   — and truncate to 120 characters.
 
-Three consequences follow that step 3 alone does not suggest.
+Three consequences follow that reading the four steps does not suggest.
+The first two are the shape bound; the third is the position bound.
 
 **A message can be half-dropped.** `Cookie: session=abc123` posts as
 `Cookie:` — the label survives, the value does not. Do not read that as
@@ -885,14 +898,23 @@ words is intended, not a bug: loosening the rule to preserve query
 strings would reopen the commonest way a token reaches a channel.
 
 **Step 4 is truncation, which is not redaction and must not be read as
-any.** Survival is bounded by length as well as by shape, and the length
-bound is *positional*: the same secret, in the same shape, posts or does
-not depending only on how much text precedes it. `token: xoxb-…` near
-the start of a message reaches the channel; the identical token pushed
-past character 120 by a longer preamble does not. So if you paste
-something long and see
-it cut off, nothing was scrubbed — the message ran out of room, and the
-same paste in a shorter message posts the secret.
+any.** This is the position bound, and it interacts with the shape bound
+in the direction nobody guesses. Step 3 runs *before* step 4, so the 120
+characters are counted on what survived the scrub, not on what you
+typed. **Dropping makes room.**
+
+A longer paste can therefore leak where a shorter one does not, which is
+the reverse of the intuition. `token: xoxb-deadbeefcafe` at the end of a
+134-character sentence of ordinary prose posts as `token: xo…`, cut
+mid-secret. Put the identical token after three `KEY=value` assignments,
+in a *longer* 166-character message, and all three are dropped before
+the count starts: the excerpt is 24 characters and the token posts
+whole.
+
+So a cut-off excerpt is not evidence that anything was scrubbed, and
+length is not protection. What decides is how much *surviving* text
+precedes the secret — which is not something you can judge by looking at
+what you pasted.
 
 Assume anything you paste can reach the channel unless it is
 `KEY=value` with no spaces. The excerpt is sanitised, not safe to leak:
