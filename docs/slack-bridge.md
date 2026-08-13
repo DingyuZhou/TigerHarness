@@ -750,9 +750,16 @@ What lands in the ops-log channel:
 :hourglass: [Shohoku] Anzai still working — "refresh the knowledge index"
     5m · 34 tool calls · last: Edit(src/tigerharness/slack_bridge/bridge.py)
     10m · 71 tool calls · last: Bash(pytest)
-    15m · 71 tool calls · no activity for 6m :warning:
-    :white_check_mark: done in 17m · 96 tool calls
+    15m · 71 tool calls · last: Bash(pytest)
+    20m · 71 tool calls · no activity for 10m :warning:
+    :white_check_mark: done in 22m · 96 tool calls
 ```
+
+The stall warning replaces the `last:` field once the turn has been
+quiet for **two intervals — 10 minutes**, not one, so a single slow tool
+call does not raise it. `10m` is therefore the smallest number that can
+appear in that line; the pulse at 15m above still reports the last tool
+because only 5 minutes had passed since it.
 
 The indentation above is Slack's thread rendering, not part of the
 message text — each pulse is posted as a threaded reply whose payload is
