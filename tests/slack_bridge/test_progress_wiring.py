@@ -761,3 +761,43 @@ async def test_c7c_a_turn_without_compaction_still_reports_a_stall(
     stall = next(t for t in notif.texts if "no activity" in t)
     assert stall.endswith(":warning:")
     assert not any("compacting" in t for t in notif.texts)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_hands_the_reporter_this_lane_s_context(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_dispatch`` must pass the LANE's token, channel and name.
+
+    The recording factory used by every other wiring test swallows
+    ``**kwargs``, so deleting all three arguments from the call site
+    leaves the suite green — which is precisely how this feature first
+    shipped resolving its config from ``os.environ`` and coming up inert
+    on every multi-lane deployment. This test asserts the arguments
+    themselves, not just the reporter's existence.
+    """
+    bridge, _ = _bridge(tmp_path)
+    seen: dict[str, object] = {}
+    notif = _FakeNotifier()
+
+    def _build(header: str, **kwargs: object) -> TurnProgress:
+        seen.update(kwargs)
+        seen["header"] = header
+        return TurnProgress(
+            notif, OPS_CHANNEL, header=header, interval_s=TICK
+        )
+
+    monkeypatch.setattr(bridge_mod, "build_turn_progress", _build)
+    monkeypatch.setattr(bridge_mod, "detect_persona", _detect)
+
+    async def _run(*_args: object, **_kwargs: object) -> FakeResult:
+        return FakeResult()
+
+    monkeypatch.setattr(bridge_mod, "run_with_retry", _run)
+
+    await bridge.handle_message(_event("hello"), AsyncMock())
+
+    team = bridge._team
+    assert seen["bot_token"] == team.slack_bot_token
+    assert seen["channel"] == team.progress_channel
+    assert seen["lane"] == team.team_name

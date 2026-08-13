@@ -161,6 +161,13 @@ class TeamBridgeContext:
     # fragment (see multi._build_idle_compact), because one process-wide
     # os.environ cannot describe N lanes' separate journals.
     idle_compact: "IdleCompactConfig | None" = None
+    # Per-lane ops-log channel for turn-progress heartbeats, for exactly
+    # the reason stated above: one process-wide os.environ cannot
+    # describe N lanes. Multi-lane fills this from the lane's own
+    # env_vars dict; None -> the reporter falls back to resolving from
+    # the process environment (the directly-embedded single-team
+    # bridge, where one process really is one team).
+    progress_channel: str | None = None
 
     @property
     def is_multi_persona(self) -> bool:
@@ -394,7 +401,12 @@ class SlackBridge:
             # Operator's own `text`, deliberately NOT `prompt`, which by
             # now carries attachment scaffolding and a long injected
             # instruction block.
-            progress = build_turn_progress(text)
+            progress = build_turn_progress(
+                text,
+                bot_token=self._team.slack_bot_token,
+                channel=self._team.progress_channel,
+                lane=self._team.team_name,
+            )
             progress_task = asyncio.create_task(progress.run())
 
             # Untracked-thread join (e.g. a reply to a notification DM

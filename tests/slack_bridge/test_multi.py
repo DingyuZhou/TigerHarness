@@ -694,3 +694,55 @@ state_dir: {tmp_path / 'state/shohoku'}
         idx = _write_index(tmp_path, ["shohoku"])
         with pytest.raises(ValueError, match="must start with 'U' or 'W'"):
             load_multi(idx)
+
+
+class TestProgressChannelPerLane:
+    """The lane's ops-log channel comes from the lane's OWN parsed .env.
+
+    `_load_env_file` deliberately never exports a lane's .env, so a
+    reporter resolving from `os.environ` found nothing on every
+    multi-lane deployment — and with two lanes, one lane's token and
+    channel would have served every lane.
+    """
+
+    def test_reads_the_lane_dict_not_the_process_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tigerharness.slack_bridge.multi import _progress_channel
+
+        monkeypatch.setenv("SLACK_NOTIFY_CHANNEL", "C-PROCESS-GLOBAL")
+        assert _progress_channel(
+            {"SLACK_NOTIFY_CHANNEL": "C-LANE"}
+        ) == "C-LANE"
+
+    def test_explicit_progress_channel_wins(self) -> None:
+        from tigerharness.slack_bridge.multi import _progress_channel
+
+        assert _progress_channel({
+            "TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL": "C-OPS",
+            "SLACK_NOTIFY_CHANNEL": "C-NOTIFY",
+        }) == "C-OPS"
+
+    def test_blank_value_does_not_count_as_set(self) -> None:
+        from tigerharness.slack_bridge.multi import _progress_channel
+
+        assert _progress_channel({
+            "TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL": "   ",
+            "SLACK_NOTIFY_CHANNEL": "C-NOTIFY",
+        }) == "C-NOTIFY"
+
+    def test_lane_declaring_nothing_resolves_to_none(self) -> None:
+        """None -> the reporter falls back to the process environment,
+        which is what keeps the embedded single-team bridge working."""
+        from tigerharness.slack_bridge.multi import _progress_channel
+
+        assert _progress_channel({}) is None
+
+    def test_precedence_is_single_homed_with_progress(self) -> None:
+        """The lane lookup and the process fallback must agree on the
+        names AND their order, or a lane and its fallback could resolve
+        to different channels."""
+        from tigerharness.slack_bridge.multi import PROGRESS_CHANNEL_KEYS
+        from tigerharness.slack_bridge.progress import CHANNEL_ENV_VARS
+
+        assert PROGRESS_CHANNEL_KEYS is CHANNEL_ENV_VARS

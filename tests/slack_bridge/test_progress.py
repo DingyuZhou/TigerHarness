@@ -796,3 +796,139 @@ def test_build_returns_a_live_reporter_when_fully_configured(
     assert reporter._inert is False
     assert reporter._channel == "C-OPS"
     assert not [r for r in caplog.records if r.name == PROGRESS_LOGGER]
+
+
+# ---------------------------------------------------------------------------
+# Lane-scoped construction — the multi-lane deployment fix.
+#
+# The bug these cover shipped GREEN at a 100% floor, because every
+# resolution test above hands `resolve_progress_channel()` an
+# environment the deployed bridge does not have (`monkeypatch.setenv`,
+# or `TIGERHARNESS_SLACK_ENV` pointing at a tmp .env). Coverage measures
+# which lines ran, not which environments were modelled. These tests
+# model the deployed one: os.environ carries NO progress keys at all.
+# ---------------------------------------------------------------------------
+
+def test_lane_scoped_build_never_reads_the_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deployment-shaped regression test.
+
+    A multi-lane bridge parses each lane's .env into a dict WITHOUT
+    exporting it, so the process environment is empty of progress keys.
+    This asserts the reporter comes up ENABLED anyway — the assertion
+    that fails against the os.environ-resolving build.
+    """
+    for name in CHANNEL_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    # Would raise if the lane path consulted it at all.
+    monkeypatch.setattr(
+        progress_mod,
+        "resolve_progress_channel",
+        lambda: pytest.fail("lane path must not read os.environ"),
+    )
+
+    reporter = build_turn_progress(
+        "h", bot_token="xoxb-lane-1", channel="C-LANE", lane="Shohoku"
+    )
+
+    assert reporter._inert is False
+    assert reporter._channel == "C-LANE"
+
+
+def test_each_lane_posts_with_its_own_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two lanes must not share one process-global token+channel pair.
+
+    Sharing them is a confidentiality bug, not just a routing one: lane
+    2's turns would post under lane 1's bot identity.
+    """
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    one = build_turn_progress(
+        "h", bot_token="xoxb-one", channel="C-ONE", lane="TeamOne"
+    )
+    two = build_turn_progress(
+        "h", bot_token="xoxb-two", channel="C-TWO", lane="TeamTwo"
+    )
+    assert one._notifier._creds.bot_token == "xoxb-one"
+    assert two._notifier._creds.bot_token == "xoxb-two"
+    assert (one._channel, two._channel) == ("C-ONE", "C-TWO")
+
+
+def test_lane_notifier_cannot_fall_back_to_a_dm() -> None:
+    """No DM fallback, enforced structurally rather than by convention.
+
+    ``_post`` refuses a falsy channel, and the lane notifier carries an
+    empty ``target_user_id``, so there is no DM for a later edit to
+    leak a pulse into.
+    """
+    reporter = build_turn_progress(
+        "h", bot_token="xoxb-lane", channel="C-LANE", lane="Shohoku"
+    )
+    assert reporter._notifier._creds.target_user_id == ""
+
+
+def test_lane_without_a_token_is_inert_not_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    reporter = build_turn_progress(
+        "h", bot_token="", channel="C-LANE", lane="Shohoku"
+    )
+    assert reporter._notifier is None
+    assert reporter._inert is True
+
+
+def test_blank_lane_channel_falls_back_to_the_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The embedded single-team bridge keeps working unchanged: it has
+    no lane channel to declare, so the process environment still wins."""
+    monkeypatch.setattr(
+        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+    )
+    monkeypatch.setenv(CHANNEL_ENV_VARS[0], "C-FROM-ENV")
+    reporter = build_turn_progress(
+        "h", bot_token="xoxb-lane", channel="   ", lane="Shohoku"
+    )
+    assert reporter._channel == "C-FROM-ENV"
+    assert reporter._inert is False
+
+
+def test_parent_carries_the_lane_discriminator() -> None:
+    """Several lanes may share one ops-log channel; an unlabelled parent
+    from a shared channel cannot be attributed to a team at all."""
+    reporter = TurnProgress(
+        _FakeNotifier(), "C-OPS", header="ship it", lane="Shohoku"
+    )
+    reporter.set_persona("Anzai")
+    rendered = reporter._render_parent()
+    assert "[Shohoku]" in rendered
+    assert "Anzai still working" in rendered
+
+
+def test_parent_without_a_lane_is_unchanged() -> None:
+    """The embedded bridge has one team, so it renders no prefix."""
+    reporter = TurnProgress(_FakeNotifier(), "C-OPS", header="ship it")
+    reporter.set_persona("Anzai")
+    assert reporter._render_parent().startswith(":hourglass: Anzai")
+
+
+def test_lane_name_cannot_break_the_one_line_parent() -> None:
+    """The post site cleans whatever the caller supplied — the lane name
+    comes from operator YAML, so it gets the same treatment as the
+    header rather than being trusted."""
+    reporter = TurnProgress(
+        _FakeNotifier(), "C-OPS", header="ship it",
+        lane="Sho\nhoku   Team",
+    )
+    rendered = reporter._render_parent()
+    assert "\n" not in rendered
+    assert "[Sho hoku Team]" in rendered

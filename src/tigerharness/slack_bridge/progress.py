@@ -43,7 +43,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..agent_sdk.types import Event, RunStart, ToolCall
-from .notify import SlackNotifier, _load_slack_bridge_dotenv
+from .notify import _Creds, SlackNotifier, _load_slack_bridge_dotenv
 
 
 log = logging.getLogger("tigerharness.slack_bridge.progress")
@@ -141,10 +141,12 @@ class TurnProgress:
         header: str,
         interval_s: float = DEFAULT_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
+        lane: str | None = None,
     ) -> None:
         self._notifier = notifier
         self._channel = channel
         self._header = header
+        self._lane = lane
         self._interval_s = interval_s
         self._clock = clock
         self._persona: str | None = None
@@ -210,9 +212,18 @@ class TurnProgress:
     # ---- rendering ----
 
     def _render_parent(self) -> str:
+        # The lane prefix is not decoration: several lanes may share one
+        # ops-log channel, and an unlabelled parent from a shared channel
+        # cannot be attributed to a team at all.
         who = "still working"
         if self._persona:
             who = f"{self._persona} still working"
+        if self._lane:
+            # Sanitised here for the same reason the header is: this
+            # module's rule is that the post site cleans whatever the
+            # caller supplied, so no caller can break the one-line
+            # format by forgetting to.
+            who = f"[{_truncate(' '.join(self._lane.split()), 40)}] {who}"
         return f':hourglass: {who} — "{sanitize_header(self._header)}"'
 
     @staticmethod
@@ -359,24 +370,72 @@ def resolve_progress_channel() -> str | None:
     return None
 
 
+def _notifier_for_token(bot_token: str) -> SlackNotifier | None:
+    """A notifier bound to ONE lane's bot token, built without reading
+    the process environment.
+
+    ``target_user_id`` is deliberately empty. Every post this module
+    makes passes an explicit channel, and :meth:`TurnProgress._post`
+    refuses to post when the channel is falsy -- so the DM target is
+    unreachable by construction. That makes the "no DM fallback" rule a
+    structural property here rather than a convention a later edit could
+    break.
+    """
+    token = (bot_token or "").strip()
+    if not token:
+        return None
+    return SlackNotifier(_Creds(bot_token=token, target_user_id=""))
+
+
 def build_turn_progress(
     header: str,
     *,
     interval_s: float = DEFAULT_INTERVAL_S,
+    bot_token: str | None = None,
+    channel: str | None = None,
+    lane: str | None = None,
 ) -> TurnProgress:
-    """Resolve creds + channel and return a live or inert reporter.
+    """Return a live or inert reporter for one turn.
 
     Never returns ``None`` and never raises: the caller must not have to
     branch on configuration.
+
+    Two construction paths, and the distinction is load-bearing:
+
+    * **Lane-scoped** (*bot_token* given) -- the multi-lane bridge hands
+      over the lane's own token and channel and this function touches
+      ``os.environ`` not at all. A multi-lane bridge parses each lane's
+      ``.env`` into a dict *without* exporting it (``multi._load_env_file``:
+      "WITHOUT polluting os.environ"), so a reporter that resolved its own
+      config would find nothing on a multi-lane deployment -- and, with
+      two lanes, one lane's token would serve every lane. Per-lane state
+      reaches the bridge as per-lane fields; this is one of them.
+    * **Process-scoped** (*bot_token* omitted) -- the directly-embedded
+      single-team bridge, which has no lane context to pass and for which
+      one process really does mean one team.
     """
-    notifier = SlackNotifier.try_load()
-    channel = resolve_progress_channel()
-    if notifier is not None and not channel:
+    if bot_token is not None:
+        notifier = _notifier_for_token(bot_token)
+    else:
+        notifier = SlackNotifier.try_load()
+    # The lane's own declaration wins. Falling back to the process
+    # environment is what keeps the embedded single-team bridge working
+    # unchanged; on a multi-lane box that fallback finds nothing unless
+    # an operator deliberately exported one, which is why the lane field
+    # is the fix and not the fallback.
+    resolved = (channel or "").strip() or None
+    if resolved is None:
+        resolved = resolve_progress_channel()
+    if notifier is not None and not resolved:
         log.info(
             "progress: slack creds present but no ops-log channel "
             "(set %s); turn progress heartbeats are off",
             CHANNEL_ENV_VARS[0],
         )
     return TurnProgress(
-        notifier, channel, header=header, interval_s=interval_s
+        notifier,
+        resolved,
+        header=header,
+        interval_s=interval_s,
+        lane=lane,
     )
