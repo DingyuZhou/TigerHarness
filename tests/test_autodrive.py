@@ -14,6 +14,7 @@ import os
 
 import pytest
 
+from tests.conftest import RealDaemonSpawnBlocked
 from tigerharness.autodrive import cli, runner
 from tigerharness.autodrive.notifier import (
     NullNotifier,
@@ -564,6 +565,45 @@ def _make_team(tmp_path, default_persona="Anzai"):
         f"default_persona: {default_persona}\npersonas:\n  - name: {default_persona}\n",
         encoding="utf-8",
     )
+
+
+def test_cmd_start_resolves_the_spawn_default_at_call_time(tmp_path):
+    """The omitted-``spawn`` path must reach the *module-level* function, so
+    ``tests/conftest.py`` can bolt it shut for the whole suite.
+
+    Written the obvious way -- ``spawn=spawn_loop_process`` in the
+    signature -- the default binds at import and no amount of patching from
+    outside can reach it. `ensure_running` omits the argument, so with the
+    early binding every journal-scaffolding test that tripped the
+    auto-start hook spawned a real detached daemon that outlived pytest.
+    Thirty were found alive at once.
+
+    Reaching the guard *is* the assertion: it proves the seam is live. The
+    autouse fixture installed it, and it is a ``BaseException``, so
+    ``pytest.raises`` must name it explicitly.
+    """
+    _make_team(tmp_path)
+    args = _args(["start", "--journal-dir", str(tmp_path / "journal")])
+    with pytest.raises(RealDaemonSpawnBlocked):
+        cli.cmd_start(args, now=lambda: "T")
+
+
+def test_autostart_hook_cannot_spawn_a_daemon_even_if_the_env_leaks(
+    tmp_path, monkeypatch,
+):
+    """Belt and braces, verified: force the leak the env scrub prevents and
+    confirm the second layer still holds.
+
+    `ensure_running` swallows every ``Exception`` by design, so a guard
+    derived from ``Exception`` would be caught here, logged at WARNING, and
+    the daemon-spawn would look like a tidy no-op while the real damage --
+    a detached process -- had already happened. ``RealDaemonSpawnBlocked``
+    is a ``BaseException`` precisely so it escapes this handler.
+    """
+    _make_team(tmp_path)
+    monkeypatch.setenv("TIGERHARNESS_AUTODRIVE_AUTOSTART", "1")
+    with pytest.raises(RealDaemonSpawnBlocked):
+        cli.ensure_running(tmp_path / "journal")
 
 
 def test_cmd_start_happy(tmp_path, capsys):
