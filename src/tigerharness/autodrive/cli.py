@@ -314,13 +314,30 @@ def kill_process_group(pid: int) -> None:  # pragma: no cover - real signal
 def cmd_start(
     args: argparse.Namespace,
     *,
-    spawn: Callable[..., int] = spawn_loop_process,
+    spawn: Callable[..., int] | None = None,
     now: Callable[[], str] = utcnow_iso,
     quiet: bool = False,
 ) -> int:
     """Start the team's daemon. ``quiet`` collapses the operator banner to a
     single line -- what :func:`ensure_running` wants, since its caller is a
-    ``journal`` command whose own output should stay readable."""
+    ``journal`` command whose own output should stay readable.
+
+    ``spawn`` defaults to ``None`` and resolves to the module-level
+    :func:`spawn_loop_process` *at call time*, not at ``def`` time. That
+    distinction is load-bearing, and it was learned the hard way. Written as
+    ``spawn=spawn_loop_process`` the default binds at import, so patching
+    ``cli.spawn_loop_process`` silently does nothing -- the seam this
+    module's docstring advertises did not exist for any caller that omitted
+    the argument, and :func:`ensure_running` is exactly such a caller.
+
+    The consequence was not theoretical. A leaked ``AUTOSTART`` env var let
+    the *test suite* reach the auto-start hook, and because the seam could
+    not be closed from outside, every affected test spawned a real detached
+    daemon that outlived pytest and fired real drives forever. Thirty of
+    them were found alive at once. Late binding is what lets
+    ``tests/conftest.py`` bolt that door shut for the whole suite.
+    """
+    spawn = spawn_loop_process if spawn is None else spawn
     journal_root = _resolve_journal_root(args)
     journal_root.mkdir(parents=True, exist_ok=True)
     # The lock (state file) is team-canonical so the guard is one-per-team,
