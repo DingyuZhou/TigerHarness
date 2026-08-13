@@ -319,6 +319,12 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
 
   The Configuration table above doesn't distinguish which env vars belong in which file. Worth a docs pass (or a single config table with a "where it goes" column) so users don't have to read the loader to find out.
 
+### Bridge shutdown
+
+- **The drain budget has only ever been exercised with one turn in flight.** On shutdown the bridge waits up to `_DRAIN_TIMEOUT_S` for its in-flight turns to finish, and that wait is released by a single `self._drained.set()` that fires when the in-flight counter reaches zero. The counter can only exceed 1 with concurrent dispatches, which no test creates — so the "still in flight, do not release yet" side of that check has never run, and it sits behind a `# pragma: no branch` that keeps the 100% coverage gate green over it. The margins in the budget chain (`STOP_DRAIN_S + FINISH_POST_S <= _DRAIN_TIMEOUT_S <= TimeoutStopSec`) exist precisely for the multi-turn case, so the case they were sized for is the one with no coverage. See ["The drain budget is a chain, not a number"](docs/slack-bridge.md) for the full ordering and the reasoning behind each margin.
+  - **Fix candidate**: a test with two concurrent dispatches in which the first to finish must *not* set `_drained`. That reaches the untested branch and lets the pragma come off.
+  - Not known to misbehave — this is an untested path, not a reported bug.
+
 ### Agent Slack notifications
 
 - **Notifications require the bot to be in `SLACK_NOTIFY_CHANNEL`.** Each team has its own Slack app (own bot user). After creating a new team's Slack app and setting `SLACK_NOTIFY_CHANNEL` in `configs/.env`, the bot must be **invited to that channel** (`/invite @BotName` in Slack). Without this, `chat.postMessage` returns `channel_not_found` and notifications are silently skipped. The notify CLI logs the error to stderr but doesn't surface it to the user.
