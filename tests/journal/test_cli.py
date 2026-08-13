@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -1791,6 +1792,54 @@ class TestStepDone:
         assert "Did the step" in e.body
         # cursor moved to the on_approve target
         assert walk.read(paths, "wf1").current == "build"
+
+    def test_advancing_the_walk_refreshes_the_heartbeat(
+        self, journal_dir, tmp_path,
+    ):
+        """Regression for the false-crash incident: the walk cursor lives
+        in walk.json, so a long workflow used to leave status.updated_at
+        frozen at the last claim. Past the stuck timeout the sweep called
+        a healthy task crashed and autodrive fired a rescue drive on top
+        of the live session -- every interval, until the box OOM'd.
+        Advancing the walk IS progress and must stamp the heartbeat."""
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        stale = "2026-01-01T00:00:00Z"
+        st = Status.from_json(paths.status_json("wf1").read_text())
+        st.updated_at = stale
+        paths.status_json("wf1").write_text(st.to_json())
+        assert self._run(journal_dir, "wf1", "plan", "APPROVE",
+                         _note(tmp_path)) == 0
+        after = Status.from_json(paths.status_json("wf1").read_text())
+        assert after.updated_at > stale
+        # Only the heartbeat moved -- step-done must not disturb the rest.
+        assert after.state is st.state
+        assert after.session_ref == st.session_ref
+        assert after.sessions == st.sessions
+
+    def test_heartbeat_refresh_failure_is_logged_not_fatal(
+        self, journal_dir, tmp_path, monkeypatch, caplog,
+    ):
+        """The step is already recorded by the time the refresh runs, so a
+        write failure must not fail the command -- a non-zero exit would
+        invite a retry that duplicates the worklog entry. Loud warning
+        instead: a silent miss re-opens the false-crash bug."""
+        from tigerharness.journal import cli as journal_cli
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(paths, "wf1", _linear_steps(), "plan")
+        monkeypatch.setattr(
+            journal_cli, "_write_status_atomic",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        with caplog.at_level(logging.WARNING):
+            rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                           _note(tmp_path))
+        assert rc == 0
+        assert walk.read(paths, "wf1").current == "build"
+        assert len(worklog.list_entries(paths, "wf1")) == 1
+        assert "heartbeat refresh failed" in caplog.text
+        assert "disk full" in caplog.text
 
     def test_json_output(self, journal_dir, tmp_path, capsys):
         paths = JournalPaths(root=journal_dir)

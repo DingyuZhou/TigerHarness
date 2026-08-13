@@ -54,7 +54,7 @@ journal/ (passive file-based state machine)         <-- source of truth
 Driver (`drive-journal` skill, interactive session)
   1. Lazy sweep of active/ (no AI, no cron, no daemon)
        - archive done/ tasks
-       - classify in_progress as idle/busy/crashed via the `session_ref` attach signal (heartbeat is crash-only; see docs/journal-instant-resume.md)
+       - classify in_progress as idle/busy/crashed via the `session_ref` attach signal (heartbeat is crash-only; see docs/journal-instant-resume.md); "crashed" additionally requires a task dir nobody has written to inside the timeout, so a live worker with a lagging heartbeat is not mistaken for a corpse
        - summarise actionable counts in-session
        - cheap no-op fast path: if all in_progress are busy and nothing is idle/crashed/pending, stop immediately (a frequent loop is meant to no-op here)
   2. Pick ONE actionable task (finish-before-start: resumable in_progress first; a busy task defers a pending one), run it through its WHOLE max_sessions budget, session-to-session
@@ -120,7 +120,7 @@ Task-id format: `<YYYYMMDD>-<HHmmSS>-<slug>-<uuid8>`.
 | Env var | Default | Purpose |
 |---|---|---|
 | `TIGERHARNESS_JOURNAL_DIR` | resolver (below) | Override the journal root. |
-| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which an *attached* `in_progress` task (`session_ref` set) is treated as **crashed** and reclaimable. A detached task is **idle**/resumable regardless of age — the heartbeat is crash-detection only. |
+| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age past which an *attached* `in_progress` task (`session_ref` set) is treated as **crashed** and reclaimable — but only if the task directory has *also* gone untouched for that long, so a live worker with a lagging heartbeat is not reclaimed out from under itself. A detached task is **idle**/resumable regardless of age — the heartbeat is crash-detection only. |
 
 Journal root resolution priority:
 

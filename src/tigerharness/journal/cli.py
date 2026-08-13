@@ -1442,6 +1442,27 @@ def cmd_step_done(args: argparse.Namespace) -> int:
     )
     walk.write(paths, new_state)
 
+    # Advancing the walk IS progress, so it must refresh the heartbeat. The
+    # cursor lives in walk.json (Status rejects the field), so without this
+    # a workflow runs for hours -- every step landing a worklog entry --
+    # while `status.updated_at` stays frozen at the last claim. Past
+    # `stuck_timeout_sec` the sweep then calls a healthy, working task
+    # *crashed*, and whatever drives the queue tries to rescue it out from
+    # under the session that owns it.
+    # Deliberately after the advance and non-fatal: the step is already
+    # recorded, so a failure here must not fail the command and trigger a
+    # retry that duplicates the worklog note. Logged loudly instead --
+    # a silent miss re-opens exactly the bug above.
+    try:
+        status.updated_at = _utcnow_iso()
+        _write_status_atomic(paths, status)
+    except OSError as exc:
+        log.warning(
+            "step-done: walk advanced but the heartbeat refresh failed "
+            "for %s (%s); the task may read as crashed once it is "
+            "older than the stuck timeout", status.id, exc,
+        )
+
     terminal = next_step in walk.SENTINELS
     if getattr(args, "format", "text") == "json":
         print(json.dumps({

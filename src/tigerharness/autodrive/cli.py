@@ -23,6 +23,7 @@ import asyncio
 import fcntl
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -220,16 +221,66 @@ def _state_root(args: argparse.Namespace) -> Path:
 
 # ----- detached spawn / kill seams (injected in tests) -----
 
+def cgroup_scope_prefix(env: Mapping[str, str] | None = None) -> list[str]:
+    """A ``systemd-run`` prefix that puts the daemon in its **own** cgroup,
+    or ``[]`` when that is not available.
+
+    ``start_new_session=True`` detaches the process *session*, but a cgroup
+    is inherited and only systemd can move a process out of one. So a
+    daemon auto-started from inside a long-lived service -- the Slack
+    bridge is the case that bit us -- lands in that service's cgroup and
+    shares its memory accounting. A drive that spikes memory then gets the
+    whole unit OOM-killed: daemon, drives, *and* the bridge that was only
+    ever the launcher. Placing the daemon in a transient scope under
+    ``user.slice`` breaks that shared fate.
+
+    ``--collect`` reaps the scope when it exits so repeated starts cannot
+    leave failed units behind. ``--quiet`` keeps systemd's own chatter out
+    of the daemon log.
+
+    **``--scope`` preserves the pid** -- systemd-run registers the transient
+    unit and then ``execve``s the command in its own process rather than
+    forking a child. Verified on the deployment host: the pid ``Popen``
+    returns is the daemon's own, its pgid equals its pid, and its cgroup is
+    ``.../app.slice/run-pNNN-iNNN.scope``. That is load-bearing, not
+    incidental -- every pid check downstream (``is_running``, the pid in
+    ``.autodrive.json``, :func:`kill_process_group` signalling the group)
+    assumes the spawned pid *is* the daemon. Swap ``--scope`` for
+    ``--service-type``/``--unit`` and all of that silently breaks.
+
+    No caller-supplied value is interpolated into the argv: the prefix is a
+    fixed literal list, and ``env`` is only ever *tested* for a key. A
+    hostile ``XDG_RUNTIME_DIR`` can flip the decision, never inject an
+    argument.
+
+    Degrades to ``[]`` -- plain, in-cgroup spawn, exactly the old behaviour
+    -- when there is no ``systemd-run`` or no user manager to talk to (a
+    container, a non-systemd host, CI). Detection is deliberately
+    conservative: a wrong "yes" makes the daemon fail to start at all,
+    while a wrong "no" only forfeits the isolation.
+    """
+    src = os.environ if env is None else env
+    if not shutil.which("systemd-run"):
+        return []
+    if not src.get("XDG_RUNTIME_DIR"):
+        # No per-user runtime dir means no user bus to register a scope on.
+        return []
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect"]
+
+
 def spawn_loop_process(
     state_file: Path, *, cwd: str, log_file: Path, env: dict[str, str]
 ) -> int:  # pragma: no cover - spawns a real detached process
     """Launch the hidden ``_loop`` as a detached background process and
     return its pid. ``start_new_session=True`` puts it in its own process
     group so ``stop`` can signal the whole tree; stdout/stderr append to
-    the log file; ``env`` pins the journal the spawned drives target."""
+    the log file; ``env`` pins the journal the spawned drives target.
+
+    Wrapped in :func:`cgroup_scope_prefix` where systemd allows it, so the
+    daemon does not share an OOM fate with whatever launched it."""
     log_fh = open(log_file, "a", encoding="utf-8")
     proc = subprocess.Popen(
-        [
+        cgroup_scope_prefix(env) + [
             sys.executable,
             "-m",
             "tigerharness.autodrive",

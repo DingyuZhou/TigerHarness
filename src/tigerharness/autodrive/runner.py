@@ -109,6 +109,13 @@ SUMMARY_MAX_CHARS = 600
 QUEUE_ACTIONABLE = "actionable"
 QUEUE_BUSY = "busy"
 QUEUE_IDLE = "idle"
+#: Actionable, but *only* because a task's heartbeat looks crashed. Kept
+#: distinct from ``actionable`` because a rescue is the one fire that can
+#: attack a task another session still owns, so the loop gates it on having
+#: no drive of its own in flight. A probe that cannot tell the difference
+#: (an injected fake returning plain ``actionable``) keeps the old
+#: behaviour, which is why this is a new verdict rather than a new argument.
+QUEUE_RESCUE = "rescue"
 
 #: Why the loop exited. ``queue-drained`` is the ADR 0010 self-stop; the
 #: others are the pre-existing external exits.
@@ -379,13 +386,39 @@ def is_running(
 
 # ----- the queue probe (ADR 0010) -----
 
+def _rescue_in_play(result: Any) -> bool:
+    """True when a fire might land on a **crashed** task.
+
+    Deliberately blunt -- *any* crashed task counts, not just a queue that
+    holds nothing else. The first draft asked "is a rescue the only work
+    left?" and stood down the moment a pending task appeared, which misses
+    the case that matters: :meth:`SweepResult.actionable` returns
+    ``in_progress_idle + in_progress_crashed`` *before* ``pending``, so a
+    drive fired for the pending task sweeps, finds the crashed one ranked
+    higher, and takes that instead. Same double-drive, one step removed.
+
+    The cost of bluntness is one interval of forfeited overlap -- the hold
+    lifts as soon as the in-flight drive lands. The cost of precision here
+    was an OOM-killed Slack bridge. Not a close call.
+    """
+    return bool(result.in_progress_crashed)
+
+
 def probe_queue(cfg: AutodriveConfig) -> str:
     """Classify the journal queue **without spending a model call**.
 
-    Returns one of :data:`QUEUE_ACTIONABLE`, :data:`QUEUE_BUSY`,
-    :data:`QUEUE_IDLE`. This is the journal's own lazy sweep -- plain,
-    non-AI Python -- run inside the daemon so an empty queue costs a file
-    walk instead of a whole ``claude -p`` session.
+    Returns one of :data:`QUEUE_ACTIONABLE`, :data:`QUEUE_RESCUE`,
+    :data:`QUEUE_BUSY`, :data:`QUEUE_IDLE`. This is the journal's own lazy
+    sweep -- plain, non-AI Python -- run inside the daemon so an empty queue
+    costs a file walk instead of a whole ``claude -p`` session.
+
+    :data:`QUEUE_RESCUE` is actionable-with-a-caveat: the queue holds a task
+    the sweep called crashed, and :meth:`SweepResult.actionable` ranks a
+    rescue above any pending work -- so a fire on *this* queue lands on the
+    crashed task whatever else is waiting. That is real work when the daemon
+    has nothing out, and a self-inflicted stampede when it does, so it is
+    reported separately and :func:`run_loop`, which alone knows what is in
+    flight, makes the call.
 
     ``deferred/`` entries count as **actionable**: a deferred conversation is
     queued work that the drive materializes at the top of OPERATING.md. Miss
@@ -417,7 +450,13 @@ def probe_queue(cfg: AutodriveConfig) -> str:
 
         paths = JournalPaths(Path(cfg.journal_root))
         result = sweep(paths)
-        if result.has_actionable() or list_deferred(paths):
+        deferred = list_deferred(paths)
+        if _rescue_in_play(result):
+            # Actionable, but a rescue is in the mix. Reported separately
+            # so the loop -- which alone knows what it has out -- can
+            # refuse to fire one on top of its own drive. See ``run_loop``.
+            return QUEUE_RESCUE
+        if result.has_actionable() or deferred:
             return QUEUE_ACTIONABLE
         if result.in_progress_busy:
             return QUEUE_BUSY
@@ -506,6 +545,10 @@ def error_text(fire_no: int, exc: Any) -> str:
 #: says *why* the rhythm ticked without launching a drive.
 SKIP_BUSY = "queue busy - a live session owns the in-flight task"
 SKIP_WAITING = "queue idle - waiting on an in-flight drive"
+SKIP_RESCUE_HELD = (
+    "a task reads as crashed, but our own drive is still out - holding "
+    "the rescue rather than double-driving it"
+)
 
 
 def skip_text(launched: int, at: str, reason: str, in_flight: int) -> str:
@@ -745,6 +788,26 @@ async def run_loop(
 
         # --- queue probe (ADR 0010): decide whether to spend a drive ---
         verdict = await asyncio.to_thread(probe, cfg)
+        if verdict == QUEUE_RESCUE:
+            if in_flight:
+                # The likeliest owner of that "crashed" task is our own
+                # in-flight drive whose heartbeat went stale. Firing would
+                # put a second session on a task the first is still
+                # working -- and since the stale verdict does not clear,
+                # it would fire again every interval until something
+                # falls over. Wait instead; a real crash is still there
+                # next cycle, when nothing of ours is out.
+                log.info(
+                    "autodrive: rescue held -- %d drive(s) in flight",
+                    len(in_flight),
+                )
+                maintenance_done = False
+                await _pulse_skip(SKIP_RESCUE_HELD)
+                await sleep(cfg.interval_seconds)
+                continue
+            # Nothing of ours is running, so the crash is somebody else's
+            # and genuinely ours to pick up.
+            verdict = QUEUE_ACTIONABLE
         is_maintenance = False
         if verdict == QUEUE_IDLE:
             if maintenance_done and not in_flight:

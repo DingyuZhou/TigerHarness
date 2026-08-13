@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from datetime import datetime
+
 import pytest
 
 from tigerharness.journal.models import State, Status
@@ -10,6 +13,7 @@ from tigerharness.journal.sweep import (
     DEFAULT_STUCK_TIMEOUT_SEC,
     MalformedEntry,
     SweepResult,
+    newest_mtime_age_seconds,
     stuck_timeout_from_env,
     sweep,
 )
@@ -26,12 +30,20 @@ def _write_status(
     state: State = State.PENDING,
     updated_at: str = "2026-06-02T08:00:00Z",
     session_ref: str | None = None,
+    mtime: str | None = None,
 ) -> None:
     """Seed one status.json on disk in active/<task_id>/.
 
     ``session_ref`` is the attach token: ``None`` (default) = detached
     (an ``in_progress`` task is then *idle*/resumable); a token = a
-    session is attached (then fresh=*busy*, stale=*crashed*)."""
+    session is attached (then fresh=*busy*, stale=*crashed*).
+
+    ``mtime`` backdates the file's modification time; it defaults to
+    ``updated_at`` so the fixture is internally consistent -- a task
+    whose heartbeat says "24h ago" also *looks* untouched for 24h on
+    disk. Pass it explicitly to build the interesting mismatch: a stale
+    heartbeat over files that were written seconds ago (a live worker
+    that advanced its walk without refreshing status.json)."""
     paths.ensure()
     (paths.active / task_id).mkdir(exist_ok=True)
     s = Status(
@@ -48,6 +60,45 @@ def _write_status(
         session_ref=session_ref,
     )
     paths.status_json(task_id).write_text(s.to_json())
+    stamp = datetime.fromisoformat(
+        (mtime or updated_at).replace("Z", "+00:00"),
+    ).timestamp()
+    os.utime(paths.status_json(task_id), (stamp, stamp))
+
+
+# ---------------------------------------------------------------------------
+# newest_mtime_age_seconds
+# ---------------------------------------------------------------------------
+
+class TestNewestMtimeAgeSeconds:
+    def test_reports_age_of_the_newest_file_anywhere_below(self, tmp_path):
+        (tmp_path / "nested").mkdir()
+        old = tmp_path / "old.txt"
+        new = tmp_path / "nested" / "new.txt"
+        old.write_text("a")
+        new.write_text("b")
+        os.utime(old, (1000.0, 1000.0))
+        os.utime(new, (1500.0, 1500.0))
+        assert newest_mtime_age_seconds(tmp_path, now_epoch=2000.0) == 500.0
+
+    def test_clock_skew_never_yields_a_negative_age(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("a")
+        os.utime(f, (5000.0, 5000.0))
+        assert newest_mtime_age_seconds(tmp_path, now_epoch=1000.0) == 0.0
+
+    def test_no_files_means_no_liveness_signal(self, tmp_path):
+        # Directories alone carry no evidence, so the caller must fall
+        # back to the heartbeat rather than treating the task as alive.
+        (tmp_path / "empty-subdir").mkdir()
+        assert newest_mtime_age_seconds(
+            tmp_path, now_epoch=2000.0,
+        ) == float("inf")
+
+    def test_missing_directory_means_no_liveness_signal(self, tmp_path):
+        assert newest_mtime_age_seconds(
+            tmp_path / "gone", now_epoch=2000.0,
+        ) == float("inf")
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +262,58 @@ class TestSweep:
         assert [s.id for s in result.blocked] == ["bl1"]
         assert result.archived == []
         assert result.malformed == []
+
+    def test_stale_heartbeat_but_fresh_files_is_busy_not_crashed(
+        self, paths,
+    ):
+        """The false-crash regression: a workflow task advances its walk
+        cursor (walk.json) on every step but only refreshes status.json
+        at session boundaries. Under load a *healthy* task therefore
+        carries a heartbeat older than the stuck timeout. Classifying it
+        crashed makes the sweep actionable, which makes autodrive fire a
+        rescue drive on top of the live one -- every interval. Files on
+        disk are the second opinion: recent writes mean somebody is home.
+        """
+        _write_status(
+            paths, "ip-working",
+            state=State.IN_PROGRESS,
+            updated_at="2026-06-02T07:00:00Z",   # 70 min stale
+            session_ref="tok-working",
+            mtime="2026-06-02T08:09:30Z",        # ...but touched 30s ago
+        )
+        result = sweep(
+            paths, stuck_timeout_sec=300, now="2026-06-02T08:10:00Z",
+        )
+        assert [s.id for s in result.in_progress_busy] == ["ip-working"]
+        assert result.in_progress_crashed == []
+        assert result.has_actionable() is False
+
+    def test_crashed_still_reclaimed_when_the_task_dir_is_quiet(
+        self, paths,
+    ):
+        """The other half of the contract: mtime liveness must not make a
+        genuinely dead task immortal. Sweep never writes into an
+        in_progress task dir, so a dead owner leaves the dir frozen and
+        the task is still reclaimed."""
+        _write_status(
+            paths, "ip-dead",
+            state=State.IN_PROGRESS,
+            updated_at="2026-06-02T07:00:00Z",
+            session_ref="tok-dead",
+            mtime="2026-06-02T07:00:00Z",
+        )
+        # A second file in the dir, equally stale -- the scan takes the
+        # *newest* mtime, so this must not rescue the task either.
+        note = paths.active / "ip-dead" / "worklog.md"
+        note.write_text("last words\n")
+        stamp = datetime.fromisoformat(
+            "2026-06-02T07:05:00+00:00",
+        ).timestamp()
+        os.utime(note, (stamp, stamp))
+        result = sweep(
+            paths, stuck_timeout_sec=300, now="2026-06-02T08:10:00Z",
+        )
+        assert [s.id for s in result.in_progress_crashed] == ["ip-dead"]
 
     def test_archives_done_tasks(self, paths):
         _write_status(paths, "d1", state=State.DONE)
