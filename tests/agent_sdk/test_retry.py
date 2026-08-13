@@ -19,6 +19,11 @@ from tigerharness.agent_sdk.types import (
 )
 
 
+#: Failure 4 of the turn-progress feature's six log lines is pinned to
+#: this logger, and it is the only one that lives outside `slack_bridge`.
+RETRY_LOGGER = "tigerharness.agent_sdk.retry"
+
+
 # ---------- Fakes ------------------------------------------------------------
 
 class _FakeBackend:
@@ -415,7 +420,10 @@ async def test_raising_on_event_does_not_retry_the_turn(
         )
     assert result.final_output == "stream-1"
     assert backend.stream_calls == 1
-    assert any("on_event callback raised" in r.getMessage()
+    # `caplog.records` is unscoped, so without the name check this
+    # assertion passes from ANY logger and §8's attribution is unpinned.
+    assert any(r.name == RETRY_LOGGER
+               and "on_event callback raised" in r.getMessage()
                for r in caplog.records)
 
 
@@ -438,7 +446,8 @@ async def test_raising_on_retry_does_not_replace_the_backend_error(
                 max_attempts=3, base_delay_s=0, on_retry=_boom,
             )
     assert backend.call_count == 3
-    assert any("on_retry callback raised" in r.getMessage()
+    assert any(r.name == RETRY_LOGGER
+               and "on_retry callback raised" in r.getMessage()
                for r in caplog.records)
 
 
