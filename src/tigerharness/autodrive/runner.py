@@ -543,7 +543,97 @@ def error_text(fire_no: int, exc: Any) -> str:
 
 #: Why a cycle declined to fire. Rides in the skip pulse so the channel
 #: says *why* the rhythm ticked without launching a drive.
-SKIP_BUSY = "queue busy - a live session owns the in-flight task"
+#: The busy pulse's opening words, single-homed: `SKIP_BUSY` is the
+#: fallback wording used when the task detail cannot be read, and the
+#: detailed form replaces everything after this prefix.
+SKIP_BUSY_PREFIX = "queue busy"
+SKIP_BUSY = f"{SKIP_BUSY_PREFIX} - a live session owns the in-flight task"
+
+#: Cap the busy pulse's task title so one long title cannot turn a
+#: skimmable heartbeat into a wrapped paragraph on a phone.
+BUSY_TITLE_MAX = 48
+
+
+def _age_minutes(iso: str, *, at: datetime | None = None) -> int | None:
+    """Whole minutes since an ISO-8601 stamp, or None if unparseable.
+
+    Never raises: a malformed timestamp must degrade the pulse to its
+    old flat wording, not break the heartbeat that reports it.
+    """
+    try:
+        stamp = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    now_ = at or datetime.now(timezone.utc)
+    return max(0, int((now_ - stamp).total_seconds() // 60))
+
+
+def busy_task_detail(cfg: AutodriveConfig) -> str:
+    """A one-line "what is that busy drive actually doing" summary.
+
+    An hour of identical ``queue busy`` pulses tells the Operator the
+    daemon is alive and *nothing* about whether the drive is making
+    progress -- a genuinely hung drive renders exactly like a healthy
+    one. Before the queue probe (ADR 0010) every cycle fired a drive,
+    and the drive's own closing summary carried this; the probe made
+    the busy cycle free and silently took the status prose with it.
+    This restores it at zero model cost, from files.
+
+    **A pure read.** It deliberately does NOT call ``sweep()`` -- the
+    probe already ran it this cycle, and sweep archives and materializes
+    as a side effect, so calling it twice per cycle would do that work
+    twice.
+
+    Returns ``""`` when there is nothing useful to add, so the caller
+    degrades to the old flat wording rather than to an error.
+    """
+    if not cfg.journal_root:
+        return ""
+    try:
+        from ..journal.models import Status
+        from ..journal.paths import JournalPaths
+
+        paths = JournalPaths(Path(cfg.journal_root))
+        for task_dir in sorted(paths.active.iterdir()):
+            sfile = task_dir / "status.json"
+            if not sfile.is_file():
+                continue
+            try:
+                status = Status.from_json(sfile.read_text())
+            except Exception:
+                # One unreadable task must not blind the pulse to the
+                # busy task sitting behind it in the walk order.
+                continue
+            # The busy signature: in_progress AND a session attached.
+            if status.state != "in_progress" or not status.session_ref:
+                continue
+            bits: list[str] = []
+            title = status.title.strip()
+            if len(title) > BUSY_TITLE_MAX:
+                title = title[: BUSY_TITLE_MAX - 1] + "…"
+            bits.append(f'"{title}"')
+            walk = paths.walk_json(status.id)
+            if walk.is_file():
+                step = json.loads(walk.read_text()).get("current")
+                if step:
+                    bits.append(f"at {step}")
+            wl = paths.worklog(status.id)
+            if wl.is_dir():
+                bits.append(f"{len(list(wl.glob('*.md')))} notes")
+            age = _age_minutes(status.updated_at)
+            if age is not None:
+                bits.append(f"last write {age}m ago")
+            return " - " + ", ".join(bits)
+        return ""
+    except Exception as exc:
+        # Never break the heartbeat to decorate it.
+        log.warning(
+            "autodrive: busy-task detail failed (%s: %s)",
+            type(exc).__name__, exc,
+        )
+        return ""
 SKIP_WAITING = "queue idle - waiting on an in-flight drive"
 SKIP_RESCUE_HELD = (
     "a task reads as crashed, but our own drive is still out - holding "
@@ -846,7 +936,14 @@ async def run_loop(
             # sweep, see busy, and exit. Skip it and keep the daemon alive.
             maintenance_done = False
             log.info("autodrive: queue busy, skipping fire")
-            await _pulse_skip(SKIP_BUSY)
+            # Say WHAT the busy drive is doing when we can read it. A
+            # flat "queue busy" repeated for an hour is indistinguishable
+            # from a hung drive; a step that never changes and a
+            # last-write age that keeps climbing are visible at a glance.
+            detail = await asyncio.to_thread(busy_task_detail, cfg)
+            await _pulse_skip(
+                (SKIP_BUSY_PREFIX + detail) if detail else SKIP_BUSY
+            )
             await sleep(cfg.interval_seconds)
             continue
         else:
