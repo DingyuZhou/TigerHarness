@@ -743,6 +743,58 @@ def test_cmd_status_stale(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------
+# CLI: cmd_status after an abnormal exit
+#
+# The incident: SIGKILL / OOM / reboot leaves the persisted counters at
+# whatever the daemon last wrote, so `status` printed a drive "(running now)"
+# under a header that already said the daemon was stopped. The fix labels the
+# counter; it deliberately does NOT zero it, because `in_flight: 1` at the
+# moment of death says how the daemon died. Neither existing fixture above
+# constructs that state -- `test_cmd_status_running` has a live pid, and
+# `test_cmd_status_stale` carries no `in_flight` key at all.
+#
+# Both paths assert WHOLE LINES out of `out.splitlines()`. A substring form
+# proves nothing here: "running" is a substring of "not running", and
+# "in_flight:    1" is a prefix of "in_flight:    10".
+# --------------------------------------------------------------------------
+
+_DEAD_PID = 2**31 - 1
+_NOTE_LINE = "  note:         counters below are frozen at the daemon's"
+_LIVE_LINE = "  in_flight:    1 (running now)"
+_FROZEN_LINE = "  in_flight:    1 (last recorded, daemon not running)"
+
+
+def _status_lines(tmp_path, capsys, state):
+    runner.write_state(runner.state_path(tmp_path / "journal"), state)
+    args = _args(["status", "--journal-dir", str(tmp_path / "journal")])
+    assert cli.cmd_status(args) == 0
+    return capsys.readouterr().out.splitlines()
+
+
+def test_cmd_status_dead_pid_keeps_in_flight_and_labels_it_frozen(tmp_path, capsys):
+    lines = _status_lines(
+        tmp_path,
+        capsys,
+        {"pid": _DEAD_PID, "interval_seconds": 600, "in_flight": 1, "tick_count": 0},
+    )
+    assert _FROZEN_LINE in lines
+    assert _LIVE_LINE not in lines
+    assert _NOTE_LINE in lines
+    assert "                last write; nothing is running now." in lines
+
+
+def test_cmd_status_live_pid_still_calls_in_flight_running_now(tmp_path, capsys):
+    lines = _status_lines(
+        tmp_path,
+        capsys,
+        {"pid": os.getpid(), "interval_seconds": 600, "in_flight": 1, "tick_count": 0},
+    )
+    assert _LIVE_LINE in lines
+    assert _FROZEN_LINE not in lines
+    assert _NOTE_LINE not in lines
+
+
+# --------------------------------------------------------------------------
 # CLI: cmd_stop
 # --------------------------------------------------------------------------
 

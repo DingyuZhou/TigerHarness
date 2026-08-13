@@ -551,6 +551,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     running, _ = is_running(sfile)
     label = "running" if running else "stopped (stale state file)"
+    # After SIGKILL / OOM / reboot nothing rewrites the persisted counters, so
+    # `in_flight` keeps whatever the daemon last wrote. Label it instead of
+    # zeroing it: `in_flight: 1` at the moment of death says how it died.
+    in_flight_suffix = (
+        "(running now)" if running else "(last recorded, daemon not running)"
+    )
     notify = state.get("notify", DEFAULT_NOTIFY)
     notify_channel = state.get("notify_channel")
     notify_target = (
@@ -559,6 +565,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         else "none (muted)"
     )
     print(f"autodrive: {label}")
+    if not running:
+        print("  note:         counters below are frozen at the daemon's")
+        print("                last write; nothing is running now.")
     print(f"  pid:          {state.get('pid')}")
     print(f"  interval:     {int(float(state.get('interval_seconds', 0)))}s")
     print(f"  backend:      {state.get('backend')}")
@@ -568,7 +577,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  started_at:   {state.get('started_at')}")
     print(f"  fire_count:   {state.get('fire_count', 0)} (drives launched)")
     print(f"  last_fire_at: {state.get('last_fire_at') or '(none yet)'}")
-    print(f"  in_flight:    {state.get('in_flight', 0)} (running now)")
+    print(f"  in_flight:    {state.get('in_flight', 0)} {in_flight_suffix}")
     print(f"  done_count:   {state.get('tick_count', 0)} (drives completed)")
     print(f"  last_done_at: {state.get('last_tick_at') or '(none yet)'}")
     if state.get("last_stop_reason"):

@@ -243,6 +243,30 @@ The lock is still team-canonical: a second `start` anywhere in the same team
 is refused, even with a different `--journal-dir` (a personal, non-team
 journal keeps its own lock under its own root).
 
+#### Reading `autodrive status` after an abnormal exit
+
+`stop` clears the state file, so a daemon that exits cleanly leaves nothing
+behind. A daemon killed by SIGKILL, the OOM killer, or a reboot does not:
+**nothing rewrites the persisted counters**, so they stay frozen at whatever
+the daemon last wrote — including `in_flight`, which will still name the
+drives that were running when it died. `status` says so:
+
+```
+autodrive: stopped (stale state file)
+  note:         counters below are frozen at the daemon's
+                last write; nothing is running now.
+  pid:          2147483647
+  ...
+  in_flight:    1 (last recorded, daemon not running)
+```
+
+`(last recorded, daemon not running)` replaces the `(running now)` you see
+while the daemon is alive. **The number is kept on purpose** — `in_flight: 1`
+at the moment of death is forensic information about how the daemon died, and
+zeroing it to fix a label would destroy that. Nothing is stuck: `start` treats
+a dead pid as not-running and overwrites the stale file, so recovery is just
+`tigerharness autodrive start` again.
+
 ### Configuration from the team's `.env`
 
 Every knob resolves **flag > process env > `<team>/configs/.env` > built-in
