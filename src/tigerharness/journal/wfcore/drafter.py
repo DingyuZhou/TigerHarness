@@ -55,7 +55,10 @@ frontmatter and a markdown body::
 The ``## step:`` headers are the split sentinel; the frontmatter is the
 authoritative source of each step's id / persona / routing. Bodies must
 not contain bare triple-backtick lines (they would collide with the
-bundle's closing fence) — the prompt says so explicitly.
+bundle's closing fence) — the prompt says so explicitly. For the same
+reason a body cannot hide a literal ``## step:`` line inside a code
+fence; it escapes it with a leading backslash instead
+(``\\## step: <id>``), which :func:`_split_steps` strips back off.
 """
 
 from __future__ import annotations
@@ -97,6 +100,12 @@ _FM_DELIM = "---"
 
 #: ``## step: <id>`` split sentinel between step files in the bundle.
 _STEP_HEADER_RE = re.compile(r"^##\s+step:\s*(?P<id>\S.*?)\s*$")
+
+#: A step header disarmed by a leading backslash. The escape exists so a
+#: body can carry a literal ``## step:`` line (documenting this very
+#: format) without injecting a phantom step; ``_split_steps`` skips these
+#: and strips the backslash back off.
+_ESCAPED_STEP_HEADER_RE = re.compile(r"^\\(?=##\s+step:)")
 
 #: Frontmatter keys the drafter will accept. Anything else is a
 #: hallucinated field and rejected before the value ever reaches the
@@ -202,6 +211,11 @@ Rules:
     extra keys.
   - Do NOT use triple-backtick code fences anywhere inside the bundle;
     a bare ``` line would terminate the bundle early.
+  - If a BODY needs to show a literal `## step: ...` line (e.g. the step's
+    instructions document this bundle format), escape it with a leading
+    backslash -- write `\\## step: <id>`. The backslash is stripped when the
+    bundle is parsed, so the persona sees the plain line. An UNescaped
+    `## step:` line inside a body starts a new step file instead.
   - The terminal step's on_approve routes to __done__.
 
 After the closing fence, end your whole reply with exactly:
@@ -298,11 +312,22 @@ def _split_steps(bundle: str) -> list[tuple[str, str]]:
     The ``## step: <id>`` headers are the split points; any preamble
     before the first header is ignored. Each chunk is the text between
     one header and the next (or the end of the bundle).
+
+    A header line prefixed with a backslash (``\\## step: ...``) is
+    *escaped*: it is not a split point, and the backslash is stripped so
+    the body carries the literal line. That is the only way a body can
+    quote this bundle format without injecting a phantom step -- a fenced
+    code block cannot do it, because ``_extract_bundle`` ends the bundle
+    at the first bare triple-backtick line.
     """
-    lines = bundle.splitlines()
+    lines: list[str] = []
     headers: list[tuple[int, str]] = []
-    for i, line in enumerate(lines):
-        match = _STEP_HEADER_RE.match(line)
+    for i, raw in enumerate(bundle.splitlines()):
+        if _ESCAPED_STEP_HEADER_RE.match(raw):
+            lines.append(raw[1:])
+            continue
+        lines.append(raw)
+        match = _STEP_HEADER_RE.match(raw)
         if match:
             headers.append((i, match.group("id")))
     if not headers:

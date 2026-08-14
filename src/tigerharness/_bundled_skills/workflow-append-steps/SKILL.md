@@ -61,6 +61,13 @@ The skill **fails closed**: a new bundle that doesn't pass Tier 1
    QA the implementation per the plan's acceptance criteria.
    ```
 
+   A body that needs to show a literal `## step: ...` line (instructions
+   that document this very format) must escape it with a leading
+   backslash -- `\## step: <id>`. The backslash is stripped at parse
+   time; an unescaped one starts a new step file instead. A fenced code
+   block will not save you: the bundle ends at the first bare
+   triple-backtick line.
+
 3. Save the bundle to a file (e.g. `compile/append-NN.md` under the
    task directory; the suffix can be whatever -- the journal doesn't
    care).

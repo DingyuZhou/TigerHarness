@@ -181,6 +181,82 @@ def test_each_step_gets_only_its_own_body() -> None:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Escaping a literal '## step:' line inside a body
+# ---------------------------------------------------------------------------
+
+def test_unescaped_step_header_in_body_splits_the_bundle() -> None:
+    """The hazard the escape exists for: a body that quotes this format
+    without escaping injects a phantom step and truncates the real one."""
+    src = GOOD.replace("---\nbody\n", "---\nbody\n## step: not-a-real-step\n")
+    with pytest.raises(DrafterParseError, match="not-a-real-step"):
+        _parse_response(src)
+
+
+def test_escaped_step_header_stays_in_the_body() -> None:
+    src = GOOD.replace(
+        "---\nbody\n",
+        "---\nemit one file per phase:\n\\## step: <id>\nthen frontmatter\n",
+    )
+    steps = _parse_response(src)
+    assert [s.id for s in steps] == ["s1"]
+    assert steps[0].body == (
+        "emit one file per phase:\n## step: <id>\nthen frontmatter"
+    )
+
+
+def test_escape_only_applies_to_step_header_lines() -> None:
+    """A backslash that does not disarm a step header is body text and
+    must survive verbatim -- the escape is not a general unquoter."""
+    src = GOOD.replace("---\nbody\n", "---\n\\## heading\nC:\\path\n")
+    steps = _parse_response(src)
+    assert steps[0].body == "\\## heading\nC:\\path"
+
+
+def test_escaped_header_alone_is_not_a_step() -> None:
+    """An escaped header cannot be the bundle's only 'header' -- otherwise
+    a doc-writing body could smuggle itself in as the whole graph."""
+    bad = (
+        FENCE + "steps-bundle\n\\## step: s1\n---\nid: s1\n---\n" + FENCE + "\n"
+    )
+    with pytest.raises(DrafterParseError, match="no '## step:"):
+        _parse_response(bad)
+
+
+def test_inner_code_fence_truncates_the_bundle() -> None:
+    """Why the fix is an escape and not fence-aware splitting: a fenced
+    block inside a body cannot survive at all. ``_extract_bundle`` ends
+    the bundle at the block's own bare closing fence, so step s2 is gone
+    and the quoted header becomes a real -- and headless -- step. Teaching
+    ``_split_steps`` about fences would never see this bundle."""
+    src = GOOD.replace(
+        "---\nbody\n",
+        "---\nbody\n" + FENCE + "text\n## step: quoted\n" + FENCE + "\n"
+        "## step: s2\n"
+        "---\n"
+        "id: s2\n"
+        "persona: Mitsui\n"
+        "role: developer\n"
+        "on_approve: __done__\n"
+        "on_revise: s2\n"
+        "on_block: __escalate__\n"
+        "max_iters: 2\n"
+        "timeout_sec: 60\n"
+        "parallel_with: []\n"
+        "---\n"
+        "second body\n",
+    )
+    with pytest.raises(DrafterParseError, match="step 'quoted'"):
+        _parse_response(src)
+
+
+def test_output_protocol_teaches_the_escape() -> None:
+    p = _build_prompt(
+        playbook_text="PB", task_brief="TB", roster=["Anzai"], feedback=None
+    )
+    assert "\\## step:" in p
+
+
 def test_body_as_a_frontmatter_key_is_rejected() -> None:
     """The body goes BELOW the closing '---'. A drafter that writes
     ``body:`` inside the frontmatter gets told, rather than having the
