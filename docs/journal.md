@@ -159,11 +159,42 @@ Slack bills API tokens, so the Slack side runs one dumb verb —
 team journal's `deferred/` inbox (no playbook read, no compile, no
 LLM). A later `drive-journal` session materializes it on the
 subscription rail: `journal materialize <id>` turns the inbox entry
-into a real `kind=workflow` task via the same scaffolder `journal new`
-uses (persona preflight included), indistinguishable from a direct
-scaffold. Malformed entries exit 1 with a JSON envelope and stay in
-the inbox for repair; `journal sweep` surfaces the inbox so the driver
-materializes the oldest when nothing else is actionable.
+into a real task via the same scaffolder `journal new` uses,
+indistinguishable from a direct scaffold. Malformed entries exit 1 with
+a JSON envelope and stay in the inbox for repair; `journal sweep`
+surfaces the inbox so the driver materializes the oldest when nothing
+else is actionable.
+
+**Both kinds are reachable from the rail.** `defer --kind` picks the
+lane the entry materializes into, and it defaults to `workflow`, so an
+invocation that passes none of these flags behaves exactly as it always
+has:
+
+- `--kind workflow` (default) materializes a compiled graph from the
+  recorded `--playbook` (itself defaulting to `default`), with the
+  playbook's persona preflight.
+- `--kind task` materializes a **Quick task** — one persona, no
+  compiled graph, `early_exit`, `autonomy=judgement`. It takes
+  `--persona <RosterName>` (required here, rejected for
+  `--kind workflow`, where the accountable owner comes from the
+  playbook's `default_captain:`), and it rejects `--playbook`, because
+  a Quick task has no playbook.
+
+```bash
+# Park a Quick-sized ask from Slack, owned by one persona:
+tigerharness journal defer --title "Fix the stale --help text" \
+  --team Shohoku --kind task --persona Mitsui --payload-file ask.md
+```
+
+The persona is **not** validated at defer time — `defer` stays dumb
+because it runs on the Slack hot path where the team root may not even
+be resolvable. A name that is not on the team's `configs/personas.yaml`
+roster fails at `materialize` with an envelope naming the persona and
+that file, and the inbox entry stays put for repair.
+
+Entries written before `--kind` existed carry neither key; they read
+back as `kind=workflow` with an empty persona, which is what they have
+always meant.
 
 **Scheduling can start the driver (opt-in).** Per
 [ADR 0010](adr/0010-self-driving-journal.md), `journal new`, `defer`,

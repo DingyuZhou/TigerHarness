@@ -288,6 +288,118 @@ class TestDefer:
         assert rc == 2
         assert "payload file not found" in capsys.readouterr().err
 
+    def test_pre_kind_sidecar_defaults_to_workflow_and_empty_persona(
+        self, team_env
+    ):
+        """The single most important line in the --kind change: an
+        entry written before the kind/persona keys existed must still
+        read, and must read as a WORKFLOW.
+
+        The sidecar here is authored from a literal pre-change key set
+        rather than written-then-edited. A write-then-delete fixture is
+        derived from the current writer, so it would keep passing if
+        `defer_entry` ever stopped emitting the keys -- proving
+        nothing. This one is a genuine old-format artifact.
+        """
+        paths = JournalPaths(root=team_env / "journal")
+        entry = defer_entry(
+            paths, title="Pre-kind", team="Shohoku", payload_text="hi",
+        )
+        (entry.path / "deferred.json").write_text(json.dumps({
+            "id": entry.id,
+            "title": "Pre-kind",
+            "team": "Shohoku",
+            "playbook": "default",
+            "requester": "",
+            "thread_ts": "",
+            "channel": "",
+            "created_at": entry.created_at,
+            "journal_root": str((team_env / "journal").resolve()),
+        }))
+        reread = read_entry(paths, entry.id)
+        assert reread.kind == "workflow"
+        assert reread.persona == ""
+
+    def test_unknown_kind_in_sidecar_is_deferred_error(self, team_env):
+        """An absent kind means workflow (back-compat). A kind that is
+        present but not a real lane is a malformation, not a silent
+        workflow -- hand-editing `kind: quick` must not buy a 19-step
+        compile for a half-hour job."""
+        paths = JournalPaths(root=team_env / "journal")
+        entry = defer_entry(
+            paths, title="Bogus", team="Shohoku", payload_text="hi",
+        )
+        sidecar_path = entry.path / "deferred.json"
+        data = json.loads(sidecar_path.read_text())
+        data["kind"] = "quick"
+        sidecar_path.write_text(json.dumps(data))
+        with pytest.raises(DeferredError, match="expected 'workflow'"):
+            read_entry(paths, entry.id)
+
+    def test_cli_defer_task_kind_without_persona_exits_2(
+        self, team_env, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "sys.stdin", __import__("io").StringIO("quick ask\n"),
+        )
+        rc = main([
+            "defer", "--title", "x", "--team", "Shohoku",
+            "--kind", "task",
+        ])
+        assert rc == 2
+        assert "--persona is required" in capsys.readouterr().err
+        # A rejected defer must not park a half-formed entry.
+        assert list_deferred(JournalPaths(root=team_env / "journal")) == []
+
+    def test_cli_defer_workflow_kind_with_persona_exits_2(
+        self, team_env, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "sys.stdin", __import__("io").StringIO("an ask\n"),
+        )
+        rc = main([
+            "defer", "--title", "x", "--team", "Shohoku",
+            "--kind", "workflow", "--persona", "Akagi",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "--persona is task-only" in err
+        assert "default_captain" in err
+        assert list_deferred(JournalPaths(root=team_env / "journal")) == []
+
+    def test_cli_defer_task_kind_with_playbook_exits_2(
+        self, team_env, capsys, monkeypatch
+    ):
+        """Passing the value that IS the old default is the whole
+        point: this can only be rejected if an explicit --playbook is
+        distinguishable from no flag at all."""
+        monkeypatch.setattr(
+            "sys.stdin", __import__("io").StringIO("quick ask\n"),
+        )
+        rc = main([
+            "defer", "--title", "x", "--team", "Shohoku",
+            "--kind", "task", "--persona", "Akagi",
+            "--playbook", "default",
+        ])
+        assert rc == 2
+        assert "--playbook is workflow-only" in capsys.readouterr().err
+        assert list_deferred(JournalPaths(root=team_env / "journal")) == []
+
+    def test_defer_without_kind_flags_records_todays_sidecar(
+        self, team_env
+    ):
+        """No new flags -> the recorded playbook is still exactly
+        "default" (the None sentinel never reaches disk) and the lane
+        is still workflow."""
+        paths = JournalPaths(root=team_env / "journal")
+        entry = defer_entry(
+            paths, title="Unchanged", team="Shohoku", payload_text="hi",
+        )
+        sidecar = json.loads((entry.path / "deferred.json").read_text())
+        assert sidecar["playbook"] == "default"
+        assert sidecar["kind"] == "workflow"
+        assert sidecar["persona"] == ""
+
 
 # ---------------------------------------------------------------------------
 # materialize: the subscription-rail half
@@ -542,6 +654,166 @@ class TestMaterialize:
         envelope = json.loads(capsys.readouterr().out)
         assert "disk full" in envelope["errors"][0]
         paths = JournalPaths(root=team_env / "journal")
+        assert list_deferred(paths) == [did]
+
+    # -- the two lanes, end to end ------------------------------------
+
+    def test_defer_then_materialize_workflow_end_to_end(
+        self, team_env, capsys
+    ):
+        """No new flags -> the workflow lane, unchanged, still printing
+        `playbook:` and NOT `persona:`."""
+        journal = str(team_env / "journal")
+        did = self._defer(team_env)
+        rc = main(["--journal-dir", journal, "materialize", did])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "  kind:         workflow" in out
+        assert "  playbook:     default" in out
+        assert "  persona:" not in out
+
+        paths = JournalPaths(root=team_env / "journal")
+        task_id = out.split("Materialized: ")[1].splitlines()[0].strip()
+        status = json.loads(
+            (paths.active / task_id / "status.json").read_text()
+        )
+        assert status["kind"] == "workflow"
+        assert status["compile_pending"] is True
+        assert list_deferred(paths) == []
+
+    def test_defer_then_materialize_task_end_to_end(
+        self, team_env, capsys
+    ):
+        """--kind task reaches the Quick lane: one persona, no compile,
+        no playbook lookup, and `persona:` printed in place of
+        `playbook:`."""
+        journal = str(team_env / "journal")
+        paths = JournalPaths(root=team_env / "journal")
+        did = defer_entry(
+            paths, title="Quick ask", team="Shohoku",
+            payload_text="Fix the thing.\n",
+            kind="task", persona="Akagi",
+        ).id
+        rc = main(["--journal-dir", journal, "materialize", did])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "  kind:         task" in out
+        assert "  persona:      Akagi" in out
+        assert "  playbook:" not in out
+
+        task_id = out.split("Materialized: ")[1].splitlines()[0].strip()
+        task_dir = paths.active / task_id
+        status = json.loads((task_dir / "status.json").read_text())
+        assert status["kind"] == "task"
+        assert status["persona"] == "Akagi"
+        assert status["early_exit"] is True
+        assert status["autonomy"] == "judgement"
+        assert status["max_sessions"] == 3
+        # A Quick task has no compile phase at all -- the key is absent
+        # from the schema, not merely false.
+        assert "compile_pending" not in status
+        assert not (task_dir / "steps").exists()
+        assert (task_dir / "task.md").read_text() == "Fix the thing.\n"
+        # Provenance survives the Quick lane too -- `journal release`
+        # reads this to thread a completion notice back under the
+        # Operator's original Slack ask.
+        assert (task_dir / "deferred_origin.json").exists()
+        assert list_deferred(paths) == []
+
+    def test_materialize_unknown_persona_exits_1_and_entry_stays(
+        self, team_env, capsys
+    ):
+        """The roster check runs at materialize, not at defer: a name
+        typed in Slack hours ago fails here, naming the persona and
+        personas.yaml, and the entry survives for repair."""
+        journal = str(team_env / "journal")
+        paths = JournalPaths(root=team_env / "journal")
+        did = defer_entry(
+            paths, title="Quick ask", team="Shohoku",
+            payload_text="Fix the thing.\n",
+            kind="task", persona="Nobody",
+        ).id
+        rc = main(["--journal-dir", journal, "materialize", did])
+        assert rc == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is False
+        assert "Nobody" in envelope["errors"][0]
+        assert "personas.yaml" in envelope["errors"][0]
+        assert list_deferred(paths) == [did]
+
+    def test_task_materializes_with_no_workflow_dir_at_all(
+        self, team_env, capsys
+    ):
+        """The discriminating test for 'the playbook-missing error path
+        must NOT fire': delete the team's whole workflow/ directory and
+        a Quick task still materializes. With a playbook present, a
+        materialize that wrongly consulted it would pass unnoticed."""
+        import shutil
+
+        journal = str(team_env / "journal")
+        paths = JournalPaths(root=team_env / "journal")
+        did = defer_entry(
+            paths, title="Quick ask", team="Shohoku",
+            payload_text="Fix the thing.\n",
+            kind="task", persona="Akagi",
+        ).id
+        shutil.rmtree(team_env / "workflow")
+        rc = main(["--journal-dir", journal, "materialize", did])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "  kind:         task" in out
+        assert list_deferred(paths) == []
+
+    @pytest.mark.parametrize("bad", [
+        "../../Other/personas/Akagi",
+        "a/b",
+        "a\\b",
+        "",
+    ])
+    def test_materialize_refuses_persona_that_is_a_path(
+        self, team_env, capsys, bad
+    ):
+        """The persona arrives over the Slack rail and becomes a path
+        component. A `..` segment would otherwise reach a sibling
+        team's personas/ and materialize a task across the team
+        boundary."""
+        journal = str(team_env / "journal")
+        paths = JournalPaths(root=team_env / "journal")
+        did = defer_entry(
+            paths, title="Quick ask", team="Shohoku",
+            payload_text="Fix the thing.\n",
+            kind="task", persona=bad,
+        ).id
+        rc = main(["--journal-dir", journal, "materialize", did])
+        assert rc == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert "personas.yaml" in envelope["errors"][0]
+        assert list_deferred(paths) == [did]
+
+    def test_task_scaffolder_failure_keeps_entry_and_envelopes(
+        self, team_env, capsys, monkeypatch
+    ):
+        """The Quick lane gets the same never-half-scaffolded contract
+        as the workflow lane."""
+        from tigerharness.journal import cli as cli_mod
+        from tigerharness.journal.scaffold import JournalScaffoldError
+
+        journal = str(team_env / "journal")
+        paths = JournalPaths(root=team_env / "journal")
+        did = defer_entry(
+            paths, title="Quick ask", team="Shohoku",
+            payload_text="Fix the thing.\n",
+            kind="task", persona="Akagi",
+        ).id
+
+        def boom(**kwargs):
+            raise JournalScaffoldError("disk full")
+
+        monkeypatch.setattr(cli_mod, "new_task", boom)
+        rc = main(["--journal-dir", journal, "materialize", did])
+        assert rc == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert "disk full" in envelope["errors"][0]
         assert list_deferred(paths) == [did]
 
 
