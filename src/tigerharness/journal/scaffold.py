@@ -124,6 +124,19 @@ _PRIOR_OPERATING_HASHES = {
     "d99d4ea1d88900d3795a9740a26a74839bd2af6afb6a5565e2f8becffd86c405",
 }
 
+# sha256 of the CURRENT OPERATING_MD, mirroring init._CURRENT_SKILL_HASHES.
+# The set above is an instruction with no enforcement: editing OPERATING_MD
+# and registering nothing leaves the whole suite green while every existing
+# journal silently stops receiving protocol updates. Two entries above are
+# that mistake being repaired after the fact ("shipped but never registered
+# here"). This constant turns it into a test failure instead -- change the
+# template and the guard in test_scaffold fails, telling you to move this
+# value into _PRIOR_OPERATING_HASHES and roll it. It also gives every future
+# prior a provenance the suite itself pinned while that template was live.
+_CURRENT_OPERATING_HASH = (
+    "ef7ddfa1281dc2e24a40b36bddfb00fb0ba21dd48f396f4b61fc5913f5e4338d"
+)
+
 
 # The three personas the in-session compile sub-protocol adopts (Anzai
 # for the drafter turn, Akagi for the execution-critic lens, Ayako for

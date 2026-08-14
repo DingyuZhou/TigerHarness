@@ -123,6 +123,32 @@ def test_current_template_not_in_prior_hash_manifest():
     assert current not in scaffold._PRIOR_OPERATING_HASHES
 
 
+def test_current_template_matches_the_current_hash_manifest():
+    """The propagation guard, mirroring ``test_skill_hash_guard``.
+
+    ``_PRIOR_OPERATING_HASHES`` is an instruction with no enforcement:
+    before this test you could edit OPERATING_MD, register nothing, and
+    watch the entire suite pass at 100% while every existing journal
+    silently stopped receiving protocol updates. Two entries in that set
+    are that exact mistake being repaired after the fact -- one of them
+    says so ("shipped but never registered here").
+
+    Failing here is not a bug in the template. It means the template
+    changed and the manifest has not been rolled yet; the message says
+    what to do."""
+    import hashlib
+    from tigerharness.journal import scaffold
+    current = hashlib.sha256(OPERATING_MD.encode("utf-8")).hexdigest()
+    assert current == scaffold._CURRENT_OPERATING_HASH, (
+        f"OPERATING_MD changed: it now hashes to {current} but "
+        f"scaffold._CURRENT_OPERATING_HASH says "
+        f"{scaffold._CURRENT_OPERATING_HASH}. Fix in scaffold.py: "
+        f"(i) add the OLD hash {scaffold._CURRENT_OPERATING_HASH!r} to "
+        f"_PRIOR_OPERATING_HASHES so existing journals auto-refresh, and "
+        f"(ii) set _CURRENT_OPERATING_HASH = {current!r}."
+    )
+
+
 def test_graph_walk_step_file_describes_both_halves():
     """A compiled step file has frontmatter AND a body -- the drafter's
     per-step instructions, landed below the closing `---`. Graph-walk
