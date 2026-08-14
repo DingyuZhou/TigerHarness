@@ -425,12 +425,15 @@ in [`journal-workflow-mode.md`](journal-workflow-mode.md).
 
 ## Skills
 
-- `skills/journal-new/` — scaffolder skill (CLI form is the primary;
-  the skill is a thin wrapper). Teaches both `kind=task` and
-  `kind=workflow` modes.
-- `skills/drive-journal/` — driver skill (skill-only, no CLI form).
-- `skills/workflow-append-steps/` — Phase 3 step-append skill for
-  extending a landed graph at runtime. Wraps `journal append-steps`.
+Shipped from `src/tigerharness/_bundled_skills/` and installed into a
+team's `.claude/skills/` by `tigerharness init`. (The top-level `skills/`
+directory is an unshipped stale duplicate — do not edit it.)
+
+- `journal-new/` — scaffolder skill (CLI form is the primary; the skill
+  is a thin wrapper). Teaches both `kind=task` and `kind=workflow` modes.
+- `drive-journal/` — driver skill (skill-only, no CLI form).
+- `workflow-append-steps/` — Phase 3 step-append skill for extending a
+  landed graph at runtime. Wraps `journal append-steps`.
 
 The driver skill points the interactive session at the on-disk
 `OPERATING.md` for the canonical protocol, which now includes the
