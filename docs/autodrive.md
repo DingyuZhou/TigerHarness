@@ -243,6 +243,55 @@ The lock is still team-canonical: a second `start` anywhere in the same team
 is refused, even with a different `--journal-dir` (a personal, non-team
 journal keeps its own lock under its own root).
 
+#### Reading `autodrive status` after an abnormal exit
+
+`stop` clears the state file, so a daemon that exits cleanly leaves nothing
+behind. A daemon killed by SIGKILL, the OOM killer, or a reboot does not:
+**nothing rewrites the persisted counters**, so they stay frozen at whatever
+the daemon last wrote — including `in_flight`, which will still name the
+drives that were running when it died. `status` says so:
+
+```
+autodrive: stopped (stale state file)
+  note:         counters below are frozen at the daemon's
+                last write; nothing is running now.
+  pid:          2147483647
+  ...
+  in_flight:    1 (last recorded, daemon not running)
+```
+
+`(last recorded, daemon not running)` replaces the `(running now)` you see
+while the daemon is alive. **The number is kept on purpose** — `in_flight: 1`
+at the moment of death is forensic information about how the daemon died, and
+zeroing it to fix a label would destroy that. Nothing is stuck: `start` treats
+a dead pid as not-running and overwrites the stale file, so recovery is just
+`tigerharness autodrive start` again.
+
+#### `status` from a team root reads that team's daemon
+
+`--journal-dir` picks the journal a command acts on, but it cannot move the
+state file `status` reads when you are standing in a **team root**. One
+autodrive per team means the daemon's state lives at `<team>/journal` even
+while it drives some other root, so following the flag there would report
+`stopped` for a daemon that is genuinely running. `status` reads the
+team-canonical anchor instead — and when the flag points elsewhere, it now
+says which file that was, rather than answering silently about a journal you
+did not name:
+
+```
+autodrive: running
+  read:         /home/you/teams/Shohoku/journal/.autodrive.json
+                (team-canonical: one autodrive per team, so
+                 --journal-dir does not move this anchor)
+  pid:          8449
+  journal:      /home/you/teams/Shohoku/journal
+```
+
+The `journal:` line is the daemon's own record of the root it drives, so you
+can see whether the daemon that is running is the one you asked about.
+Anywhere that is **not** a team root — including one directory deeper, like
+`<team>/journal` — `--journal-dir` is used exactly as given.
+
 ### Configuration from the team's `.env`
 
 Every knob resolves **flag > process env > `<team>/configs/.env` > built-in

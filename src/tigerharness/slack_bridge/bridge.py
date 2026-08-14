@@ -81,7 +81,12 @@ log = logging.getLogger("tigerharness.slack_bridge.bridge")
 #: would keep posting and land its message after the closer. **If
 #: notify.py's timeout changes, both of these move with it, and the sum
 #: must be re-checked against `_DRAIN_TIMEOUT_S` (__main__.py) -- 70s of
-#: a 90s budget shared by every lane.** They are numerically equal and
+#: a 90s budget shared by every lane.** That chain is enforced by
+#: `tests/slack_bridge/test_drain_budget_invariant.py`, which reads all
+#: three values from their real sources. Note what its outer bound
+#: actually is: the `TimeoutStopSec` in gen_service.py's **template**.
+#: An already-installed unit keeps the old number until someone re-runs
+#: `gen-service`, and no test can see that. They are numerically equal and
 #: do different jobs: STOP_DRAIN_S is sized so it does not fire (a
 #: pulse landing after the closer is a visible lie), FINISH_POST_S
 #: merely bounds the last post of the thread, where a late arrival has
@@ -300,8 +305,14 @@ class SlackBridge:
             )
             self._shutting_down.set()
 
-    async def wait_for_drain(self, timeout: float = 120.0) -> bool:
-        """Wait up to *timeout* seconds for in-flight dispatches to finish."""
+    async def wait_for_drain(self, timeout: float) -> bool:
+        """Wait up to *timeout* seconds for in-flight dispatches to finish.
+
+        Required, deliberately: the old ``= 120.0`` default silently
+        equalled the unit's ``TimeoutStopSec``, so a bare call would
+        drain for exactly as long as systemd waits before SIGKILL.
+        ``tests/slack_bridge/test_drain_budget_invariant.py`` holds it.
+        """
         try:
             await asyncio.wait_for(self._drained.wait(), timeout=timeout)
             return True
@@ -709,7 +720,11 @@ class SlackBridge:
                     self._store.mark_in_flight(thread_key, False)
                 self._in_flight -= 1
                 # `no branch`: only single-request flows are tested,
-                # so the "still in flight" side never runs.
+                # so the "still in flight" side never runs. The gap is
+                # written up in docs/slack-bridge.md ("Concurrency (does
+                # not)") and listed in README.md under Known limitations
+                # -> Bridge shutdown; removing this pragma means
+                # retracting both.
                 if self._in_flight == 0:  # pragma: no branch
                     self._drained.set()
 
