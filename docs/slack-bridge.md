@@ -950,8 +950,14 @@ precedes the secret — which is not something you can judge by looking at
 what you pasted.
 
 Assume anything you paste can reach the channel. `KEY=value` with no
-spaces is the shape the excerpt drops, and it is dropped *there only* —
-the identical string inside a `file_path` posts whole through the hint.
+spaces gets three different answers from the three fields, so "is this
+shape safe" is not a question you can answer without naming one: the
+excerpt drops that token and posts the rest; a `Bash` hint never carries
+it either way — as the first token it suppresses the hint entirely, and
+anywhere later only the first token is ever rendered; a `file_path`
+posts the identical string whole. The one field that carries it is the
+one with no shape rule at all.
+
 The excerpt is sanitised, not safe to leak: the dropping is a courtesy
 against the common accident, **not** a control you may rely on. Treat
 its presence as intended, not as a defect to file — and the precondition
