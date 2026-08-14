@@ -123,3 +123,68 @@ def test_blank_lines_before_frontmatter_tolerated() -> None:
     padded = GOOD.replace("## step: s1\n---", "## step: s1\n\n\n---")
     steps = _parse_response(padded)
     assert steps[0].id == "s1"
+
+
+# ---------------------------------------------------------------------------
+# Bodies -- everything after the closing '---' of a chunk
+# ---------------------------------------------------------------------------
+
+def test_body_is_captured_from_the_chunk() -> None:
+    steps = _parse_response(GOOD)
+    assert steps[0].body == "body"
+
+
+def test_multiline_body_keeps_internal_blank_lines() -> None:
+    src = GOOD.replace(
+        "---\nbody\n",
+        "---\nfirst line\n\nsecond paragraph\n  indented\n",
+    )
+    steps = _parse_response(src)
+    assert steps[0].body == "first line\n\nsecond paragraph\n  indented"
+
+
+def test_chunk_with_no_body_yields_empty_string() -> None:
+    src = GOOD.replace("---\nbody\n", "---\n")
+    steps = _parse_response(src)
+    assert steps[0].body == ""
+
+
+def test_whitespace_only_body_normalises_to_empty() -> None:
+    """A drafter that leaves a blank line after the delimiter must not
+    produce a step that reads as "has instructions" downstream."""
+    src = GOOD.replace("---\nbody\n", "---\n\n   \n\n")
+    steps = _parse_response(src)
+    assert steps[0].body == ""
+
+
+def test_each_step_gets_only_its_own_body() -> None:
+    two = GOOD.replace(
+        "---\nbody\n",
+        "---\nfirst body\n"
+        "## step: s2\n"
+        "---\n"
+        "id: s2\n"
+        "persona: Mitsui\n"
+        "role: developer\n"
+        "on_approve: __done__\n"
+        "on_revise: s2\n"
+        "on_block: __escalate__\n"
+        "max_iters: 2\n"
+        "timeout_sec: 60\n"
+        "parallel_with: []\n"
+        "---\n"
+        "second body\n",
+    )
+    steps = _parse_response(two)
+    assert [(s.id, s.body) for s in steps] == [
+        ("s1", "first body"), ("s2", "second body"),
+    ]
+
+
+def test_body_as_a_frontmatter_key_is_rejected() -> None:
+    """The body goes BELOW the closing '---'. A drafter that writes
+    ``body:`` inside the frontmatter gets told, rather than having the
+    text silently land as a YAML value."""
+    bad = GOOD.replace("parallel_with: []", "parallel_with: []\nbody: inline")
+    with pytest.raises(DrafterParseError, match="unknown frontmatter"):
+        _parse_response(bad)

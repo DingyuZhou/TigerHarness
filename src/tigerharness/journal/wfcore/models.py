@@ -179,6 +179,11 @@ class StepFrontmatter:
     max_iters: int
     timeout_sec: int
     parallel_with: list[str] = field(default_factory=list)
+    # The drafter's per-step instructions, carried from the bundle chunk to
+    # the landed ``steps/<id>.md`` body. Deliberately absent from
+    # ``to_dict``: it is not frontmatter and must never reach
+    # ``orchestration.json``.
+    body: str = ""
 
     REQUIRED_KEYS: ClassVar[tuple[str, ...]] = (
         "id",
@@ -208,6 +213,10 @@ class StepFrontmatter:
         self.parallel_with = _require_list_of_str(
             self.parallel_with, "parallel_with"
         )
+        if not isinstance(self.body, str):
+            raise WorkflowModelError(
+                f"body must be a string, got {type(self.body).__name__}"
+            )
 
     # Convenience accessor used by the executor.
     @property

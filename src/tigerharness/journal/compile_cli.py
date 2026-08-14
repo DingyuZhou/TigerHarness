@@ -57,7 +57,6 @@ import re
 import shutil
 import sys
 import tempfile
-from dataclasses import asdict
 from pathlib import Path
 
 from tigerharness.journal import worklog
@@ -553,14 +552,12 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
         shutil.rmtree(final_steps_dir)
     final_steps_dir.mkdir(parents=True, exist_ok=False)
 
-    # Step bodies: write each step's frontmatter to final/steps/<id>.md.
-    # StepFrontmatter carries no body field (the drafter's per-step body
-    # text is consumed at parse time and dropped); a Phase 2 enhancement
-    # that wires bodies through can extend this.
+    # Step files: frontmatter to final/steps/<id>.md, followed by the
+    # drafter's per-step body -- the instructions the walking persona
+    # receives. A step whose chunk had no body renders exactly as before.
     for step in steps:
-        front = _render_frontmatter(step)
         (final_steps_dir / f"{step.id}.md").write_text(
-            f"---\n{front}---\n",
+            _render_step_file(step),
             encoding="utf-8",
         )
 
@@ -636,14 +633,32 @@ def cmd_land_compile(args: argparse.Namespace) -> int:
 
 def _render_frontmatter(step) -> str:
     """Render a StepFrontmatter as YAML-ish text for the step file's
-    --- block. Plain key: value lines; lists rendered inline."""
+    --- block. Plain key: value lines; lists rendered inline.
+
+    Driven by ``to_dict``, which enumerates the frontmatter fields
+    explicitly. ``asdict`` would sweep in ``body`` and emit the step's
+    instructions as a YAML key."""
     out = []
-    for k, v in asdict(step).items():
+    for k, v in step.to_dict().items():
         if isinstance(v, list):
             out.append(f"{k}: [{', '.join(str(item) for item in v)}]\n")
         else:
             out.append(f"{k}: {v}\n")
     return "".join(out)
+
+
+def _render_step_file(step) -> str:
+    """Render a full ``steps/<id>.md``: frontmatter block, then the
+    drafter's per-step body below the closing delimiter.
+
+    A step with no body renders byte-identically to what shipped before
+    bodies existed, so every previously-compiled task is unaffected. Both
+    write sites (``land-compile`` and ``append-steps``) go through here so
+    they cannot drift apart."""
+    text = f"---\n{_render_frontmatter(step)}---\n"
+    if step.body:
+        text += f"\n{step.body}\n"
+    return text
 
 
 def _guess_team_for_status() -> str:
@@ -762,9 +777,10 @@ def _read_existing_step(task_dir: Path, step_id: str):
     ``steps/<step_id>.md`` so we can re-validate the full graph when
     append-steps extends it. Returns a ``StepFrontmatter``.
 
-    The file format mirrors what ``_render_frontmatter`` writes: a
-    YAML-ish key/value block between ``---`` delimiters, no body
-    (Phase 1.5/2 step files don't carry body text)."""
+    The file format mirrors what ``_render_step_file`` writes: a YAML-ish
+    key/value block between ``---`` delimiters, optionally followed by the
+    step's body. Files landed before bodies existed have nothing after the
+    closing delimiter and re-hydrate with ``body == ""``."""
     import yaml
     from tigerharness.journal.wfcore.models import StepFrontmatter
 
@@ -786,7 +802,10 @@ def _read_existing_step(task_dir: Path, step_id: str):
         )
     fm_text = "\n".join(lines[1:body_start])
     raw = yaml.safe_load(fm_text) or {}
-    return StepFrontmatter.from_dict(raw)
+    step = StepFrontmatter.from_dict(raw)
+    body = "\n".join(lines[body_start + 1 :]).strip("\n")
+    step.body = body if body.strip() else ""
+    return step
 
 
 def cmd_append_steps(args: argparse.Namespace) -> int:
@@ -954,8 +973,7 @@ def cmd_append_steps(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            front = _render_frontmatter(step)
-            step_path.write_text(f"---\n{front}---\n", encoding="utf-8")
+            step_path.write_text(_render_step_file(step), encoding="utf-8")
             written_paths.append(step_path)
     except OSError as exc:
         # Disk full / permission denied mid-loop. Roll back partial

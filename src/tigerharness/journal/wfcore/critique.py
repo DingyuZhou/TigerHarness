@@ -227,10 +227,11 @@ def _render_value(value: object) -> str:
 def _render_steps(steps: list[StepFrontmatter]) -> str:
     """Render the step set in the canonical ``## step:`` + frontmatter form.
 
-    Bodies are not available at this layer (the loop operates on parsed
-    :class:`StepFrontmatter`, not raw step files); the critics review
-    structure and routing, which live entirely in the frontmatter, with
-    the dry-run trace supplying the execution walk.
+    Bodies are deliberately withheld: the critics review structure and
+    routing, which live entirely in the frontmatter, with the dry-run
+    trace supplying the execution walk. ``StepFrontmatter`` does carry
+    ``body`` since step files gained one, so showing bodies here is a
+    design change -- and a much larger prompt -- not a missing wire.
     """
     blocks: list[str] = []
     for step in steps:

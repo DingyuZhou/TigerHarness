@@ -167,6 +167,37 @@ def test_step_frontmatter_rejects_path_unsafe_ids(bad_id):
         StepFrontmatter.from_dict(raw)
 
 
+def test_step_frontmatter_body_defaults_empty():
+    fm = StepFrontmatter.from_dict(_good_frontmatter())
+    assert fm.body == ""
+
+
+def test_step_frontmatter_body_is_not_frontmatter():
+    """``body`` is the step's instruction text, not a frontmatter field.
+    ``to_dict`` feeds both ``orchestration.json`` and the rendered ``---``
+    block, so leaking it there would persist the instructions as a YAML
+    key."""
+    fm = StepFrontmatter.from_dict(_good_frontmatter())
+    fm.body = "Do the work."
+    assert "body" not in fm.to_dict()
+
+
+def test_step_frontmatter_rejects_non_string_body():
+    with pytest.raises(WorkflowModelError, match="body must be a string"):
+        StepFrontmatter(
+            id="01-plan",
+            persona="anzai",
+            role="planner",
+            on_approve="__done__",
+            on_revise="01-plan",
+            on_block="__escalate__",
+            max_iters=5,
+            timeout_sec=1800,
+            parallel_with=[],
+            body=["not", "a", "string"],  # type: ignore[arg-type]
+        )
+
+
 # --------------------------------------------------------------------------- #
 # StepEdges
 # --------------------------------------------------------------------------- #

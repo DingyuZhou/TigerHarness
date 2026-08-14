@@ -285,10 +285,12 @@ def validate_cycles(
     """Reject any *unbounded* cycle.
 
     A cycle is bounded if at least one member carries a finite
-    ``max_iters`` cap (the executor bounds re-entry by it). The model
-    guarantees every step has such a cap, so this is a defensive check;
-    it fires only if a cap was corrupted after construction or a future
-    model relaxes the invariant.
+    ``max_iters`` cap. No executor enforces that cap today -- the walk is
+    driven by an agent following OPERATING.md, and ``journal step-done``
+    does not read the field -- so the cap is an honour-system budget the
+    seat counts itself. The model guarantees every step has one, so this
+    is a defensive check; it fires only if a cap was corrupted after
+    construction or a future model relaxes the invariant.
     """
     id_to_step = {step.id: step for step in steps}
     errors: list[ValidationError] = []

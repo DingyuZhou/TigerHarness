@@ -708,14 +708,18 @@ persona-attributed worklog note is the ticket to advance (see
 
 For each step:
 
-1. **Adopt the step's persona.** The compiled `steps/<id>.md` carries
-   frontmatter only -- persona, role, the approve/revise/block edges and
-   the caps. It carries no instructions. What defines the work is
-   `playbook_snapshot.md` (the phase text), `task_brief.md` (the ask),
-   `artifacts/` (the pair's own notes) and `worklog/` (prior verdicts).
-   Read those, adopt the persona via the preamble, do the work, and save
-   the turn's substantive output to a note file (e.g.
-   `artifacts/<step>-note.md`).
+1. **Adopt the step's persona and read the step file.** The compiled
+   `steps/<id>.md` has two halves. The frontmatter carries persona, role,
+   the approve/revise/block edges and the caps. **Below the closing `---`
+   is the body: this step's per-run instructions, written for this task at
+   compile time.** Read it -- it is the most specific thing you will get,
+   and it says what THIS turn must do. Around it: `playbook_snapshot.md`
+   (the lane's doctrine, frozen at compile time), `task_brief.md` (the
+   ask), `artifacts/` (the pair's own notes) and `worklog/` (prior
+   verdicts). A step file compiled before bodies existed has nothing below
+   the delimiter -- fall back to those sources. Adopt the persona via the
+   preamble, do the work, and save the turn's substantive output to a note
+   file (e.g. `artifacts/<step>-note.md`).
 2. **End the turn at the gate:**
 
    ```bash

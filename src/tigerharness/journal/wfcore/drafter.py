@@ -324,20 +324,28 @@ def _parse_chunk(header_id: str, chunk: str) -> StepFrontmatter:
     make error messages locatable. The authoritative id is the ``id:``
     frontmatter field consumed by ``StepFrontmatter.from_dict``.
     """
-    data = _split_frontmatter(header_id, chunk)
+    data, body = _split_frontmatter(header_id, chunk)
     unknown = sorted(str(k) for k in set(data) - _ALLOWED_KEYS)
     if unknown:
         raise _BundleFormatError(
             f"step {header_id!r} has unknown frontmatter field(s): {unknown}"
         )
     try:
-        return StepFrontmatter.from_dict(data)
+        step = StepFrontmatter.from_dict(data)
     except WorkflowModelError as exc:
         raise _BundleFormatError(f"step {header_id!r}: {exc}") from exc
+    step.body = body
+    return step
 
 
-def _split_frontmatter(header_id: str, chunk: str) -> dict[str, Any]:
-    """Extract the YAML frontmatter mapping from one step chunk.
+def _split_frontmatter(
+    header_id: str, chunk: str
+) -> tuple[dict[str, Any], str]:
+    """Split one step chunk into its YAML frontmatter mapping and its body.
+
+    The body is everything after the closing ``---`` -- the per-step
+    instructions the walking persona receives. A chunk with nothing after
+    the delimiter yields ``""``.
 
     Tolerates blank lines between the ``## step:`` header and the opening
     ``---``. Raises :class:`_BundleFormatError` on a missing delimiter,
@@ -374,4 +382,7 @@ def _split_frontmatter(header_id: str, chunk: str) -> dict[str, Any]:
         raise _BundleFormatError(
             f"step {header_id!r} frontmatter must be a YAML mapping"
         )
-    return data
+    body = "\n".join(lines[close_i + 1 :]).strip("\n")
+    if not body.strip():
+        body = ""
+    return data, body

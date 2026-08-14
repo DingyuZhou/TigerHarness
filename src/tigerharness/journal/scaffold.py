@@ -61,6 +61,11 @@ _PRIOR_OPERATING_HASHES = {
     # Each entry is a previously-shipped rendered OPERATING.md an existing
     # journal may still have on disk; all refresh to the current (merged
     # cascade + per-persona-memory) template.
+    # 2026-08-14 (step files carry bodies): pre step-body render -- before
+    # graph-walk step 1 described the frontmatter/body split and told the
+    # seat to read its per-run instructions below the closing ---. Journals
+    # scaffolded on the preceding wording fix carry this one.
+    "5cd76431b04dbf9d1ebab7f54ed6c386099eca502f65d8e1f39461800190a5d8",
     # 2026-08-14 (graph-walk step-1 wording): pre step-file-carries-no-
     # instructions render -- before graph-walk step 1 said the compiled
     # steps/<id>.md holds frontmatter only and named playbook_snapshot.md
