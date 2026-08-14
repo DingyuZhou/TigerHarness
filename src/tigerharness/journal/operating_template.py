@@ -708,9 +708,14 @@ persona-attributed worklog note is the ticket to advance (see
 
 For each step:
 
-1. **Adopt the step's persona** (read from the compiled `steps/<id>.md`)
-   via the preamble and do the work. Save the turn's substantive output
-   to a note file (e.g. `artifacts/<step>-note.md`).
+1. **Adopt the step's persona.** The compiled `steps/<id>.md` carries
+   frontmatter only -- persona, role, the approve/revise/block edges and
+   the caps. It carries no instructions. What defines the work is
+   `playbook_snapshot.md` (the phase text), `task_brief.md` (the ask),
+   `artifacts/` (the pair's own notes) and `worklog/` (prior verdicts).
+   Read those, adopt the persona via the preamble, do the work, and save
+   the turn's substantive output to a note file (e.g.
+   `artifacts/<step>-note.md`).
 2. **End the turn at the gate:**
 
    ```bash

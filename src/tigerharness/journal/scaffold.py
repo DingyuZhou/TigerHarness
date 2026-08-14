@@ -61,6 +61,12 @@ _PRIOR_OPERATING_HASHES = {
     # Each entry is a previously-shipped rendered OPERATING.md an existing
     # journal may still have on disk; all refresh to the current (merged
     # cascade + per-persona-memory) template.
+    # 2026-08-14 (graph-walk step-1 wording): pre step-file-carries-no-
+    # instructions render -- before graph-walk step 1 said the compiled
+    # steps/<id>.md holds frontmatter only and named playbook_snapshot.md
+    # / task_brief.md / artifacts/ / worklog/ as the real sources. Live
+    # journals (Shohoku's included) carry this one.
+    "41e3ddf1e9070ff476a7334b40e3513f54471e460f38e0eaf7d1e13f6ed41d97",
     # 2026-08-11 (wrong-thread notify fix): pre origin-thread-routing
     # render -- before step 5's "route task notifies to the task's origin
     # thread" rule (notify --task) and the park-notify --task pointer.

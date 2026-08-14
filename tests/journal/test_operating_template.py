@@ -121,6 +121,48 @@ def test_current_template_not_in_prior_hash_manifest():
     assert current not in scaffold._PRIOR_OPERATING_HASHES
 
 
+def test_graph_walk_step_file_carries_no_instructions():
+    """A compiled step file is frontmatter and nothing else
+    (compile_cli writes `---\\n{front}---\\n`; StepFrontmatter has no body
+    field), so graph-walk step 1 must not read as "open steps/<id>.md and
+    it tells you the job". Pin both halves of the correction: the step
+    file is described as carrying no instructions, and the sources that
+    actually define the work are named. A walking seat that believes the
+    step file briefs it reads eleven lines of frontmatter and invents the
+    rest."""
+    text = OPERATING_MD
+    assert "carries\n   frontmatter only" in text
+    assert "It carries no instructions." in text
+    # The real sources, named where the seat is told to look.
+    for source in (
+        "`playbook_snapshot.md` (the phase text)",
+        "`task_brief.md` (the ask)",
+        "`artifacts/` (the pair's own notes)",
+        "`worklog/` (prior verdicts)",
+    ):
+        assert source in text, f"graph-walk step 1 no longer names {source}"
+
+
+def test_pre_edit_render_registered_as_prior():
+    """The render shipped before the 2026-08-14 graph-walk wording fix is
+    the copy live journals carry on disk. Its sha256 must stay in
+    scaffold._PRIOR_OPERATING_HASHES or those journals silently stop
+    receiving protocol updates -- the refresh only happens for a byte
+    match against a *registered* prior.
+
+    This is the half of the propagation contract no other test covers:
+    `test_operating_md_refreshed_when_unmodified_prior_ship` proves
+    "registered => refreshed" against a monkeypatched manifest, and
+    `test_operating_md_not_overwritten_when_present` proves
+    "unregistered => untouched". Neither notices a missing entry in the
+    real manifest, which is exactly the step most easily forgotten."""
+    from tigerharness.journal import scaffold
+    pre_edit = (
+        "41e3ddf1e9070ff476a7334b40e3513f54471e460f38e0eaf7d1e13f6ed41d97"
+    )
+    assert pre_edit in scaffold._PRIOR_OPERATING_HASHES
+
+
 def test_per_persona_memory_gates_documented():
     """Per-persona memory protocol: the CLI gates that route each
     persona's worklog note exist, but they only fire if the driver
