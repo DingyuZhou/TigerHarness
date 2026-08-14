@@ -61,6 +61,17 @@ _PRIOR_OPERATING_HASHES = {
     # Each entry is a previously-shipped rendered OPERATING.md an existing
     # journal may still have on disk; all refresh to the current (merged
     # cascade + per-persona-memory) template.
+    # 2026-08-14 (step files carry bodies): pre step-body render -- before
+    # graph-walk step 1 described the frontmatter/body split and told the
+    # seat to read its per-run instructions below the closing ---. Journals
+    # scaffolded on the preceding wording fix carry this one.
+    "5cd76431b04dbf9d1ebab7f54ed6c386099eca502f65d8e1f39461800190a5d8",
+    # 2026-08-14 (graph-walk step-1 wording): pre step-file-carries-no-
+    # instructions render -- before graph-walk step 1 said the compiled
+    # steps/<id>.md holds frontmatter only and named playbook_snapshot.md
+    # / task_brief.md / artifacts/ / worklog/ as the real sources. Live
+    # journals (Shohoku's included) carry this one.
+    "41e3ddf1e9070ff476a7334b40e3513f54471e460f38e0eaf7d1e13f6ed41d97",
     # 2026-08-11 (wrong-thread notify fix): pre origin-thread-routing
     # render -- before step 5's "route task notifies to the task's origin
     # thread" rule (notify --task) and the park-notify --task pointer.
@@ -112,6 +123,19 @@ _PRIOR_OPERATING_HASHES = {
     # the step-6 cascade ("a clean stop, not a turn-end").
     "d99d4ea1d88900d3795a9740a26a74839bd2af6afb6a5565e2f8becffd86c405",
 }
+
+# sha256 of the CURRENT OPERATING_MD, mirroring init._CURRENT_SKILL_HASHES.
+# The set above is an instruction with no enforcement: editing OPERATING_MD
+# and registering nothing leaves the whole suite green while every existing
+# journal silently stops receiving protocol updates. Two entries above are
+# that mistake being repaired after the fact ("shipped but never registered
+# here"). This constant turns it into a test failure instead -- change the
+# template and the guard in test_scaffold fails, telling you to move this
+# value into _PRIOR_OPERATING_HASHES and roll it. It also gives every future
+# prior a provenance the suite itself pinned while that template was live.
+_CURRENT_OPERATING_HASH = (
+    "ef7ddfa1281dc2e24a40b36bddfb00fb0ba21dd48f396f4b61fc5913f5e4338d"
+)
 
 
 # The three personas the in-session compile sub-protocol adopts (Anzai

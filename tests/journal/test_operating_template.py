@@ -7,6 +7,8 @@ accidental delete; they do NOT pin prose, which the design may evolve.
 
 from __future__ import annotations
 
+import pytest
+
 from tigerharness.journal.operating_template import OPERATING_MD
 
 
@@ -119,6 +121,97 @@ def test_current_template_not_in_prior_hash_manifest():
     from tigerharness.journal import scaffold
     current = hashlib.sha256(OPERATING_MD.encode("utf-8")).hexdigest()
     assert current not in scaffold._PRIOR_OPERATING_HASHES
+
+
+def test_current_template_matches_the_current_hash_manifest():
+    """The propagation guard, mirroring ``test_skill_hash_guard``.
+
+    ``_PRIOR_OPERATING_HASHES`` is an instruction with no enforcement:
+    before this test you could edit OPERATING_MD, register nothing, and
+    watch the entire suite pass at 100% while every existing journal
+    silently stopped receiving protocol updates. Two entries in that set
+    are that exact mistake being repaired after the fact -- one of them
+    says so ("shipped but never registered here").
+
+    Failing here is not a bug in the template. It means the template
+    changed and the manifest has not been rolled yet; the message says
+    what to do."""
+    import hashlib
+    from tigerharness.journal import scaffold
+    current = hashlib.sha256(OPERATING_MD.encode("utf-8")).hexdigest()
+    assert current == scaffold._CURRENT_OPERATING_HASH, (
+        f"OPERATING_MD changed: it now hashes to {current} but "
+        f"scaffold._CURRENT_OPERATING_HASH says "
+        f"{scaffold._CURRENT_OPERATING_HASH}. Fix in scaffold.py: "
+        f"(i) add the OLD hash {scaffold._CURRENT_OPERATING_HASH!r} to "
+        f"_PRIOR_OPERATING_HASHES so existing journals auto-refresh, and "
+        f"(ii) set _CURRENT_OPERATING_HASH = {current!r}."
+    )
+
+
+def test_graph_walk_step_file_describes_both_halves():
+    """A compiled step file has frontmatter AND a body -- the drafter's
+    per-step instructions, landed below the closing `---`. Graph-walk
+    step 1 must send the seat there.
+
+    This test used to pin the opposite ("It carries no instructions."),
+    which was accurate then: the parser dropped every body, so a seat
+    that believed its step file briefed it read eleven lines of
+    frontmatter and invented the rest. The channel exists now and the
+    failure mode inverts -- a seat that skips the body reinvents work
+    the compile already specified. Pin three things: the body is named,
+    the seat is sent to it, and the surrounding sources stay named for
+    the tasks compiled before bodies existed."""
+    # Scope to step 1 itself: every source below is named elsewhere in
+    # the document too, so a document-wide search would pass even after
+    # step 1 stopped mentioning any of them.
+    after = OPERATING_MD.split(
+        "1. **Adopt the step's persona and read the step file.**", 1,
+    )
+    assert len(after) == 2, "graph-walk step 1 heading is gone"
+    step1 = after[1].split("2. **End the turn at the gate", 1)[0]
+
+    # Substrings only -- no line breaks or indentation, which would pin
+    # prose wrapping this module deliberately leaves free.
+    assert "Below the closing `---`" in step1
+    assert "this step's per-run instructions" in step1
+    # The pre-bodies fallback, which live journals still need.
+    assert "compiled before bodies existed" in step1
+    # The surrounding sources, named where the seat is told to look.
+    # Names only -- the parentheticals wrap.
+    for source in (
+        "`playbook_snapshot.md`",
+        "`task_brief.md`",
+        "`artifacts/`",
+        "`worklog/`",
+    ):
+        assert source in step1, f"graph-walk step 1 no longer names {source}"
+
+
+@pytest.mark.parametrize(
+    "pre_edit",
+    [
+        # pre step-body render (2026-08-14, this change)
+        "5cd76431b04dbf9d1ebab7f54ed6c386099eca502f65d8e1f39461800190a5d8",
+        # pre graph-walk-wording render (2026-08-14, the change before it)
+        "41e3ddf1e9070ff476a7334b40e3513f54471e460f38e0eaf7d1e13f6ed41d97",
+    ],
+)
+def test_pre_edit_render_registered_as_prior(pre_edit):
+    """Each render shipped before a wording change is a copy some live
+    journal carries on disk. Its sha256 must stay in
+    scaffold._PRIOR_OPERATING_HASHES or that journal silently stops
+    receiving protocol updates -- the refresh only happens for a byte
+    match against a *registered* prior.
+
+    This is the half of the propagation contract no other test covers:
+    `test_operating_md_refreshed_when_unmodified_prior_ship` proves
+    "registered => refreshed" against a monkeypatched manifest, and
+    `test_operating_md_not_overwritten_when_present` proves
+    "unregistered => untouched". Neither notices a missing entry in the
+    real manifest, which is exactly the step most easily forgotten."""
+    from tigerharness.journal import scaffold
+    assert pre_edit in scaffold._PRIOR_OPERATING_HASHES
 
 
 def test_per_persona_memory_gates_documented():

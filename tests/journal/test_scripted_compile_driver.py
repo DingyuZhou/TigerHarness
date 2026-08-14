@@ -1070,3 +1070,151 @@ class TestTranscriptPreservedIntoCritiqueArtifact:
         d.land_compile(draft, transcript_path, rounds=1)
         canon = d.task_dir / "compile_critique.md"
         assert canon.read_text() == transcript_path.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Scenario 17 -- step bodies survive the compile end to end
+# ---------------------------------------------------------------------------
+
+class TestStepBodiesReachTheLandedFiles:
+    """The drafter writes per-step instructions below each chunk's
+    closing ``---``. Until 2026-08-14 the parser dropped them, so every
+    walking seat opened a landed ``steps/<id>.md`` that held frontmatter
+    and nothing else.
+
+    These assertions run against the file ON DISK after a real land --
+    constructing a ``StepFrontmatter`` with the body pre-attached would
+    pass on the broken build and prove nothing."""
+
+    def _land(self, journal_dir, team_root, bundle=_VALID_BUNDLE):
+        d = _new_driver(journal_dir, team_root)
+        d.begin_round()
+        draft = d.write_draft(bundle)
+        v = d.validate_graph(draft)
+        assert v.rc == 0, v.stdout
+        d.write_trace(json.loads(v.stdout)["trace"])
+        d.write_critic("akagi", "WORKFLOW: APPROVE")
+        d.write_critic("ayako", "WORKFLOW: APPROVE")
+        landed = d.land_compile(draft, d.write_transcript(), rounds=1)
+        assert landed.rc == 0, landed.stderr
+        return d
+
+    def test_landed_step_file_carries_its_body(self, team_root, journal_dir):
+        d = self._land(journal_dir, team_root)
+
+        plan = (d.task_dir / "steps" / "01-anzai-plan.md").read_text()
+        impl = (d.task_dir / "steps" / "02-mitsui-impl.md").read_text()
+
+        # Each seat gets ITS OWN instructions, not the other's.
+        assert "Plan the work." in plan
+        assert "Implement the plan." not in plan
+        assert "Implement the plan." in impl
+        assert "Plan the work." not in impl
+
+        # And below the closing delimiter, where a reader looks for it.
+        head, _, body = plan.partition("---\n")[2].partition("---\n")
+        assert "Plan the work." not in head
+        assert body.strip() == "Plan the work."
+
+    def test_body_is_not_emitted_as_a_yaml_key(self, team_root, journal_dir):
+        """The silence assertion. ``_render_frontmatter`` used to iterate
+        ``asdict(step)``, which would sweep in the new field and emit the
+        step's whole instruction text as a ``body:`` YAML key -- rendering
+        that still *looks* right at a glance."""
+        d = self._land(journal_dir, team_root)
+
+        for sid in ("01-anzai-plan", "02-mitsui-impl"):
+            text = (d.task_dir / "steps" / f"{sid}.md").read_text()
+            frontmatter = text.partition("---\n")[2].partition("---\n")[0]
+            keys = [
+                line.split(":", 1)[0]
+                for line in frontmatter.splitlines()
+                if line.strip()
+            ]
+            assert "body" not in keys, frontmatter
+            assert keys == [
+                "id", "persona", "role", "on_approve", "on_revise",
+                "on_block", "max_iters", "timeout_sec", "parallel_with",
+            ]
+
+    def test_body_never_reaches_orchestration_json(
+        self, team_root, journal_dir,
+    ):
+        """A structural guard, not a check on the body plumbing:
+        ``Orchestration.steps`` is a list of step *ids*, so no
+        frontmatter field has ever been able to reach this file. It
+        holds even with ``body`` in ``to_dict`` -- the assertion that
+        catches that is ``test_body_is_not_emitted_as_a_yaml_key``.
+        Kept so a refactor that inlines whole step dicts into ``steps``
+        has to notice the bodies it would drag along."""
+        d = self._land(journal_dir, team_root)
+        raw = (d.task_dir / "orchestration.json").read_text()
+        assert "Plan the work." not in raw
+        assert "Implement the plan." not in raw
+        assert '"body"' not in raw
+
+    def test_bodyless_bundle_renders_as_before(self, team_root, journal_dir):
+        """The empty-body branch of ``_render_step_file``. A bundle whose
+        chunks stop at the closing ``---`` must land byte-identically to
+        what shipped before bodies existed -- no trailing blank line."""
+        bodyless = _VALID_BUNDLE.replace(
+            "---\nPlan the work.\n", "---\n",
+        ).replace(
+            "---\nImplement the plan.\n", "---\n",
+        )
+        d = self._land(journal_dir, team_root, bundle=bodyless)
+
+        text = (d.task_dir / "steps" / "01-anzai-plan.md").read_text()
+        assert text == (
+            "---\n"
+            "id: 01-anzai-plan\n"
+            "persona: Anzai\n"
+            "role: planner\n"
+            "on_approve: 02-mitsui-impl\n"
+            "on_revise: 01-anzai-plan\n"
+            "on_block: __escalate__\n"
+            "max_iters: 5\n"
+            "timeout_sec: 1800\n"
+            "parallel_with: []\n"
+            "---\n"
+        )
+
+    def test_appended_step_carries_its_body_too(
+        self, team_root, journal_dir, tmp_path,
+    ):
+        """``append-steps`` is the second write site. A fix that lands
+        only in ``land-compile`` leaves runtime-grafted steps empty."""
+        d = self._land(journal_dir, team_root)
+
+        bundle_path = tmp_path / "append.md"
+        bundle_path.write_text(
+            "```steps-bundle\n"
+            "## step: 03-mitsui-qa\n"
+            "---\n"
+            "id: 03-mitsui-qa\n"
+            "persona: Mitsui\n"
+            "role: qa\n"
+            "on_approve: __done__\n"
+            "on_revise: 03-mitsui-qa\n"
+            "on_block: __escalate__\n"
+            "max_iters: 5\n"
+            "timeout_sec: 1800\n"
+            "parallel_with: []\n"
+            "---\n"
+            "QA the implementation against the plan's acceptance rows.\n"
+            "```\n"
+        )
+        assert d.append_steps(bundle_path).rc == 0
+
+        appended = (d.task_dir / "steps" / "03-mitsui-qa.md").read_text()
+        assert "QA the implementation against the plan's acceptance rows." in (
+            appended.partition("---\n")[2].partition("---\n")[2]
+        )
+
+        # The append re-reads every existing step file to re-validate the
+        # whole graph. It must leave them alone: an already-walked seat's
+        # instructions cannot change under it mid-walk.
+        plan = (d.task_dir / "steps" / "01-anzai-plan.md").read_text()
+        assert plan.partition("---\n")[2].partition("---\n")[2].strip() == (
+            "Plan the work."
+        )

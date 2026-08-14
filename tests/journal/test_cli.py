@@ -46,9 +46,14 @@ def _seed_workflow_graph(
     """Seed a fully-landed kind=workflow task: status.json
     (compile_phase=complete), orchestration.json, and one steps/<id>.md
     per step. ``steps`` is a list of StepFrontmatter; edges are derived
-    from each step's own routing triple. Mirrors what land-compile
-    writes, so step-done's readers see real on-disk shapes."""
-    from tigerharness.journal.compile_cli import _render_frontmatter
+    from each step's own routing triple.
+
+    Goes through land-compile's own ``_render_step_file`` rather than
+    rendering the frontmatter by hand, so a step carrying a ``body``
+    lands here in exactly the shape a compiled task has on disk. A
+    hand-rolled frontmatter-only render drifts silently the moment the
+    file format grows a part."""
+    from tigerharness.journal.compile_cli import _render_step_file
     from tigerharness.journal.models import CompilePhase
     from tigerharness.journal.wfcore.models import (
         Orchestration,
@@ -66,9 +71,7 @@ def _seed_workflow_graph(
     st.compile_phase = CompilePhase.COMPLETE
     paths.status_json(task_id).write_text(st.to_json())
     for sf in steps:
-        (tdir / "steps" / f"{sf.id}.md").write_text(
-            f"---\n{_render_frontmatter(sf)}---\n"
-        )
+        (tdir / "steps" / f"{sf.id}.md").write_text(_render_step_file(sf))
     orch = Orchestration(
         task_id=task_id, team="Shohoku", playbook="default",
         playbook_sha256="0" * 64,
@@ -1791,6 +1794,31 @@ class TestStepDone:
         assert e.verdict == "APPROVE"
         assert "Did the step" in e.body
         # cursor moved to the on_approve target
+        assert walk.read(paths, "wf1").current == "build"
+
+    def test_reads_a_body_carrying_step_file(self, journal_dir, tmp_path):
+        """The shape land-compile writes for every task compiled since
+        step files gained bodies. The gate takes persona/role from
+        between the first two delimiters, so instruction text below them
+        -- which may itself contain a bare ``---`` line -- must not
+        disturb the read or leak into the worklog attribution."""
+        from tigerharness.journal import walk
+        paths = JournalPaths(root=journal_dir)
+        steps = _linear_steps()
+        for sf in steps:
+            sf.body = (
+                f"Instructions for {sf.id}.\n\n"
+                "A second paragraph, and a bare delimiter below.\n"
+                "---\n"
+                "persona: NotThisOne\n"
+            )
+        _seed_workflow_graph(paths, "wf1", steps, "plan")
+        rc = self._run(journal_dir, "wf1", "plan", "APPROVE",
+                       _note(tmp_path))
+        assert rc == 0
+        [e] = worklog.list_entries(paths, "wf1")
+        assert e.persona == "Akagi"      # the frontmatter, not the body
+        assert e.role == "planner"
         assert walk.read(paths, "wf1").current == "build"
 
     def test_advancing_the_walk_refreshes_the_heartbeat(

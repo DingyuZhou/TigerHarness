@@ -1622,6 +1622,46 @@ class TestReadExistingStep:
         assert loaded.id == s.id
         assert loaded.persona == s.persona
         assert loaded.on_approve == s.on_approve
+        assert loaded.body == ""
+
+    def test_round_trips_a_body(self, tmp_path):
+        from tigerharness.journal.compile_cli import (
+            _read_existing_step, _render_step_file,
+        )
+        from tigerharness.journal.wfcore.models import StepFrontmatter
+
+        s = StepFrontmatter(
+            id="x-1", persona="Anzai", role="planner",
+            on_approve="x-2", on_revise="x-1", on_block="__escalate__",
+            max_iters=5, timeout_sec=1800, parallel_with=[],
+            body="Line one.\n\nLine two.",
+        )
+        td = tmp_path / "task"
+        (td / "steps").mkdir(parents=True)
+        (td / "steps" / "x-1.md").write_text(_render_step_file(s))
+        assert _read_existing_step(td, "x-1").body == s.body
+
+    def test_whitespace_only_body_rehydrates_empty(self, tmp_path):
+        """Trailing blank lines are not instructions. Every step file
+        landed before bodies existed rehydrates through here."""
+        from tigerharness.journal.compile_cli import _read_existing_step
+        td = tmp_path / "task"
+        (td / "steps").mkdir(parents=True)
+        (td / "steps" / "x-1.md").write_text(
+            "---\n"
+            "id: x-1\n"
+            "persona: Anzai\n"
+            "role: planner\n"
+            "on_approve: __done__\n"
+            "on_revise: x-1\n"
+            "on_block: __escalate__\n"
+            "max_iters: 5\n"
+            "timeout_sec: 1800\n"
+            "parallel_with: []\n"
+            "---\n"
+            "\n   \n\n",
+        )
+        assert _read_existing_step(td, "x-1").body == ""
 
     def test_missing_leading_delimiter_raises(self, tmp_path):
         from tigerharness.journal.compile_cli import _read_existing_step
