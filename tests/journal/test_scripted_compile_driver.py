@@ -1140,6 +1140,13 @@ class TestStepBodiesReachTheLandedFiles:
     def test_body_never_reaches_orchestration_json(
         self, team_root, journal_dir,
     ):
+        """A structural guard, not a check on the body plumbing:
+        ``Orchestration.steps`` is a list of step *ids*, so no
+        frontmatter field has ever been able to reach this file. It
+        holds even with ``body`` in ``to_dict`` -- the assertion that
+        catches that is ``test_body_is_not_emitted_as_a_yaml_key``.
+        Kept so a refactor that inlines whole step dicts into ``steps``
+        has to notice the bodies it would drag along."""
         d = self._land(journal_dir, team_root)
         raw = (d.task_dir / "orchestration.json").read_text()
         assert "Plan the work." not in raw

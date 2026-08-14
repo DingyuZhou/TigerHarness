@@ -181,8 +181,11 @@ class StepFrontmatter:
     parallel_with: list[str] = field(default_factory=list)
     # The drafter's per-step instructions, carried from the bundle chunk to
     # the landed ``steps/<id>.md`` body. Deliberately absent from
-    # ``to_dict``: it is not frontmatter and must never reach
-    # ``orchestration.json``.
+    # ``to_dict`` because ``_render_frontmatter`` iterates it: a ``body``
+    # key there emits the whole instruction text as a YAML field, into a
+    # file that still looks plausible at a glance. (It also keeps the body
+    # out of ``orchestration.json`` -- but that file holds step *ids*, so
+    # it was never reachable from here either way.)
     body: str = ""
 
     REQUIRED_KEYS: ClassVar[tuple[str, ...]] = (
