@@ -131,7 +131,9 @@ def test_graph_walk_step_file_carries_no_instructions():
     step file briefs it reads eleven lines of frontmatter and invents the
     rest."""
     text = OPERATING_MD
-    assert "carries\n   frontmatter only" in text
+    # Substrings only -- no line breaks or indentation, which would pin
+    # prose wrapping this module deliberately leaves free.
+    assert "frontmatter only" in text
     assert "It carries no instructions." in text
     # The real sources, named where the seat is told to look.
     for source in (
