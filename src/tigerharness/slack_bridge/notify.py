@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import sys
 import urllib.error
 import urllib.request
@@ -166,6 +167,77 @@ def _load_creds() -> _Creds | None:
 
 
 # ---------------------------------------------------------------------------
+# TLS trust store
+# ---------------------------------------------------------------------------
+
+def _ssl_context() -> ssl.SSLContext:
+    """Build the TLS context for an outbound post, most specific rung first:
+    ``SSL_CERT_FILE`` -> ``certifi.where()`` -> the interpreter default.
+
+    Built **per call, never at import and never cached**: the team ``.env``
+    is parsed inside :func:`SlackNotifier.try_load`, not at import, so a
+    context built at import time would read ``SSL_CERT_FILE`` before the
+    ``.env`` had set it and silently skip the operator's explicit choice.
+
+    A configured rung that does not work falls through to the next one
+    rather than raising -- one typo in an ``.env`` must not take down every
+    notification on the subsystem whose failure cannot notify anyone. That
+    is only safe because the fall-through is logged at WARNING and because
+    reaching the last rung is itself logged; a degrade here is attributed,
+    not silent. ``certifi`` merely being absent logs at DEBUG, since it is
+    not an actionable misconfiguration and rung 1 may still be serving the
+    host correctly.
+    """
+    candidates: list[tuple[str, str]] = []
+    cert_file = os.environ.get("SSL_CERT_FILE", "").strip()
+    if cert_file:
+        candidates.append(("SSL_CERT_FILE", cert_file))
+    try:
+        import certifi
+    except ImportError:
+        log.debug("notify: certifi not installed; skipping that trust-store rung")
+    else:
+        candidates.append(("certifi", certifi.where()))
+
+    for rung, path in candidates:
+        # ssl.SSLError and FileNotFoundError are both OSError subclasses, so
+        # one handler covers the missing path, the unreadable file and the
+        # file that is not a CA bundle.
+        try:
+            return ssl.create_default_context(cafile=path)
+        except OSError as exc:
+            log.warning(
+                "notify: TLS trust store %s=%s is unusable (%r); "
+                "falling through to the next rung", rung, path, exc,
+            )
+    log.warning(
+        "notify: falling back to the interpreter's default TLS trust store; "
+        "set SSL_CERT_FILE or install certifi if verification fails"
+    )
+    return ssl.create_default_context()
+
+
+def _record_transport_result(
+    ok: bool, exc: BaseException | None = None, *, site: str = ""
+) -> None:
+    """Observe the outcome of one HTTP attempt.
+
+    ``ok`` means **the transport completed** -- not that the post
+    succeeded. A Slack ``{"ok": false}`` body and an HTTP 500 both count as
+    ``ok=True`` here, because the failure this instruments is a TLS
+    handshake dying, which is what ``URLError`` marks. Never raises into
+    the notify path.
+    """
+    from .notify_health import record_transport
+
+    if ok:
+        record_transport(True)
+        return
+    log.warning("notify: slack transport failed (%s): %r", site, exc)
+    record_transport(False, error=f"{site}: {exc!r}")
+
+
+# ---------------------------------------------------------------------------
 # Low-level HTTP
 # ---------------------------------------------------------------------------
 
@@ -180,12 +252,16 @@ def _slack_post_json(endpoint: str, token: str, payload: dict) -> dict[str, Any]
             "Content-Type": "application/json; charset=utf-8",
         },
     )
+    ctx = _ssl_context()
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+            raw = resp.read()
     except urllib.error.URLError as exc:
-        log.warning("slack POST %s failed: %r", endpoint, exc)
+        _record_transport_result(False, exc, site=f"POST {endpoint}")
         return {"ok": False, "error": f"transport: {exc}"}
+    else:
+        _record_transport_result(True)
+    return json.loads(raw.decode("utf-8"))
 
 
 def _slack_post_form(endpoint: str, token: str, payload: dict) -> dict[str, Any]:
@@ -200,12 +276,16 @@ def _slack_post_form(endpoint: str, token: str, payload: dict) -> dict[str, Any]
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
     )
+    ctx = _ssl_context()
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+            raw = resp.read()
     except urllib.error.URLError as exc:
-        log.warning("slack POST %s failed: %r", endpoint, exc)
+        _record_transport_result(False, exc, site=f"POST {endpoint}")
         return {"ok": False, "error": f"transport: {exc}"}
+    else:
+        _record_transport_result(True)
+    return json.loads(raw.decode("utf-8"))
 
 
 def _resolve_dm_channel(token: str, user_id: str) -> str | None:
@@ -225,12 +305,16 @@ def _resolve_dm_channel(token: str, user_id: str) -> str | None:
 
 def _put_bytes(url: str, data: bytes) -> bool:
     req = urllib.request.Request(url, data=data, method="POST")
+    ctx = _ssl_context()
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return 200 <= resp.status < 300
+        with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
+            status = resp.status
     except urllib.error.URLError as exc:
-        log.warning("slack upload-URL POST failed: %r", exc)
+        _record_transport_result(False, exc, site="upload-URL POST")
         return False
+    else:
+        _record_transport_result(True)
+    return 200 <= status < 300
 
 
 # ---------------------------------------------------------------------------

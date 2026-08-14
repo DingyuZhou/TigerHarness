@@ -83,8 +83,20 @@ AUTODRIVE_ENV_VARS = (
     "TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL",
 )
 
+#: The TLS trust-store overrides. ``SSL_CERT_FILE`` is a genuine ``src/``
+#: reader (rung 1 of ``notify._ssl_context``) and the team ``.env`` sets it,
+#: so an unscrubbed dev shell silently green-lights the rung-1 tests for the
+#: wrong reason. ``SSL_CERT_DIR`` is read *below* us, by OpenSSL inside
+#: ``create_default_context()``; it is scrubbed anyway because it is the one
+#: lever that decides what a default context trusts, and a test asserting
+#: "this context trusts nothing" must not depend on the runner's capath.
+TLS_ENV_VARS = (
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+)
+
 #: Everything the autouse fixture unsets.
-SCRUBBED_ENV_VARS = BRIDGE_ENV_VARS + AUTODRIVE_ENV_VARS
+SCRUBBED_ENV_VARS = BRIDGE_ENV_VARS + AUTODRIVE_ENV_VARS + TLS_ENV_VARS
 
 
 class RealDaemonSpawnBlocked(BaseException):

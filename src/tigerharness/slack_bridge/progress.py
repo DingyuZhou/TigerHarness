@@ -115,11 +115,44 @@ def sanitize_header(text: str) -> str:
     """Flatten an excerpt of the Operator's message for a shared channel.
 
     Collapses all whitespace (a multi-line prompt would otherwise become
-    a wall of text), drops backticks and fences, and truncates. This runs
-    at the post site on whatever string the caller supplied, so a caller
-    cannot leak by forgetting to sanitise.
+    a wall of text), drops backticks and fences, drops assignment-shaped
+    tokens, and truncates. This runs at the post site on whatever string
+    the caller supplied, so a caller cannot leak by forgetting to
+    sanitise.
+
+    The assignment rule is ``tool_hint``'s, applied to every token rather
+    than only the first: the excerpt is the Operator's own prose quoted
+    into a channel other people read, and ``SECRET=xoxb-...`` is a
+    perfectly ordinary thing to paste into a prompt. It is shape-based on
+    purpose -- a credential regex loses exactly the secret format nobody
+    thought to add to it. A token whose right-hand side is empty
+    (``--flag=``) carries nothing, so it survives.
+
+    Scrubbing runs BEFORE truncation: truncating first can cut a secret
+    mid-token and leave a prefix that no longer reads as an assignment.
+    That ordering also has a leak consequence in the other direction --
+    dropping makes room, so a longer paste can leak where a shorter one
+    does not. ``docs/slack-bridge.md`` carries it; do not restate it here.
+
+    Backticks are DELETED, not replaced with a space. Spacing them out
+    split ``SECRET=`xoxb-...``` into ``SECRET=`` -- empty right-hand
+    side, kept by the rule above -- plus a bare value carrying no ``=``
+    at all, so backticking a value (idiomatic in Slack) defeated the
+    scrubber that the unbackticked form passes. Deletion can only merge
+    tokens, and merging only ever adds ``=`` characters to a token, so
+    it can make a token droppable but never the reverse.
+
+    It does NOT close ``SECRET = xoxb-...`` with spaces around the
+    equals: that is three tokens, and no token-shaped rule can catch it
+    without lookahead that would also eat ``the answer = 42``. The docs
+    say so rather than the code pretending otherwise.
     """
-    return _truncate(" ".join(text.replace("`", " ").split()), HEADER_MAX)
+    kept = [
+        token
+        for token in text.replace("`", "").split()
+        if "=" not in token or not token.partition("=")[2]
+    ]
+    return _truncate(" ".join(kept), HEADER_MAX)
 
 
 def _minutes(seconds: float) -> int:

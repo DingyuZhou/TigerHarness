@@ -52,6 +52,11 @@ class DeferredEntry:
     # Slack channel the origin thread lives in. Optional: old sidecars
     # predate the field, and a defer may come from outside Slack.
     channel: str = ""
+    # Lane routing. "workflow" is the pre-field meaning: every entry
+    # written before these keys existed could only produce a workflow,
+    # so that is what a sidecar without them still means.
+    kind: str = "workflow"
+    persona: str = ""
 
 
 def defer_entry(
@@ -64,6 +69,8 @@ def defer_entry(
     requester: str = "",
     thread_ts: str = "",
     channel: str = "",
+    kind: str = "workflow",
+    persona: str = "",
 ) -> DeferredEntry:
     """Write one deferred entry. Deliberately dumb: no playbook read,
     no roster validation -- those run at materialization on the
@@ -91,6 +98,8 @@ def defer_entry(
         "requester": requester,
         "thread_ts": thread_ts,
         "channel": channel,
+        "kind": kind,
+        "persona": persona,
         "created_at": created_at,
         # Provenance: where this entry was meant to live. Carried
         # forward into the materialized task so a misplaced entry is
@@ -104,6 +113,7 @@ def defer_entry(
     return DeferredEntry(
         id=entry_id, title=title, team=team, playbook=playbook,
         requester=requester, thread_ts=thread_ts, channel=channel,
+        kind=kind, persona=persona,
         created_at=created_at, path=entry_dir,
     )
 
@@ -140,6 +150,12 @@ def read_entry(paths: JournalPaths, entry_id: str) -> DeferredEntry:
             f"{sidecar_path} missing required field(s): "
             + ", ".join(missing)
         )
+    kind = str(sidecar.get("kind") or "workflow")
+    if kind not in ("workflow", "task"):
+        raise DeferredError(
+            f"{sidecar_path} has kind {kind!r}; expected 'workflow' or "
+            "'task'"
+        )
     try:
         payload = payload_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -156,6 +172,8 @@ def read_entry(paths: JournalPaths, entry_id: str) -> DeferredEntry:
         requester=str(sidecar.get("requester", "")),
         thread_ts=str(sidecar.get("thread_ts", "")),
         channel=str(sidecar.get("channel", "")),
+        kind=kind,
+        persona=str(sidecar.get("persona", "")),
         created_at=str(sidecar.get("created_at", "")),
         path=entry_dir,
         payload=payload,

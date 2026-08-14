@@ -528,6 +528,92 @@ On SIGTERM (e.g. `systemctl restart`), the multi-bridge:
 
 If a lane's drain times out, the others still get their full window and the process logs a per-lane warning before continuing.
 
+#### The drain budget is a chain, not a number
+
+That 90 s is the middle link of an ordering that spans three files which
+do not import each other:
+
+```
+STOP_DRAIN_S + FINISH_POST_S  <=  _DRAIN_TIMEOUT_S  <=  TimeoutStopSec
+   35 + 35 = 70                       90                    120
+   bridge.py                      __main__.py         gen_service.py
+```
+
+Read it outside in. `TimeoutStopSec=120` is how long systemd waits
+before SIGKILL, so the drain must finish **and** the process must exit
+inside it. The drain budget is 90 s, leaving 30 s for that exit — sized
+against `notify.py`'s `urlopen(timeout=30)`, which is the last post a
+lane may still owe. Inside that, a lane's own teardown costs at most
+70 s, leaving 20 s of slack before the shared budget expires.
+
+Both margins are enforced as **floors** (≥ 20 s, ≥ 30 s), not as "> 0":
+one second of headroom is the same wedge failure wearing a passing test.
+And the 70 s floor is not arbitrary either — it is sized *above* the
+30 s `urlopen` timeout on purpose, so the budget fires during a genuine
+wedge rather than during a normal-but-slow Slack POST. `asyncio.to_thread`
+is not cancellable, so a worker cut off early keeps posting and lands its
+message *after* the closer, which is a visible lie in the channel rather
+than a silent timeout.
+
+Edit any one link in isolation and the failure is silent and remote:
+systemd SIGKILLs a bridge that was draining correctly, and the reply the
+Operator is waiting for dies with the process. Nothing in the code
+connects the three, so
+[`tests/slack_bridge/test_drain_budget_invariant.py`](../tests/slack_bridge/test_drain_budget_invariant.py)
+does — it reads all three from their real sources, including
+`TimeoutStopSec` parsed out of the **rendered** unit rather than a
+literal, so a template edit trips it too. It also pins these prose sites,
+so a docs reword that drops a number fails CI.
+
+**Do not replace the test with a derivation.** Three hand-maintained
+numbers policed by a test looks like tech debt with an obvious fix:
+compute `_DRAIN_TIMEOUT_S` from `STOP_DRAIN_S + FINISH_POST_S` and be
+done with it. That was considered and rejected, for two reasons that
+have not changed. The margins are two *independent* headroom judgments,
+not one factor — 30 s sizes a process exit against `notify.py`'s
+timeout, 20 s buys slack inside a budget every lane shares, and a
+formula relating them would invent a constant nobody can defend. And an
+import-time derivation would freeze the values, defeating the
+module-level monkeypatching the tests rely on (`bridge.py` keeps them
+module-level and read at call time, never bound into a default argument,
+on purpose). A test is also the only form that reaches the systemd
+template at all, which no Python expression can.
+
+**Two bounds the guard does not cover** — one it *cannot*, one it
+currently *does not*. The difference matters: the first is permanent,
+the second is a gap someone can close.
+
+*The installed unit (cannot).* The guard reads `gen_service.py`'s
+template, not your installed unit. An already-installed
+`slack-bridge-*.service` keeps the old `TimeoutStopSec` until someone
+re-runs `gen-service` and `systemctl --user daemon-reload`. If you are
+reconciling a live box, check the unit itself:
+
+```bash
+systemctl --user show <unit> -p TimeoutStopUSec   # expect 2min
+```
+
+*Concurrency (does not).* The budget's arithmetic has only ever been
+observed draining **one** turn. Outside its initial set in the
+constructor, `_drained` is set in exactly one place — the dispatch
+`finally` block in `bridge.py`, when the in-flight counter reaches zero
+— and that line carries a `# pragma: no branch` whose own comment
+records why: only single-request flows are tested, so the "still in
+flight" side never runs. With a single dispatch the counter falls to
+zero trivially. The case these margins exist *for* — several turns
+winding down together against one shared 90 s budget — sits inside the
+coverage percentage and outside any assertion. Treat the ordering as
+enforced, because it is, and the multi-turn drain as reasoned but
+unexercised. Closing it means a test with two concurrent dispatches
+where the first to finish must *not* set `_drained`.
+
+This gap is also listed in the README under *Known limitations &
+roadmap* → *Bridge shutdown*, and the pragma itself points back at both.
+If you write that test and remove the pragma, **retract all three** — a
+known limitation that outlives its fix is a reassurance pointing the
+wrong way, and it is the one kind of stale doc a reader will not think
+to check.
+
 ### Systemd unit
 
 The fastest path: have tigerharness generate a unit file customized
@@ -664,9 +750,19 @@ What lands in the ops-log channel:
 :hourglass: [Shohoku] Anzai still working — "refresh the knowledge index"
     5m · 34 tool calls · last: Edit(src/tigerharness/slack_bridge/bridge.py)
     10m · 71 tool calls · last: Bash(pytest)
-    15m · 71 tool calls · no activity for 6m :warning:
-    :white_check_mark: done in 17m · 96 tool calls
+    15m · 71 tool calls · last: Bash(pytest)
+    20m · 71 tool calls · no activity for 10m :warning:
+    :white_check_mark: done in 22m · 96 tool calls
 ```
+
+The 15m pulse still names the last tool because only 5 minutes had
+passed since it. For when `no activity for Nm` appears instead, what
+suppresses it, and why `N` usually reads larger than the threshold, see
+*Operational notes* below. That bullet is deliberately the only
+statement of the rule in this document — the example above once showed a
+pulse the code cannot produce, with the rule written nowhere to check it
+against, and restating it here would just give the next edit two places
+to disagree.
 
 The indentation above is Slack's thread rendering, not part of the
 message text — each pulse is posted as a threaded reply whose payload is
@@ -731,23 +827,145 @@ tool added next month renders nothing rather than leaking by default:
 | Tool | Rendered |
 |---|---|
 | `Read` / `Edit` / `Write` | the `file_path` only |
-| `Bash` | the first token of the command (dropped if it looks like `VAR=value`) |
+| `Bash` | the first token of the command — or nothing at all, when that token contains `=` |
 | anything else | the tool name alone |
 
-Tool arguments, file contents, and command bodies never reach Slack.
+Nothing else does: file contents never reach Slack, no argument of any
+other tool does, and no more of a `Bash` command than that first token.
+Note what the table already implies about the two arguments it *does*
+render: neither is **scrubbed**. The excerpt below cleans a message
+token by token; these two never clean anything. A `file_path` is posted
+as it stands, truncated at 60 characters and not otherwise inspected.
+The `Bash` first token is all-or-nothing — rendered whole or withheld
+whole — and the `=` test that decides which is not the excerpt's rule.
+The shape-bound paragraph below sets out how the two differ; do not
+carry a rule across from one to the other.
 
 The **parent message** is the exception worth deciding about
 deliberately: it quotes up to 120 characters of the message that started
-the turn, so you can tell two concurrent turns apart.
+the turn — with assignment-shaped tokens dropped — so you can tell two
+concurrent turns apart.
 
 This excerpt is a **deliberate, reviewed exception** to the "no prompt
 text" rule the rest of this feature follows. It was kept on purpose:
 without it, two concurrent turns from the same persona are
 indistinguishable in the channel. It is bounded to 120 characters,
 stripped of backticks and flattened to one line, and it is the *only*
-prompt-derived text that is ever posted. Treat its presence as intended,
-not as a defect to file — and the precondition below as the thing that
-makes it safe.
+prompt-derived text that is ever posted. Any whitespace-delimited token
+shaped like an assignment carrying a value — `SECRET=xoxb-…`, which a
+`Bash` hint also refuses, though by a stricter rule of its own — is
+removed
+*before* the excerpt is truncated. Backticks are **deleted** rather than
+turned into spaces, so ``SECRET=`xoxb-…`` scrubs exactly like the
+unbackticked form; spacing them out used to split it into a valueless
+`SECRET=` plus a bare secret, and leak it.
+
+**What that does not do is redact.** Two separate bounds decide whether
+a piece of the **excerpt** reaches the channel — its **shape** and its
+**position** — and only the first is a rule about secrets at all. Keep
+them apart while reading: a sentence that is true of one is routinely
+false of the other, and a sentence about "what gets through" that does
+not say which bound it means is not a claim you can act on.
+
+Keep the **channel** straight too, and the two bounds stop resembling
+each other. Three things carry text into that channel and each is cut at
+its own limit — the excerpt at 120, the tool hint at 60, the lane prefix
+at 40. So the position bound is the ordinary case: present everywhere,
+varying only in its number.
+
+The shape bound is nothing like that. It is **two different rules**, and
+between them they cover the excerpt and one branch of the hint. The
+excerpt drops assignment-shaped tokens one at a time and keeps the rest
+of the message. The `Bash` hint drops the *entire* hint when its first
+token contains `=` — including a valueless `--flag=`, which the excerpt
+keeps on purpose, so the one shape the excerpt is documented below as
+preserving is the one the hint refuses to render. The `file_path` hint
+drops nothing at all: `SECRET=xoxb-…` inside a path posts whole, and
+that is the shape the excerpt is *best* at catching. (The lane prefix
+drops nothing either; it is named here and not again, because it comes
+from bridge config, not from anything you type.)
+
+Read the rest of this section as being about the excerpt. It is the only
+one of the three that both bounds touch, and the two rules below are its
+two rules — not the channel's.
+
+The shape bound is not a credential regex, and it is token-shaped, so
+none of these is dropped by it:
+
+- **anything colon-shaped** — `token: xoxb-…`, a JSON body
+  `{"token": "xoxb-…"}`, an `Authorization: Bearer xoxb-…` header. The
+  rule never looks at a colon at all, so a colon-shaped secret survives
+  whenever its own value carries no `=` — which is the usual case, and
+  all three of those. This is the one to remember: most credentials
+  arrive by colon, not by equals, and a Bearer header is the shape least
+  likely to look like a secret at a glance while you are pasting a
+  failing request into a prompt;
+- a secret written as prose — "the token is xoxb-…";
+- a secret with spaces around the equals — `SECRET = xoxb-…` is three
+  tokens, none of them an assignment, and no token-shaped rule catches
+  it without lookahead that would also eat "the answer = 42";
+- a `--flag=` whose value is empty, which is kept on purpose so the rule
+  does not eat ordinary command-line prose.
+
+Read that list as samples from one side of a boundary, not as a
+checklist. `sanitize_header`, in
+`src/tigerharness/slack_bridge/progress.py`, is the entire rule, and it
+is four steps:
+
+1. delete backticks;
+2. split on whitespace;
+3. drop every token containing `=` with something after it — the unit is
+   the **token**, never the message;
+4. rejoin with single spaces — this is what flattens a multi-line paste
+   — and truncate to 120 characters.
+
+Three consequences follow that reading the four steps does not suggest.
+The first two are the shape bound; the third is the position bound.
+
+**A message can be half-dropped.** `Cookie: session=abc123` posts as
+`Cookie:` — the label survives, the value does not. Do not read that as
+colon forms being protected. Nothing about the colon saved anything; the
+`=` inside the *value* is what got caught, and `Authorization: Bearer
+xoxb-…` has no `=` to catch.
+
+**It over-drops.** Any token with a non-empty right-hand side goes, and
+URLs qualify — `curl https://example.invalid/a?token=…` posts as `curl`,
+losing the whole URL. Benign content disappearing from your own quoted
+words is intended, not a bug: loosening the rule to preserve query
+strings would reopen the commonest way a token reaches a channel.
+
+**Step 4 is truncation, which is not redaction and must not be read as
+any.** This is the position bound, and it interacts with the shape bound
+in the direction nobody guesses. Step 3 runs *before* step 4, so the 120
+characters are counted on what survived the scrub, not on what you
+typed. **Dropping makes room.**
+
+A longer paste can therefore leak where a shorter one does not, which is
+the reverse of the intuition. `token: xoxb-deadbeefcafe` at the end of a
+134-character sentence of ordinary prose posts as `token: xo…`, cut
+mid-secret. Put the identical token after three `KEY=value` assignments,
+in a *longer* 166-character message, and all three are dropped before
+the count starts: the excerpt is 24 characters and the token posts
+whole.
+
+So a cut-off excerpt is not evidence that anything was scrubbed, and
+length is not protection. What decides is how much *surviving* text
+precedes the secret — which is not something you can judge by looking at
+what you pasted.
+
+Assume anything you paste can reach the channel. `KEY=value` with no
+spaces gets three different answers from the three fields, so "is this
+shape safe" is not a question you can answer without naming one: the
+excerpt drops that token and posts the rest; a `Bash` hint never carries
+it either way — as the first token it suppresses the hint entirely, and
+anywhere later only the first token is ever rendered; a `file_path`
+posts the identical string whole. The one field that carries it is the
+one with no shape rule at all.
+
+The excerpt is sanitised, not safe to leak: the dropping is a courtesy
+against the common accident, **not** a control you may rely on. Treat
+its presence as intended, not as a defect to file — and the precondition
+below as the thing that makes it safe.
 
 > **Precondition — check this before enabling.** The ops-log channel
 > must be **private**, and its membership must be exactly the set of
@@ -773,9 +991,16 @@ makes it safe.
 - **A bad channel id stops retrying.** If the parent post fails, the
   reporter goes inert for that turn rather than re-posting every
   interval into a channel that will never accept it.
-- **`no activity for Nm`** appears after roughly two idle intervals.
-  Windows that are quiet *by design* — a retry backoff, an idle
-  compaction — are labelled as such instead of raising a false stall.
+- **`no activity for Nm`** — the threshold is exact and the number you
+  read is not. The warning is due the moment idle reaches **two
+  intervals** (`>=`, so 10 minutes exactly at the fixed 5-minute
+  interval), but a pulse only renders on its own cadence, so it first
+  appears at the next pulse after that — up to one interval later — and
+  `N` is floored. Expect to read **10 through 14**, and usually not 10;
+  the example above shows 10 only because its last event happened to
+  land on a pulse. Windows that are quiet *by design* — a retry backoff,
+  an idle compaction — are labelled as such **instead**, and suppress
+  the warning for as long as they last, however quiet the turn goes.
 
 ### Confirming it works
 

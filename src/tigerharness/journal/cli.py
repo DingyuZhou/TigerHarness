@@ -52,6 +52,7 @@ from tigerharness.journal.scaffold import (
     resolve_default_persona,
     resolve_playbook_default_captain,
     resolve_team_root,
+    validate_personas,
 )
 from tigerharness.journal.sweep import (
     DEFAULT_STUCK_TIMEOUT_SEC,
@@ -204,7 +205,6 @@ def _cmd_new_task(args: argparse.Namespace, paths: JournalPaths) -> int:
     # correct. Symmetric default-only validation keeps the safety net
     # without changing the stable CLI surface.
     if team_root is not None and persona_came_from_default:
-        from tigerharness.journal.scaffold import validate_personas
         missing = validate_personas(team_root, {persona})
         if missing:
             print(
@@ -371,6 +371,36 @@ def cmd_defer(args: argparse.Namespace) -> int:
     playbook read -- the minimum a Slack-triggered session must do.
     Team pinning is mandatory: this never falls back to the XDG
     journal (exit 2 with the refusal instead)."""
+    # Flag validation first: pure argument checks, so a malformed
+    # invocation fails before stdin is drained and before anything
+    # reaches the inbox.
+    if args.kind == "task" and not args.persona:
+        print(
+            "error: --persona is required for --kind task (a Quick "
+            "task has exactly one owner)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.kind == "workflow" and args.persona:
+        print(
+            "error: --persona is task-only; for --kind workflow the "
+            "accountable owner comes from the playbook's "
+            "default_captain:",
+            file=sys.stderr,
+        )
+        return 2
+    if args.kind == "task" and args.playbook is not None:
+        print(
+            "error: --playbook is workflow-only; a Quick task has no "
+            "playbook. Drop --playbook, or use --kind workflow.",
+            file=sys.stderr,
+        )
+        return 2
+    # `--playbook` defaults to None so an explicit pass is detectable
+    # (same sentinel trick `journal new` uses at the parser). Resolve it
+    # here so the recorded value stays exactly "default" and nothing
+    # downstream sees the sentinel.
+    playbook = args.playbook if args.playbook is not None else "default"
     try:
         journal_root = resolve_team_journal_root(
             team=args.team or None,
@@ -399,7 +429,7 @@ def cmd_defer(args: argparse.Namespace) -> int:
             title=args.title,
             team=args.team,
             payload_text=payload_text,
-            playbook=args.playbook,
+            playbook=playbook,
             requester=args.requester,
             thread_ts=args.thread_ts,
             # Bridge sessions carry the origin channel in the env (same
@@ -409,6 +439,8 @@ def cmd_defer(args: argparse.Namespace) -> int:
                 args.channel
                 or os.environ.get("TIGERHARNESS_SLACK_CHANNEL", "")
             ),
+            kind=args.kind,
+            persona=args.persona,
         )
     except DeferredError as exc:
         print(json.dumps({"ok": False, "errors": [str(exc)]}))
@@ -425,12 +457,14 @@ def cmd_defer(args: argparse.Namespace) -> int:
 
 
 def cmd_materialize(args: argparse.Namespace) -> int:
-    """Subscription-rail half: turn an inbox entry into a real
-    kind=workflow task via the SAME scaffolder `journal new` uses, so
-    the result is indistinguishable from a directly-scheduled task.
-    The inbox entry is consumed only after the scaffolder succeeded;
-    malformed entries exit 1 with a JSON envelope and stay in the
-    inbox for repair."""
+    """Subscription-rail half: turn an inbox entry into a real task via
+    the SAME scaffolder `journal new` uses, so the result is
+    indistinguishable from a directly-scheduled task. The entry's
+    ``kind`` picks the lane: ``workflow`` compiles a graph from the
+    recorded playbook, ``task`` scaffolds a Quick task owned by one
+    persona and never looks for a playbook at all. The inbox entry is
+    consumed only after the scaffolder succeeded; malformed entries
+    exit 1 with a JSON envelope and stay in the inbox for repair."""
     paths = _paths_from_args(args)
     try:
         entry = read_entry(paths, args.deferred_id)
@@ -438,29 +472,76 @@ def cmd_materialize(args: argparse.Namespace) -> int:
         print(json.dumps({"ok": False, "errors": [str(exc)]}))
         return 1
     team_root = resolve_team_root(entry.team)
-    playbook_path = team_root / "workflow" / f"{entry.playbook}.md"
-    if not playbook_path.is_file():
-        print(json.dumps({
-            "ok": False,
-            "errors": [
-                f"playbook {entry.playbook}.md not found under "
-                f"{team_root / 'workflow'}/ for deferred entry "
-                f"{entry.id}"
-            ],
-        }))
-        return 1
-    playbook_text = playbook_path.read_text(encoding="utf-8")
-    captain = resolve_playbook_default_captain(playbook_text, team_root)
-    try:
-        result = new_workflow_task(
-            brief_text=entry.payload,
-            playbook_text=playbook_text,
-            playbook_name=entry.playbook,
-            team_root=team_root,
-            paths=paths,
-            title=entry.title,
-            captain=captain,
+    if entry.kind == "task":
+        # The roster check `journal new` deliberately skips for an
+        # explicit --persona runs HERE. Its reason for skipping (the
+        # operator typed the name seconds ago and can correct the late
+        # error themselves) does not survive the deferred rail: this
+        # name was typed in Slack, possibly hours before anything
+        # materializes, by someone who is not watching.
+        #
+        # Shape is checked first and short-circuits, because the name
+        # becomes a path component: a `..` segment would reach a
+        # sibling team's personas/ and materialize a task owned across
+        # the team boundary. Rejecting only separators and `..` cannot
+        # exclude a legitimate roster name or alias.
+        unsafe = (
+            not entry.persona
+            or "/" in entry.persona
+            or "\\" in entry.persona
+            or ".." in entry.persona
         )
+        if unsafe or validate_personas(team_root, {entry.persona}):
+            print(json.dumps({
+                "ok": False,
+                "errors": [
+                    f"persona {entry.persona!r} for deferred entry "
+                    f"{entry.id} is not on team {entry.team}'s roster "
+                    f"({team_root / 'configs' / 'personas.yaml'}), or "
+                    f"has no prompt.md under "
+                    f"{team_root / 'personas'}/. The entry is kept in "
+                    f"the inbox for repair."
+                ],
+            }))
+            return 1
+    else:
+        playbook_path = team_root / "workflow" / f"{entry.playbook}.md"
+        if not playbook_path.is_file():
+            print(json.dumps({
+                "ok": False,
+                "errors": [
+                    f"playbook {entry.playbook}.md not found under "
+                    f"{team_root / 'workflow'}/ for deferred entry "
+                    f"{entry.id}"
+                ],
+            }))
+            return 1
+        playbook_text = playbook_path.read_text(encoding="utf-8")
+        captain = resolve_playbook_default_captain(playbook_text, team_root)
+    try:
+        if entry.kind == "task":
+            result = new_task(
+                prd_text=entry.payload,
+                persona=entry.persona,
+                paths=paths,
+                title=entry.title,
+                kind="task",
+                # The Quick lane, spelled out at the call site rather
+                # than inherited: knowledge/quick-lane.md.
+                max_sessions=3,
+                early_exit=True,
+                autonomy="judgement",
+            )
+        else:
+            result = new_workflow_task(
+                brief_text=entry.payload,
+                playbook_text=playbook_text,
+                playbook_name=entry.playbook,
+                team_root=team_root,
+                paths=paths,
+                title=entry.title,
+                captain=captain,
+            )
     except MissingPersonaError as exc:
         print(json.dumps({"ok": False, "errors": [str(exc)]}))
         return 1
@@ -475,7 +556,12 @@ def cmd_materialize(args: argparse.Namespace) -> int:
     print(f"  from:         deferred/{entry.id}")
     print(f"  title:        {result.status.title}")
     print(f"  kind:         {result.status.kind}")
-    print(f"  playbook:     {entry.playbook}")
+    if entry.kind == "task":
+        # entry.playbook is "default" even here (read_entry coerces a
+        # missing/empty value), so printing it would be a false line.
+        print(f"  persona:      {result.status.persona}")
+    else:
+        print(f"  playbook:     {entry.playbook}")
     print(f"  task_dir:     {result.task_dir}")
     _autostart(paths)
     return 0
@@ -1921,9 +2007,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="File holding the verbatim conversation (default: stdin).",
     )
     df.add_argument(
-        "--playbook", default="default",
+        "--kind", choices=("workflow", "task"), default="workflow",
+        help="Lane the entry materializes into: workflow (the pair "
+             "loop, default) or task (the Quick lane -- one persona, "
+             "no compiled graph).",
+    )
+    df.add_argument(
+        "--persona", default="",
+        help="Owner of a Quick task. Required with --kind task, "
+             "rejected with --kind workflow. Validated at "
+             "materialization, not here.",
+    )
+    df.add_argument(
+        "--playbook", default=None,
         help="Playbook name recorded for materialization "
-             "(default: default).",
+             "(default: default). Workflow-only.",
     )
     df.add_argument("--requester", default="",
                     help="Who asked (recorded in the sidecar).")

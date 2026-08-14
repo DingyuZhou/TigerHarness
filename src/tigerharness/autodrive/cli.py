@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterator, Mapping
 from .._logging import configure_cli_logging
 from ..journal.paths import default_journal_root
 from ..journal.scaffold import resolve_default_persona
+from ..slack_bridge import notify_health
 from .notifier import build_notifier
 from .settings import (
     AUTOSTART_ENV,
@@ -541,16 +542,47 @@ def ensure_running(
     return False
 
 
+def _print_state_anchor(sfile: Path) -> None:
+    print(f"  read:         {sfile}")
+    print("                (team-canonical: one autodrive per team, so")
+    print("                 --journal-dir does not move this anchor)")
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     # Read from the team-canonical lock (same anchor `start` wrote), so a
     # muted operator standing anywhere in the team still sees daemon health.
-    sfile = state_path(_state_root(args))
+    state_root = _state_root(args)
+    sfile = state_path(state_root)
+    # `--journal-dir` cannot move that anchor: a daemon started inside this
+    # team keeps its state at the team's journal even while driving another
+    # root, so honouring the flag here would report `stopped` for a daemon
+    # that is genuinely running. Name the file read instead of answering
+    # silently about a journal the operator did not ask about.
+    misaimed = bool(getattr(args, "journal_dir", None)) and (
+        _resolve_journal_root(args) != state_root
+    )
     state = read_state(sfile)
+    # Rendered before the early return on purpose: the counter belongs to the
+    # notifier, not to daemon liveness, and notify.py is used outside
+    # autodrive entirely. Note the anchor differs from the line above --
+    # the sidecar belongs to the *driven* journal, so it honours
+    # --journal-dir, while the lock stays team-canonical.
+    health_lines = notify_health.status_lines(_resolve_journal_root(args))
     if state is None:
         print("autodrive: stopped (no state file)")
+        if misaimed:
+            _print_state_anchor(sfile)
+        for line in health_lines:
+            print(line)
         return 0
     running, _ = is_running(sfile)
     label = "running" if running else "stopped (stale state file)"
+    # After SIGKILL / OOM / reboot nothing rewrites the persisted counters, so
+    # `in_flight` keeps whatever the daemon last wrote. Label it instead of
+    # zeroing it: `in_flight: 1` at the moment of death says how it died.
+    in_flight_suffix = (
+        "(running now)" if running else "(last recorded, daemon not running)"
+    )
     notify = state.get("notify", DEFAULT_NOTIFY)
     notify_channel = state.get("notify_channel")
     notify_target = (
@@ -559,7 +591,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         else "none (muted)"
     )
     print(f"autodrive: {label}")
+    if misaimed:
+        _print_state_anchor(sfile)
+    if not running:
+        print("  note:         counters below are frozen at the daemon's")
+        print("                last write; nothing is running now.")
     print(f"  pid:          {state.get('pid')}")
+    print(f"  journal:      {state.get('journal_root') or '(unknown)'}")
     print(f"  interval:     {int(float(state.get('interval_seconds', 0)))}s")
     print(f"  backend:      {state.get('backend')}")
     print(f"  driver:       {state.get('driver') or '(none)'}")
@@ -568,13 +606,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  started_at:   {state.get('started_at')}")
     print(f"  fire_count:   {state.get('fire_count', 0)} (drives launched)")
     print(f"  last_fire_at: {state.get('last_fire_at') or '(none yet)'}")
-    print(f"  in_flight:    {state.get('in_flight', 0)} (running now)")
+    print(f"  in_flight:    {state.get('in_flight', 0)} {in_flight_suffix}")
     print(f"  done_count:   {state.get('tick_count', 0)} (drives completed)")
     print(f"  last_done_at: {state.get('last_tick_at') or '(none yet)'}")
     if state.get("last_stop_reason"):
         print(f"  last_stop:    {state.get('last_stop_reason')}")
     if state.get("last_error"):
         print(f"  last_error:   {state.get('last_error')}")
+    for line in health_lines:
+        print(line)
     return 0
 
 

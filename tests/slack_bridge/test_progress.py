@@ -152,6 +152,23 @@ def test_c3_path_tools_render_file_path_only(name: str) -> None:
     assert hint == "src/x.py"
 
 
+def test_c3_file_path_is_allowlisted_by_tool_not_scrubbed_by_shape() -> None:
+    """The hint obeys neither of the excerpt's two bounds.
+
+    ``docs/slack-bridge.md`` documents this pass-through, and a reader of
+    ``tool_hint`` alone would take it for an oversight -- the table three
+    lines above calls the hint "redacted", and the assignment shape is the
+    one ``sanitize_header`` exists to drop. Characterisation, not
+    endorsement: if the allowlist ever grows a shape filter, this test is
+    the thing that says the docs need rewriting too.
+    """
+    secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIleak"
+    assert sanitize_header("deploy broke " + secret) == "deploy broke"
+    assert tool_hint("Read", {"file_path": f"/tmp/{secret}.env"}) == (
+        f"/tmp/{secret}.env"
+    )
+
+
 def test_c3_bash_renders_first_token_only() -> None:
     assert tool_hint("Bash", {"command": "pytest -k secret --token=x"}) == (
         "pytest"
@@ -200,6 +217,218 @@ def test_c3_header_is_flattened_unfenced_and_truncated() -> None:
     assert len(out) == progress_mod.HEADER_MAX
     assert out.endswith("…")
     assert out.startswith("line one line two python")
+
+
+# ---------- Item 3 (D2): the header scrubber -------------------------------
+#
+# Every test here asserts BOTH halves. "The secret is absent" is satisfied
+# by a scrubber that eats the whole excerpt, or by a reporter that posts
+# nothing at all -- so each case also pins the prose that must survive.
+
+def test_d2_header_drops_an_assignment_and_keeps_the_prose() -> None:
+    out = sanitize_header("run SLACK_TOKEN=xoxb-deadbeef against staging")
+    # Absent.
+    assert "xoxb-deadbeef" not in out
+    assert "SLACK_TOKEN" not in out
+    # Present -- the excerpt still says what the turn was about.
+    assert out == "run against staging"
+
+
+def test_d2_header_keeps_an_assignment_with_an_empty_value() -> None:
+    """``--flag=`` carries nothing, so the shape rule lets it through.
+
+    Pinned because the obvious implementation -- drop any token with an
+    ``=`` -- would silently eat ordinary command-line prose. Scoped to
+    the excerpt: ``tool_hint``'s ``Bash`` branch *is* that obvious
+    implementation, and the test below pins the disagreement.
+    """
+    out = sanitize_header("re-run it with --profile= and see")
+    assert out == "re-run it with --profile= and see"
+
+
+def test_d2_bash_hint_drops_the_valueless_assignment_the_excerpt_keeps() -> None:
+    """The half of the shape rule the suite left unpinned for eight rounds.
+
+    Every other ``Bash`` case uses a valued assignment, so all of them
+    stay green under the reading the docs used to carry -- that the hint
+    drops ``VAR=value`` shapes. It drops on ``=`` alone. The two fields
+    are asserted together here because reading either one by itself
+    gives the wrong general rule, which is how the wrong sentence
+    survived.
+    """
+    assert tool_hint("Bash", {"command": "--profile= and see"}) == ""
+    assert sanitize_header("--profile= and see") == "--profile= and see"
+
+
+def test_d2_header_scrubs_before_it_truncates() -> None:
+    """Ordering, pinned by what survives rather than by reading the code.
+
+    Scrub-then-truncate spends all 120 characters on prose. The reverse
+    order spends the first 21 of them on a token it is about to throw
+    away, and the excerpt comes back short.
+    """
+    out = sanitize_header("SECRET=xoxb-deadbeef " + "w" * 130)
+    assert "xoxb-deadbeef" not in out
+    assert len(out) == progress_mod.HEADER_MAX
+    assert out == "w" * (progress_mod.HEADER_MAX - 1) + "…"
+
+
+def test_d2_header_dropping_makes_room_so_a_longer_paste_can_leak_more() -> None:
+    """The two halves of the position bound, asserted against each other.
+
+    Scrub-before-truncate means the 120 characters are counted on what
+    survived, so a longer message can leak where a shorter one does not.
+    The lengths are asserted because ``docs/slack-bridge.md`` quotes
+    these exact two messages by their character counts; nothing links
+    the doc to this file, so at least let the strings not drift.
+    """
+    token = "token: xoxb-deadbeefcafe"
+    prose = (
+        "Here is the failing request I keep getting from the staging "
+        "deploy, please look at what the gateway is doing: " + token
+    )
+    assignments = (
+        "SECRET=" + "a" * 40 + " OTHER=" + "b" * 40 + " THIRD=" + "c" * 40 + " " + token
+    )
+    assert (len(prose), len(assignments)) == (134, 166)
+
+    cut = sanitize_header(prose)
+    assert cut.endswith("token: xo…")
+    assert "xoxb-deadbeefcafe" not in cut
+
+    whole = sanitize_header(assignments)
+    assert whole == token
+    assert len(whole) == 24
+
+
+def test_d2_header_of_nothing_but_a_secret_renders_an_empty_excerpt() -> None:
+    """The whole excerpt can legitimately scrub to nothing.
+
+    Asserted as the exact rendered line, not as "a message exists": the
+    failure this guards against is a caller that special-cases the empty
+    string and posts something else, or nothing.
+    """
+    reporter, _, _ = _make(_FakeNotifier(), header="SLACK_TOKEN=xoxb-deadbeef")
+    assert reporter._render_parent() == ':hourglass: still working — ""'
+
+
+def test_d2_lane_prefix_is_cut_at_forty_collapsed_and_drops_nothing() -> None:
+    """The third bounded field, pinned because the docs now name its 40.
+
+    ``HEADER_MAX`` and ``HINT_MAX`` are named constants with tests behind
+    them; this limit is a bare literal in ``_render_parent``, and it
+    applies no shape rule at all. Both facts are documented, so if a
+    filter is ever added here this test is what says the page has to move
+    with it.
+    """
+    cut = TurnProgress(
+        None, None, header="hi", lane="L" * 60, clock=_FakeClock()
+    )
+    assert cut._render_parent() == (
+        f':hourglass: [{"L" * 39}…] still working — "hi"'
+    )
+
+    messy = TurnProgress(
+        None,
+        None,
+        header="hi",
+        lane="Team\n\tSECRET=xoxb-abc",
+        clock=_FakeClock(),
+    )
+    assert messy._render_parent() == (
+        ':hourglass: [Team SECRET=xoxb-abc] still working — "hi"'
+    )
+
+
+@pytest.mark.asyncio
+async def test_d2_parent_post_carries_the_prose_and_not_the_secret() -> None:
+    """End to end: the scrubber runs at the post site, not at the caller."""
+    notifier = _FakeNotifier()
+    reporter, _, _ = _make(
+        notifier, header="deploy AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI now"
+    )
+    reporter.set_persona("Mitsui")
+    await _run_until(reporter, notifier, posts=1)
+    parent = notifier.texts[0]
+    assert "wJalrXUtnFEMI" not in parent
+    assert parent == ':hourglass: Mitsui still working — "deploy now"'
+
+
+# ---------- Item 3 (D2): where the shape rule stops ------------------------
+#
+# The rule is token-shaped by design, so it has an edge, and QA found two
+# ways over it. The backtick one was closed (backticks are deleted, not
+# spaced out). The spaces-around-equals one cannot be closed by any
+# token-shaped rule and is documented instead -- pinned here so the code
+# and `docs/slack-bridge.md` describe the same boundary.
+
+def test_d2_header_spaces_around_the_equals_defeat_the_shape_rule() -> None:
+    """``KEY = value`` is three tokens, none of them an assignment.
+
+    ``KEY`` and ``value`` carry no ``=``; the bare ``=`` has an empty
+    right-hand side and is kept by the ``--profile=`` exemption. Nothing
+    is dropped and the secret is posted verbatim.
+    """
+    out = sanitize_header("run SLACK_TOKEN = xoxb-deadbeef against staging")
+    assert out == "run SLACK_TOKEN = xoxb-deadbeef against staging"
+
+
+def test_d2_backticking_the_value_does_not_defeat_the_shape_rule() -> None:
+    """Backticking a value must scrub identically to not backticking it.
+
+    Spacing backticks out split ``SECRET=`xoxb-...``` into ``SECRET=``
+    -- empty right-hand side, kept by the ``--profile=`` exemption --
+    plus a bare value with no ``=`` at all, so the backticked form
+    leaked where the plain form did not. Backticking a value is
+    idiomatic in Slack, so the two forms must not disagree. Asserted as
+    equality between them, not just as absence, so a scrubber that ate
+    the whole excerpt could not satisfy it.
+    """
+    backticked = sanitize_header("run SECRET=`xoxb-deadbeef` against staging")
+    plain = sanitize_header("run SECRET=xoxb-deadbeef against staging")
+    assert backticked == plain == "run against staging"
+
+
+def test_d2_header_leaks_every_colon_shape_the_docs_promise_it_leaks() -> None:
+    """Pins the *leak* side, which `docs/slack-bridge.md` documents at length.
+
+    The drop side above is thoroughly covered; what leaks was described
+    only in prose, and that prose shipped wrong twice. These are the
+    shapes credentials actually arrive in, and an operator decides what
+    is safe to paste from the doc's word that they survive -- so the doc
+    is wrong the moment this test goes red, in either direction.
+    """
+    for text in (
+        "token: xoxb-deadbeef",
+        '{"token": "xoxb-deadbeef"}',
+        "Authorization: Bearer xoxb-deadbeef",
+        "the token is xoxb-deadbeef",
+    ):
+        assert sanitize_header(text) == text
+
+
+def test_d2_header_drops_per_token_so_a_colon_line_is_only_half_dropped() -> None:
+    """A colon form whose *value* carries an ``=`` loses that token alone.
+
+    The unit is the whitespace-delimited token, not the message. Pinned
+    because the natural misreading -- that the colon protected it -- is
+    the one the docs warn against, and because it bounds the claim above:
+    colon shapes survive when their values carry no ``=``, not always.
+    """
+    assert sanitize_header("Cookie: session=abc123") == "Cookie:"
+
+
+def test_d2_header_over_drops_a_url_carrying_a_query_parameter() -> None:
+    """Documented as intended, and pinned so it is not "fixed" away.
+
+    ``docs/slack-bridge.md`` predicts exactly this edit -- someone
+    loosening the rule to preserve query strings -- and says it would
+    reopen the commonest way a token reaches a channel. Prose cannot stop
+    that; this can.
+    """
+    out = sanitize_header("curl https://example.invalid/a?token=deadbeef")
+    assert "deadbeef" not in out
+    assert out == "curl"
 
 
 @pytest.mark.asyncio
