@@ -238,10 +238,26 @@ def test_d2_header_keeps_an_assignment_with_an_empty_value() -> None:
     """``--flag=`` carries nothing, so the shape rule lets it through.
 
     Pinned because the obvious implementation -- drop any token with an
-    ``=`` -- would silently eat ordinary command-line prose.
+    ``=`` -- would silently eat ordinary command-line prose. Scoped to
+    the excerpt: ``tool_hint``'s ``Bash`` branch *is* that obvious
+    implementation, and the test below pins the disagreement.
     """
     out = sanitize_header("re-run it with --profile= and see")
     assert out == "re-run it with --profile= and see"
+
+
+def test_d2_bash_hint_drops_the_valueless_assignment_the_excerpt_keeps() -> None:
+    """The half of the shape rule the suite left unpinned for eight rounds.
+
+    Every other ``Bash`` case uses a valued assignment, so all of them
+    stay green under the reading the docs used to carry -- that the hint
+    drops ``VAR=value`` shapes. It drops on ``=`` alone. The two fields
+    are asserted together here because reading either one by itself
+    gives the wrong general rule, which is how the wrong sentence
+    survived.
+    """
+    assert tool_hint("Bash", {"command": "--profile= and see"}) == ""
+    assert sanitize_header("--profile= and see") == "--profile= and see"
 
 
 def test_d2_header_scrubs_before_it_truncates() -> None:

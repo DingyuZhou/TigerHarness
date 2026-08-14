@@ -827,15 +827,19 @@ tool added next month renders nothing rather than leaking by default:
 | Tool | Rendered |
 |---|---|
 | `Read` / `Edit` / `Write` | the `file_path` only |
-| `Bash` | the first token of the command (dropped if it looks like `VAR=value`) |
+| `Bash` | the first token of the command — or nothing at all, when that token contains `=` |
 | anything else | the tool name alone |
 
 Nothing else does: file contents never reach Slack, no argument of any
 other tool does, and no more of a `Bash` command than that first token.
 Note what the table already implies about the two arguments it *does*
-render — they are allowlisted by **tool**, not scrubbed by **shape**. A
-`file_path` is posted as it stands, truncated at 60 characters and not
-otherwise inspected.
+render: neither is **scrubbed**. The excerpt below cleans a message
+token by token; these two never clean anything. A `file_path` is posted
+as it stands, truncated at 60 characters and not otherwise inspected.
+The `Bash` first token is all-or-nothing — rendered whole or withheld
+whole — and the `=` test that decides which is not the excerpt's rule.
+The shape-bound paragraph below sets out how the two differ; do not
+carry a rule across from one to the other.
 
 The **parent message** is the exception worth deciding about
 deliberately: it quotes up to 120 characters of the message that started
