@@ -16,7 +16,8 @@ The driver (``drive-journal`` skill) is intentionally *not* a Python
 function in this package -- it is markdown instructions in a SKILL.md
 that drive the interactive Claude Code app. The skill instructs the
 session to call ``tigerharness journal sweep`` and then follow the
-decision procedure in OPERATING.md. See ``skills/drive-journal/``.
+decision procedure in OPERATING.md. See
+``src/tigerharness/_bundled_skills/drive-journal/``.
 """
 
 from __future__ import annotations
