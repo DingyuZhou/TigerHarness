@@ -179,6 +179,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
     },
     "tigerharness-basics": {
+        # 2026-08-14 (gitignore refresh): anzai: pre --refresh ship -- the
+        #   flag was `--refresh-skills`, covered skills only, and still
+        #   claimed it tidied a retired settings.json key (removed in
+        #   5a27262).
+        "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
         # 2026-08-01 (team event log, ADR 0008): ayako: pre team-events
         #   ship -- tiger-memory verb list without the
         #   team-events-compact-plan/apply pair.
@@ -279,7 +284,7 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "journal-new": "c0f2384f0d3313ba4821d15ca82714a48a1704268b4c546fd25e5986dc9d6466",
     "slack-notify": "bc182b0f0dc5e07f3e7fa3506b3b1658d63fbedfb4e5d69c2cb7e6ad97767a99",
     "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
-    "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
+    "tigerharness-basics": "40d8265fe325e07362713a8ffe09b64b3fc8e4641cdc2a6aa0f138f7f0b56ce8",
     "workflow-append-steps": "cd95580475094b10cf5cd8fcd3d080a2e97221c83d22384d9049d29b6e9a8ea5",
 }
 
@@ -326,6 +331,19 @@ class SkillSync:
     @property
     def changed(self) -> list[Path]:
         return self.created + self.updated
+
+
+@dataclass
+class GitignoreSync:
+    """Outcome of creating / topping up a team's ``.gitignore``."""
+
+    path: Path
+    created: bool = False                                   # written from scratch
+    appended: list[str] = field(default_factory=list)       # patterns added
+
+    @property
+    def changed(self) -> bool:
+        return self.created or bool(self.appended)
 
 # Valid persona/team names: space-separated words, each starting with
 # a letter or digit and continuing with letters, digits, dash,
@@ -730,10 +748,17 @@ configs/.env
 memories/*/briefing/
 memories/*/cache/
 memories/*/state.json
-# Transient sweep working dir: the prompts / summary cards / manifest the
-# in-session memory sweep stages and then consumes (each `tiger-memory plan`
-# rmtrees + rebuilds it). It embeds raw transcript content -- never commit it.
+# Transient staging dirs: the prompts / summary cards / manifests that the
+# in-session memory sweep and the between-task idle compaction stage and then
+# consume (each run rmtrees + rebuilds its dir). They embed raw transcript
+# content -- never commit them.
 memories/*/.sweep-staging/
+memories/*/.compact-staging/
+# Machine-local store state, living INSIDE the memory journal: operator_id,
+# rebuild timestamps, cost counters. Never share it -- the operator id is what
+# keeps concurrent writers collision-free. The path is deliberately specific:
+# memories/*/journal/ itself IS version-controlled (see below).
+memories/*/journal/.state.json
 # Live coordination state, mutated by every sweep -- committing it lets a
 # branch merge/revert resurrect an old claim or roll cursors back. The
 # store files, not these, are the durable ledger (a cursor rollback only
@@ -741,9 +766,21 @@ memories/*/.sweep-staging/
 memories/.tiger-memory-sweep.json
 memories/*/.sweep-cursors.json
 memories/*/.last-sweep-report.json
-# archive/ and journal/ are version-controlled (memory summaries).
-# .gitkeep files inside them ensure the empty dirs are tracked.
+# The team-root journal/ is the subscription-backend task queue: status.json
+# heartbeats, progress.md, worklog/, locks -- runtime state, not source. The
+# leading slash matters: it pins this to the ROOT journal/ only, so the
+# per-persona memories/*/journal/ stays tracked.
+/journal/
+# memories/*/archive/ and memories/*/journal/ are version-controlled (they
+# hold the memory summaries). .gitkeep files inside them ensure the empty
+# dirs are tracked.
 """
+
+# Marker printed above a block appended by ``init --refresh``, so a reader
+# can tell a topped-up team's shipped rules from its own.
+_GITIGNORE_APPEND_HEADER = (
+    "# --- added by `tigerharness init --refresh` (shipped template) ---"
+)
 
 # .claude/settings.json -- env vars that Claude Code injects into agent
 # subprocesses. The persona registry path is seeded here for every new
@@ -1096,6 +1133,98 @@ def install_bundled_skills(team_dir: Path, *, refresh: bool = False) -> SkillSyn
     return result
 
 
+def _gitignore_groups(text: str) -> list[tuple[list[str], list[str]]]:
+    """Split .gitignore *text* into ``(comment_lines, pattern_lines)`` groups.
+
+    A group is one comment block plus the run of pattern lines it
+    introduces, so appending a missing pattern can carry the comment that
+    explains *why* it is ignored. A blank line or a fresh comment block
+    closes the current group; a comment block with no patterns under it is
+    dropped (it explains nothing appendable). Lines are stripped, so the
+    result compares cleanly against an on-disk file.
+    """
+    groups: list[tuple[list[str], list[str]]] = []
+    comments: list[str] = []
+    patterns: list[str] = []
+
+    def close() -> None:
+        nonlocal comments, patterns
+        if patterns:
+            groups.append((comments, patterns))
+        comments, patterns = [], []
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            close()
+        elif line.startswith("#"):
+            if patterns:
+                close()
+            comments.append(line)
+        else:
+            patterns.append(line)
+    close()
+    return groups
+
+
+def sync_gitignore(team_dir: Path, *, refresh: bool = False) -> GitignoreSync:
+    """Create, or top up, the team's ``.gitignore`` from ``_GITIGNORE``.
+
+    A team with no ``.gitignore`` gets the whole template. With
+    ``refresh=True`` (``tigerharness init --refresh``) an existing file is
+    topped up **append-only**: every template pattern the file doesn't
+    already carry verbatim is appended at the end under
+    :data:`_GITIGNORE_APPEND_HEADER`, along with the template comment that
+    explains it. Nothing is removed, reordered, or rewritten -- the team's
+    own rules and its edits to shipped rules both survive untouched. This
+    is what lets a team scaffolded months ago pick up a newly-shipped
+    safety rule (e.g. ``memories/*/.compact-staging/``) from the same
+    command that refreshes its skills.
+
+    Two consequences worth knowing:
+
+    * A shipped pattern the team **deliberately deleted comes back**. Every
+      shipped pattern is a "never commit this" rule (secrets, raw-transcript
+      staging dirs, live coordination state), so restoring it is the safe
+      default; a team that genuinely wants one gone can follow it with a
+      ``!`` negation, which append-only will never disturb.
+    * Matching is verbatim on the stripped line, so a reworded equivalent
+      (``foo`` vs ``foo/``) reads as missing and gets appended. A duplicate
+      ignore rule is harmless.
+
+    Without ``refresh``, an existing file is left exactly as-is.
+    """
+    path = team_dir / ".gitignore"
+    result = GitignoreSync(path=path)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_GITIGNORE, encoding="utf-8")
+        result.created = True
+        return result
+    if not refresh:
+        return result
+    existing = path.read_text(encoding="utf-8")
+    have = {
+        line for line in (raw.strip() for raw in existing.splitlines())
+        if line and not line.startswith("#")
+    }
+    chunks: list[str] = []
+    for comments, patterns in _gitignore_groups(_GITIGNORE):
+        missing = [p for p in patterns if p not in have]
+        if not missing:
+            continue
+        chunks.extend(comments)
+        chunks.extend(missing)
+        result.appended.extend(missing)
+    if not result.appended:
+        return result
+    body = "\n".join([_GITIGNORE_APPEND_HEADER, *chunks])
+    path.write_text(
+        existing.rstrip("\n") + "\n\n" + body + "\n", encoding="utf-8"
+    )
+    return result
+
+
 def create_team(
     team_dir: Path, *, include_slack: bool, multi_team: bool = False,
     initial_goal: str = "",
@@ -1111,9 +1240,9 @@ def create_team(
     """
     created: list[Path] = []
 
-    gi = team_dir / ".gitignore"
-    if _write_if_missing(gi, _GITIGNORE):
-        created.append(gi)
+    gi_sync = sync_gitignore(team_dir)
+    if gi_sync.created:
+        created.append(gi_sync.path)
 
     pyaml = team_dir / "configs" / "personas.yaml"
     if _write_if_missing(pyaml, _PERSONAS_YAML_HEADER.format(team=team_dir.name)):
@@ -1854,30 +1983,46 @@ def main(argv: list[str] | None = None) -> int:
              "to expand them into a full prompt. Skips the prompt.",
     )
     parser.add_argument(
-        "--refresh-skills",
+        "--refresh",
         action="store_true",
         help="Don't create a persona; instead bring an existing team's "
-             "bundled skills current: install any missing skill, refresh "
-             "any skill byte-identical to a previously-shipped version to "
-             "the latest, and leave hand-edited skills untouched. "
+             "shipped files current. Skills: install any missing one, "
+             "refresh any that is byte-identical to a previously-shipped "
+             "version, leave hand-edited ones untouched. .gitignore: "
+             "append any missing line from the shipped template "
+             "(append-only -- nothing is removed or rewritten). "
              "Idempotent.",
+    )
+    parser.add_argument(
+        "--refresh-skills",
+        action="store_true",
+        help="Alias for --refresh (kept for existing scripts). Note it "
+             "now syncs .gitignore too.",
     )
     args = parser.parse_args(argv)
 
-    # --refresh-skills bypasses persona creation entirely. Resolve the
-    # target team (the existing-team discovery flow) and just copy
-    # missing bundled skills into its .claude/skills/.
-    if args.refresh_skills:
+    # --refresh bypasses persona creation entirely. Resolve the target
+    # team (the existing-team discovery flow), then bring its shipped
+    # files current: bundled skills + the .gitignore template. Both are
+    # non-destructive -- a hand-edited skill is left alone, and the
+    # .gitignore is only ever appended to.
+    if args.refresh or args.refresh_skills:
         search_root = Path(args.dir).resolve()
         team_dir = _resolve_refresh_target(args, search_root)
         if team_dir is None:
             return 1
+        if args.refresh_skills and not args.refresh:
+            print(
+                "note: --refresh-skills now syncs .gitignore too; "
+                "--refresh is the current spelling (same behavior)."
+            )
         sync = install_bundled_skills(team_dir, refresh=True)
-        if not sync.changed:
+        gi = sync_gitignore(team_dir, refresh=True)
+        if not sync.changed and not gi.changed:
             msg = (
-                f"Nothing to do -- all bundled skills already present and "
-                f"up to date under "
-                f"{_format_path(team_dir, search_root)}/.claude/skills/."
+                f"Nothing to do -- bundled skills and .gitignore are "
+                f"already up to date under "
+                f"{_format_path(team_dir, search_root)}/."
             )
             if sync.kept_handedited:
                 msg += (
@@ -1904,6 +2049,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             for p in sync.kept_handedited:
                 print(f"  {_format_path(p, search_root)}")
+        if gi.created:
+            print(
+                f"Created .gitignore from the shipped template: "
+                f"{_format_path(gi.path, search_root)}"
+            )
+        elif gi.appended:
+            print(
+                f"Appended {len(gi.appended)} missing line(s) to "
+                f"{_format_path(gi.path, search_root)} "
+                f"(nothing removed or rewritten):"
+            )
+            for pattern in gi.appended:
+                print(f"  {pattern}")
         return 0
 
     search_root = Path(args.dir).resolve()

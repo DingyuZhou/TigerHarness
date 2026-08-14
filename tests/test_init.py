@@ -10,6 +10,9 @@ from unittest.mock import patch
 import pytest
 
 from tigerharness.init import (
+    _GITIGNORE,
+    _GITIGNORE_APPEND_HEADER,
+    _gitignore_groups,
     _scaffold_repos_yaml,
     _append_lane_to_slack_bridge_index,
     _append_persona_to_yaml,
@@ -34,6 +37,7 @@ from tigerharness.init import (
     init,
     list_personas_in_team,
     main,
+    sync_gitignore,
 )
 
 
@@ -284,11 +288,25 @@ class TestCreateTeam:
         # gitignore excludes secrets and the runner's working journal,
         # but NOT archive/journal (those are git-tracked memory summaries).
         gi_text = (team / ".gitignore").read_text()
-        assert "configs/.env" in gi_text
-        # Transient sweep staging is excluded (it embeds raw transcripts).
-        assert "memories/*/.sweep-staging/" in gi_text
-        assert "memories/*/archive/" not in gi_text
-        assert "memories/*/journal/" not in gi_text
+        # Compare *pattern* lines, not raw text: the comments legitimately
+        # mention paths that must stay tracked, so a substring check on the
+        # whole file reads a comment as a rule.
+        gi_rules = {
+            line for line in (ln.strip() for ln in gi_text.splitlines())
+            if line and not line.startswith("#")
+        }
+        assert "configs/.env" in gi_rules
+        # Both transient staging dirs are excluded (they embed raw
+        # transcripts) -- sweep's and idle compaction's.
+        assert "memories/*/.sweep-staging/" in gi_rules
+        assert "memories/*/.compact-staging/" in gi_rules
+        # The team-root task queue is runtime state; the leading slash keeps
+        # the per-persona memory journals out of it.
+        assert "/journal/" in gi_rules
+        assert "memories/*/journal/.state.json" in gi_rules
+        # ...but the memory archive/journal themselves stay git-tracked.
+        assert "memories/*/archive/" not in gi_rules
+        assert "memories/*/journal/" not in gi_rules
         # personas.yaml header references team name
         assert "Team: tigers" in (team / "configs" / "personas.yaml").read_text()
         # tiger-memory defaults created
@@ -1991,6 +2009,210 @@ class TestRefreshSkills:
 
 
 # ---------------------------------------------------------------------------
+# .gitignore top-up (sync_gitignore / --refresh)
+# ---------------------------------------------------------------------------
+
+class TestGitignoreGroups:
+    """`_gitignore_groups` pairs each comment block with the patterns it
+    introduces, so an appended rule carries its rationale."""
+
+    def test_comment_block_binds_to_following_patterns(self):
+        groups = _gitignore_groups("# why\na/\nb/\n")
+        assert groups == [(["# why"], ["a/", "b/"])]
+
+    def test_new_comment_block_starts_a_new_group(self):
+        groups = _gitignore_groups("# one\na/\n# two\nb/\n")
+        assert groups == [(["# one"], ["a/"]), (["# two"], ["b/"])]
+
+    def test_blank_line_closes_a_group(self):
+        groups = _gitignore_groups("# one\na/\n\nb/\n")
+        assert groups == [(["# one"], ["a/"]), ([], ["b/"])]
+
+    def test_dangling_comment_with_no_patterns_is_dropped(self):
+        # Both a trailing block and one orphaned by a blank line: neither
+        # introduces a pattern, so neither can be appended.
+        assert _gitignore_groups("# orphan\n\n# trailing\n") == []
+
+    def test_indentation_and_blank_only_input(self):
+        assert _gitignore_groups("   \n\n") == []
+        assert _gitignore_groups("  a/  \n") == [([], ["a/"])]
+
+
+class TestSyncGitignore:
+    """`sync_gitignore` seeds a missing .gitignore and, on refresh, tops
+    up an existing one append-only."""
+
+    def _rules(self, path: Path) -> set[str]:
+        return {
+            line for line in (
+                raw.strip() for raw in path.read_text().splitlines()
+            )
+            if line and not line.startswith("#")
+        }
+
+    def test_creates_when_absent(self, tmp_path: Path):
+        result = sync_gitignore(tmp_path)
+        assert result.created is True
+        assert result.changed is True
+        assert result.appended == []
+        assert (tmp_path / ".gitignore").read_text() == _GITIGNORE
+
+    def test_existing_untouched_without_refresh(self, tmp_path: Path):
+        gi = tmp_path / ".gitignore"
+        gi.write_text("configs/.env\n")
+        result = sync_gitignore(tmp_path)
+        assert result.created is False
+        assert result.changed is False
+        assert gi.read_text() == "configs/.env\n"
+
+    def test_refresh_appends_only_missing_rules(self, tmp_path: Path):
+        """The real regression: a team scaffolded before
+        `memories/*/.compact-staging/` shipped never saw it, because the
+        old code only wrote .gitignore when absent."""
+        gi = tmp_path / ".gitignore"
+        gi.write_text(
+            "# my own rule\n"
+            "scratch/\n"
+            "configs/.env\n"
+            "memories/*/.sweep-staging/\n"
+        )
+        result = sync_gitignore(tmp_path, refresh=True)
+        assert result.created is False
+        assert "memories/*/.compact-staging/" in result.appended
+        # Already-present rules are not re-appended.
+        assert "configs/.env" not in result.appended
+        assert "memories/*/.sweep-staging/" not in result.appended
+        text = gi.read_text()
+        # The team's own rule survives, in place, first.
+        assert text.startswith("# my own rule\nscratch/\n")
+        # The append block is marked and carries the explaining comment.
+        assert _GITIGNORE_APPEND_HEADER in text
+        assert "never commit them" in text
+        # Every shipped rule now present.
+        assert self._rules(_write_template(tmp_path)) <= self._rules(gi)
+
+    def test_refresh_is_idempotent(self, tmp_path: Path):
+        gi = tmp_path / ".gitignore"
+        gi.write_text("configs/.env\n")
+        assert sync_gitignore(tmp_path, refresh=True).appended
+        after_first = gi.read_text()
+        second = sync_gitignore(tmp_path, refresh=True)
+        assert second.appended == []
+        assert second.changed is False
+        assert gi.read_text() == after_first
+
+    def test_refresh_on_current_file_is_a_noop(self, tmp_path: Path):
+        gi = tmp_path / ".gitignore"
+        gi.write_text(_GITIGNORE)
+        result = sync_gitignore(tmp_path, refresh=True)
+        assert result.appended == []
+        assert gi.read_text() == _GITIGNORE
+
+    def test_refresh_never_removes_or_reorders(self, tmp_path: Path):
+        """Append-only is the whole safety property: whatever the team had
+        is still there, in the same order, byte for byte."""
+        original = (
+            "# team rules\n"
+            "*.tmp\n"
+            "!keep.tmp\n"
+            "notes/private/\n"
+        )
+        gi = tmp_path / ".gitignore"
+        gi.write_text(original)
+        sync_gitignore(tmp_path, refresh=True)
+        assert gi.read_text().startswith(original)
+
+    def test_refresh_tolerates_missing_trailing_newline(self, tmp_path: Path):
+        gi = tmp_path / ".gitignore"
+        gi.write_text("configs/.env")  # no trailing newline
+        sync_gitignore(tmp_path, refresh=True)
+        text = gi.read_text()
+        assert "configs/.env\n" in text
+        assert text.endswith("\n")
+        assert "configs/.env#" not in text  # never glued to the next line
+
+
+def _write_template(tmp_path: Path) -> Path:
+    """Helper: the shipped template written to a scratch file, so a test
+    can diff a team's rules against it."""
+    ref = tmp_path / "_template.gitignore"
+    ref.write_text(_GITIGNORE)
+    return ref
+
+
+class TestRefreshSyncsGitignore:
+    """`init --refresh` brings skills AND .gitignore current in one go."""
+
+    def _scaffold(self, tmp_path: Path) -> Path:
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "chief", "--team", "tigers", "--yes",
+        ])
+        assert rc == 0
+        return tmp_path / "tigers"
+
+    def test_refresh_flag_tops_up_stale_gitignore(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        team = self._scaffold(tmp_path)
+        # Simulate a team scaffolded from an older template.
+        (team / ".gitignore").write_text(
+            "# Tigerharness team -- secrets and runtime state\n"
+            "configs/.env\n"
+        )
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Appended" in out
+        assert "memories/*/.compact-staging/" in out
+        assert "memories/*/.compact-staging/" in (team / ".gitignore").read_text()
+
+    def test_refresh_skills_alias_also_syncs_and_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        team = self._scaffold(tmp_path)
+        (team / ".gitignore").write_text("configs/.env\n")
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh-skills"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "note: --refresh-skills now syncs .gitignore too" in out
+        assert "memories/*/.compact-staging/" in (team / ".gitignore").read_text()
+
+    def test_no_deprecation_note_for_refresh(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        self._scaffold(tmp_path)
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh"])
+        assert rc == 0
+        assert "note: --refresh-skills" not in capsys.readouterr().out
+
+    def test_recreates_a_deleted_gitignore(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        team = self._scaffold(tmp_path)
+        (team / ".gitignore").unlink()
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh"])
+        assert rc == 0
+        assert "Created .gitignore" in capsys.readouterr().out
+        assert (team / ".gitignore").read_text() == _GITIGNORE
+
+    def test_nothing_to_do_mentions_both(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        self._scaffold(tmp_path)
+        capsys.readouterr()
+        rc = main(["--dir", str(tmp_path), "--refresh"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Nothing to do" in out
+        assert ".gitignore" in out
+
+
+# ---------------------------------------------------------------------------
 # Bundled drive-journal skill content + mirror invariant
 # ---------------------------------------------------------------------------
 
@@ -2041,7 +2263,7 @@ _BASICS_SKILL_ANCHORS = [
     "`tigerharness journal` (alias: `j`)",
     "`tigerharness tiger-memory` (alias: `tm`)",
     "`tigerharness slack-bridge` (alias: `sb`)",
-    "`--refresh-skills`",
+    "`--refresh`",
     "## Recruiting a new persona",
     "## Creating a workflow task",
 ]

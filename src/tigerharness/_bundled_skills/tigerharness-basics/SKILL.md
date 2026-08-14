@@ -46,20 +46,31 @@ Flags: `--persona`, `--team`, `--team-dir` (custom location),
 (skip the Slack `.env` template), `--multi-team` / `--no-multi-team`
 (multi-team Slack mode on/off without prompting), `--yes`/`-y`,
 `--dir` (where teams live; default current directory), and
-`--refresh-skills` (below).
+`--refresh` (below).
 
 Running `init` against an **existing** team is how you **recruit** —
 see the walkthrough below. Existing files are never clobbered:
 scaffolding is idempotent and only fills in what's missing.
 
-`--refresh-skills` doesn't create a persona at all; it brings an
-existing team's `.claude/skills/` current: installs bundled skills the
-team is missing, refreshes any skill whose on-disk content still
-matches a previously shipped version, and leaves hand-edited skills
-untouched (delete one to re-adopt the shipped version). It also tidies
-`.claude/settings.json` by removing one retired legacy key
-(a mid-task auto-compaction override tigerharness used to seed); it
-does not add new settings.
+`--refresh` doesn't create a persona at all; it brings an existing
+team's **shipped files** current, and is the one command to run after
+upgrading tigerharness:
+
+    tigerharness init --refresh --team-dir <path-to-team>
+
+- **Skills** (`.claude/skills/`) — installs bundled skills the team is
+  missing, refreshes any skill whose on-disk content still matches a
+  previously shipped version, and leaves hand-edited skills untouched
+  (delete one to re-adopt the shipped version).
+- **`.gitignore`** — appends any line from the shipped template the
+  team doesn't have yet, with the comment that explains it.
+  **Append-only**: nothing is removed, reordered, or rewritten, so your
+  own rules survive. A shipped rule you deleted on purpose does come
+  back (they are all "never commit this" safety rules) — follow it with
+  a `!` negation if you truly want it gone.
+
+Idempotent: run it as often as you like. `--refresh-skills` is the old
+name, still accepted, and now does both.
 
 ## `tigerharness dismiss`
 
@@ -148,7 +159,8 @@ What `tigerharness init` scaffolds, and who owns each piece.
 maintained by the tooling.
 
 - `.gitignore` — seeded so secrets (`configs/.env`) and local state
-  never land in git. Generated once; extend it as your team needs.
+  never land in git. Extend it as your team needs; `--refresh` tops it
+  up append-only when tigerharness ships a new rule.
 - `AGENTS.md` — the always-loaded session bootstrap (vendor-neutral;
   source of truth). `CLAUDE.md` just imports it for Claude Code.
 - `configs/personas.yaml` — THE team roster + `default_persona`.
@@ -170,7 +182,7 @@ maintained by the tooling.
 - `.claude/skills/<name>/SKILL.md` — the bundled skills
   (`drive-journal`, `journal-autodrive`, `journal-new`, `slack-notify`,
   `workflow-append-steps`, `tigerharness-basics`, `sweep-memory`).
-  Generated; refreshed by `--refresh-skills`; hand-edits preserved.
+  Generated; refreshed by `--refresh`; hand-edits preserved.
 - `memories/<Name>/` — per-persona tiger-memory config + store.
 - `journal/` — NOT scaffolded by init: created on first journal use at
   the team root (then holds `OPERATING.md`, `active/`, `done/`).

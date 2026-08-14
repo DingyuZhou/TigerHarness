@@ -207,10 +207,26 @@ until the Operator answers (see
 [`journal-operator-questions.md`](journal-operator-questions.md)).
 
 `journal/` is a **runtime artifact**, not git-tracked source (the same
-treatment `task_journal/` and `workflow_journal/` get). `OPERATING.md`
-is the one exception — it is the committed protocol. The team
-`.gitignore` should exclude `journal/active/`, `journal/done/` and
-`journal/needs_input/` but keep `journal/OPERATING.md`.
+treatment `task_journal/` and `workflow_journal/` get). The shipped
+team `.gitignore` therefore excludes the whole tray with a single
+root-anchored `/journal/` — the leading slash matters, because it pins
+the rule to the team-root queue and leaves the per-persona
+`memories/*/journal/` (memory summaries, version-controlled) tracked.
+
+`OPERATING.md` is the one file in there that is protocol rather than
+runtime, and the intent has always been to commit it. The shipped rule
+does **not** carve it out, so on a fresh team it is ignored along with
+the rest of the tray; a team that committed it before the rule landed
+keeps it tracked (`.gitignore` never untracks an already-tracked
+file). If you want it tracked on a new team, replace `/journal/` with:
+
+    /journal/*
+    !/journal/OPERATING.md
+
+**Open question**: whether the shipped template should do that by
+default. Nothing depends on `OPERATING.md` being in git — the
+scaffolder rewrites it hash-gated from the package (below) — so this
+is a "would you like its edit history" call, not a correctness one.
 
 ## status.json — the heart
 
@@ -545,12 +561,14 @@ with no code change.
 **Adopting protocol updates on an existing team.** The skill and
 `OPERATING.md` propagate to already-scaffolded teams **hash-gated**, so
 an upgrade reaches them without clobbering local edits:
-- `tigerharness init --refresh-skills` installs any missing bundled
-  skill, **refreshes** any skill byte-identical to a previously-shipped
-  version to the current one, **leaves hand-edited skills untouched**,
-  and removes the retired mid-task compact override from
-  `.claude/settings.json` (only when it still holds the old seeded
-  default).
+- `tigerharness init --refresh` installs any missing bundled skill,
+  **refreshes** any skill byte-identical to a previously-shipped
+  version to the current one, and **leaves hand-edited skills
+  untouched**. The same command tops up the team's `.gitignore`
+  **append-only** from the shipped template, so a newly-shipped safety
+  rule (e.g. `memories/*/.compact-staging/`) reaches teams scaffolded
+  before it existed. (`--refresh-skills` is the old spelling, still
+  accepted, and now does both.)
 - `OPERATING.md` refreshes on the next `tigerharness journal new`: the
   scaffolder's `_ensure_operating_md` rewrites an on-disk file that
   matches a prior shipped template (`_PRIOR_OPERATING_HASHES`) to the
