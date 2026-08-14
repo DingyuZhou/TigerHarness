@@ -52,6 +52,9 @@ src/tigerharness/
     init.py                  Project scaffolding (tigerharness init)
     dismiss.py               Symmetric teardown (tigerharness dismiss)
     py.typed                 PEP 561 type stub marker
+    _bundled_skills/         The SKILL.md set `tigerharness init` installs
+                             into a team. Hash-gated by init.py's two
+                             manifests; the only skill tree in this repo
     agent_sdk/               Backend-agnostic agent SDK (swappable runtimes)
         types.py             AgentConfig + AgentBackend Protocol (the interface)
         factory.py           get_backend / register_backend / list_backends
@@ -116,8 +119,13 @@ docs/
     journal-workflow-mode.md kind=workflow compile + graph-walk deep dive
     adr/                     Architecture Decision Records (0003: legacy
                              runner removal + write-guard migration)
-skills/                      Claude Code SKILL.md definitions
 ```
+
+Skills live in exactly one place: `src/tigerharness/_bundled_skills/`.
+That is the set `tigerharness init` installs into a team, and the one
+`tests/test_skill_hash_guard.py` guards. (A top-level `skills/` tree
+existed until 2026-08-14; it was packaged nowhere, drifted behind the
+bundle, and was removed.)
 
 ## Adding a new module
 

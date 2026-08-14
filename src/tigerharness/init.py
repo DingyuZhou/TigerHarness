@@ -259,8 +259,12 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         #   hash) is auto-refreshed forward for existing teams.
         "f00bcf6f6420935269dce6006f475c98312fe72e6826abc86823c9edf3a7af33",
     },
-    # workflow-append-steps: only ever shipped once (current == sole history) --
-    #   no prior version to register.
+    "workflow-append-steps": {
+        # 2026-08-14 (drafter split escape): mitsui: pre-escape ship -- the
+        #   bundle section taught no way to put a literal `## step:` line in
+        #   a body, so a body documenting the format split the bundle.
+        "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
+    },
 }
 
 # Last-shipped manifest: skill dir name -> sha256 of the CURRENT bundled
@@ -276,7 +280,7 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "slack-notify": "bc182b0f0dc5e07f3e7fa3506b3b1658d63fbedfb4e5d69c2cb7e6ad97767a99",
     "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
     "tigerharness-basics": "2899bdc6e43f2d371d66730d7ce140a5addde65ad8bcf17e1c574d84d1e62747",
-    "workflow-append-steps": "865e597d2624b68c1440e101bf7fe77ad0e11e07f7f45561cab9f199be4c596e",
+    "workflow-append-steps": "cd95580475094b10cf5cd8fcd3d080a2e97221c83d22384d9049d29b6e9a8ea5",
 }
 
 
