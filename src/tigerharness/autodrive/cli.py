@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterator, Mapping
 from .._logging import configure_cli_logging
 from ..journal.paths import default_journal_root
 from ..journal.scaffold import resolve_default_persona
+from ..slack_bridge import notify_health
 from .notifier import build_notifier
 from .settings import (
     AUTOSTART_ENV,
@@ -561,10 +562,18 @@ def cmd_status(args: argparse.Namespace) -> int:
         _resolve_journal_root(args) != state_root
     )
     state = read_state(sfile)
+    # Rendered before the early return on purpose: the counter belongs to the
+    # notifier, not to daemon liveness, and notify.py is used outside
+    # autodrive entirely. Note the anchor differs from the line above --
+    # the sidecar belongs to the *driven* journal, so it honours
+    # --journal-dir, while the lock stays team-canonical.
+    health_lines = notify_health.status_lines(_resolve_journal_root(args))
     if state is None:
         print("autodrive: stopped (no state file)")
         if misaimed:
             _print_state_anchor(sfile)
+        for line in health_lines:
+            print(line)
         return 0
     running, _ = is_running(sfile)
     label = "running" if running else "stopped (stale state file)"
@@ -604,6 +613,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  last_stop:    {state.get('last_stop_reason')}")
     if state.get("last_error"):
         print(f"  last_error:   {state.get('last_error')}")
+    for line in health_lines:
+        print(line)
     return 0
 
 
