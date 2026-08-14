@@ -186,11 +186,17 @@ tigerharness journal defer --title "Fix the stale --help text" \
   --team Shohoku --kind task --persona Mitsui --payload-file ask.md
 ```
 
-The persona is **not** validated at defer time — `defer` stays dumb
-because it runs on the Slack hot path where the team root may not even
-be resolvable. A name that is not on the team's `configs/personas.yaml`
-roster fails at `materialize` with an envelope naming the persona and
-that file, and the inbox entry stays put for repair.
+The persona is **not** validated at defer time. `defer` *could* check —
+it already resolves the team root and refuses without one — so this is
+a choice, not a limitation: the Slack hot path stays dumb, and a roster
+that passed at defer can change before anything materializes, which
+would make an early check a guarantee the rail cannot keep. A name that
+is not on the team's `configs/personas.yaml` roster fails at
+`materialize` with an envelope naming the persona and that file, and
+the inbox entry stays put for repair. A persona that is *path-shaped*
+is refused there too, with the same message: the name becomes a path
+component, so a `..` segment would otherwise reach a sibling team's
+`personas/` under a shared `TIGERHARNESS_TEAMS_DIR`.
 
 Entries written before `--kind` existed carry neither key; they read
 back as `kind=workflow` with an empty persona, which is what they have

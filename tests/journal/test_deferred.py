@@ -790,6 +790,41 @@ class TestMaterialize:
         assert "personas.yaml" in envelope["errors"][0]
         assert list_deferred(paths) == [did]
 
+    def test_materialize_refuses_persona_reaching_a_real_sibling_team(
+        self, team_env, capsys
+    ):
+        """The case that actually pins the shape check. Every name in
+        the parametrized test above is ALSO rejected by
+        ``validate_personas`` (that fixture has no sibling team, so the
+        traversal target does not exist), which means those four pass
+        even with the shape check deleted. Here the target exists: a
+        second team under the same TIGERHARNESS_TEAMS_DIR has a real
+        ``personas/Akagi/prompt.md``, so ``validate_personas`` returns
+        clean and the shape check is the only thing standing between a
+        string typed in Slack and a task owned across the team
+        boundary."""
+        sibling = _make_team(team_env.parent, name="Sai")
+        assert (sibling / "personas" / "Akagi" / "prompt.md").is_file()
+        escape = "../../Sai/personas/Akagi"
+        # The premise: the traversal really does resolve out of this
+        # team. If this stops holding the test is no longer testing
+        # what it claims.
+        assert (team_env / "personas" / escape / "prompt.md").is_file()
+
+        journal = str(team_env / "journal")
+        paths = JournalPaths(root=team_env / "journal")
+        did = defer_entry(
+            paths, title="Quick ask", team="Shohoku",
+            payload_text="Fix the thing.\n",
+            kind="task", persona=escape,
+        ).id
+        rc = main(["--journal-dir", journal, "materialize", did])
+        assert rc == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert escape in envelope["errors"][0]
+        assert list_deferred(paths) == [did]
+        assert list(paths.active.glob("*")) == []
+
     def test_task_scaffolder_failure_keeps_entry_and_envelopes(
         self, team_env, capsys, monkeypatch
     ):
