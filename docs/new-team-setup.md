@@ -37,6 +37,20 @@ Python 3.11+ and [`uv`](https://docs.astral.sh/uv/). TigerHarness has zero
 hard dependencies; every integration is an optional extra, so **install the
 extras for the features you intend to turn on** — Slack in particular.
 
+The extras are declared under `[project.optional-dependencies]` in
+`pyproject.toml`:
+
+| Extra | Turns on |
+|---|---|
+| `slack` | the bridge, `notify`, ops-log heartbeats (Stages 4–5) |
+| `memory` | tiger-memory's YAML config (Stage 8) |
+| `anthropic` | the `anthropic_sdk` agent backend; without it only `claude_p` works |
+| `all` | all of the above |
+
+A team that will use Slack **and** memory wants `[all]`, or at minimum
+`[slack,memory]`. Install bare and Stages 4, 5 and 8 fail later, at import
+time, instead of here.
+
 The Operator decides where the team lives. Two roots matter and they are
 **not** the same directory:
 
@@ -44,7 +58,18 @@ The Operator decides where the team lives. Two roots matter and they are
   a clone), and
 - the **teams root** — the parent directory your team folders sit in.
 
-Install, then confirm the CLI resolves:
+Install into the teams root. The README's
+[Installation](../README.md#installation) section carries all three
+strategies (scoped to one folder, global CLI, or from a clone); the scoped
+form, which is the one that matches this runbook's layout, is:
+
+```bash
+mkdir -p <teams-root> && cd <teams-root>
+uv init --bare
+uv add 'tigerharness[all]'
+```
+
+Then confirm the CLI resolves:
 
 ```bash
 uv run tigerharness --help
@@ -83,9 +108,21 @@ directory**. `discover_teams` returns `[search_root]` when the search root is
 as a team), otherwise it scans the immediate children.
 
 The consequence, and it is the trap that bites on your *second* team: a bare
-`init` run **from inside an existing team folder** extends that team rather
-than creating a new one. Run `init` from the teams root (the parent), or pass
-`--dir` / `--team-dir` explicitly.
+`init` run **from inside an existing team folder** does not create a new team
+next to it, and it does not cleanly extend the one you are standing in
+either. It creates a **nested team inside the current one** —
+`<Team>/<Team>/` with its own `configs/personas.yaml` listing only the new
+persona, while the outer team's roster stays exactly as it was.
+
+That shape is the reason to care. The wreckage looks plausible: a directory
+tree that reads like a team, a persona that resolves nowhere the Operator is
+looking, and an outer roster that is *silently missing someone*. Nothing
+errors. If you have already done it, the tell is a team directory whose name
+appears twice in the path.
+
+**Run `init` from the teams root (the parent), or pass `--dir` / `--team-dir`
+explicitly.** `TIGERHARNESS_TEAMS_DIR` does not protect you here — it is read
+by the journal, not by `init`.
 
 #### The flags that matter on day one
 
@@ -117,6 +154,24 @@ Team-level, via `create_team`: `.gitignore`, `configs/personas.yaml`,
 `settings.json` (carrying `TIGERHARNESS_PERSONAS_CONFIG` pointed at
 `configs/personas.yaml`) plus the bundled skills installed by
 `install_bundled_skills`.
+
+**Know these by name.** The bundled skills are the team's capability surface,
+and a team that does not know a skill exists never uses it — that is Inkstone
+symptom #1 in one sentence. `_CURRENT_SKILL_HASHES` is the manifest; it ships
+**seven**:
+
+| Skill | What it is for |
+|---|---|
+| `drive-journal` | the driver — claim a task, work it, cascade the queue (Stage 7) |
+| `journal-new` | schedule a task or workflow into the queue (Stage 7) |
+| `journal-autodrive` | start / stop / inspect the autodrive daemon (Stage 6) |
+| `sweep-memory` | run the team-wide memory sweep (Stage 8) |
+| `slack-notify` | send a proactive Slack message or file (Stage 4) |
+| `workflow-append-steps` | extend a compiled workflow's step graph |
+| `tigerharness-basics` | orientation for a persona new to the harness |
+
+Read them in `.claude/skills/<name>/SKILL.md` after `init`. Stage 9's
+`--refresh` keeps them current without clobbering hand edits.
 
 Per-persona, via `add_persona`: `personas/<Persona>/prompt.md`, an appended
 entry in `configs/personas.yaml`, and
@@ -179,7 +234,10 @@ Four files, three of which `init` wrote for you.
   *immediate child directories* for a `pyproject.toml` whose `[project] name`
   is `tigerharness`, first hit in sorted order winning. When nothing matches it
   writes a **placeholder**, never a silent guess — so check this file and fix
-  the placeholder if the auto-capture missed.
+  the placeholder if the auto-capture missed. A captured path is written
+  **relative to the team root**, not absolute; that is what makes the team
+  folder portable between machines, so a relative value here is correct and
+  is not the failure mode.
 - **`configs/tiger-memory.defaults.yaml`** — team-wide memory defaults.
   Stage 8.
 - **`configs/workflow.yaml`** — optional, not scaffolded. Only to override
@@ -192,9 +250,18 @@ placeholder:
 cat configs/repos.yaml
 ```
 
-Expected: a real absolute path to the project the team works on. A
-placeholder here means every persona instruction that says "the project" will
-point nowhere.
+Expected: an **uncommented `project:` key** naming the repo this team works
+on, e.g. `project: ../../tigerharness`. The single thing that distinguishes
+pass from fail is the leading `#`, because the placeholder is a *commented-out*
+line:
+
+```
+# project: ../tigerharness  # <- set me: path to the repo this team works on
+```
+
+Absolute versus relative is not the signal — relative is the norm. A
+still-commented `project:` means every persona instruction that says "the
+project" points nowhere.
 
 ### Stage 3 — Persona prompts and the charter
 
@@ -239,7 +306,7 @@ not optional.
 | `agent_cwd` | no (default `.`) | where the agent session starts |
 | `allowed_user_ids` | no | falls back to `SLACK_ALLOWED_USER_IDS` in the env file |
 | `tiger_memory_trigger` | no (default `rebuild`) | valid values in `VALID_TIGER_MEMORY_TRIGGERS`: `rebuild`, `off` |
-| `idle_compact` | no | opt in to bridge idle compaction |
+| `idle_compact` | no | bridge idle compaction — **`init` scaffolds it `true`**; set `false` to opt this lane *out* |
 
 #### The lane env file
 
@@ -301,10 +368,29 @@ which is **300.0** (five minutes). It posts to a **channel, never a DM**:
 `TurnProgress._post` refuses to post when the channel is falsy, so the DM
 target is unreachable by construction rather than by convention.
 
+#### Where it is read — the lane, not your shell
+
+This is the detail that decides whether the feature works, so follow the
+route rather than the name that sounds right.
+
+`multi._progress_channel` reads `PROGRESS_CHANNEL_KEYS` **out of the lane's
+own parsed env dict** and hands the result to `TeamBridgeContext`'s
+`progress_channel` field, which is passed as `build_turn_progress`'s
+`channel=` argument. That argument wins: `build_turn_progress` takes it when
+non-empty and only falls back to scanning `os.environ` via
+`resolve_progress_channel` when it is `None`.
+
+**That fallback is a single-tenant leftover and it does not fire in any
+supported deployment.** The single-tenant bridge was removed; every bridge is
+multi-lane now, and `resolve_progress_channel`'s own docstring says it "finds
+nothing" there — *the lane field is the fix and not the fallback*. So a value
+exported in your shell reaches nothing, exactly as Stage 4's trap says.
+
 #### Two accepted names
 
-`resolve_progress_channel` scans `CHANNEL_ENV_VARS` in order and takes the
-first **non-empty** value:
+`PROGRESS_CHANNEL_KEYS` and `CHANNEL_ENV_VARS` are the same tuple — the lane
+reader imports it from `progress` so the two paths can never drift. Either
+name works, in this order, first **non-empty** value winning:
 
 1. `TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL`
 2. `SLACK_NOTIFY_CHANNEL`
@@ -398,11 +484,41 @@ bridge sets them per turn.
 uv run tigerharness autodrive status
 ```
 
-Expected: a state report naming the interval and driver. This is
-state-revealing by design — a team that never enabled autodrive gets a
-*different string*, not an absence, so "we thought it was on" cannot survive
-this check. Confirm the reported driver is a real persona in
-`configs/personas.yaml`.
+This is state-revealing by design — a team that never enabled autodrive gets
+a *different string*, not an absence, so "we thought it was on" cannot
+survive the check. Both branches, so you can tell them apart:
+
+**Never enabled** — one line, and that is the whole output:
+
+```
+autodrive: stopped (no state file)
+```
+
+**Enabled and alive** — a multi-line state report headed `autodrive:
+running`:
+
+```
+autodrive: running
+  pid:          <pid>
+  journal:      <team-root>/journal
+  interval:     600s
+  driver:       <Persona>
+  max_budget:   <usd or None>
+  fire_count:   <n> (drives launched)
+  in_flight:    <n> (running now)
+  done_count:   <n> (drives completed)
+```
+
+**Enabled but dead** — the same report headed `autodrive: stopped (stale
+state file)`, with a `note:` saying the counters are frozen at the daemon's
+last write. Do not read this as the first case: a stale state file means the
+daemon *was* configured and is not running now (SIGKILL, OOM, reboot), and
+`in_flight: 1 (last recorded, daemon not running)` is how it tells you it
+died mid-drive.
+
+Confirm the reported `driver:` is a real persona in `configs/personas.yaml`
+— `(none)` prints there when no driver resolved, which is a daemon that will
+fire and attribute its work nowhere.
 
 ### Stage 7 — Journal scaffold and the drive rail
 
@@ -527,10 +643,32 @@ uv run tigerharness tiger-memory --config memories/<Persona>/tiger-memory.config
 uv run tigerharness tiger-memory --config memories/<Persona>/tiger-memory.config.yaml doctor
 ```
 
-Expected: `check` exits 0 (all three stores parse). `doctor` prints a
-team-wide health table and **exits 1 if anything is flagged** — so use its
-exit status, not just its output. `check --fix` repairs mechanical drift and
-quarantines anything it cannot repair to `<store>.rejected.md`.
+**`check` is the pass/fail gate: expect exit 0**, meaning all three stores
+parse. `check --fix` repairs mechanical drift and quarantines anything it
+cannot repair to `<store>.rejected.md`.
+
+**`doctor` is a report, not a gate — read its `FLAGS:` section, do not gate
+on its exit status.** `doctor_report` collects every anomaly into one `flags`
+list and `_cmd_doctor` exits 1 whenever that list is non-empty, so **a
+correctly built team exits 1 on day one and keeps exiting 1 forever.** Two
+flags are expected rather than wrong:
+
+- `<Persona>: never swept (no done_at recorded)` — unavoidable on a
+  brand-new team, which by definition has never swept. It clears after the
+  first sweep.
+- `topic slug collision: <slug> across <Persona>, <Persona>` — two personas
+  independently owning a topic of the same name. Normal and desirable on any
+  team that has worked together; the reference team carries 22 of these while
+  perfectly healthy.
+
+These are the flags that mean something is actually wrong:
+
+- `<Persona>: briefing missing (run rebuild)` — fix with `rebuild`.
+- `<Persona>: rejected file(s): ...` — content `check --fix` could not
+  repair; open the `.rejected.md` file.
+- `<Persona>: <store> over_overflow (<n> chars, max <m>)` — a store past its
+  bound that compaction has not yet reclaimed.
+- `<Persona>: config error (...)` — that persona's config does not load.
 
 Then confirm the briefing a persona actually reads at session start exists:
 
@@ -587,15 +725,23 @@ Run all seven from the team root. Every one of them can fail.
 | # | Check | Command | Alive looks like |
 |---|---|---|---|
 | 1 | Team resolves | `cat configs/personas.yaml` | your personas listed, `default_persona` set |
-| 2 | Project path real | `cat configs/repos.yaml` | an absolute path, not a placeholder |
+| 2 | Project path real | `cat configs/repos.yaml` | an **uncommented** `project:` key (relative is fine) |
 | 3 | Bridge replies | DM the bot from an allowlisted account | a reply in thread |
 | 4 | **Ops-log armed** | grep the bridge log for `heartbeats ARMED` | the ARMED line naming your channel |
-| 5 | **Autodrive known** | `tigerharness autodrive status` | a state report with interval + a real driver |
+| 5 | **Autodrive known** | `tigerharness autodrive status` | a state report with interval + a real driver — **not** `autodrive: stopped (no state file)` |
 | 6 | **Queue reachable** | `tigerharness journal sweep` | counts matching what you scaffolded |
-| 7 | Memory healthy | `tiger-memory ... doctor` | exit status 0 |
+| 7 | Memory healthy | `tiger-memory ... check` | exit status 0 (**not** `doctor` — see Stage 8) |
 
 Checks 4, 5 and 6 are the three that were silently false on Inkstone. If you
 verify nothing else, verify those.
+
+> **Check 6 is the one that is not read-only.** `journal sweep` archives every
+> `done` task and can materialize deferred inbox entries into the queue —
+> `journal --help` describes it as *"archive done tasks, classify in_progress
+> as idle/busy/crashed, summarise. Side-effecting."* That is fine on day one,
+> when the queue is yours and empty. Once the team is working, re-run this row
+> as `tigerharness journal list`, which reads the same trays and changes
+> nothing.
 
 ### Appendix — environment variable inventory
 
