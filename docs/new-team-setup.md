@@ -273,11 +273,63 @@ first interactive session, on the subscription rail.
 **Operator supplies:** what the team is for; what each persona is good at;
 the boundaries (which directories a persona may write to).
 
-This is the one stage with no mechanical verification — a template prompt and
-a finished prompt are both valid markdown. The check is human: open
-`personas/<Persona>/prompt.md` and confirm it describes a specific role with
-explicit read/write boundaries, not the scaffold's placeholder text. A team
-whose prompts are still templates will *run*, and will behave generically.
+**Prompt *content* has no mechanical check, and cannot have one.** The
+scaffolded `_PERSONA_TEMPLATE` is a complete, working prompt — it carries no
+`TODO`, no placeholder token, nothing a grep can flag. That is deliberate (a
+fresh persona is usable immediately), but it means a template prompt and a
+finished prompt are indistinguishable to a machine. The check here is human:
+open `personas/<Persona>/prompt.md` and confirm it describes a *specific* role
+with explicit read/write boundaries. A team whose prompts are still templates
+will *run*, and will behave generically. Nothing will ever tell you.
+
+Two things in this stage **are** checkable, and both are worth running:
+
+**1. The charter still has its TODOs.** `init` seeds `charter/README.md` with
+four `TODO` markers; `--goal` replaces exactly one of them (the Mission
+blockquote), leaving three:
+
+```bash
+grep -c TODO charter/README.md    # 4 = charter untouched; 3 = --goal only; 0 = filled in
+```
+
+Any non-zero count means the team's single entry-point doc is still partly
+scaffold. This matters more than it looks: `AGENTS.md`/`CLAUDE.md` point every
+persona at the charter first, so an unfilled `TODO` is read by every session.
+
+**2. The compile trio may not exist yet — and this bites at first workflow.**
+Workflow compilation needs three personas (roles `drafter`/`akagi`/`ayako`).
+`init` does **not** write `configs/workflow.yaml`, so `resolve_compile_personas`
+returns the hard-coded defaults **Anzai / Akagi / Ayako** — names your new team
+almost certainly does not have:
+
+```bash
+tigerharness journal validate-personas .
+```
+
+On a team scaffolded as `--persona Scout`, that exits **1**:
+
+```
+missing prompt.md for: ['Akagi', 'Anzai', 'Ayako'] (under /path/to/Team)
+  akagi: Akagi <- MISSING
+  ayako: Ayako <- MISSING
+  drafter: Anzai <- MISSING
+```
+
+It is a **file-existence check only** (`is_file()` and non-zero size), scoped
+to the compile trio — it says nothing about prompt quality and does not look at
+your other personas. But exit 0 here is the difference between a workflow task
+that compiles and one that crashes mid-compile after scaffolding. Fix it either
+way: create those three personas, or map the roles onto personas you do have in
+`configs/workflow.yaml`:
+
+```yaml
+compile_personas:
+  drafter: Scout
+  akagi:   Scout
+  ayako:   Scout
+```
+
+Skip this only if the team will never run `kind=workflow` tasks.
 
 ### Stage 4 — Slack app and bridge lane registration
 
@@ -417,10 +469,40 @@ Grep the bridge log for `heartbeats ARMED`. Its presence is proof; its absence
 with the second line present is a precise diagnosis. This exists exactly so
 you do not have to wait five minutes to learn the feature is off —
 `_announce_ready` fires **once per lane** per process, guarded by `_ANNOUNCED`
-so it does not log on every turn.
+keyed on `(lane, channel)`. So the line appears **once per lane**, not once per
+process: on a multi-lane bridge, look for *your* lane's line, and note that a
+lane you did not configure staying silent is expected, not a fault.
+
+**Where the log is.** Two deployments, two places:
+
+| How you run the bridge | Read the log with |
+|---|---|
+| systemd (`tigerharness slack-bridge gen-service`) | `journalctl --user -u <your-unit> -f` |
+| foreground (`python -m tigerharness.slack_bridge`) | stdout of that terminal |
+
+The generated unit sets `StandardOutput=journal` and `StandardError=journal`,
+so under systemd there is **no log file to `tail`** — the usual reason this
+verification stalls.
+
+`<your-unit>` is **not** a fixed name. `derive_unit_name` builds it per teams
+root as `slack-bridge-<basename>-<hash6>.service`, where the hash is the first
+6 hex of a SHA-256 over the *full resolved path* — so two roots sharing a
+basename (`~/a/teams`, `~/b/teams`) never collide on one unit. A root at
+`~/projects/tiger-teams` yields `slack-bridge-tiger-teams-4a9e4a.service`.
+Don't guess it; get it one of two ways:
+
+```bash
+systemctl --user list-units 'slack-bridge-*'   # what is actually running
+```
+
+or re-run `gen-service` — it prints `# Save as: ~/.config/systemd/user/<name>`
+on **stderr** (stdout is the unit file itself, so `gen-service > unit` stays
+clean). The derivation is deterministic, so re-running never renames anything.
 
 > Requires `TIGERHARNESS_LOG_LEVEL=INFO` (Stage 0). At a coarser level both
-> lines are invisible and you are back to guessing.
+> lines are invisible and you are back to guessing. Under systemd the level
+> must be set **in the unit's environment**, not in your shell — same
+> lane-vs-shell distinction as the channel itself.
 
 ### Stage 6 — autodrive
 
@@ -720,7 +802,7 @@ rest are the same class.
 
 ### Stage 10 — Is the team actually alive?
 
-Run all seven from the team root. Every one of them can fail.
+Run all eight from the team root. Every one of them can fail.
 
 | # | Check | Command | Alive looks like |
 |---|---|---|---|
@@ -731,9 +813,12 @@ Run all seven from the team root. Every one of them can fail.
 | 5 | **Autodrive known** | `tigerharness autodrive status` | a state report with interval + a real driver — **not** `autodrive: stopped (no state file)` |
 | 6 | **Queue reachable** | `tigerharness journal sweep` | counts matching what you scaffolded |
 | 7 | Memory healthy | `tiger-memory ... check` | exit status 0 (**not** `doctor` — see Stage 8) |
+| 8 | **Compile trio present** | `tigerharness journal validate-personas .` | exit 0 + `ok: ... has all of [...]` (see Stage 3) |
 
 Checks 4, 5 and 6 are the three that were silently false on Inkstone. If you
-verify nothing else, verify those.
+verify nothing else, verify those. Check 8 fails on **every** freshly scaffolded
+team that has not been told which personas compile workflows — it is the one
+below that costs you a crashed task rather than a missing feature.
 
 > **Check 6 is the one that is not read-only.** `journal sweep` archives every
 > `done` task and can materialize deferred inbox entries into the queue —
