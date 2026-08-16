@@ -98,6 +98,12 @@ persistent memory and the official SDK backend.
 
 ## Quick start
 
+> **Standing up a whole team, not just running `init`?** `init` is a
+> scaffolder — it writes files and stops. Everything that makes a team *live*
+> (Slack lane, ops-log channel, autodrive, the journal queue, memory) is a
+> separate step. The ordered day-one path, each step with a verification that
+> fails loudly, is [`docs/new-team-setup.md`](docs/new-team-setup.md).
+
 ### Scaffold a team and its first persona
 
 `tigerharness init` is interactive — it walks you through:
