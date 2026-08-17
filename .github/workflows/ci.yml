@@ -2,6 +2,29 @@
 # pyproject.toml pins it (fail_under owns the floor -- do not restate
 # numbers here). No lint step: the project configures no lint tool,
 # and CI must not introduce one by drift (T7 scope).
+#
+# How the matrix interpreter is pinned: `setup-uv`'s `python-version`
+# input sets UV_PYTHON, so the later `uv sync` / `uv run` steps resolve
+# the matrix version instead of the runner's system Python. That input
+# exists only from v5 onwards -- it is NOT declared by v3, which this
+# workflow pinned while passing the key anyway.
+#
+# The trap that caused that bug, and the reason to check `action.yml`
+# before adding any `with:` key here: GitHub Actions silently ignores
+# `with:` keys an action does not declare. There is no warning and no
+# failure, so a bogus input looks correct forever -- both cells ran
+# 3.12.3 for months while the log said `pytest (py3.11)`. Verify a key
+# against the pinned tag's own action.yml; release notes are how this
+# one got in.
+#
+# The tag is an exact, immutable version rather than a floating major
+# because upstream stopped publishing major/minor tags at v8.0.0 as
+# supply-chain hardening (`@v8` and friends do not resolve at all).
+# Bumping it also inherits two upstream default changes: `enable-cache`
+# is `auto` (it was `false` at v3), and `prune-cache` has defaulted to
+# `false` since v9.0.0 -- so this job now caches, and that cache is
+# larger. The cache key embeds the `python-version` input, so the two
+# matrix cells stay partitioned.
 name: CI
 
 on:
@@ -24,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: ${{ matrix.python-version }}
 
