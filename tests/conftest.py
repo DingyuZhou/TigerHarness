@@ -87,9 +87,16 @@ AUTODRIVE_ENV_VARS = (
 #: reader (rung 1 of ``notify._ssl_context``) and the team ``.env`` sets it,
 #: so an unscrubbed dev shell silently green-lights the rung-1 tests for the
 #: wrong reason. ``SSL_CERT_DIR`` is read *below* us, by OpenSSL inside
-#: ``create_default_context()``; it is scrubbed anyway because it is the one
-#: lever that decides what a default context trusts, and a test asserting
-#: "this context trusts nothing" must not depend on the runner's capath.
+#: ``create_default_context()``; it is scrubbed so the rung tests start from
+#: a known capath rather than the dev shell's.
+#:
+#: Neither variable makes a default context trust nothing, and no test may
+#: assume otherwise. ``SSL_CERT_DIR`` feeds the hash-dir lookup, consulted
+#: lazily at verification time and never counted by ``cert_store_stats``
+#: (a correctly hashed, populated capath also reports ``x509 == 0``), while
+#: *unsetting* ``SSL_CERT_FILE`` is exactly what makes OpenSSL fall back to
+#: the interpreter's compiled-in bundle. What a default context trusts is a
+#: property of the Python build, not of this scrub.
 TLS_ENV_VARS = (
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",

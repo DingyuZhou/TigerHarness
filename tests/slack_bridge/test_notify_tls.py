@@ -143,6 +143,14 @@ def broken_host(tmp_path):
     ``set_default_verify_paths()``, which reads the environment *below* the
     Python function -- an inert fixture that displaces nothing.
 
+    What it does NOT displace: the interpreter's compiled-in default
+    ``cafile``. Leaving ``SSL_CERT_FILE`` unset -- required, since the rung
+    tests read that variable as their input -- is precisely what makes
+    OpenSSL fall back to it, so on a host that ships a CA bundle a default
+    context built under this fixture still trusts it. Assert on the store
+    only with the file rung displaced as well; see
+    :func:`test_fixture_reproduces_the_broken_host`.
+
     ``TIGERHARNESS_SLACK_ENV`` points at an **empty file that exists**: the
     loader's candidate loop returns after the first candidate that exists,
     so this short-circuits ``cwd/.env``, ``cwd/configs/.env`` and the
@@ -226,19 +234,41 @@ def cafile_spy(monkeypatch):
 # The fixtures themselves, asserted before anything relies on them
 # ---------------------------------------------------------------------------
 
-def test_fixture_reproduces_the_broken_host(broken_host):
-    """Assertion order matters and this is first.
+def test_fixture_reproduces_the_broken_host(broken_host, tmp_path):
+    """The fixture's contract, asserted so it holds on ANY interpreter.
 
-    The capath assertion comes before the negative control deliberately.
-    This box is *already* the incident host -- a plain default context here
-    trusts zero certs with no fixture at all -- so ``x509 == 0`` alone would
-    green whether or not the fixture did anything. The capath equality is
-    what proves the fixture is not inert, and it is what keeps this file
-    honest on a healthy runner, where the second assertion is the one that
-    carries weight.
+    This used to end on a bare
+    ``ssl.create_default_context().cert_store_stats()["x509"] == 0``. That
+    line measured the **host**, not the fixture, for two independently
+    verified reasons:
+
+    1. ``SSL_CERT_DIR`` feeds OpenSSL's hash-dir lookup, which is consulted
+       lazily during verification and never loaded into the store up front.
+       A correctly hashed, *populated* capath also reports ``x509 == 0``, so
+       that count never measured the capath override at all.
+    2. What it did measure is the compiled-in default **cafile** -- and
+       ``SSL_CERT_FILE`` being ABSENT, which this fixture guarantees, is
+       exactly the condition under which OpenSSL falls back to it. A
+       uv-managed interpreter looks for ``/etc/ssl/cert.pem``, finds nothing
+       on the incident box, and trusts zero certs; a distro interpreter
+       resolves the system bundle and the very same line reads in the
+       hundreds. No environment variable removes that fallback.
+
+    So: assert the fixture's own contract, then assert the incident's
+    mechanic with the file rung displaced too -- an unloadable
+    ``SSL_CERT_FILE`` set **here and nowhere else**, because every rung test
+    below needs it genuinely absent.
     """
     assert ssl.get_default_verify_paths().capath == str(broken_host)
-    assert ssl.create_default_context().cert_store_stats()["x509"] == 0
+    assert not any(broken_host.iterdir())
+    assert "SSL_CERT_FILE" not in os.environ
+
+    with _restored("SSL_CERT_FILE"):
+        # Present-but-unloadable, not absent: presence is what suppresses
+        # the built-in fallback, so this is the only spelling that
+        # reproduces "no trust anchors" on a host that ships a CA bundle.
+        os.environ["SSL_CERT_FILE"] = str(tmp_path / "no-such-bundle.pem")
+        assert ssl.create_default_context().cert_store_stats()["x509"] == 0
 
 
 def test_embedded_bundles_are_parseable_and_distinct(one_cert_bundle, certifi_bundle):
