@@ -6,8 +6,9 @@
 # How the matrix interpreter is pinned: `setup-uv`'s `python-version`
 # input sets UV_PYTHON, so the later `uv sync` / `uv run` steps resolve
 # the matrix version instead of the runner's system Python. That input
-# exists only from v5 onwards -- it is NOT declared by v3, which this
-# workflow pinned while passing the key anyway.
+# is NOT declared by v3, which this workflow pinned while passing the
+# key anyway; it first appears in v4. Check the tag you pin rather than
+# trusting that boundary.
 #
 # The trap that caused that bug, and the reason to check `action.yml`
 # before adding any `with:` key here: GitHub Actions silently ignores
@@ -53,6 +54,20 @@ jobs:
 
       - name: Sync dependencies (all extras)
         run: uv sync --extra all
+
+      # The bug this workflow carried was not that the wrong interpreter
+      # ran -- it is that the wrong interpreter ran for months and every
+      # signal, job name included, still looked correct. Pinning the
+      # version removes today's instance; this step is what notices the
+      # next one. It fails loudly and prints the interpreter that
+      # actually ran, so the log localises the drift instead of just
+      # going red. The matrix value goes through env rather than being
+      # interpolated into the shell command.
+      - name: Verify the interpreter matches the matrix cell
+        env:
+          EXPECTED: ${{ matrix.python-version }}
+        run: |
+          uv run python -c "import os, sys; expected = os.environ['EXPECTED']; actual = f'{sys.version_info.major}.{sys.version_info.minor}'; assert actual == expected, f'matrix cell says {expected}, interpreter is {sys.version}'"
 
       - name: Run tests with the coverage gate
         # Plain pytest does NOT enforce the floor (see CONTRIBUTING's
