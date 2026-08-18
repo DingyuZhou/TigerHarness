@@ -13,6 +13,7 @@ import logging
 import pytest
 
 from tigerharness.slack_bridge.persistence import (
+    SEEN_CHANNELS_HARD_MAX,
     SEEN_CHANNELS_MAX,
     SEEN_RING_MAX,
     ChannelDelivery,
@@ -79,18 +80,49 @@ class TestTheOnePromise:
 
 
 class TestBoundedGrowth:
-    def test_evicting_channels_is_loud(self, caplog):
+    def test_over_the_soft_bound_a_channel_is_degraded_not_forgotten(self):
+        """The cheap tier drops the ring, which is the expensive part,
+        and keeps the watermark -- so the channel stays in the catch-up's
+        coverage set and still rejects the boundary message."""
+        disk = {
+            f"D{i:04d}": ChannelDelivery(
+                watermark=f"{i}.0", seen=(f"{i}.0", f"{i}.1"),
+            )
+            for i in range(SEEN_CHANNELS_MAX + 3)
+        }
+        kept = SeenLedger._evict(disk)
+
+        assert len(kept) == SEEN_CHANNELS_MAX + 3
+        oldest = kept["D0000"]
+        assert oldest.watermark == "0.0"
+        assert oldest.seen == ("0.0",)
+        newest = f"D{SEEN_CHANNELS_MAX + 2:04d}"
+        assert kept[newest].seen == (
+            f"{SEEN_CHANNELS_MAX + 2}.0", f"{SEEN_CHANNELS_MAX + 2}.1",
+        )
+
+    def test_a_degraded_channel_with_no_watermark_keeps_an_empty_ring(self):
         disk = {
             f"D{i:04d}": ChannelDelivery(watermark=f"{i}.0")
-            for i in range(SEEN_CHANNELS_MAX + 3)
+            for i in range(1, SEEN_CHANNELS_MAX + 1)
+        }
+        disk["DBLANK"] = ChannelDelivery()
+        assert SeenLedger._evict(disk)["DBLANK"].seen == ()
+
+    def test_forgetting_a_channel_announces_the_redelivery_risk(self, caplog):
+        disk = {
+            f"D{i:05d}": ChannelDelivery(watermark=f"{i}.0")
+            for i in range(SEEN_CHANNELS_HARD_MAX + 2)
         }
         with caplog.at_level(logging.WARNING):
             kept = SeenLedger._evict(disk)
-        assert len(kept) == SEEN_CHANNELS_MAX
-        assert "dropping 3 least-recent" in caplog.text
-        # The three oldest went, not three arbitrary ones.
-        assert "D0000" not in kept
-        assert f"D{SEEN_CHANNELS_MAX + 2:04d}" in kept
+
+        assert len(kept) == SEEN_CHANNELS_HARD_MAX
+        assert "FORGETTING 2 least-recent" in caplog.text
+        assert "may now be re-delivered" in caplog.text
+        # The two oldest went, not two arbitrary ones.
+        assert "D00000" not in kept
+        assert f"D{SEEN_CHANNELS_HARD_MAX + 1:05d}" in kept
 
     def test_under_the_limit_nothing_moves(self):
         disk = {DM: ChannelDelivery(watermark="1.0")}

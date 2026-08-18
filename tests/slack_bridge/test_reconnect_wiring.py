@@ -79,13 +79,22 @@ class TestTheHook:
         assert wd._last_activity > before
 
     @pytest.mark.asyncio
-    async def test_a_reconnect_storm_runs_one_catch_up(self, wired, caplog):
+    async def test_a_session_opened_mid_catch_up_is_not_lost(
+        self, wired, caplog
+    ):
+        """A `hello` arriving during a catch-up marks a LATER gap than
+        the one being replayed. Dropping it would leave that gap
+        unrecovered, so it queues a re-run."""
         handler, _, _ = wired
         listener = handler.client.message_listeners[0]
         gate = asyncio.Event()
+        runs = 0
 
         async def _slow(**_):
-            await gate.wait()
+            nonlocal runs
+            runs += 1
+            if runs == 1:
+                await gate.wait()
             return 0
 
         with patch("tigerharness.slack_bridge.__main__.run_catchup", _slow):
@@ -97,7 +106,37 @@ class TestTheHook:
                 await listener(handler.client, {"type": "hello"}, "{}")
             gate.set()
             await first
-        assert "already running" in caplog.text
+
+        assert runs == 2
+        assert "queued a re-run" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_reconnect_storm_coalesces_to_one_re_run(self, wired):
+        """Three `hello`s during one run is still one re-run, not three:
+        the later passes would cover the same window."""
+        handler, _, _ = wired
+        listener = handler.client.message_listeners[0]
+        gate = asyncio.Event()
+        runs = 0
+
+        async def _slow(**_):
+            nonlocal runs
+            runs += 1
+            if runs == 1:
+                await gate.wait()
+            return 0
+
+        with patch("tigerharness.slack_bridge.__main__.run_catchup", _slow):
+            first = asyncio.create_task(
+                listener(handler.client, {"type": "hello"}, "{}")
+            )
+            await asyncio.sleep(0)
+            for _ in range(3):
+                await listener(handler.client, {"type": "hello"}, "{}")
+            gate.set()
+            await first
+
+        assert runs == 2
 
     @pytest.mark.asyncio
     async def test_a_failing_catch_up_never_kills_the_socket_loop(

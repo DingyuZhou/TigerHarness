@@ -381,10 +381,16 @@ class ThreadStore:
 #: the size of that per-message cost.
 SEEN_RING_MAX = 200
 
-#: How many channels the ledger tracks. Far above any realistic bridge
-#: (this is DMs plus channels the bot is mentioned in), but a hostile or
-#: runaway workspace cannot grow the file without bound.
+#: How many channels keep a full ring. Far above any realistic bridge
+#: (this is DMs plus channels the bot is mentioned in); past it, older
+#: channels are degraded rather than forgotten -- see ``_evict``.
 SEEN_CHANNELS_MAX = 200
+
+#: How many channels the ledger tracks at all. Past this the least-recent
+#: really are dropped, which is the one place the ledger can lose its
+#: no-double-delivery guarantee -- so the drop is logged as the incident
+#: it would be, not as housekeeping.
+SEEN_CHANNELS_HARD_MAX = 2000
 
 
 @dataclass(frozen=True)
@@ -549,10 +555,19 @@ class SeenLedger:
 
     @staticmethod
     def _evict(disk: dict[str, ChannelDelivery]) -> dict[str, ChannelDelivery]:
-        """Keep the ledger bounded by dropping the least recently active
-        channels. Evicting a channel only costs a re-replay of messages
-        the bridge already handled there, which the watermark then
-        re-anchors on the next delivery."""
+        """Keep the ledger bounded without silently re-arming duplicates.
+
+        Forgetting a channel is not free. The catch-up's thread pass
+        reads the *thread* store, which has no such bound, so a thread
+        in a forgotten channel gets its replies refetched from the age
+        floor against an empty ring -- every one of them dispatched a
+        second time. That is the failure this ledger exists to prevent,
+        so the cheap tier does not forget: past ``SEEN_CHANNELS_MAX`` a
+        channel is degraded to its watermark alone, which still costs
+        almost nothing to rewrite and still rejects the boundary
+        message. Only past ``SEEN_CHANNELS_HARD_MAX`` is a channel
+        really dropped, and that is announced as a risk.
+        """
         if len(disk) <= SEEN_CHANNELS_MAX:
             return disk
         ranked = sorted(
@@ -560,12 +575,22 @@ class SeenLedger:
             key=lambda kv: _ts_sort_key(kv[1].watermark or ""),
             reverse=True,
         )
-        dropped = [c for c, _ in ranked[SEEN_CHANNELS_MAX:]]
-        log.warning(
-            "delivery ledger over %d channels; dropping %d least-recent: %s",
-            SEEN_CHANNELS_MAX, len(dropped), ", ".join(dropped),
-        )
-        return dict(ranked[:SEEN_CHANNELS_MAX])
+        kept = dict(ranked[:SEEN_CHANNELS_MAX])
+        for channel, entry in ranked[SEEN_CHANNELS_MAX:SEEN_CHANNELS_HARD_MAX]:
+            kept[channel] = ChannelDelivery(
+                watermark=entry.watermark,
+                seen=(entry.watermark,) if entry.watermark else (),
+                channel_type=entry.channel_type,
+            )
+        dropped = [c for c, _ in ranked[SEEN_CHANNELS_HARD_MAX:]]
+        if dropped:
+            log.warning(
+                "delivery ledger over its %d-channel hard bound; FORGETTING "
+                "%d least-recent channel(s), which may now be re-delivered "
+                "once: %s",
+                SEEN_CHANNELS_HARD_MAX, len(dropped), ", ".join(dropped),
+            )
+        return kept
 
     # ----- shared write discipline -----
 

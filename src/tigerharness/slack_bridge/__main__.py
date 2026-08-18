@@ -190,32 +190,50 @@ def attach_reconnect_guards(
     client = handler.client
     watchdog = SocketLivenessWatchdog(client, watchdog_cfg, lane=lane_name)
     catchup_lock = asyncio.Lock()
+    catchup_pending = False
 
     async def _on_frame(_client: object, message: dict, raw: str) -> None:  # noqa: ARG001
+        nonlocal catchup_pending
         watchdog.mark_activity()
         if message.get("type") != "hello":
             return
         if catchup_lock.locked():
-            # A reconnect storm can deliver several `hello`s; one
-            # catch-up at a time is enough (the ledger would reject the
-            # duplicates anyway, but the API calls are wasted).
-            log.info("lane=%s catch-up already running -- skipping", lane_name)
+            # NOT a duplicate to discard. A catch-up replays serially and
+            # each message can hold it for a whole agent turn, so a
+            # `hello` arriving mid-run marks a *later* gap than the one
+            # being replayed -- dropping it would leave that gap
+            # unrecovered forever. Coalesce instead: one re-run, however
+            # many `hello`s a reconnect storm delivers.
+            catchup_pending = True
+            log.info(
+                "lane=%s new session while catch-up is running -- queued a "
+                "re-run so this gap is not missed", lane_name,
+            )
             return
         async with catchup_lock:
-            log.info("lane=%s new Socket Mode session -- catching up", lane_name)
-            try:
-                await run_catchup(
-                    target=bridge,
-                    ledger=bridge.seen_ledger,
-                    web_client=bridge.app.client,
-                    cfg=catchup_cfg,
-                    lane=lane_name,
+            while True:
+                # Cleared before the run, so a `hello` arriving during it
+                # queues another pass. The check below happens with no
+                # await in between, so nothing can set it and be lost.
+                catchup_pending = False
+                log.info(
+                    "lane=%s new Socket Mode session -- catching up", lane_name
                 )
-            except Exception:  # noqa: BLE001 - never kill the socket loop
-                log.warning(
-                    "lane=%s catch-up failed -- messages missed during the "
-                    "gap were NOT recovered", lane_name, exc_info=True,
-                )
+                try:
+                    await run_catchup(
+                        target=bridge,
+                        ledger=bridge.seen_ledger,
+                        web_client=bridge.app.client,
+                        cfg=catchup_cfg,
+                        lane=lane_name,
+                    )
+                except Exception:  # noqa: BLE001 - never kill the socket loop
+                    log.warning(
+                        "lane=%s catch-up failed -- messages missed during "
+                        "the gap were NOT recovered", lane_name, exc_info=True,
+                    )
+                if not catchup_pending:
+                    return
 
     client.message_listeners.append(_on_frame)
     watchdog.start()
