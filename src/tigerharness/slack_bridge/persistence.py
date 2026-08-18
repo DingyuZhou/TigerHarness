@@ -14,6 +14,7 @@ Each entry on disk::
         "session_id": "abc-def-...",
         "persona": "ayako",           // may be null for pre-routing records
         "team": "Shohoku",            // lane/team name; null on old records
+        "channel": "D0B4L5V7RFG",     // where the thread lives; null on old records
         "last_usage": {...},          // final turn's usage payload, or null
         "last_turn_at": "2026-...Z",  // ISO time of last completed turn
         "in_flight": false            // a bridge turn is running right now
@@ -32,6 +33,28 @@ that pass.
 
 Writes are atomic via ``tmp + os.replace``. Read errors fall back to an
 empty map with a warning rather than failing the bridge to start.
+
+Delivery ledger (``SeenLedger``)
+--------------------------------
+
+:class:`SeenLedger` lives in this module and shares the store's locking
+and atomic-write discipline, but keeps its own sidecar file
+(``threads.seen.json``) rather than extending the thread map. Two
+reasons: the thread map's on-disk shape is read by an older bridge and
+by the ``compact-idle`` CLI, and its records are keyed by *thread*
+while delivery has to be tracked for messages that do not have a thread
+record yet (the first message of a brand-new DM). Its per-channel entry
+is::
+
+    "<channel_id>": {
+        "watermark": "1786900916.787969",   // newest ts ever accepted
+        "seen": ["1786900916.787969", ...]  // bounded ring, newest last
+    }
+
+The ring -- not the watermark -- is the dedup authority: an explicit
+per-message marker cannot be fooled by equal timestamps or by messages
+arriving out of order, which "is it newer than the watermark?" can. The
+watermark exists only to bound how far back a catch-up has to fetch.
 """
 
 from __future__ import annotations
@@ -100,10 +123,16 @@ class ThreadRecord:
     *team* / *last_usage* / *last_turn_at* / *in_flight* are the turn
     metadata the external ``compact-idle`` pass reads; all default to
     the "unknown" values an older on-disk record implies.
+
+    *channel* is the Slack conversation the thread lives in. It is what
+    lets the reconnect catch-up ask ``conversations.replies`` for the
+    replies it missed; a record written before this field existed reads
+    as ``None`` and is simply skipped by that pass.
     """
     session_id: str
     persona: str | None = None
     team: str | None = None
+    channel: str | None = None
     last_usage: dict | None = None
     last_turn_at: str | None = None
     in_flight: bool = False
@@ -169,12 +198,16 @@ class ThreadStore:
                     continue
                 persona = v.get("persona")
                 team = v.get("team")
+                channel = v.get("channel")
                 usage = v.get("last_usage")
                 turn_at = v.get("last_turn_at")
                 loaded[key] = ThreadRecord(
                     session_id=sid,
                     persona=persona if isinstance(persona, str) and persona else None,
                     team=team if isinstance(team, str) and team else None,
+                    channel=(
+                        channel if isinstance(channel, str) and channel else None
+                    ),
                     last_usage=usage if isinstance(usage, dict) else None,
                     last_turn_at=(
                         turn_at if isinstance(turn_at, str) and turn_at else None
@@ -221,6 +254,7 @@ class ThreadStore:
         *,
         persona: str | None | object = _UNSET,
         team: str | object = _UNSET,
+        channel: str | None | object = _UNSET,
         last_usage: dict | None | object = _UNSET,
         last_turn_at: str | None | object = _UNSET,
         in_flight: bool | object = _UNSET,
@@ -252,6 +286,7 @@ class ThreadStore:
                 session_id=session_id,
                 persona=_keep(persona, cur.persona),   # type: ignore[arg-type]
                 team=_keep(team, cur.team),            # type: ignore[arg-type]
+                channel=_keep(channel, cur.channel),   # type: ignore[arg-type]
                 last_usage=_keep(last_usage, cur.last_usage),  # type: ignore[arg-type]
                 last_turn_at=_keep(last_turn_at, cur.last_turn_at),  # type: ignore[arg-type]
                 in_flight=bool(_keep(in_flight, cur.in_flight)),
@@ -298,6 +333,10 @@ class ThreadStore:
         pass iterates this."""
         return dict(self._map)
 
+    def seen_ledger(self) -> "SeenLedger":
+        """The delivery ledger sitting beside this store's file."""
+        return SeenLedger(self._path.with_name(self._path.stem + ".seen.json"))
+
     def _write_map(self, mapping: dict[str, ThreadRecord]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd = tempfile.NamedTemporaryFile(
@@ -315,6 +354,7 @@ class ThreadStore:
                         "session_id": v.session_id,
                         "persona": v.persona,
                         "team": v.team,
+                        "channel": v.channel,
                         "last_usage": v.last_usage,
                         "last_turn_at": v.last_turn_at,
                         "in_flight": v.in_flight,
@@ -322,6 +362,247 @@ class ThreadStore:
                     for k, v in mapping.items()
                 }
                 json.dump(serializable, tf, indent=2, sort_keys=True)
+                tf.write("\n")
+            os.replace(fd.name, self._path)
+        except Exception:
+            try:
+                os.unlink(fd.name)
+            except OSError:
+                pass
+            raise
+
+
+#: How many recently-delivered message timestamps to retain per channel.
+#: The ring only has to outlive the catch-up window: a replay never
+#: offers more than ``CatchupConfig.max_messages`` (50) per run, so
+#: anything the ring has forgotten is also something the replay will not
+#: re-offer. Kept modest on purpose -- this file is read and rewritten
+#: once per inbound message, so ``SEEN_RING_MAX * SEEN_CHANNELS_MAX`` is
+#: the size of that per-message cost.
+SEEN_RING_MAX = 200
+
+#: How many channels the ledger tracks. Far above any realistic bridge
+#: (this is DMs plus channels the bot is mentioned in), but a hostile or
+#: runaway workspace cannot grow the file without bound.
+SEEN_CHANNELS_MAX = 200
+
+
+@dataclass(frozen=True)
+class ChannelDelivery:
+    """One channel's delivery state: how far we have got, and exactly
+    which messages we handled recently.
+
+    ``channel_type`` is Slack's own routing hint (``"im"`` for a DM),
+    copied verbatim off a live event. The replay path re-attaches it
+    instead of inferring it from the channel id, so a recovered message
+    is routed by the same rule as the one that arrived normally.
+    """
+    watermark: str | None = None
+    seen: tuple[str, ...] = ()
+    channel_type: str | None = None
+
+
+def _ts_sort_key(ts: str) -> float:
+    """Slack timestamps sort numerically, not lexically -- ``"9.0" >
+    "10.0"`` as strings. A value that is not a Slack ts at all sorts
+    oldest so it can never win a watermark comparison."""
+    try:
+        return float(ts)
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+class SeenLedger:
+    """Per-channel record of which inbound messages were already handled.
+
+    The bridge consults this **before** dispatching anything, on the
+    normal path as well as the replay path, so the two cannot disagree
+    about what "already delivered" means. :meth:`mark` is the whole
+    contract: it is a compare-and-set that returns ``True`` exactly once
+    per message ts, and it is durable before it returns.
+
+    Shares :class:`ThreadStore`'s discipline -- ``flock`` around
+    read-merge-write, atomic ``tmp + os.replace`` publish, tolerant
+    parse -- because the same two processes (the bridge daemon and the
+    ``compact-idle`` CLI) may hold the file open at once.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    # ----- reads -----
+
+    def _read_disk(self) -> dict[str, ChannelDelivery]:
+        """Tolerant parse; an unreadable ledger reads as empty.
+
+        Failing open matters more here than anywhere else in the bridge:
+        an empty ledger costs at most one duplicate replayed message,
+        while refusing to start costs every message.
+        """
+        if not self._path.exists():
+            return {}
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning(
+                "could not read delivery ledger %s (%s); starting fresh",
+                self._path, exc,
+            )
+            return {}
+        if not isinstance(data, dict):
+            log.warning(
+                "delivery ledger %s is not a JSON object; starting fresh",
+                self._path,
+            )
+            return {}
+        out: dict[str, ChannelDelivery] = {}
+        for channel, entry in data.items():
+            if not isinstance(entry, dict):
+                continue
+            watermark = entry.get("watermark")
+            ctype = entry.get("channel_type")
+            raw_seen = entry.get("seen")
+            seen = (
+                tuple(t for t in raw_seen if isinstance(t, str) and t)
+                if isinstance(raw_seen, list)
+                else ()
+            )
+            out[str(channel)] = ChannelDelivery(
+                watermark=(
+                    watermark
+                    if isinstance(watermark, str) and watermark
+                    else None
+                ),
+                seen=seen[-SEEN_RING_MAX:],
+                channel_type=(
+                    ctype if isinstance(ctype, str) and ctype else None
+                ),
+            )
+        return out
+
+    def watermark(self, channel: str) -> str | None:
+        """Newest ts ever accepted for *channel*, or ``None`` if the
+        bridge has never handled a message there."""
+        entry = self._read_disk().get(channel)
+        return entry.watermark if entry is not None else None
+
+    def channels(self) -> list[tuple[str, str | None]]:
+        """``(channel, channel_type)`` for everywhere the bridge has ever
+        delivered a message from.
+
+        This is the catch-up's coverage set, and it is a real limit: the
+        bridge can only replay conversations it already knows exist. A
+        DM opened for the very first time while the socket was down has
+        no entry here and is not recovered -- see ``docs/slack-bridge.md``.
+        """
+        return sorted(
+            (channel, entry.channel_type)
+            for channel, entry in self._read_disk().items()
+        )
+
+    def was_seen(self, channel: str, message_ts: str) -> bool:
+        """Read-only probe. :meth:`mark` is the one that decides."""
+        entry = self._read_disk().get(channel)
+        return entry is not None and message_ts in entry.seen
+
+    # ----- the write that gates dispatch -----
+
+    def mark(
+        self,
+        channel: str,
+        message_ts: str,
+        channel_type: str | None = None,
+    ) -> bool:
+        """Claim *message_ts* for delivery. ``True`` iff this call won.
+
+        A second call with the same ``(channel, message_ts)`` returns
+        ``False``, whether it comes from the live socket or from a
+        reconnect replay, and whether or not the bridge restarted in
+        between -- the claim is on disk before this returns. Callers
+        must treat ``False`` as "someone already has this; do nothing".
+        """
+        if not channel or not message_ts:
+            # Nothing to key on. Refusing (rather than dispatching
+            # unguarded) keeps "the ledger said yes" honest -- a caller
+            # that cannot be deduped must not be replayed either.
+            log.warning(
+                "delivery ledger refusing an unkeyable message "
+                "(channel=%r ts=%r)", channel, message_ts,
+            )
+            return False
+        with self._locked():
+            disk = self._read_disk()
+            entry = disk.get(channel, ChannelDelivery())
+            if message_ts in entry.seen:
+                return False
+            seen = (entry.seen + (message_ts,))[-SEEN_RING_MAX:]
+            watermark = entry.watermark
+            if watermark is None or _ts_sort_key(message_ts) > _ts_sort_key(watermark):
+                watermark = message_ts
+            disk[channel] = ChannelDelivery(
+                watermark=watermark,
+                seen=seen,
+                channel_type=channel_type or entry.channel_type,
+            )
+            self._write(self._evict(disk))
+        return True
+
+    @staticmethod
+    def _evict(disk: dict[str, ChannelDelivery]) -> dict[str, ChannelDelivery]:
+        """Keep the ledger bounded by dropping the least recently active
+        channels. Evicting a channel only costs a re-replay of messages
+        the bridge already handled there, which the watermark then
+        re-anchors on the next delivery."""
+        if len(disk) <= SEEN_CHANNELS_MAX:
+            return disk
+        ranked = sorted(
+            disk.items(),
+            key=lambda kv: _ts_sort_key(kv[1].watermark or ""),
+            reverse=True,
+        )
+        dropped = [c for c, _ in ranked[SEEN_CHANNELS_MAX:]]
+        log.warning(
+            "delivery ledger over %d channels; dropping %d least-recent: %s",
+            SEEN_CHANNELS_MAX, len(dropped), ", ".join(dropped),
+        )
+        return dict(ranked[:SEEN_CHANNELS_MAX])
+
+    # ----- shared write discipline -----
+
+    @contextmanager
+    def _locked(self):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._path.with_name(self._path.name + ".lock")
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+    def _write(self, mapping: dict[str, ChannelDelivery]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(self._path.parent),
+            delete=False,
+            prefix=".seen.",
+            suffix=".tmp",
+        )
+        try:
+            with fd as tf:
+                json.dump(
+                    {
+                        channel: {
+                            "watermark": entry.watermark,
+                            "seen": list(entry.seen),
+                            "channel_type": entry.channel_type,
+                        }
+                        for channel, entry in mapping.items()
+                    },
+                    tf, indent=2, sort_keys=True,
+                )
                 tf.write("\n")
             os.replace(fd.name, self._path)
         except Exception:

@@ -30,6 +30,12 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from .bridge import SlackBridge, build_team_bridge
 from .multi import MultiBridgeConfig, load_multi
+from .reconnect import (
+    CatchupConfig,
+    SocketLivenessWatchdog,
+    WatchdogConfig,
+    run_catchup,
+)
 
 log = logging.getLogger("tigerharness.slack_bridge")
 
@@ -162,13 +168,75 @@ async def _drive_handlers(
 # Multi-tenant entrypoint
 # ---------------------------------------------------------------------------
 
+def attach_reconnect_guards(
+    handler: AsyncSocketModeHandler,
+    bridge: SlackBridge,
+    lane_name: str,
+    watchdog_cfg: WatchdogConfig,
+    catchup_cfg: CatchupConfig,
+) -> SocketLivenessWatchdog:
+    """Give one lane a liveness watchdog and a catch-up on reconnect.
+
+    Both hang off ``message_listeners``, which sees every frame Slack
+    sends -- including the ``hello`` that opens a session. So one hook
+    supplies the watchdog's liveness clock and the catch-up's trigger,
+    and neither has to poll the connection state. Bolt registers on
+    ``socket_mode_request_listeners``, which the SDK runs *after* this
+    list, so liveness is marked before any dispatch work begins.
+
+    The catch-up runs on the *first* session too, not just reconnects:
+    a restart is a gap like any other.
+    """
+    client = handler.client
+    watchdog = SocketLivenessWatchdog(client, watchdog_cfg, lane=lane_name)
+    catchup_lock = asyncio.Lock()
+
+    async def _on_frame(_client: object, message: dict, raw: str) -> None:  # noqa: ARG001
+        watchdog.mark_activity()
+        if message.get("type") != "hello":
+            return
+        if catchup_lock.locked():
+            # A reconnect storm can deliver several `hello`s; one
+            # catch-up at a time is enough (the ledger would reject the
+            # duplicates anyway, but the API calls are wasted).
+            log.info("lane=%s catch-up already running -- skipping", lane_name)
+            return
+        async with catchup_lock:
+            log.info("lane=%s new Socket Mode session -- catching up", lane_name)
+            try:
+                await run_catchup(
+                    target=bridge,
+                    ledger=bridge.seen_ledger,
+                    web_client=bridge.app.client,
+                    cfg=catchup_cfg,
+                    lane=lane_name,
+                )
+            except Exception:  # noqa: BLE001 - never kill the socket loop
+                log.warning(
+                    "lane=%s catch-up failed -- messages missed during the "
+                    "gap were NOT recovered", lane_name, exc_info=True,
+                )
+
+    client.message_listeners.append(_on_frame)
+    watchdog.start()
+    return watchdog
+
+
 async def _run_multi(multi_cfg: MultiBridgeConfig) -> None:
     _setup_logging()
+    watchdog_cfg = WatchdogConfig.from_env()
+    catchup_cfg = CatchupConfig.from_env()
     bridges: list[SlackBridge] = []
     handlers: list[AsyncSocketModeHandler] = []
+    watchdogs: list[SocketLivenessWatchdog] = []
     for lane in multi_cfg.lanes:
         b = build_team_bridge(lane.team_ctx, state_path=lane.state_path)
         h = AsyncSocketModeHandler(b.app, lane.team_ctx.slack_app_token)
+        watchdogs.append(
+            attach_reconnect_guards(
+                h, b, lane.name, watchdog_cfg, catchup_cfg,
+            )
+        )
         bridges.append(b)
         handlers.append(h)
         log.info(
@@ -179,10 +247,14 @@ async def _run_multi(multi_cfg: MultiBridgeConfig) -> None:
             sorted(lane.team_ctx.allowed_user_ids),
         )
     log.info("starting bridge with %d lane(s)", len(multi_cfg.lanes))
-    await _drive_handlers(
-        handlers, bridges,
-        lane_names=[lane.name for lane in multi_cfg.lanes],
-    )
+    try:
+        await _drive_handlers(
+            handlers, bridges,
+            lane_names=[lane.name for lane in multi_cfg.lanes],
+        )
+    finally:
+        for w in watchdogs:
+            w.stop()
 
 
 # ---------------------------------------------------------------------------

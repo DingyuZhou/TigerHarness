@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 from tigerharness.agent_sdk import AgentConfig, get_backend, run_with_retry
 from tigerharness.agent_sdk.types import AgentBackend, Session
@@ -65,7 +65,7 @@ from .history import (
     format_context_block,
 )
 from .idle_compact import IdleCompactConfig, maybe_compact
-from .persistence import ThreadStore, default_state_path
+from .persistence import SeenLedger, ThreadStore, default_state_path
 from .progress import build_turn_progress
 from .router import detect_persona
 
@@ -233,6 +233,10 @@ class SlackBridge:
 
         self._backend = backend
         self._store = store
+        # Every inbound message passes through this, live or replayed,
+        # so the two paths cannot disagree about what "already handled"
+        # means. See `_dispatch`.
+        self._seen = store.seen_ledger()
         # Crash sanitization: at construction no turn is running, so any
         # persisted in_flight marker is a leftover from a killed bridge.
         # Clearing here keeps a crash from making the compact-idle pass
@@ -359,6 +363,34 @@ class SlackBridge:
         files = event.get("files") or []
         if not text and not files:
             return
+
+        # At-most-once, and deliberately BEFORE any work: the claim is
+        # on disk before the agent runs, so a bridge killed mid-turn
+        # comes back and does not re-run a turn that may already have
+        # pushed or committed. The cost is that such a turn is never
+        # re-answered -- but a missing reply is visible to the Operator,
+        # while a duplicate `git push` is not.
+        channel = event.get("channel") or ""
+        message_ts = event.get("ts") or ""
+        if channel and message_ts:
+            if not self._seen.mark(
+                channel, message_ts, event.get("channel_type")
+            ):
+                log.info(
+                    "skipping message %s/%s -- already handled",
+                    channel, message_ts,
+                )
+                return
+        else:
+            # Nothing to key on. Dispatching unguarded beats dropping:
+            # this whole module exists because a lost message is worse
+            # than a rare duplicate, and the replay path always supplies
+            # both fields, so only the live socket can land here.
+            log.warning(
+                "dispatching a message with no dedup key "
+                "(channel=%r ts=%r) -- it is not protected against "
+                "redelivery", channel, message_ts,
+            )
 
         thread_key = event.get("thread_ts") or event["ts"]
 
@@ -552,6 +584,7 @@ class SlackBridge:
                             state.session.id,
                             persona=state.persona,
                             team=self._team.team_name or None,
+                            channel=event.get("channel"),
                             last_usage=getattr(result, "usage", None),
                             last_turn_at=_utcnow_iso(),
                         )
@@ -727,6 +760,63 @@ class SlackBridge:
                 # retracting both.
                 if self._in_flight == 0:  # pragma: no branch
                     self._drained.set()
+
+    # ----- reconnect catch-up (CatchupTarget) -----
+
+    @property
+    def seen_ledger(self) -> SeenLedger:
+        """The delivery ledger this bridge dedups against."""
+        return self._seen
+
+    def catchup_threads(self) -> list[tuple[str, str]]:
+        """Threads worth re-checking after a gap.
+
+        Only records that know their channel qualify; ``channel`` was
+        added on 2026-08-17, so threads last touched by an older bridge
+        are covered by their channel's history pass instead.
+        """
+        return [
+            (rec.channel, ts)
+            for ts, rec in self._store.records().items()
+            if rec.channel
+        ]
+
+    def is_replay_candidate(self, event: Mapping[str, Any]) -> bool:
+        """Reject what a history page is full of: our own replies."""
+        if event.get("bot_id"):
+            return False
+        subtype = event.get("subtype")
+        return not subtype or subtype in _ACCEPTED_SUBTYPES
+
+    async def replay(self, event: dict[str, Any]) -> None:
+        """Re-inject one missed message through the live code path.
+
+        Deliberately routed via ``handle_message`` rather than straight
+        to ``_dispatch``: a replayed message is still untrusted, so it
+        must clear the same allowlist, the same bot/subtype filters, the
+        same shutdown check, and the same dedup gate.
+        """
+        if not _is_user_dm(event) and not self._is_tracked_thread_reply(event):
+            log.warning(
+                "catch-up cannot route %s/%s -- the bridge only replays "
+                "DMs and threads it already tracks, so this message was "
+                "NOT delivered",
+                event.get("channel"), event.get("ts"),
+            )
+            return
+        channel = event.get("channel")
+
+        async def _say(
+            text: str = "", thread_ts: str | None = None, **_: Any
+        ) -> None:
+            await self.app.client.chat_postMessage(
+                channel=channel, text=text, thread_ts=thread_ts,
+            )
+
+        log.info(
+            "catch-up replaying %s/%s", channel, event.get("ts"),
+        )
+        await self.handle_message(event, _say)
 
     def _is_untracked_thread_reply(self, event: dict[str, Any], thread_key: str) -> bool:
         """True iff this message replies into a thread the bridge has

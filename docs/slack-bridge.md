@@ -45,7 +45,8 @@ Reply posted to thread
 |---|---|
 | `bridge.py` | SlackBridge class: routing, dispatch, thread management |
 | `config.py` | BridgeConfig dataclass + shared config primitives |
-| `persistence.py` | ThreadStore: atomic JSON file for thread->session map |
+| `persistence.py` | ThreadStore (thread->session map) + SeenLedger (per-channel delivery watermark) |
+| `reconnect.py` | Socket liveness watchdog + on-reconnect catch-up replay |
 | `downloader.py` | SlackFileDownloader + prompt augmentation |
 | `history.py` | Thread-history fetch + transcript for untracked-thread joins |
 | `notify.py` | Outbound: SlackNotifier (text DM + file upload) + CLI |
@@ -72,6 +73,12 @@ Process-wide env vars:
 | `TIGERHARNESS_SLACK_STATE_DIR` | XDG state | Default `threads.json` home for directly-embedded bridges (lane fragments set `state_dir` explicitly) |
 | `TIGERHARNESS_ATTACHMENT_DIR` | `/tmp/slack-attachments` | File staging dir |
 | `TIGERHARNESS_SLACK_ENV` | (none) | Explicit .env path for the `notify` CLI **and** for the turn-progress env fallback (see *Turn-progress heartbeats*). Not notify-only — removing it can silence more than one feature |
+| `TIGERHARNESS_SLACK_WATCHDOG` | `1` | Socket liveness watchdog on/off (see *Surviving a dead socket*) |
+| `TIGERHARNESS_SLACK_WATCHDOG_STALE_S` | `30` | Seconds of inbound silence before a reconnect is forced |
+| `TIGERHARNESS_SLACK_WATCHDOG_POLL_S` | `5` | How often the watchdog thread checks |
+| `TIGERHARNESS_SLACK_CATCHUP` | `1` | Catch-up replay on reconnect on/off |
+| `TIGERHARNESS_SLACK_CATCHUP_MAX_AGE_S` | `3600` | Oldest message the catch-up will replay |
+| `TIGERHARNESS_SLACK_CATCHUP_MAX_MESSAGES` | `50` | Ceiling on messages replayed per reconnect |
 
 Per-lane `.env` file keys (the fragment's `env:` path, default
 `<team>/configs/.env`):
@@ -176,6 +183,84 @@ Bounds and behavior (`history.py`):
 - Tracked threads never fetch — their resumed session already carries
   the context. Each adopted thread fetches once; after the first turn
   it is tracked like any other.
+
+## Surviving a dead socket
+
+A Socket Mode connection can stop delivering messages while every layer
+still believes it is up. Messages sent during that window are simply
+never delivered — Slack does not retry them, and nothing in the bridge
+logs an error. Two independent mechanisms cover this.
+
+### Why the SDK's own detector was not enough
+
+`slack_sdk` calls a session stale when
+`now - last_ping_pong_time >= ping_interval * 4` — about **20 seconds**.
+Production reconnects reported **909–1052 seconds** of staleness, a 50x
+gap. The measured explanation:
+
+- The distribution's mode (~930s) matches this host's
+  `net.ipv4.tcp_retries2 = 15` (~925s to give up on a TCP write), not
+  any multiple of `ping_interval`.
+- At the moment staleness was reported, `session.closed` was still
+  `False` — the monitor took the "seems to be stale" branch, not the
+  "already closed" one, so it had run zero *effective* iterations for
+  ~910s.
+- The stale verdict landed **0.9s after** the first inbound frame in 26
+  minutes. Detection was gated on traffic returning, not on the 20s
+  timer.
+
+So the SDK's detector is not independent of the failure it detects, and
+it shares a lock with `issue_new_wss_url()` — an outbound HTTPS call
+over the same black-holed network. **Lowering `ping_interval` cannot
+help**: it lowers a threshold that is never evaluated during the
+outage.
+
+### 1. The watchdog (`reconnect.py`) — best effort
+
+An **OS thread**, not an asyncio task. It reads a monotonic clock it
+owns, compares it against the last inbound frame, and — past
+`WATCHDOG_STALE_S` — logs a WARNING naming the silence duration and
+asks the event loop to force a reconnect. Deliberately:
+
+- it never writes to the socket it is judging;
+- it logs *before* it needs the loop, so a starved or dead loop still
+  leaves evidence;
+- it rate-limits itself to one force per stale window.
+
+Because a watchdog cannot fix a loop that is wedged, this is best
+effort by construction. It shortens gaps; it does not close them.
+
+### 2. Catch-up replay — the actual correctness fix
+
+`SeenLedger` (in `persistence.py`, beside `ThreadStore` — same
+lock/atomic-write discipline) records, per channel, the last message
+timestamp the bridge handled plus a ring of recently-seen timestamps.
+On every new Socket Mode session — including the first one after a
+restart, since a restart is a gap like any other — the bridge refetches
+each known conversation via `conversations.history` /
+`conversations.replies` and feeds anything new through normal dispatch:
+same allowlist, same bot filtering, same shutdown check.
+
+Dedup is the correctness risk, so it is an **explicit per-message
+claim**, not a "probably newer than the watermark" heuristic: dispatch
+marks each `(channel, ts)` in the ledger *before* doing any work, and a
+second claim on the same pair loses. The ledger is on disk, so this
+holds across a restart mid-turn. The trade is honest: a crash between
+the mark and the reply means that message is not retried
+(at-most-once). Delivering the same prompt twice is worse than dropping
+one, and the watermark still shows the gap in the logs.
+
+Bounds are `CATCHUP_MAX_AGE_S` and `CATCHUP_MAX_MESSAGES`. **Every time
+a bound skips something, it is logged loudly** — a silent cap here
+would recreate the exact "message vanished with no error" failure this
+machinery exists to remove. That includes the case where a channel's
+watermark is older than the age floor: the log says the catch-up is
+starting at the bound rather than at the last message it handled, and
+that anything in between was not delivered.
+
+**Known limit:** the catch-up can only replay conversations it already
+knows exist. A DM opened for the very first time while the socket was
+down has no ledger entry and is not recovered.
 
 ## Journal tasks over Slack (scheduling discipline)
 
