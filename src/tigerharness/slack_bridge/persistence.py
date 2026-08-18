@@ -47,14 +47,22 @@ record yet (the first message of a brand-new DM). Its per-channel entry
 is::
 
     "<channel_id>": {
-        "watermark": "1786900916.787969",   // newest ts ever accepted
-        "seen": ["1786900916.787969", ...]  // bounded ring, newest last
+        "watermark": "1786900916.787969",    // newest ts ever accepted
+        "seen": ["1786900916.787969", ...],  // bounded ring, newest last
+        "channel_type": "im",                // which history API to call
+        "pending": ["1786900916.787969"]     // claimed, not yet answered
     }
 
 The ring -- not the watermark -- is the dedup authority: an explicit
 per-message marker cannot be fooled by equal timestamps or by messages
 arriving out of order, which "is it newer than the watermark?" can. The
 watermark exists only to bound how far back a catch-up has to fetch.
+
+``pending`` is the honesty half. A claim is written before the agent
+runs, so a bridge killed mid-turn leaves a message that is claimed,
+unanswered, and -- by design -- never replayed. That entry is the only
+thing that lets the next startup name it out loud instead of losing it
+in silence.
 """
 
 from __future__ import annotations
@@ -377,8 +385,9 @@ class ThreadStore:
 #: offers more than ``CatchupConfig.max_messages`` (50) per run, so
 #: anything the ring has forgotten is also something the replay will not
 #: re-offer. Kept modest on purpose -- this file is read and rewritten
-#: once per inbound message, so ``SEEN_RING_MAX * SEEN_CHANNELS_MAX`` is
-#: the size of that per-message cost.
+#: once per inbound message, and ``SEEN_RING_MAX * SEEN_CHANNELS_MAX``
+#: dominates that per-message cost (channels past the soft bound keep
+#: only a watermark, so they add roughly nothing).
 SEEN_RING_MAX = 200
 
 #: How many channels keep a full ring. Far above any realistic bridge
@@ -436,9 +445,14 @@ class SeenLedger:
 
     The bridge consults this **before** dispatching anything, on the
     normal path as well as the replay path, so the two cannot disagree
-    about what "already delivered" means. :meth:`mark` is the whole
-    contract: it is a compare-and-set that returns ``True`` exactly once
-    per message ts, and it is durable before it returns.
+    about what "already delivered" means. :meth:`mark` is the safety
+    contract: a compare-and-set that returns ``True`` exactly once per
+    message ts, durable before it returns.
+
+    :meth:`settle` and :meth:`take_unfinished` are the honesty half.
+    ``mark`` alone would let a message be claimed and then silently
+    forgotten if the process died mid-turn; the pair makes that case
+    reportable without ever re-arming the duplicate ``mark`` prevented.
 
     Shares :class:`ThreadStore`'s discipline -- ``flock`` around
     read-merge-write, atomic ``tmp + os.replace`` publish, tolerant
@@ -535,6 +549,10 @@ class SeenLedger:
         reconnect replay, and whether or not the bridge restarted in
         between -- the claim is on disk before this returns. Callers
         must treat ``False`` as "someone already has this; do nothing".
+
+        A won claim also lands in ``pending``. Callers owe it a
+        :meth:`settle` once they have actually replied, or the message
+        is reported unanswered at the next startup.
         """
         if not channel or not message_ts:
             # Nothing to key on. Refusing (rather than dispatching

@@ -271,9 +271,15 @@ watermark is older than the age floor: the log says the catch-up is
 starting at the bound rather than at the last message it handled, and
 that anything in between was not delivered.
 
-**Known limit:** the catch-up can only replay conversations it already
-knows exist. A DM opened for the very first time while the socket was
-down has no ledger entry and is not recovered.
+**Known limits.** The catch-up can only replay conversations it already
+knows exist: a DM opened for the very first time while the socket was
+down has no ledger entry and is not recovered. And the ledger is
+bounded — past 200 channels the least-recent keep only a watermark
+(still enough to reject a repeat), and past 2000 they are dropped
+outright, which is the one case where a message could be delivered
+twice. That drop is logged at WARNING naming every channel affected,
+because it is an incident and not housekeeping. Neither bound is
+reachable by a bridge with a realistic number of lanes.
 
 ## Journal tasks over Slack (scheduling discipline)
 

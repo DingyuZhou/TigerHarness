@@ -296,6 +296,41 @@ class TestNothingIsDroppedQuietly:
         assert second.seen_ledger.take_unfinished() == []
 
     @pytest.mark.asyncio
+    async def test_one_failed_redelivery_does_not_abandon_the_rest(
+        self, caplog
+    ):
+        """A replay can fail for its own reasons -- Slack rejecting the
+        post, the backend erroring. Letting that escape would abandon
+        every message queued behind it, unnamed. The failure is named
+        and the pass continues."""
+        target = MagicMock()
+        target.catchup_threads.return_value = []
+        target.is_replay_candidate.return_value = True
+        target.replay = AsyncMock(
+            side_effect=[RuntimeError("chat.postMessage failed"), None]
+        )
+
+        ledger = MagicMock()
+        ledger.channels.return_value = [(DM, "im")]
+        ledger.watermark.return_value = None
+
+        with caplog.at_level(logging.WARNING):
+            replayed = await run_catchup(
+                target=target,
+                ledger=ledger,
+                web_client=history_client(
+                    dm("1786900916.000001"), dm("1786900916.000002")
+                ),
+                cfg=CatchupConfig(),
+                now=lambda: 1786900920.0,
+            )
+
+        assert target.replay.await_count == 2
+        assert replayed == 1
+        assert "could not redeliver" in caplog.text
+        assert "1786900916.000001" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_age_bound_is_logged(self, bridge, monkeypatch, caplog):
         b, _ = bridge
         monkeypatch.setattr(

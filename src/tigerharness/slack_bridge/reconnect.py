@@ -309,11 +309,12 @@ async def run_catchup(
 ) -> int:
     """Replay everything Slack accepted while we were not listening.
 
-    Returns how many messages were handed to *target*. Safe to call on
-    every session -- including the first one after a restart, which is
-    its own kind of gap. Double delivery is impossible regardless of
-    how often this runs: the ledger's compare-and-set, not this
-    function's bookkeeping, is what decides whether a message is new.
+    Returns how many messages were successfully redelivered. Safe to
+    call on every session -- including the first one after a restart,
+    which is its own kind of gap. Double delivery is impossible
+    regardless of how often this runs: the ledger's compare-and-set,
+    not this function's bookkeeping, is what decides whether a message
+    is new.
     """
     if not cfg.enabled:
         log.warning(
@@ -338,6 +339,31 @@ async def run_catchup(
             return False
         offered.add(key)
         return True
+
+    async def _offer(event: dict[str, Any]) -> int:
+        """Hand one message to the bridge. Returns 1 iff it landed.
+
+        A failure costs that one message, not the rest of the pass.
+        Letting it propagate would abandon every message still queued
+        behind it -- in this channel and in every channel and thread
+        after it -- and they would go unnamed, which is precisely the
+        silent loss this module exists to remove.
+
+        The failed message is not retried later: dispatch claims it
+        before the agent runs, so a `say` that fails *after* a turn
+        already pushed or committed must not be re-run. It stays
+        unsettled and is named at the next startup.
+        """
+        try:
+            await target.replay(event)
+        except Exception:  # noqa: BLE001 - one bad message is not the pass
+            log.warning(
+                "lane=%s catch-up could not redeliver %s/%s -- that message "
+                "was NOT delivered; continuing with the rest",
+                lane, event.get("channel"), event.get("ts"), exc_info=True,
+            )
+            return 0
+        return 1
 
     for channel, channel_type in ledger.channels():
         watermark = ledger.watermark(channel)
@@ -372,8 +398,7 @@ async def run_catchup(
                 continue
             if not budget.take():
                 break
-            await target.replay(event)
-            replayed += 1
+            replayed += await _offer(event)
 
     for channel, thread_ts in target.catchup_threads():
         messages = await _fetch(
@@ -400,8 +425,7 @@ async def run_catchup(
                 continue
             if not budget.take():
                 break
-            await target.replay(event)
-            replayed += 1
+            replayed += await _offer(event)
 
     if too_old:
         log.warning(

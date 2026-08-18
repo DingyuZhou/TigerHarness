@@ -368,8 +368,10 @@ class SlackBridge:
         # on disk before the agent runs, so a bridge killed mid-turn
         # comes back and does not re-run a turn that may already have
         # pushed or committed. The cost is that such a turn is never
-        # re-answered -- but a missing reply is visible to the Operator,
-        # while a duplicate `git push` is not.
+        # re-answered. That cost is only acceptable because it is said
+        # out loud: the claim is settled below once a reply is actually
+        # posted, and anything still unsettled is named at the next
+        # startup rather than vanishing.
         channel = event.get("channel") or ""
         message_ts = event.get("ts") or ""
         claimed = False
