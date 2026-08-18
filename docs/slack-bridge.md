@@ -245,10 +245,23 @@ Dedup is the correctness risk, so it is an **explicit per-message
 claim**, not a "probably newer than the watermark" heuristic: dispatch
 marks each `(channel, ts)` in the ledger *before* doing any work, and a
 second claim on the same pair loses. The ledger is on disk, so this
-holds across a restart mid-turn. The trade is honest: a crash between
-the mark and the reply means that message is not retried
-(at-most-once). Delivering the same prompt twice is worse than dropping
-one, and the watermark still shows the gap in the logs.
+holds across a restart mid-turn.
+
+The trade is at-most-once: a crash between the claim and the reply
+means that message is never retried. Delivering the same prompt to a
+persona twice is worse than dropping one. But a dropped message that
+nobody mentions is the failure this whole section exists to remove, so
+the claim is only *settled* once a reply is actually posted, and an
+unsettled claim is **named at the next startup**:
+
+```
+lane=Shohoku message D0.../1786900916.787969 was accepted but never
+answered (the bridge died mid-turn); it will NOT be retried -- ask
+again if you are still waiting on it
+```
+
+Each stranded claim is reported once. Clearing the report does not
+re-arm the duplicate — the claim itself is permanent.
 
 Bounds are `CATCHUP_MAX_AGE_S` and `CATCHUP_MAX_MESSAGES`. **Every time
 a bound skips something, it is logged loudly** — a silent cap here

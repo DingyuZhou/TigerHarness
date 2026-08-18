@@ -255,6 +255,17 @@ async def _run_multi(multi_cfg: MultiBridgeConfig) -> None:
                 h, b, lane.name, watchdog_cfg, catchup_cfg,
             )
         )
+        for ch, ts in b.seen_ledger.take_unfinished():
+            # A claim with no reply: the previous process died mid-turn.
+            # The catch-up will NOT re-offer it -- the claim is what
+            # makes replay safe -- so this line is the only trace the
+            # message ever leaves. Naming it beats losing it quietly.
+            log.warning(
+                "lane=%s message %s/%s was accepted but never answered "
+                "(the bridge died mid-turn); it will NOT be retried -- "
+                "ask again if you are still waiting on it",
+                lane.name, ch, ts,
+            )
         bridges.append(b)
         handlers.append(h)
         log.info(

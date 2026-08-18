@@ -372,6 +372,7 @@ class SlackBridge:
         # while a duplicate `git push` is not.
         channel = event.get("channel") or ""
         message_ts = event.get("ts") or ""
+        claimed = False
         if channel and message_ts:
             if not self._seen.mark(
                 channel, message_ts, event.get("channel_type")
@@ -381,6 +382,7 @@ class SlackBridge:
                     channel, message_ts,
                 )
                 return
+            claimed = True
         else:
             # Nothing to key on. Dispatching unguarded beats dropping:
             # this whole module exists because a lost message is worse
@@ -410,6 +412,8 @@ class SlackBridge:
                 "File-fetch failed -- check the bridge logs.",
                 thread_ts=thread_key,
             )
+            if claimed:
+                self._seen.settle(channel, message_ts)
             return
 
         prompt = augment_prompt(text, attachments)
@@ -659,6 +663,12 @@ class SlackBridge:
                 # Bridge voice -- no persona prefix.
                 reply_text = bridge_body or ""
             await say(text=reply_text, thread_ts=thread_key)
+            # Settled only once a reply is actually posted -- including
+            # the backend-error reply, which is still an answer. A turn
+            # killed before this line stays pending, which is how the
+            # next startup knows to name it.
+            if claimed:
+                self._seen.settle(channel, message_ts)
         except asyncio.CancelledError as exc:
             # Captured, then re-raised untouched. §7 annotates
             # `turn_error` as BaseException for exactly this case: the

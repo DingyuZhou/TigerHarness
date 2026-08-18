@@ -393,6 +393,12 @@ SEEN_CHANNELS_MAX = 200
 SEEN_CHANNELS_HARD_MAX = 2000
 
 
+def _ts_list(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    return tuple(t for t in raw if isinstance(t, str) and t)
+
+
 @dataclass(frozen=True)
 class ChannelDelivery:
     """One channel's delivery state: how far we have got, and exactly
@@ -402,10 +408,17 @@ class ChannelDelivery:
     copied verbatim off a live event. The replay path re-attaches it
     instead of inferring it from the channel id, so a recovered message
     is routed by the same rule as the one that arrived normally.
+
+    ``pending`` is claimed-but-not-yet-answered. Because the claim is
+    written before the agent runs, a bridge killed mid-turn leaves one
+    here -- a message that will never be replayed (that is the
+    at-most-once trade) and would otherwise disappear without a word.
+    :meth:`take_unfinished` is how it gets said out loud instead.
     """
     watermark: str | None = None
     seen: tuple[str, ...] = ()
     channel_type: str | None = None
+    pending: tuple[str, ...] = ()
 
 
 def _ts_sort_key(ts: str) -> float:
@@ -467,12 +480,7 @@ class SeenLedger:
                 continue
             watermark = entry.get("watermark")
             ctype = entry.get("channel_type")
-            raw_seen = entry.get("seen")
-            seen = (
-                tuple(t for t in raw_seen if isinstance(t, str) and t)
-                if isinstance(raw_seen, list)
-                else ()
-            )
+            seen = _ts_list(entry.get("seen"))
             out[str(channel)] = ChannelDelivery(
                 watermark=(
                     watermark
@@ -483,6 +491,7 @@ class SeenLedger:
                 channel_type=(
                     ctype if isinstance(ctype, str) and ctype else None
                 ),
+                pending=_ts_list(entry.get("pending"))[-SEEN_RING_MAX:],
             )
         return out
 
@@ -549,9 +558,57 @@ class SeenLedger:
                 watermark=watermark,
                 seen=seen,
                 channel_type=channel_type or entry.channel_type,
+                pending=(entry.pending + (message_ts,))[-SEEN_RING_MAX:],
             )
             self._write(self._evict(disk))
         return True
+
+    def settle(self, channel: str, message_ts: str) -> None:
+        """Record that the claim on *message_ts* produced a reply.
+
+        Only clears ``pending``; the ``seen`` claim is permanent, so
+        settling can never re-arm a duplicate. A claim that is never
+        settled is the signature of a turn that died mid-flight, which
+        :meth:`take_unfinished` reports at the next startup.
+        """
+        with self._locked():
+            disk = self._read_disk()
+            entry = disk.get(channel)
+            if entry is None or message_ts not in entry.pending:
+                return
+            disk[channel] = ChannelDelivery(
+                watermark=entry.watermark,
+                seen=entry.seen,
+                channel_type=entry.channel_type,
+                pending=tuple(t for t in entry.pending if t != message_ts),
+            )
+            self._write(disk)
+
+    def take_unfinished(self) -> list[tuple[str, str]]:
+        """``(channel, ts)`` claimed by a previous process that never
+        posted a reply. Clears them, so each is reported once.
+
+        Call at startup only: mid-run, ``pending`` legitimately holds
+        the turns currently in flight.
+        """
+        with self._locked():
+            disk = self._read_disk()
+            stranded = sorted(
+                (channel, ts)
+                for channel, entry in disk.items()
+                for ts in entry.pending
+            )
+            if not stranded:
+                return []
+            for channel, entry in list(disk.items()):
+                if entry.pending:
+                    disk[channel] = ChannelDelivery(
+                        watermark=entry.watermark,
+                        seen=entry.seen,
+                        channel_type=entry.channel_type,
+                    )
+            self._write(disk)
+        return stranded
 
     @staticmethod
     def _evict(disk: dict[str, ChannelDelivery]) -> dict[str, ChannelDelivery]:
@@ -581,6 +638,9 @@ class SeenLedger:
                 watermark=entry.watermark,
                 seen=(entry.watermark,) if entry.watermark else (),
                 channel_type=entry.channel_type,
+                # Kept: an unsettled claim is an unanswered message, and
+                # dropping it here would lose the one record that says so.
+                pending=entry.pending,
             )
         dropped = [c for c, _ in ranked[SEEN_CHANNELS_HARD_MAX:]]
         if dropped:
@@ -623,6 +683,7 @@ class SeenLedger:
                             "watermark": entry.watermark,
                             "seen": list(entry.seen),
                             "channel_type": entry.channel_type,
+                            "pending": list(entry.pending),
                         }
                         for channel, entry in mapping.items()
                     },

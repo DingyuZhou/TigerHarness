@@ -237,6 +237,65 @@ class TestNothingIsDroppedQuietly:
     """Acceptance criterion 5."""
 
     @pytest.mark.asyncio
+    async def test_a_turn_that_never_replied_is_named_at_the_next_startup(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        """The other half of the at-most-once trade. The claim is what
+        stops the message being re-run, so the next process has to say
+        it went unanswered -- otherwise it vanished with no error, the
+        exact failure this branch exists to remove."""
+        state = tmp_path / "threads.json"
+        event = dict(dm("1786900916.787969", "push the branch"), channel=DM)
+
+        first, _ = make_bridge(cfg, state)
+        monkeypatch.setattr(
+            "tigerharness.slack_bridge.bridge.run_with_retry",
+            AsyncMock(return_value=FakeResult()),
+        )
+        # The turn ran; the process died before the reply reached Slack.
+        with pytest.raises(RuntimeError):
+            await first.handle_message(
+                dict(event), AsyncMock(side_effect=RuntimeError("socket gone"))
+            )
+
+        second, _ = make_bridge(cfg, state)
+        assert second.seen_ledger.take_unfinished() == [
+            (DM, "1786900916.787969")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_attachment_warning_counts_as_an_answer(self, bridge):
+        """A message whose only content was an undownloadable file gets
+        the warning reply and nothing else. That IS an answer, so it
+        must not later be reported as one we swallowed."""
+        b, _ = bridge
+        await b.handle_message(
+            {
+                "channel": DM, "channel_type": "im", "user": OPERATOR,
+                "text": "", "ts": "1786900916.787969",
+                "files": [{"id": "F1"}],
+            },
+            AsyncMock(),
+        )
+        assert b.seen_ledger.take_unfinished() == []
+
+    @pytest.mark.asyncio
+    async def test_an_answered_turn_leaves_nothing_to_report(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        state = tmp_path / "threads.json"
+        first, _ = make_bridge(cfg, state)
+        monkeypatch.setattr(
+            "tigerharness.slack_bridge.bridge.run_with_retry",
+            AsyncMock(return_value=FakeResult()),
+        )
+        await first.handle_message(
+            dict(dm("1786900916.787969"), channel=DM), AsyncMock()
+        )
+        second, _ = make_bridge(cfg, state)
+        assert second.seen_ledger.take_unfinished() == []
+
+    @pytest.mark.asyncio
     async def test_age_bound_is_logged(self, bridge, monkeypatch, caplog):
         b, _ = bridge
         monkeypatch.setattr(

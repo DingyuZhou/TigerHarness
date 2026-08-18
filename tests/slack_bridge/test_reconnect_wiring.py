@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -199,6 +200,53 @@ class TestRunMultiTearsDownWatchdogs:
             with pytest.raises(RuntimeError):
                 await _run_multi(cfg)
         assert stopped == [True]
+
+    @pytest.mark.asyncio
+    async def test_startup_names_a_message_the_last_process_never_answered(
+        self, tmp_path, capsys
+    ):
+        """The at-most-once trade is only honest if the dropped message
+        is announced. Startup is where a stranded claim gets said."""
+        from tigerharness.slack_bridge.__main__ import _run_multi
+
+        lane = MagicMock()
+        lane.name = "Shohoku"
+        lane.state_path = tmp_path / "threads.json"
+        cfg = MagicMock()
+        cfg.lanes = [lane]
+
+        bridge = make_bridge()
+        bridge.seen_ledger.take_unfinished.return_value = [
+            ("D0B4L5V7RFG", "1786900916.787969")
+        ]
+
+        with patch(
+            "tigerharness.slack_bridge.__main__.build_team_bridge",
+            return_value=bridge,
+        ), patch(
+            "tigerharness.slack_bridge.__main__.AsyncSocketModeHandler",
+            return_value=make_handler(),
+        ), patch(
+            "tigerharness.slack_bridge.__main__.attach_reconnect_guards",
+            return_value=MagicMock(),
+        ), patch(
+            "tigerharness.slack_bridge.__main__._drive_handlers", AsyncMock()
+        ):
+            try:
+                # `_run_multi` reconfigures logging with force=True, which
+                # evicts caplog's handler -- so read the stream it writes.
+                await _run_multi(cfg)
+            finally:
+                # Re-bind to the REAL stderr: capsys closes its buffer at
+                # teardown, and a root handler still pointing at it makes
+                # every later test's first log raise on a closed file.
+                logging.basicConfig(force=True, stream=sys.__stderr__)
+
+        out = capsys.readouterr()
+        logged = out.err + out.out
+        assert "never answered" in logged
+        assert "1786900916.787969" in logged
+        assert "will NOT be retried" in logged
 
 
 class TestCatchupInternals:

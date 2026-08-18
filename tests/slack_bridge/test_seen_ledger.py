@@ -206,6 +206,67 @@ class TestSortKey:
         assert _ts_sort_key(None) == float("-inf")
 
 
+class TestAnUnansweredClaimIsNamed:
+    """The at-most-once trade says a turn killed mid-flight is never
+    retried. That is only acceptable if somebody is told."""
+
+    def test_a_settled_claim_is_not_reported(self, ledger):
+        ledger.mark(DM, "1.1")
+        ledger.settle(DM, "1.1")
+        assert ledger.take_unfinished() == []
+
+    def test_a_claim_that_never_replied_survives_the_restart(self, tmp_path):
+        path = tmp_path / "threads.seen.json"
+        SeenLedger(path).mark(DM, "1.1")
+        assert SeenLedger(path).take_unfinished() == [(DM, "1.1")]
+
+    def test_it_is_reported_once_not_every_startup(self, ledger):
+        ledger.mark(DM, "1.1")
+        assert ledger.take_unfinished() == [(DM, "1.1")]
+        assert ledger.take_unfinished() == []
+
+    def test_clearing_the_report_does_not_re_arm_the_duplicate(self, ledger):
+        """`pending` is cleared; `seen` is forever. Otherwise reporting a
+        stranded message would let the catch-up dispatch it again."""
+        ledger.mark(DM, "1.1")
+        ledger.take_unfinished()
+        assert ledger.mark(DM, "1.1") is False
+
+    def test_a_quiet_channel_is_left_alone_by_the_report(self, ledger):
+        """Only channels with a stranded claim are rewritten; a settled
+        neighbour keeps its ring."""
+        ledger.mark("DQUIET", "1.1")
+        ledger.settle("DQUIET", "1.1")
+        ledger.mark(DM, "2.2")
+
+        assert ledger.take_unfinished() == [(DM, "2.2")]
+        assert ledger.was_seen("DQUIET", "1.1") is True
+
+    def test_settling_something_unknown_is_a_no_op(self, ledger):
+        ledger.settle(DM, "1.1")
+        ledger.mark(DM, "1.1")
+        ledger.settle(DM, "9.9")
+        assert ledger.take_unfinished() == [(DM, "1.1")]
+
+    def test_a_degraded_channel_keeps_its_unanswered_claim(self):
+        disk = {
+            f"D{i:04d}": ChannelDelivery(watermark=f"{i}.0")
+            for i in range(1, SEEN_CHANNELS_MAX + 1)
+        }
+        disk["DOLD"] = ChannelDelivery(watermark="0.0", pending=("0.0",))
+        assert SeenLedger._evict(disk)["DOLD"].pending == ("0.0",)
+
+    def test_a_ledger_written_before_pending_existed_reads_clean(
+        self, tmp_path
+    ):
+        path = tmp_path / "threads.seen.json"
+        path.write_text(
+            json.dumps({DM: {"watermark": "1.1", "seen": ["1.1"]}}),
+            encoding="utf-8",
+        )
+        assert SeenLedger(path).take_unfinished() == []
+
+
 class TestStoreWiring:
     def test_the_ledger_sits_beside_the_thread_store(self, tmp_path):
         store = ThreadStore(tmp_path / "threads.json")
