@@ -215,6 +215,16 @@ class TestAnUnansweredClaimIsNamed:
         ledger.settle(DM, "1.1")
         assert ledger.take_unfinished() == []
 
+    def test_settling_one_turn_does_not_settle_its_neighbour(self, ledger):
+        """Two messages in the same DM can be in flight at once. If
+        answering the first cleared the channel's whole pending list,
+        the second could die mid-turn and go unreported -- exactly the
+        silent loss this ledger exists to prevent."""
+        ledger.mark(DM, "1.1")
+        ledger.mark(DM, "1.2")
+        ledger.settle(DM, "1.1")
+        assert ledger.take_unfinished() == [(DM, "1.2")]
+
     def test_a_claim_that_never_replied_survives_the_restart(self, tmp_path):
         path = tmp_path / "threads.seen.json"
         SeenLedger(path).mark(DM, "1.1")
