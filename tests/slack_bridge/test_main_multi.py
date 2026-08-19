@@ -73,6 +73,11 @@ def _mock_handler() -> AsyncMock:
         await asyncio.sleep(60)
     h.start_async = blocking_start
     h.close_async = AsyncMock()
+    # A real list: the reconnect wiring appends its frame listener here,
+    # and an AsyncMock's `.append` would hand back an un-awaited
+    # coroutine instead of recording anything.
+    h.client = MagicMock()
+    h.client.message_listeners = []
     return h
 
 

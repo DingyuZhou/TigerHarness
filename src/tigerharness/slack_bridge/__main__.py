@@ -30,6 +30,12 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from .bridge import SlackBridge, build_team_bridge
 from .multi import MultiBridgeConfig, load_multi
+from .reconnect import (
+    CatchupConfig,
+    SocketLivenessWatchdog,
+    WatchdogConfig,
+    run_catchup,
+)
 
 log = logging.getLogger("tigerharness.slack_bridge")
 
@@ -162,13 +168,104 @@ async def _drive_handlers(
 # Multi-tenant entrypoint
 # ---------------------------------------------------------------------------
 
+def attach_reconnect_guards(
+    handler: AsyncSocketModeHandler,
+    bridge: SlackBridge,
+    lane_name: str,
+    watchdog_cfg: WatchdogConfig,
+    catchup_cfg: CatchupConfig,
+) -> SocketLivenessWatchdog:
+    """Give one lane a liveness watchdog and a catch-up on reconnect.
+
+    Both hang off ``message_listeners``, which sees every frame Slack
+    sends -- including the ``hello`` that opens a session. So one hook
+    supplies the watchdog's liveness clock and the catch-up's trigger,
+    and neither has to poll the connection state. Bolt registers on
+    ``socket_mode_request_listeners``, which the SDK runs *after* this
+    list, so liveness is marked before any dispatch work begins.
+
+    The catch-up runs on the *first* session too, not just reconnects:
+    a restart is a gap like any other.
+    """
+    client = handler.client
+    watchdog = SocketLivenessWatchdog(client, watchdog_cfg, lane=lane_name)
+    catchup_lock = asyncio.Lock()
+    catchup_pending = False
+
+    async def _on_frame(_client: object, message: dict, raw: str) -> None:  # noqa: ARG001
+        nonlocal catchup_pending
+        watchdog.mark_activity()
+        if message.get("type") != "hello":
+            return
+        if catchup_lock.locked():
+            # NOT a duplicate to discard. A catch-up replays serially and
+            # each message can hold it for a whole agent turn, so a
+            # `hello` arriving mid-run marks a *later* gap than the one
+            # being replayed -- dropping it would leave that gap
+            # unrecovered forever. Coalesce instead: one re-run, however
+            # many `hello`s a reconnect storm delivers.
+            catchup_pending = True
+            log.info(
+                "lane=%s new session while catch-up is running -- queued a "
+                "re-run so this gap is not missed", lane_name,
+            )
+            return
+        async with catchup_lock:
+            while True:
+                # Cleared before the run, so a `hello` arriving during it
+                # queues another pass. The check below happens with no
+                # await in between, so nothing can set it and be lost.
+                catchup_pending = False
+                log.info(
+                    "lane=%s new Socket Mode session -- catching up", lane_name
+                )
+                try:
+                    await run_catchup(
+                        target=bridge,
+                        ledger=bridge.seen_ledger,
+                        web_client=bridge.app.client,
+                        cfg=catchup_cfg,
+                        lane=lane_name,
+                    )
+                except Exception:  # noqa: BLE001 - never kill the socket loop
+                    log.warning(
+                        "lane=%s catch-up failed -- messages missed during "
+                        "the gap were NOT recovered", lane_name, exc_info=True,
+                    )
+                if not catchup_pending:
+                    return
+
+    client.message_listeners.append(_on_frame)
+    watchdog.start()
+    return watchdog
+
+
 async def _run_multi(multi_cfg: MultiBridgeConfig) -> None:
     _setup_logging()
+    watchdog_cfg = WatchdogConfig.from_env()
+    catchup_cfg = CatchupConfig.from_env()
     bridges: list[SlackBridge] = []
     handlers: list[AsyncSocketModeHandler] = []
+    watchdogs: list[SocketLivenessWatchdog] = []
     for lane in multi_cfg.lanes:
         b = build_team_bridge(lane.team_ctx, state_path=lane.state_path)
         h = AsyncSocketModeHandler(b.app, lane.team_ctx.slack_app_token)
+        watchdogs.append(
+            attach_reconnect_guards(
+                h, b, lane.name, watchdog_cfg, catchup_cfg,
+            )
+        )
+        for ch, ts in b.seen_ledger.take_unfinished():
+            # A claim with no reply: the previous process died mid-turn.
+            # The catch-up will NOT re-offer it -- the claim is what
+            # makes replay safe -- so this line is the only trace the
+            # message ever leaves. Naming it beats losing it quietly.
+            log.warning(
+                "lane=%s message %s/%s was accepted but never answered "
+                "(the bridge died mid-turn); it will NOT be retried -- "
+                "ask again if you are still waiting on it",
+                lane.name, ch, ts,
+            )
         bridges.append(b)
         handlers.append(h)
         log.info(
@@ -179,10 +276,14 @@ async def _run_multi(multi_cfg: MultiBridgeConfig) -> None:
             sorted(lane.team_ctx.allowed_user_ids),
         )
     log.info("starting bridge with %d lane(s)", len(multi_cfg.lanes))
-    await _drive_handlers(
-        handlers, bridges,
-        lane_names=[lane.name for lane in multi_cfg.lanes],
-    )
+    try:
+        await _drive_handlers(
+            handlers, bridges,
+            lane_names=[lane.name for lane in multi_cfg.lanes],
+        )
+    finally:
+        for w in watchdogs:
+            w.stop()
 
 
 # ---------------------------------------------------------------------------
