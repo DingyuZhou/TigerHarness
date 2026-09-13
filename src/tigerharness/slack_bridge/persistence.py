@@ -136,6 +136,12 @@ class ThreadRecord:
     lets the reconnect catch-up ask ``conversations.replies`` for the
     replies it missed; a record written before this field existed reads
     as ``None`` and is simply skipped by that pass.
+
+    *backend* is the agent_sdk backend name the session was opened on
+    (``claude_p`` / ``codex_exec``). A session id is not portable across
+    backends, so the bridge compares it with the persona's current
+    backend before resuming; ``None`` (a record written before the
+    field existed) reads as a ``claude_p`` session.
     """
     session_id: str
     persona: str | None = None
@@ -144,6 +150,7 @@ class ThreadRecord:
     last_usage: dict | None = None
     last_turn_at: str | None = None
     in_flight: bool = False
+    backend: str | None = None
 
 
 class ThreadStore:
@@ -209,6 +216,7 @@ class ThreadStore:
                 channel = v.get("channel")
                 usage = v.get("last_usage")
                 turn_at = v.get("last_turn_at")
+                backend = v.get("backend")
                 loaded[key] = ThreadRecord(
                     session_id=sid,
                     persona=persona if isinstance(persona, str) and persona else None,
@@ -221,6 +229,9 @@ class ThreadStore:
                         turn_at if isinstance(turn_at, str) and turn_at else None
                     ),
                     in_flight=bool(v.get("in_flight", False)),
+                    backend=(
+                        backend if isinstance(backend, str) and backend else None
+                    ),
                 )
         return loaded
 
@@ -266,6 +277,7 @@ class ThreadStore:
         last_usage: dict | None | object = _UNSET,
         last_turn_at: str | None | object = _UNSET,
         in_flight: bool | object = _UNSET,
+        backend: str | None | object = _UNSET,
     ) -> None:
         """Persist a thread's session + persona (+ turn metadata).
 
@@ -298,6 +310,7 @@ class ThreadStore:
                 last_usage=_keep(last_usage, cur.last_usage),  # type: ignore[arg-type]
                 last_turn_at=_keep(last_turn_at, cur.last_turn_at),  # type: ignore[arg-type]
                 in_flight=bool(_keep(in_flight, cur.in_flight)),
+                backend=_keep(backend, cur.backend),  # type: ignore[arg-type]
             )
             if disk.get(thread_ts) != new:
                 disk[thread_ts] = new
@@ -366,6 +379,7 @@ class ThreadStore:
                         "last_usage": v.last_usage,
                         "last_turn_at": v.last_turn_at,
                         "in_flight": v.in_flight,
+                        "backend": v.backend,
                     }
                     for k, v in mapping.items()
                 }

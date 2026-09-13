@@ -9,6 +9,7 @@ Public API entry points:
     )
 
     backend = get_backend("claude_p")              # `claude -p` subprocess
+    # backend = get_backend("codex_exec")          # `codex exec` subprocess
     # backend = get_backend("anthropic_sdk")       # future
     # backend = get_backend("openai_sdk")          # future
 

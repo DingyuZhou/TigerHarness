@@ -2,9 +2,9 @@
 
 Backend-agnostic agent SDK. One declarative config and one backend
 interface, so caller code stays identical when you swap the runtime
-underneath it (`claude -p` subprocess today; Anthropic's
-`claude-agent-sdk` or OpenAI's `openai-agents` by changing a single
-string).
+underneath it (a `claude -p` subprocess or a `codex exec` subprocess
+today; Anthropic's `claude-agent-sdk` or OpenAI's `openai-agents` by
+changing a single string).
 
 `tigerharness.agent_sdk` is the foundation the other sub-packages build
 on: `slack_bridge` and `tiger_memory` run agents
@@ -49,6 +49,7 @@ Built-in registrations:
 | Name | Backend | Availability |
 |---|---|---|
 | `claude_p` | `ClaudePBackend` — spawns `claude -p` as a subprocess | Always registered; requires the Claude Code CLI on `PATH`. |
+| `codex_exec` | `CodexExecBackend` — spawns `codex exec --json` as a subprocess (OpenAI's Codex CLI, ChatGPT-subscription billed) | Always registered; requires the Codex CLI (`codex`) on `PATH`, signed in via `codex login`. |
 | `anthropic_sdk` | `AnthropicSDKBackend` — wraps Anthropic's official `claude-agent-sdk` | Requires the `[anthropic]` extra (`pip install 'tigerharness[anthropic]'`). |
 | `openai_sdk` | `OpenAISDKBackend` — stub | **Planned.** Will wrap `openai-agents` when implemented. |
 
@@ -123,6 +124,57 @@ backend constructor). For `claude_p` (`agent_sdk/backends/claude_p.py`):
 
 Because `claude_p` shells out, the Claude Code CLI must be on `PATH` —
 see the README's cold-boot `PATH` note.
+
+For `codex_exec` (`agent_sdk/backends/codex_exec.py`) — the same shape,
+so a config written for `claude_p` runs unchanged:
+
+- Constructor: `get_backend("codex_exec", cli="codex", env=None, cwd=None)`;
+  `cli` is resolved via `shutil.which` and a missing binary raises
+  `CLIError`.
+- Each call is `codex exec --json --skip-git-repo-check … -` with the
+  prompt on stdin; a session with an id becomes `codex exec resume <id>`.
+  The id comes from Codex's `thread.started` event, and Codex's `item.*`
+  events (`agent_message`, `reasoning`, `command_execution`,
+  `file_change`, `mcp_tool_call`, `web_search`) map onto the same
+  `Event` union `claude_p` emits.
+- `AgentConfig.instructions` is passed as Codex's `developer_instructions`
+  config override (`-c developer_instructions=<TOML string>`), layered
+  over Codex's own base instructions — the role `--system-prompt` plays
+  for `claude -p`. `AgentConfig.model` → `-m`.
+- `cfg.extra["permission_mode"]` keeps the Claude Code vocabulary:
+  `bypassPermissions` / `dontAsk` → `--dangerously-bypass-approvals-and-sandbox`,
+  `acceptEdits` → `workspace-write` sandbox, `plan` → `read-only`
+  sandbox, `default` → Codex's own `exec` defaults. `add_dirs` → `--add-dir`
+  (new sessions only), `cli_args` and `env` behave as for `claude_p`.
+- Knobs Codex has no per-run flag for are **logged (at DEBUG) and
+  ignored**, never raised: `max_turns`, `max_budget_usd`, `disallowed_tools`, `settings`,
+  `builtin_tools`. `cost_usd` is always `None` (Codex reports tokens, and
+  the spend is the ChatGPT subscription).
+- `output_schema` → `--output-schema <tempfile>` (new sessions only); the
+  final message is then parsed as JSON.
+
+## Choosing a backend per persona (model vendors)
+
+A team does not call `get_backend` by hand. `tigerharness.vendors` maps a
+human-facing **vendor** name to a backend — `claude` → `claude_p`,
+`chatgpt` → `codex_exec` — and resolves, per persona, the vendor and
+model declared in the team's `configs/personas.yaml`:
+
+```yaml
+default_vendor: claude        # team default: claude | chatgpt
+default_model: ""             # team default model; blank = the CLI's own
+
+personas:
+  - name: Rukawa
+    vendor: chatgpt           # this persona's override (optional)
+    model: gpt-6-astra        # this persona's override (optional)
+```
+
+A persona inherits the team's vendor and model when it says nothing; a
+persona that switches vendor and names no model gets that vendor CLI's
+own default (a model id belongs to one vendor). The Slack bridge, autodrive
+and idle compaction all resolve through this module. Design and the known
+limits: [adr/0011](adr/0011-model-vendors-per-persona.md).
 
 ## Error and retry model
 

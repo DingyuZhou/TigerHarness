@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from .persistence import ThreadStore, default_state_path
+from tigerharness.vendors import CLAUDE_BACKEND
 
 log = logging.getLogger("tigerharness.slack_bridge.idle_compact")
 
@@ -393,8 +394,17 @@ async def _scan_and_compact(
     candidates: list[tuple[str, Any]] = []
     for thread_ts, rec in sorted(store.records().items()):
         report["checked"] += 1
-        if _eligible(rec, team_dir.name, moment, min_quiet_seconds, cfg, _skip):
-            candidates.append((thread_ts, rec))
+        if not _eligible(rec, team_dir.name, moment, min_quiet_seconds, cfg, _skip):
+            continue
+        # `/compact` is a Claude Code prompt turn; a session on another
+        # vendor's backend (a Codex thread) has no equivalent and would
+        # just receive a message reading "/compact". The record's own
+        # backend tag is authoritative for the session it names; a
+        # pre-tag record is a claude_p session by construction.
+        if (rec.backend or CLAUDE_BACKEND) != CLAUDE_BACKEND:
+            _skip("vendor_unsupported")
+            continue
+        candidates.append((thread_ts, rec))
 
     report["ran"] = True
     if not candidates:

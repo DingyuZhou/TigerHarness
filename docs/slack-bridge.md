@@ -431,9 +431,47 @@ The routable persona roster is **auto-discovered** from the team's
 automatically makes them reachable in the team's Slack bridge — no
 second edit needed.
 
+#### Per-persona model vendors
+
+The same file says which agent CLI each persona runs on
+([adr/0011](adr/0011-model-vendors-per-persona.md)):
+
+```yaml
+default_vendor: claude        # team default: claude (`claude -p`) | chatgpt (`codex exec`)
+default_model: ""             # team default model; blank = the CLI's own
+
+personas:
+  - name: Rukawa
+    vendor: chatgpt           # override for this persona (optional)
+    model: gpt-6-astra        # override for this persona (optional)
+```
+
+The lane loader resolves every persona through `tigerharness.vendors`
+and builds **one backend instance per distinct vendor** in the roster;
+each persona's turns run on its own, and the persona router (the
+one-shot routing call on a new thread) runs on the team default's. A
+persona that switches vendor and names no model gets that vendor CLI's
+own default — the team's `default_model` is never handed across vendors.
+
+Three consequences to know about:
+
+- `threads.json` records the backend each session was opened on. When a
+  persona's vendor changes, its existing threads **start a fresh session**
+  on the next message instead of handing a Claude session id to
+  `codex exec resume` (records written before the field existed count as
+  `claude_p`).
+- ADR 0004 idle compaction — one `/compact` prompt turn — only applies to
+  `claude_p` sessions. The in-bridge hook and the external `compact-idle`
+  pass both skip a persona on another vendor (`vendor_unsupported` in the
+  pass report); a Codex thread compacts itself.
+- Like a roster change, a vendor change takes effect on **bridge restart**
+  (below). The vendor's CLI must be on the bridge's `PATH` — for `codex`
+  the same cold-boot drop-in the README describes for `claude`.
+
 The loader (`tigerharness.slack_bridge.multi.load_multi`) enforces:
 
 - Required fields present, `default_persona` exists in the team's roster, `allowed_user_ids` non-empty + each starts with `U`/`W` (the list may come from the fragment or, when the fragment omits it, from `SLACK_ALLOWED_USER_IDS` in the lane env file — same validation either way).
+- `default_vendor` and every persona's `vendor:` (when set) name a known model vendor (`claude` / `chatgpt`, or an accepted alias); a typo is a startup failure, never a silent fallback to the other vendor.
 - Token prefixes (`xapp-` / `xoxb-`).
 - Every persona in the roster has a `personas/<name>/prompt.md` file.
 - No two lanes share a `state_dir` (would corrupt each other's `threads.json`).
@@ -459,8 +497,9 @@ Example:
 
 #### How routing works
 
-1. New thread arrives → bridge does a **one-shot LLM call** to the
-   same backend the personas use (no separate vendor dependency).
+1. New thread arrives → bridge does a **one-shot LLM call** on the
+   team's default vendor's backend (no separate vendor dependency; the
+   persona it picks may then run on a different vendor).
    Prompt: "Given this roster and this message, which team member is
    addressed? Return one name or `default`."
 2. If the response matches a roster name → that persona is bound to

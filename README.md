@@ -14,7 +14,7 @@ integration, and persistent memory management.
 
 | Package | Description |
 |---|---|
-| `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: the `claude -p` subprocess backend and Anthropic's `claude-agent-sdk` backend, with a shared typed event/retry/error model. |
+| `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: the `claude -p` subprocess backend, the `codex exec` subprocess backend (OpenAI's Codex CLI), and Anthropic's `claude-agent-sdk` backend, with a shared typed event/retry/error model. Which one a persona runs on is declared per persona in `configs/personas.yaml` (`vendor: claude \| chatgpt`, with a team default) — see [ADR 0011](docs/adr/0011-model-vendors-per-persona.md). |
 | `tigerharness.journal` | **File-based subscription backend.** Routes agent work through the interactive Claude Code app so it counts against a monthly subscription instead of token-billed API. Single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`) compiled in-session by a drafter/two-critic loop over mechanical validators, then walked through gates that enforce step order and write persona-stamped worklog notes (the per-persona memory rail). Crash-safe by lease: tasks classify idle/busy/crashed and a fresh session resumes a crashed walk at the same step. Team-pinned scheduling: every task records the journal root it was scheduled into (provenance), scheduling verbs refuse to fall back silently to the per-user journal, and the sweep flags misplaced tasks. A `deferred/` inbox makes Slack-side scheduling cheap: `journal defer` parks the conversation verbatim; `journal materialize` (inside a drive) turns it into a real task. 20 CLI verbs under `journal`. See [docs/journal.md](docs/journal.md), [docs/journal-workflow-mode.md](docs/journal-workflow-mode.md), [docs/journal-instant-resume.md](docs/journal-instant-resume.md). |
 | `tigerharness.autodrive` | **Periodic journal driver** (the Operator-authorized exception to the human-only drive rule). A detached daemon fires "drive the journal" on a fixed cadence via the backend-agnostic `agent_sdk` (default `claude -p`) — fire every N seconds without waiting, so drives may overlap; each fire is a fresh, context-clean session; not built on `/loop`. Overlap is safe and self-limiting because the journal's busy lease makes a redundant fire a cheap no-op. Before each fire it runs the journal's plain-Python sweep itself, so a busy tick is skipped and an idle tick costs a file walk instead of a model session. **Self-driving when opted in** (`TIGERHARNESS_AUTODRIVE_AUTOSTART` in the team's `configs/.env`): scheduling work starts the daemon, and a drained queue — after the idle memory sweep + context compaction — stops it, so steady state is no process running. Only safe while `claude -p` bills the subscription, so it ships with a `--max-budget` cap (mind the N×-concurrent multiplier), a 60s interval floor, an atomically-locked single-instance-per-team daemon, and an `autodrive stop` off-switch. See [docs/autodrive.md](docs/autodrive.md) and [ADR 0010](docs/adr/0010-self-driving-journal.md). |
 | `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to a `claude -p` backend and posts replies back to the thread. |
@@ -102,7 +102,12 @@ persistent memory and the official SDK backend.
 1. Multi-team Slack mode (recommended for new setups) — opt in or out.
 2. Persona name + team.
 3. Slack `.env` template + memory config (optional toggles).
-4. Slack user-ID allowlist for the team's bridge bot (optional).
+4. For a new team: which model vendor it defaults to — Claude
+   (`claude -p`) or ChatGPT (`codex exec`) — and an optional default
+   model. Written to `configs/personas.yaml`; `--vendor` / `--model`
+   skip the prompt and `--yes` takes Claude. Any persona can override
+   with its own `vendor:` / `model:` in that file.
+5. Slack user-ID allowlist for the team's bridge bot (optional).
 
 The memory store is auto-initialized for each new persona and the
 Claude Code transcripts path is auto-detected from the team root, so
@@ -125,7 +130,7 @@ tigers/
 │                                 #   journal-autodrive, slack-notify,
 │                                 #   workflow-append-steps, tigerharness-basics)
 ├── configs/
-│   ├── personas.yaml              # team registry (auto-updated)
+│   ├── personas.yaml              # team registry + default model vendor (auto-updated)
 │   └── .env                       # Slack tokens (gitignored)
 ├── charter/
 │   └── README.md                  # team's mission, scope, conventions
@@ -297,6 +302,7 @@ See [`examples/`](examples/) for a fully-populated sample team folder
 
 - Python 3.11+
 - For the default `claude_p` backend: the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude`) on `PATH`.
+- For the `codex_exec` backend (personas with `vendor: chatgpt`): the [Codex CLI](https://github.com/openai/codex) (`codex`) on `PATH`, signed in with `codex login`.
 - For the `anthropic_sdk` backend: install with `[anthropic]` extra; pulls in [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/).
 
 ## Known limitations & roadmap
@@ -308,6 +314,7 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
 - **`claude` not found on PATH when the bridge auto-starts at boot.** On distros where the Claude Code CLI is installed outside `/usr/bin` (e.g. NixOS at `/run/current-system/sw/bin/`, npm-global at `~/.npm-global/bin/`, pipx at `~/.local/bin/`), the systemd unit emitted by `tigerharness slack-bridge gen-service` has no `Environment=PATH=...` line. Restarting from an interactive shell works (the rich PATH is inherited from the live user session), but a **cold boot auto-start** sees only the minimal systemd PATH (`/usr/bin:/bin`), so `shutil.which("claude")` in the SDK fails with `backend error: \`claude\` not found on PATH`.
   - **Workaround**: a systemd drop-in at `~/.config/systemd/user/<your-bridge-unit>.service.d/path.conf` (e.g. `slack-bridge-teams-4a8c8b.service.d/`) containing `[Service]\nEnvironment="PATH=/run/current-system/sw/bin:/usr/bin:/bin"` (adapted to the local install location). Drop-ins survive `gen-service` regeneration.
   - **Fix candidates**: (a) `gen-service` emits a sensible default `Environment=PATH=` covering common install locations; (b) add a `CLAUDE_CLI` env var the bridge reads and forwards as `cli=` to `ClaudePBackend()`, mirroring the existing `TIGER_MEMORY_CLI` knob.
+  - **Same shape for `codex`** (personas on `vendor: chatgpt`): the Codex CLI's standalone install lands in `~/.local/bin`, which the drop-in must also list.
 - **Same shape applies to the `tiger-memory` binary** used by the bridge's post-thread rebuild trigger. The existing `TIGER_MEMORY_CLI` env var already provides the per-team-`.env` workaround, but a PATH default in `gen-service` would fix both at once.
 
 ### Bridge setup ergonomics

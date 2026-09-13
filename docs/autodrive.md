@@ -218,8 +218,8 @@ tigerharness autodrive stop
 | `--interval` | `600` (10 min) | Seconds between *fires* (cadence, not spacing — the loop does not wait for a drive to finish). **Floor 60** — keeps a typo from piling up dozens of concurrent drives. |
 | `--driver` | team `default_persona` | Persona the work is attributed to (worklogs land in its memory store). |
 | `--max-budget` | none | Per-drive USD cap, passed to the backend. **Strongly advised** — your protection for the day billing changes. |
-| `--backend` | `claude_p` | agent SDK backend name. **Vendor-agnostic caveat:** only an *agentic CLI* backend can actually invoke skills and drive; a raw chat-completion backend cannot. |
-| `--model` | backend default | Model override. |
+| `--backend` | the driver persona's vendor (`configs/personas.yaml`), else `claude_p` | agent SDK backend name (`claude_p`, `codex_exec`) or a vendor name (`claude`, `chatgpt`). **Vendor-agnostic caveat:** only an *agentic CLI* backend can actually invoke skills and drive; a raw chat-completion backend cannot. |
+| `--model` | the driver persona's model (`configs/personas.yaml`), else the backend default | Model override. Applied from personas.yaml only when the drive runs on the persona's own backend — an explicit `--backend` that differs gets no model unless `--model` says which. |
 | `--permission-mode` | `bypassPermissions` | Unattended permission mode (the daemon must never stall on a prompt). |
 | `--prompt` | built-in | Override the built-in "drive the journal" instruction. |
 | `--journal-dir` | env / cwd-as-team / XDG | Journal root to manage. |
@@ -306,6 +306,17 @@ invocation:
 | `TIGERHARNESS_AUTODRIVE_DRIVER` | team `default_persona` | Attribution persona |
 | `TIGERHARNESS_AUTODRIVE_NOTIFY` | `slack` | `slack` or `none` |
 | `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` | `SLACK_NOTIFY_CHANNEL`, else operator DM | Slack channel id, or `dm` |
+
+#### The backend and model come from `personas.yaml`, not `.env`
+
+Which vendor a drive runs on is a property of the **driver persona**, so it
+is read from the team roster, not from a process-wide key: flag >
+`configs/personas.yaml` (the persona's own `vendor:` / `model:`, else the
+team's `default_vendor` / `default_model`) > built-in `claude_p`. The
+auto-start hook resolves the same way. A malformed vendor there makes
+`start` exit 2 instead of quietly starting the daemon on the other vendor's
+bill. See [adr/0011](adr/0011-model-vendors-per-persona.md) — including
+why a *task* runs on the driver's vendor rather than its assigned persona's.
 
 #### The notify channel inherits `SLACK_NOTIFY_CHANNEL`
 
@@ -416,7 +427,7 @@ and clears the state file.
 
 | Path | What |
 |---|---|
-| `<team>/journal/.autodrive.json` | State **and the team-canonical lock**: pid, interval, backend, driver, max_budget, notify config, started_at, plus two gauges — **launched** (`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`, `last_tick_at`, `last_stop_reason` / `last_error`). With overlap the two diverge while drives are in flight. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. Anchored to the team's canonical journal regardless of `--journal-dir`, so the one-per-team guard holds (a personal, non-team journal keeps the lock under its own root). |
+| `<team>/journal/.autodrive.json` | State **and the team-canonical lock**: pid, interval, backend, model, driver, max_budget, notify config, started_at, plus two gauges — **launched** (`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`, `last_tick_at`, `last_stop_reason` / `last_error`). With overlap the two diverge while drives are in flight. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. Anchored to the team's canonical journal regardless of `--journal-dir`, so the one-per-team guard holds (a personal, non-team journal keeps the lock under its own root). |
 | `<team>/journal/.autodrive.lock` | `flock` target serializing the two decisions that must not interleave: `start`'s check-and-spawn (so two simultaneous `start`/auto-start calls cannot both spawn) and the daemon's drained-exit handover (so a stop cannot lose a wakeup). Deliberately **not** `.autodrive.json`: that file is replaced on every write and `flock` follows the inode. Zero-length; never read. |
 | `<team>/journal/.autodrive.log` | Appended stdout/stderr of the detached `_loop` process. |
 

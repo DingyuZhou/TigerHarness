@@ -9,7 +9,8 @@ TigerHarness (Python 3.11+, MIT; version per the PyPI badge in the
 personas run against real codebases with iterative execution, Slack
 integration, and persistent per-persona memory. Zero hard dependencies —
 every integration is an optional extra; the default execution backend is a
-plain `claude -p` subprocess.
+plain `claude -p` subprocess (a persona may run on `codex exec` instead —
+[adr/0011](adr/0011-model-vendors-per-persona.md)).
 
 ## Find your answer in one hop
 
@@ -31,8 +32,9 @@ plain `claude -p` subprocess.
 | Understand the memory design (stores + staged compaction, the rationale) | [DESIGN-memory.md](DESIGN-memory.md) |
 | Run the team-wide memory sweep | [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md) |
 | Use the backend-agnostic agent SDK | [agent_sdk.md](agent_sdk.md) |
+| Put a persona (or the whole team) on ChatGPT via `codex exec` instead of Claude | [adr/0011](adr/0011-model-vendors-per-persona.md), [slack-bridge.md](slack-bridge.md#per-persona-model-vendors), [agent_sdk.md](agent_sdk.md#choosing-a-backend-per-persona-model-vendors) |
 | Make the queue self-driving (scheduling starts the daemon, draining stops it) | [adr/0010](adr/0010-self-driving-journal.md), [autodrive.md](autodrive.md) |
-| Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep, 0007 topic-store revamp, 0008 team event log, 0009 remove single-tenant bridge, 0010 self-driving journal) |
+| Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep, 0007 topic-store revamp, 0008 team event log, 0009 remove single-tenant bridge, 0010 self-driving journal, 0011 model vendors per persona) |
 
 ## Must-not-miss rules (one hop, never bury these)
 
@@ -83,8 +85,10 @@ plain `claude -p` subprocess.
   bundled Claude Code skills (drive-journal, journal-new, journal-autodrive,
   slack-notify, workflow-append-steps, tigerharness-basics), hash-aware so
   hand-edited skills are never overwritten; `dismiss` tears down. `agent_sdk`
-  is a typed, backend-agnostic API over the `claude -p` and Claude Agent SDK
-  runtimes. `autodrive` periodically drives the journal queue via that SDK
+  is a typed, backend-agnostic API over the `claude -p`, `codex exec`, and
+  Claude Agent SDK runtimes, chosen per persona through
+  `configs/personas.yaml` ([adr/0011](adr/0011-model-vendors-per-persona.md)).
+  `autodrive` periodically drives the journal queue via that SDK
   (the Operator-authorized exception to the human-only drive rule —
   [autodrive.md](autodrive.md)). Opt in with
   `TIGERHARNESS_AUTODRIVE_AUTOSTART` and it becomes self-driving: scheduling

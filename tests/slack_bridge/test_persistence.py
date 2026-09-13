@@ -247,3 +247,32 @@ def test_legacy_two_arg_set_preserves_persona(tmp_path: Path) -> None:
     assert store.get_record("1.1").persona == "Ayako"
     store.set("1.1", "sess-new", persona=None)
     assert store.get_record("1.1").persona is None
+
+
+class TestBackendTag:
+    """The record's ``backend`` field (ADR 0011): written, read back,
+    kept across partial updates, and ``None`` for pre-field records."""
+
+    def test_round_trip_and_keep(self, tmp_path: Path):
+        store = ThreadStore(tmp_path / "threads.json")
+        store.set("t1", "sess-1", persona="Rukawa", backend="codex_exec")
+        assert store.get_record("t1").backend == "codex_exec"
+        # A later write that says nothing about the backend keeps it.
+        store.set("t1", "sess-1", last_usage={"input_tokens": 3})
+        reloaded = ThreadStore(tmp_path / "threads.json")
+        assert reloaded.get_record("t1").backend == "codex_exec"
+        # An explicit None clears it.
+        reloaded.set("t1", "sess-1", backend=None)
+        assert ThreadStore(tmp_path / "threads.json").get_record("t1").backend is None
+
+    def test_legacy_records_read_as_none(self, tmp_path: Path):
+        path = tmp_path / "threads.json"
+        path.write_text(json.dumps({
+            "bare": "sess-bare",
+            "dict": {"session_id": "sess-d", "persona": "Ayako"},
+            "blank": {"session_id": "sess-e", "backend": ""},
+        }))
+        store = ThreadStore(path)
+        assert store.get_record("bare").backend is None
+        assert store.get_record("dict").backend is None
+        assert store.get_record("blank").backend is None

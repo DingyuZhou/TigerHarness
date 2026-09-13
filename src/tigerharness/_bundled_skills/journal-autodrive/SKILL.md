@@ -92,12 +92,18 @@ them on the command line.
 - `--driver` persona the work is attributed to (defaults to the team's
   `default_persona`). Pass it so worklogs land in the right memory store.
 - `--max-budget` per-drive USD cap (advised; see safety note).
-- `--backend` agent_sdk backend (default `claude_p`). **Vendor-agnostic
-  caveat:** only an *agentic CLI* backend (like `claude_p`) can actually
-  invoke skills/tools and drive; a raw chat-completion backend cannot.
-- `--model`, `--permission-mode`, `--prompt` override the model, the
-  unattended permission mode (default `bypassPermissions`), and the
-  built-in drive instruction.
+- `--backend` agent_sdk backend name (`claude_p`, `codex_exec`) or a
+  vendor name (`claude`, `chatgpt`). Default: the driver persona's vendor
+  from the team's `configs/personas.yaml` (its own `vendor:`, else the
+  team's `default_vendor`), else `claude_p`. **Vendor-agnostic caveat:**
+  only an *agentic CLI* backend (like `claude_p` or `codex_exec`) can
+  actually invoke skills/tools and drive; a raw chat-completion backend
+  cannot.
+- `--model` overrides the model (default: the driver persona's `model:`
+  from personas.yaml, else the team's `default_model`, else the backend's
+  own). `--permission-mode` and `--prompt` override the unattended
+  permission mode (default `bypassPermissions`) and the built-in drive
+  instruction.
 - `--notify {slack,none}` (default `slack`) and `--notify-channel <id>`
   control daemon-level notifications: by default the daemon posts a Slack
   **heartbeat per fire** plus a **threaded status/summary on completion**;

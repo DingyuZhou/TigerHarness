@@ -163,8 +163,11 @@ maintained by the tooling.
   up append-only when tigerharness ships a new rule.
 - `AGENTS.md` — the always-loaded session bootstrap (vendor-neutral;
   source of truth). `CLAUDE.md` just imports it for Claude Code.
-- `configs/personas.yaml` — THE team roster + `default_persona`.
-  Source of truth; `init` appends a row per recruit.
+- `configs/personas.yaml` — THE team roster + `default_persona` + the
+  team's default model vendor (`default_vendor: claude | chatgpt` and
+  `default_model`; a persona row may override with its own `vendor:` /
+  `model:`). Source of truth; `init` appends a row per recruit and asks
+  the vendor question once, when the team is created.
 - `configs/repos.yaml` — path indirection: where the team root and the
   project repo live. Auto-detected when possible; otherwise created
   with a commented `# project:` placeholder and a stderr hint — fill
@@ -203,7 +206,11 @@ maintained by the tooling.
 2. Write the persona's `prompt.md` — identity, role, boundaries.
    The template marks what to fill in.
 3. Edit the new roster row: description, aliases, and (if this team
-   uses Slack) make sure the persona is reachable by name.
+   uses Slack) make sure the persona is reachable by name. If the
+   recruit should run on a different vendor than the team default,
+   uncomment its `vendor:` (`claude` / `chatgpt`) and, optionally,
+   `model:` -- the Slack bridge honours it after a restart, autodrive
+   when the recruit is the `--driver`.
 4. Verify what the recruit produced: `personas/<NewName>/prompt.md`
    exists and is filled in, and `configs/personas.yaml` has the new
    row with the right `prompt_file`. (`journal validate-personas` is

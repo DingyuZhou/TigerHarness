@@ -746,3 +746,54 @@ class TestProgressChannelPerLane:
         from tigerharness.slack_bridge.progress import CHANNEL_ENV_VARS
 
         assert PROGRESS_CHANNEL_KEYS is CHANNEL_ENV_VARS
+
+
+# ---------------------------------------------------------------------------
+# Per-persona model vendors (ADR 0011)
+# ---------------------------------------------------------------------------
+
+class TestPersonaVendors:
+    def _team_with_roster(self, tmp_path: Path, roster: str) -> Path:
+        team_dir = _make_valid_team(tmp_path, "shohoku", "ayako", extra_personas=("rukawa",))
+        (team_dir / "configs" / "personas.yaml").write_text(roster)
+        _write_index(tmp_path, ["shohoku"])
+        return team_dir
+
+    def test_slots_carry_their_vendor_backend_and_model(self, tmp_path: Path, caplog):
+        self._team_with_roster(tmp_path, """\
+default_vendor: chatgpt
+default_model: gpt-6-astra
+personas:
+  - name: ayako
+  - name: rukawa
+    vendor: claude
+    model: claude-opus-5
+""")
+        import logging
+        with caplog.at_level(logging.INFO, logger="tigerharness.slack_bridge.multi"):
+            cfg = load_multi(tmp_path / "slack-bridge.yaml")
+        ctx = cfg.lanes[0].team_ctx
+        assert ctx.default_backend_name == "codex_exec"
+        assert ctx.personas["ayako"].backend_name == "codex_exec"
+        assert ctx.personas["ayako"].agent_config.model == "gpt-6-astra"
+        assert ctx.personas["rukawa"].backend_name == "claude_p"
+        assert ctx.personas["rukawa"].agent_config.model == "claude-opus-5"
+        assert "persona 'rukawa' runs on claude/claude-opus-5 (persona)" in caplog.text
+
+    def test_no_vendor_keys_means_claude_everywhere(self, tmp_path: Path):
+        _make_valid_team(tmp_path, "shohoku", "ayako")
+        _write_index(tmp_path, ["shohoku"])
+        ctx = load_multi(tmp_path / "slack-bridge.yaml").lanes[0].team_ctx
+        assert ctx.default_backend_name == "claude_p"
+        assert ctx.personas["ayako"].backend_name == "claude_p"
+        assert ctx.personas["ayako"].agent_config.model is None
+
+    def test_malformed_team_vendor_fails_startup(self, tmp_path: Path):
+        self._team_with_roster(tmp_path, "default_vendor: gemini\npersonas:\n  - name: ayako\n  - name: rukawa\n")
+        with pytest.raises(ValueError, match=r"lane 'shohoku'.*unknown model vendor 'gemini'"):
+            load_multi(tmp_path / "slack-bridge.yaml")
+
+    def test_malformed_persona_vendor_fails_startup(self, tmp_path: Path):
+        self._team_with_roster(tmp_path, "personas:\n  - name: ayako\n  - name: rukawa\n    vendor: chatgtp\n")
+        with pytest.raises(ValueError, match=r"lane 'shohoku'.*persona 'rukawa' vendor.*'chatgtp'"):
+            load_multi(tmp_path / "slack-bridge.yaml")

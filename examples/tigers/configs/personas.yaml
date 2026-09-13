@@ -18,16 +18,29 @@
 
 personas_dir: ../personas
 
+# Team default model vendor + model. Every persona runs on these unless
+# its own entry sets `vendor:` / `model:` (see the commented hints on
+# each entry). Vendors: `claude` runs `claude -p` (Claude Code);
+# `chatgpt` runs `codex exec` (OpenAI Codex). A blank model means the
+# vendor CLI's own default model. Read by the Slack bridge (per
+# persona), autodrive (its --driver persona), and idle compaction.
+default_vendor: claude
+default_model: ""
+
 personas:
   - name: chief
     cwd: ..
     prompt_file: chief/prompt
     description: "chief on team tigers"
+    # vendor: default   # claude | chatgpt | default (the team's default_vendor)
+    # model: default    # a model id, or default (inherit; see default_model)
     # extra:
     #   add_dirs: [../skills]   # uncomment to expose team-shared skills
   - name: scout
     cwd: ..
     prompt_file: scout/prompt
     description: "scout on team tigers"
+    # vendor: chatgpt   # this persona runs on `codex exec` instead
+    # model: default    # a model id, or default (inherit; see default_model)
     # extra:
     #   add_dirs: [../skills]   # uncomment to expose team-shared skills

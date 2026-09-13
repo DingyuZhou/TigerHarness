@@ -46,6 +46,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .vendors import (
+    DEFAULT_VENDOR,
+    VENDOR_BACKENDS,
+    VENDOR_CLIS,
+    normalize_vendor,
+)
+
 log = logging.getLogger("tigerharness.init")
 
 # Hashes of *prior shipped* versions of a bundled skill, keyed by skill
@@ -127,6 +134,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "e882a7820610975b9bbd24d0594dc0f5fd89d3db5557ec0a1208869476f37e10",
     },
     "journal-autodrive": {
+        # 2026-08-12 (a9fef88): anzai: inherit SLACK_NOTIFY_CHANNEL for autodrive notifications
+        "94d59329ee4456cc7f8bfb1fe6c63be23fb1a5a88f2664d4c2fa19c1bedb13f2",
         # 2026-08-12 (notify-channel inheritance, ADR 0010 amendment): anzai:
         #   pre SLACK_NOTIFY_CHANNEL fallback -- documented a channel chain
         #   that stopped at the autodrive-only key, so a reader following it
@@ -179,6 +188,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
     },
     "tigerharness-basics": {
+        # 2026-08-14 (74cb243): anzai: sync .gitignore on init --refresh, not just skills
+        "40d8265fe325e07362713a8ffe09b64b3fc8e4641cdc2a6aa0f138f7f0b56ce8",
         # 2026-08-14 (gitignore refresh): anzai: pre --refresh ship -- the
         #   flag was `--refresh-skills`, covered skills only, and still
         #   claimed it tidied a retired settings.json key (removed in
@@ -280,11 +291,11 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
     "drive-journal": "20d8521342086b2c6702097396da6b1beda5258f8aa5451580799e3cdc9ac627",
-    "journal-autodrive": "94d59329ee4456cc7f8bfb1fe6c63be23fb1a5a88f2664d4c2fa19c1bedb13f2",
+    "journal-autodrive": "8f5bc76583b076615b517ffccffdd4a53e766e98256a80f1247c68a92d977a74",
     "journal-new": "c0f2384f0d3313ba4821d15ca82714a48a1704268b4c546fd25e5986dc9d6466",
     "slack-notify": "bc182b0f0dc5e07f3e7fa3506b3b1658d63fbedfb4e5d69c2cb7e6ad97767a99",
     "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
-    "tigerharness-basics": "40d8265fe325e07362713a8ffe09b64b3fc8e4641cdc2a6aa0f138f7f0b56ce8",
+    "tigerharness-basics": "98dac516cb00454b164a0ee5f7593eb0433354cc3126f8fd920347b6aca700d3",
     "workflow-append-steps": "cd95580475094b10cf5cd8fcd3d080a2e97221c83d22384d9049d29b6e9a8ea5",
 }
 
@@ -461,17 +472,45 @@ default_persona: {persona}
 
 """
 
+# Team default model vendor + model (``tigerharness.vendors``). Written
+# into every new team's personas.yaml right after the preamble, from the
+# init-time vendor question (or --vendor/--model; --yes takes claude).
+_PERSONAS_YAML_VENDOR_BLOCK = """\
+# Team default model vendor + model. Every persona runs on these unless
+# its own entry sets `vendor:` / `model:` (see the commented hints on
+# each entry). Vendors: `claude` runs `claude -p` (Claude Code);
+# `chatgpt` runs `codex exec` (OpenAI Codex). A blank model means the
+# vendor CLI's own default model. Read by the Slack bridge (per
+# persona), autodrive (its --driver persona), and idle compaction.
+default_vendor: {vendor}
+default_model: "{model}"
+
+"""
+
 # Built by concatenating preamble + (optional default_persona line) +
 # the personas-list opener; kept as one constant for the "team
 # scaffold without any persona yet" path that create_team takes
 # (default_persona is added when the first persona is appended).
 _PERSONAS_YAML_HEADER = _PERSONAS_YAML_PREAMBLE + "personas:\n"
 
+
+def _personas_yaml_header(team: str, *, vendor: str, model: str) -> str:
+    """The fresh personas.yaml a new team starts from: preamble, the
+    team's default vendor/model block, then the empty roster."""
+    return (
+        _PERSONAS_YAML_PREAMBLE.format(team=team)
+        + _PERSONAS_YAML_VENDOR_BLOCK.format(vendor=vendor, model=model)
+        + "personas:\n"
+    )
+
+
 _PERSONA_ENTRY = """\
   - name: {persona}
     cwd: ..
     prompt_file: {persona}/prompt
     description: "{description}"
+    # vendor: default   # claude | chatgpt | default (the team's default_vendor)
+    # model: default    # a model id, or default (inherit; see default_model)
     # extra:
     #   add_dirs: [../skills]   # uncomment to expose team-shared skills
 """
@@ -596,7 +635,13 @@ manual -- before substantive work. Other key locations:
 
 - **`knowledge/INDEX.md`** (or `knowledge/README.md` until an INDEX exists)
   -- the team's curated reference base.
-- **`configs/personas.yaml`** -- the roster and the default persona.
+- **`configs/personas.yaml`** -- the roster, the default persona, and the
+  team's default model vendor (`default_vendor` / `default_model`; a
+  persona entry may override with its own `vendor:` / `model:`).
+- **`.claude/skills/<name>/SKILL.md`** -- the team's skills (drive-journal,
+  journal-new, sweep-memory, ...). Claude Code loads them natively; an
+  agent on another vendor (Codex, Cursor) reads a skill's `SKILL.md`
+  directly whenever its description matches the task at hand.
 - A journal's **`OPERATING.md`** governs task/queue work; drive it through
   the `drive-journal` skill and `tigerharness journal` CLIs -- never
   hand-edit journal state.
@@ -1228,6 +1273,8 @@ def sync_gitignore(team_dir: Path, *, refresh: bool = False) -> GitignoreSync:
 def create_team(
     team_dir: Path, *, include_slack: bool, multi_team: bool = False,
     initial_goal: str = "",
+    default_vendor: str = DEFAULT_VENDOR,
+    default_model: str = "",
 ) -> list[Path]:
     """Create the empty scaffold for a team. Returns paths created.
 
@@ -1236,16 +1283,26 @@ def create_team(
     the no-index one bundles the allowlist via ``SLACK_ALLOWED_USER_IDS``
     (the canonical spelling -- both the lane loader and notify read it).
     *initial_goal* (optional, the Operator's words) seeds the charter's
-    Mission section instead of the TODO placeholder.
+    Mission section instead of the TODO placeholder. *default_vendor* /
+    *default_model* seed personas.yaml's team-wide model vendor block
+    (``tigerharness.vendors``); the vendor must be a known name.
     """
     created: list[Path] = []
+    vendor = normalize_vendor(default_vendor, where="create_team default_vendor")
+    if vendor is None:
+        vendor = DEFAULT_VENDOR
 
     gi_sync = sync_gitignore(team_dir)
     if gi_sync.created:
         created.append(gi_sync.path)
 
     pyaml = team_dir / "configs" / "personas.yaml"
-    if _write_if_missing(pyaml, _PERSONAS_YAML_HEADER.format(team=team_dir.name)):
+    if _write_if_missing(
+        pyaml,
+        _personas_yaml_header(
+            team_dir.name, vendor=vendor, model=(default_model or "").strip(),
+        ),
+    ):
         created.append(pyaml)
 
     mem_defaults = team_dir / "configs" / "tiger-memory.defaults.yaml"
@@ -1345,6 +1402,7 @@ def _append_persona_to_yaml(
     yaml_path.write_text(
         _PERSONAS_YAML_PREAMBLE.format(team=team_name)
         + _PERSONAS_YAML_DEFAULT_PERSONA_LINE.format(persona=persona)
+        + _PERSONAS_YAML_VENDOR_BLOCK.format(vendor=DEFAULT_VENDOR, model="")
         + "personas:\n"
         + entry
     )
@@ -1546,6 +1604,13 @@ def _maybe_register_slack_bridge_lane(
 # Interactive prompts (stdlib only -- no extra deps)
 # ---------------------------------------------------------------------------
 
+def _vendor_choices() -> list[str]:
+    """Vendor names for the init-time menu, the built-in default first
+    (so an Enter keeps a team on it) and the rest alphabetical."""
+    rest = sorted(v for v in VENDOR_BACKENDS if v != DEFAULT_VENDOR)
+    return [DEFAULT_VENDOR, *rest]
+
+
 def _prompt_text(question: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
     while True:
@@ -1610,6 +1675,8 @@ def init(
     ask_extras: bool = False,
     search_root: Path | None = None,
     home: Path | None = None,
+    vendor: str | None = None,
+    model: str | None = None,
 ) -> tuple[Path, str, list[Path]]:
     """Run the init flow.
 
@@ -1618,11 +1685,17 @@ def init(
     persona prompt's verbatim personality block. Both prompt
     interactively ONLY when *ask_extras* is True (main() sets it for
     interactive runs; direct callers/tests never see a prompt).
+    *vendor* / *model* seed a NEW team's default model vendor block in
+    personas.yaml (``claude`` or ``chatgpt``; the model may be blank);
+    the vendor is asked interactively under the same *ask_extras* rule
+    and defaults to ``claude`` otherwise. An existing team keeps its
+    block untouched -- edit configs/personas.yaml to change it.
     *home* overrides ``~`` for Claude transcripts auto-detect (testing).
     Returns ``(team_dir, persona, created_paths)``.
 
     Raises:
-        ValueError: persona already exists in the team.
+        ValueError: persona already exists in the team, or *vendor* is
+            not a known vendor name.
     """
     root = (search_root or Path.cwd()).resolve()
     created: list[Path] = []
@@ -1743,6 +1816,29 @@ def init(
     # 4. create
     is_new_team = not (final_team_dir / "configs" / "personas.yaml").exists()
     is_multi_team = include_multi_team
+    # Team default model vendor: asked once, for a NEW team only, and
+    # written into personas.yaml where every consumer (bridge, autodrive,
+    # idle compaction) reads it. --vendor / --model skip the prompt;
+    # --yes (ask_extras=False) takes claude with no model pin.
+    vendor_name = normalize_vendor(vendor, where="--vendor")
+    if vendor_name is None and is_new_team and ask_extras:
+        choices = _vendor_choices()
+        idx = _prompt_choice(
+            "\nWhich model vendor should this team use by default?",
+            [f"{v} (runs `{VENDOR_CLIS[v]}`)" for v in choices],
+            default_idx=0,
+        )
+        vendor_name = choices[idx]
+    if vendor_name is None:
+        vendor_name = DEFAULT_VENDOR
+    if model is None and is_new_team and ask_extras:
+        try:
+            model = _prompt_optional_text(
+                f"Default {vendor_name} model id (Enter for the "
+                f"`{VENDOR_CLIS[vendor_name]}` CLI's own default)"
+            )
+        except (EOFError, OSError):
+            model = ""
     if goal is None and ask_extras and is_new_team:
         try:
             goal = _prompt_optional_text(
@@ -1765,7 +1861,17 @@ def init(
             include_slack=include_slack,
             multi_team=is_multi_team,
             initial_goal=goal or "",
+            default_vendor=vendor_name,
+            default_model=model or "",
         ))
+        if shutil.which(VENDOR_CLIS[vendor_name]) is None:
+            print(
+                f"warning: team {team} defaults to vendor {vendor_name!r} "
+                f"but its CLI `{VENDOR_CLIS[vendor_name]}` is not on PATH; "
+                "install it (and sign in) before running the bridge or "
+                "autodrive.",
+                file=sys.stderr,
+            )
     elif include_slack:
         env_template = _ENV_TEMPLATE_MULTI_TEAM if is_multi_team else _ENV_TEMPLATE
         if _write_if_missing(env_path, env_template):
@@ -1983,6 +2089,19 @@ def main(argv: list[str] | None = None) -> int:
              "to expand them into a full prompt. Skips the prompt.",
     )
     parser.add_argument(
+        "--vendor", default=None,
+        help="A NEW team's default model vendor: claude (runs `claude -p`) "
+             "or chatgpt (runs `codex exec`). Skips the prompt; --yes "
+             "takes claude. Written to configs/personas.yaml as "
+             "`default_vendor`.",
+    )
+    parser.add_argument(
+        "--model", default=None,
+        help="A NEW team's default model id for its vendor (blank = the "
+             "vendor CLI's own default). Skips the prompt. Written to "
+             "configs/personas.yaml as `default_model`.",
+    )
+    parser.add_argument(
         "--refresh",
         action="store_true",
         help="Don't create a persona; instead bring an existing team's "
@@ -2118,6 +2237,8 @@ def main(argv: list[str] | None = None) -> int:
             include_multi_team=multi_team_kw,
             goal=args.goal,
             traits=args.traits,
+            vendor=args.vendor,
+            model=args.model,
             ask_extras=not args.yes,
             search_root=search_root,
         )

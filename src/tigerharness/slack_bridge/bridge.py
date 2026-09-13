@@ -48,6 +48,7 @@ from collections.abc import Awaitable, Callable, Mapping
 
 from tigerharness.agent_sdk import AgentConfig, get_backend, run_with_retry
 from tigerharness.agent_sdk.types import AgentBackend, Session
+from tigerharness.vendors import CLAUDE_BACKEND
 from slack_bolt.async_app import AsyncApp
 
 from .config import BridgeConfig
@@ -136,6 +137,15 @@ class PersonaSlot:
     name: str
     agent_config: AgentConfig
     tiger_memory_config_path: str = ""
+    # agent_sdk backend this persona's turns run on (its model vendor,
+    # resolved from personas.yaml by the lane loader). The bridge keeps
+    # one backend instance per distinct name per lane.
+    backend_name: str = CLAUDE_BACKEND
+
+
+#: What a thread record with no ``backend`` field was opened on: every
+#: session persisted before the field existed was a `claude -p` one.
+_LEGACY_RECORD_BACKEND = CLAUDE_BACKEND
 
 
 @dataclass(frozen=True)
@@ -156,6 +166,10 @@ class TeamBridgeContext:
     default_persona: str               # must be in personas
     tiger_memory_cli: str = ""
     persona_aliases: dict[str, list[str]] | None = None  # name -> aliases
+    # The team's default vendor's backend: what the persona router and a
+    # pre-routing thread run on. Multi-lane fills it from personas.yaml's
+    # ``default_vendor``; the embedded one-persona bridge keeps claude_p.
+    default_backend_name: str = CLAUDE_BACKEND
     # "rebuild" (legacy claude -p, default) | "off" (in-session sweep
     # protocol owns it). See config.normalize_tiger_memory_trigger.
     tiger_memory_trigger: str = "rebuild"
@@ -217,6 +231,7 @@ class SlackBridge:
         *,
         team_ctx: TeamBridgeContext | None = None,
         history_fetcher: ThreadHistoryFetcher | None = None,
+        backends: Mapping[str, AgentBackend] | None = None,
     ) -> None:
         if team_ctx is not None:
             self._team = team_ctx
@@ -232,6 +247,20 @@ class SlackBridge:
             raise ValueError("SlackBridge: backend and store are required")
 
         self._backend = backend
+        # Per-backend-name instances for lanes whose personas run on
+        # different vendors (``build_team_bridge`` fills it). Empty means
+        # every persona shares ``backend`` -- the embedded one-persona
+        # bridge and the pre-vendor test surface.
+        self._backends: dict[str, AgentBackend] = dict(backends or {})
+        if self._backends:
+            missing = sorted({
+                slot.backend_name for slot in self._team.personas.values()
+            } - set(self._backends))
+            if missing:
+                raise ValueError(
+                    "SlackBridge: personas run on backends the bridge was "
+                    f"not given: {missing}"
+                )
         self._store = store
         # Every inbound message passes through this, live or replayed,
         # so the two paths cannot disagree about what "already handled"
@@ -274,6 +303,17 @@ class SlackBridge:
 
         self.app = AsyncApp(token=self._team.slack_bot_token)
         self._register_handlers()
+
+    def _backend_for(self, persona_name: str) -> AgentBackend:
+        """The backend a persona's turns run on. With a per-backend map
+        (multi-lane) that is the persona's own vendor; without one, the
+        single shared backend."""
+        if not self._backends:
+            return self._backend
+        slot = self._team.personas.get(persona_name)
+        if slot is None:
+            return self._backend
+        return self._backends[slot.backend_name]
 
     def _record_cost(self, cost_usd: object) -> None:
         """Accumulate LLM spend.
@@ -558,7 +598,7 @@ class SlackBridge:
                 in_flight_marked = True
                 try:
                     result = await run_with_retry(
-                        self._backend,
+                        self._backend_for(state.persona),
                         _with_thread_env(
                             persona.agent_config, thread_key,
                             event.get("channel"),
@@ -589,6 +629,7 @@ class SlackBridge:
                             thread_key,
                             state.session.id,
                             persona=state.persona,
+                            backend=persona.backend_name,
                             team=self._team.team_name or None,
                             channel=event.get("channel"),
                             last_usage=getattr(result, "usage", None),
@@ -628,7 +669,7 @@ class SlackBridge:
                         # would end up rendering "3 tool calls".
                         progress.compacting()
                         await run_with_retry(
-                            self._backend,
+                            self._backend_for(state.persona),
                             _agent_config,
                             prompt_text,
                             session=state.session,
@@ -636,13 +677,24 @@ class SlackBridge:
                             label=f"thread={thread_key} idle-compact",
                         )
 
-                    state.idle_compacted = await maybe_compact(
-                        _compact_turn,
-                        self._idle_compact_cfg,
-                        getattr(result, "usage", None),
-                        already_compacted=state.idle_compacted,
-                        label=f"thread={thread_key}",
-                    )
+                    if persona.backend_name != CLAUDE_BACKEND:
+                        # ADR 0004 compaction is one `/compact` prompt
+                        # turn, which only Claude Code interprets; a
+                        # Codex thread compacts itself and would just
+                        # answer a message that says "/compact".
+                        log.debug(
+                            "thread=%s persona=%s on %s: in-bridge idle "
+                            "compaction not applicable",
+                            thread_key, state.persona, persona.backend_name,
+                        )
+                    else:
+                        state.idle_compacted = await maybe_compact(
+                            _compact_turn,
+                            self._idle_compact_cfg,
+                            getattr(result, "usage", None),
+                            already_compacted=state.idle_compacted,
+                            label=f"thread={thread_key}",
+                        )
                     if state.idle_compacted and state.session.id:
                         # The session just compacted, so the stamped
                         # usage no longer describes its context -- clear
@@ -983,7 +1035,22 @@ class SlackBridge:
                 key, persona_name,
             )
 
-        session = await self._backend.open_session(resume_id=resume_id)
+        slot = self._team.personas[persona_name]
+        if resume_id and record is not None:
+            recorded = record.backend or _LEGACY_RECORD_BACKEND
+            if recorded != slot.backend_name:
+                # A session id only means something to the backend that
+                # minted it. The persona's vendor changed since this
+                # thread was opened, so start it over on the new one.
+                log.warning(
+                    "thread=%s persona=%s was on backend %s, now runs on %s; "
+                    "opening a fresh session instead of resuming %s",
+                    key, persona_name, recorded, slot.backend_name, resume_id,
+                )
+                resume_id = None
+        session = await self._backend_for(persona_name).open_session(
+            resume_id=resume_id
+        )
 
         # Claim the slot under lock. Double-check in case another
         # coroutine raced ahead and inserted while we were in the
@@ -1230,13 +1297,17 @@ def build_persona_agent_config(
     prompt_text: str,
     team_name: str,
     all_personas: list[str],
+    *,
+    model: str | None = None,
 ) -> AgentConfig:
     """Compose a persona's AgentConfig: their prompt + the team-awareness
-    preamble appended for multi-persona teams."""
+    preamble appended for multi-persona teams. *model* is the persona's
+    resolved model id (``None`` = the vendor CLI's own default)."""
     preamble = _team_awareness_preamble(persona_name, team_name, all_personas)
     return AgentConfig(
         name=f"agent-{persona_name}",
         instructions=prompt_text + preamble,
+        model=model,
         extra={
             "permission_mode": "bypassPermissions",
             "disallowed_tools": list(_SUDO_DENY),
@@ -1301,8 +1372,15 @@ def build_team_bridge(
     team context per lane; each lane has its own backend (cwd-scoped),
     its own ThreadStore (state_path), and N personas with routing.
     """
-    backend = get_backend("claude_p", cwd=team_ctx.agent_cwd)
+    names = {team_ctx.default_backend_name}
+    names.update(slot.backend_name for slot in team_ctx.personas.values())
+    # One instance per distinct backend, all pinned to the lane's cwd
+    # (session ids resolve against it -- see idle_compact._default_send).
+    backends = {name: get_backend(name, cwd=team_ctx.agent_cwd) for name in sorted(names)}
     store = ThreadStore(state_path if state_path is not None else default_state_path())
     return SlackBridge(
-        backend=backend, store=store, team_ctx=team_ctx,
+        backend=backends[team_ctx.default_backend_name],
+        store=store,
+        team_ctx=team_ctx,
+        backends=backends,
     )

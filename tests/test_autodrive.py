@@ -1412,3 +1412,70 @@ def test_cmd_loop_builds_null_notifier_without_creds(tmp_path, monkeypatch):
     args = _args(["_loop", "--state-file", str(sfile)])
     cli.cmd_loop(args, runner=fake_runner)
     assert isinstance(seen["notifier"], NullNotifier)
+
+
+# --------------------------------------------------------------------------
+# Vendor / model resolution for a drive (ADR 0011)
+# --------------------------------------------------------------------------
+
+def _make_vendor_team(tmp_path, body):
+    (tmp_path / "configs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "configs" / "personas.yaml").write_text(body, encoding="utf-8")
+    return tmp_path
+
+
+_VENDOR_ROSTER = """\
+default_persona: Anzai
+default_vendor: claude
+default_model: claude-opus-5
+personas:
+  - name: Anzai
+  - name: Rukawa
+    vendor: chatgpt
+    model: gpt-6-astra
+"""
+
+
+def test_resolve_drive_backend_follows_the_driver_persona(tmp_path):
+    team = _make_vendor_team(tmp_path, _VENDOR_ROSTER)
+    assert cli.resolve_drive_backend(None, None, team, "Anzai") == (
+        "claude_p", "claude-opus-5",
+    )
+    assert cli.resolve_drive_backend(None, None, team, "Rukawa") == (
+        "codex_exec", "gpt-6-astra",
+    )
+
+
+def test_resolve_drive_backend_flags_win(tmp_path):
+    team = _make_vendor_team(tmp_path, _VENDOR_ROSTER)
+    # A vendor name is accepted as --backend; the persona's model applies
+    # only when the drive lands on the persona's own backend.
+    assert cli.resolve_drive_backend("chatgpt", None, team, "Rukawa") == (
+        "codex_exec", "gpt-6-astra",
+    )
+    assert cli.resolve_drive_backend("claude_p", None, team, "Rukawa") == (
+        "claude_p", None,
+    )
+    assert cli.resolve_drive_backend("codex_exec", "gpt-x", team, "Anzai") == (
+        "codex_exec", "gpt-x",
+    )
+    # An unknown backend name passes through untouched (custom registration).
+    assert cli.resolve_drive_backend("mine", None, team, "Anzai") == ("mine", None)
+
+
+def test_resolve_drive_backend_without_a_team_is_the_builtin(tmp_path):
+    assert cli.resolve_drive_backend(None, None, None, None) == ("claude_p", None)
+    assert cli.resolve_drive_backend(None, "m", None, "Anzai") == ("claude_p", "m")
+
+
+def test_cmd_start_refuses_a_malformed_vendor(tmp_path, capsys):
+    """A typo in personas.yaml must not start a daemon on the other vendor."""
+    _make_vendor_team(tmp_path, "default_persona: Anzai\ndefault_vendor: gemini\npersonas:\n  - name: Anzai\n")
+    args = _args(["start", "--journal-dir", str(tmp_path / "journal")])
+    assert cli.cmd_start(args, now=lambda: "T") == 2
+    assert "unknown model vendor 'gemini'" in capsys.readouterr().err
+
+
+def test_start_parser_defaults_leave_backend_and_model_unset():
+    args = _args(["start"])
+    assert args.backend is None and args.model is None

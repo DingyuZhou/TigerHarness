@@ -2536,6 +2536,8 @@ class TestMainPromptsForUserIds:
         responses = iter([
             "y",                     # slack .env? yes -> fragment will be made
             "n",                     # memory? no
+            "",                      # default model vendor -> Enter = claude
+            "",                      # default model id -> skip
             "",                      # team goal (optional) -> skip
             "",                      # persona traits (optional) -> skip
             "U0ABC,U0DEF",           # allowed_user_ids prompt
@@ -2560,7 +2562,8 @@ class TestMainPromptsForUserIds:
     ):
         (tmp_path / "slack-bridge.yaml").write_text("")
         # Same order as above: slack -> memory -> goal -> traits -> user-IDs.
-        responses = iter(["y", "n", "", "", ""])
+        # slack y, memory n, vendor (Enter=claude), model, goal, traits, ids
+        responses = iter(["y", "n", "", "", "", "", ""])
         monkeypatch.setattr(builtins, "input", lambda _: next(responses))
         with patch("tigerharness.init.subprocess.run"):
             rc = main([
@@ -2611,7 +2614,8 @@ class TestMultiTeamEnvTemplate:
     ):
         """`--multi-team` works without `--yes`; covers the elif branch
         in main()."""
-        responses = iter(["n", "n", "", "", ""])
+        # slack n, memory n, vendor (Enter=claude), model, goal, traits, ids
+        responses = iter(["n", "n", "", "", "", "", ""])
         monkeypatch.setattr(builtins, "input", lambda _: next(responses))
         with patch("tigerharness.init.subprocess.run"):
             rc = main([
@@ -2779,6 +2783,8 @@ class TestInitMultiTeamGating:
         responses = [
             "y",     # slack .env prompt -> yes (so fragment gets made)
             "n",     # memory prompt -> skip
+            "",      # default model vendor -> Enter = claude
+            "",      # default model id -> skip
             "",      # team goal (optional) -> skip
             "",      # persona traits (optional) -> skip
         ]
@@ -2833,6 +2839,8 @@ class TestSlackOptionalAndInitExtras:
         responses = iter([
             "n",  # slack?
             "n",  # memory?
+            "",   # default model vendor -> Enter = claude
+            "",   # default model id -> skip
             "",   # goal
             "",   # traits
         ])
@@ -2959,6 +2967,7 @@ class TestSpacedNames:
             "--dir", str(tmp_path),
             "--team", "tigers",
             "--no-memory", "--no-slack", "--no-multi-team",
+            "--vendor", "claude", "--model", "",
         ])
         assert rc == 0
         assert (
@@ -3046,3 +3055,112 @@ class TestSpacedNames:
             "tigers/configs/personas.yaml\n"
         ) in out
         assert "--persona chief --prd <brief.md>" in out
+
+
+# ---------------------------------------------------------------------------
+# Team default model vendor (ADR 0011)
+# ---------------------------------------------------------------------------
+
+class TestTeamVendorBlock:
+    def test_create_team_writes_the_vendor_block(self, tmp_path: Path):
+        team = tmp_path / "tigers"
+        create_team(
+            team, include_slack=False,
+            default_vendor="chatgpt", default_model=" gpt-6-astra ",
+        )
+        text = (team / "configs" / "personas.yaml").read_text()
+        assert "default_vendor: chatgpt\n" in text
+        assert 'default_model: "gpt-6-astra"\n' in text
+        assert text.index("default_vendor:") < text.index("personas:\n")
+
+    def test_create_team_default_and_inherit_spellings(self, tmp_path: Path):
+        create_team(tmp_path / "a", include_slack=False)
+        assert "default_vendor: claude\n" in (tmp_path / "a" / "configs" / "personas.yaml").read_text()
+        create_team(tmp_path / "b", include_slack=False, default_vendor="default")
+        assert "default_vendor: claude\n" in (tmp_path / "b" / "configs" / "personas.yaml").read_text()
+
+    def test_create_team_rejects_unknown_vendor(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="unknown model vendor 'gemini'"):
+            create_team(tmp_path / "x", include_slack=False, default_vendor="gemini")
+
+    def test_persona_entry_carries_vendor_hints(self, tmp_path: Path):
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        add_persona(team, "chief", include_memory=False)
+        text = (team / "configs" / "personas.yaml").read_text()
+        assert "    # vendor: default" in text
+        assert "    # model: default" in text
+
+    def test_fresh_yaml_from_add_persona_gets_the_block(self, tmp_path: Path):
+        team = tmp_path / "tigers"
+        team.mkdir()
+        add_persona(team, "chief", include_memory=False)
+        text = (team / "configs" / "personas.yaml").read_text()
+        assert "default_persona: chief\n" in text
+        assert "default_vendor: claude\n" in text
+
+    def test_vendor_choices_put_the_default_first(self):
+        from tigerharness.init import _vendor_choices
+        assert _vendor_choices() == ["claude", "chatgpt"]
+
+    def test_main_flags_write_the_block_and_warn_when_cli_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ):
+        from tigerharness import init as init_mod
+        monkeypatch.setattr(init_mod.shutil, "which", lambda _name: None)
+        rc = main([
+            "--dir", str(tmp_path), "--team", "tigers", "--persona", "chief",
+            "--yes", "--no-slack", "--no-memory",
+            "--vendor", "ChatGPT", "--model", "gpt-6-astra",
+        ])
+        assert rc == 0
+        text = (tmp_path / "tigers" / "configs" / "personas.yaml").read_text()
+        assert "default_vendor: chatgpt\n" in text
+        assert 'default_model: "gpt-6-astra"\n' in text
+        err = capsys.readouterr().err
+        assert "vendor 'chatgpt'" in err and "`codex` is not on PATH" in err
+
+    def test_main_rejects_unknown_vendor(self, tmp_path: Path, capsys: pytest.CaptureFixture):
+        rc = main([
+            "--dir", str(tmp_path), "--team", "tigers", "--persona", "chief",
+            "--yes", "--no-slack", "--no-memory", "--vendor", "gemini",
+        ])
+        assert rc == 1
+        assert "unknown model vendor 'gemini'" in capsys.readouterr().err
+        assert not (tmp_path / "tigers" / "configs" / "personas.yaml").exists()
+
+    def test_interactive_vendor_choice_and_eof_on_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Picking option 2 selects chatgpt; an EOF at the model question
+        means 'no pin', like the goal/traits questions."""
+        calls: list[str] = []
+
+        def _input(prompt: str) -> str:
+            calls.append(prompt)
+            if prompt.startswith("Selection"):
+                return "2"
+            raise EOFError
+        monkeypatch.setattr(builtins, "input", _input)
+        rc = main([
+            "--dir", str(tmp_path), "--team", "tigers", "--persona", "chief",
+            "--no-slack", "--no-memory", "--no-multi-team",
+        ])
+        assert rc == 0
+        text = (tmp_path / "tigers" / "configs" / "personas.yaml").read_text()
+        assert "default_vendor: chatgpt\n" in text
+        assert 'default_model: ""\n' in text
+        assert any("model id" in c for c in calls)
+
+    def test_existing_team_is_not_asked(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False, default_vendor="chatgpt")
+        answers = iter([""])  # traits only
+        monkeypatch.setattr(builtins, "input", lambda _: next(answers))
+        rc = main([
+            "--dir", str(tmp_path), "--team", "tigers", "--persona", "scout",
+            "--no-slack", "--no-memory", "--no-multi-team",
+        ])
+        assert rc == 0
+        text = (team / "configs" / "personas.yaml").read_text()
+        assert text.count("default_vendor:") == 1 and "default_vendor: chatgpt" in text

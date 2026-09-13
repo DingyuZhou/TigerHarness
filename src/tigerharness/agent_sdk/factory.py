@@ -7,6 +7,10 @@ Built-in registrations:
     "anthropic_sdk"   -> AnthropicSDKBackend
                          Wraps Anthropic's official ``claude-agent-sdk`` Python
                          package. Install with ``pip install tigerharness[anthropic]``.
+    "codex_exec"      -> CodexExecBackend
+                         Spawns ``codex exec`` as a subprocess (OpenAI's Codex
+                         CLI, ChatGPT-subscription billed). Always available;
+                         requires the ``codex`` CLI on ``PATH``.
     "openai_sdk"      -> OpenAISDKBackend
                          Stub. Will wrap ``openai-agents`` when implemented.
 
@@ -86,6 +90,12 @@ def _openai_sdk_factory(**kw: Any) -> AgentBackend:
     return OpenAISDKBackend(**kw)
 
 
+def _codex_exec_factory(**kw: Any) -> AgentBackend:
+    from .backends.codex_exec import CodexExecBackend
+    return CodexExecBackend(**kw)
+
+
 register_backend("claude_p", _claude_p_factory)
 register_backend("anthropic_sdk", _anthropic_sdk_factory)
 register_backend("openai_sdk", _openai_sdk_factory)
+register_backend("codex_exec", _codex_exec_factory)
