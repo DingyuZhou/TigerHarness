@@ -138,6 +138,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "e882a7820610975b9bbd24d0594dc0f5fd89d3db5557ec0a1208869476f37e10",
     },
     "journal-autodrive": {
+        # 2026-09-13 (6627029): anzai: drive lanes -- journal work runs on its owner persona's vendor
+        "e1858cd442c9c871326765603f82361578f909f0039bc75f0394011c47600711",
         # 2026-09-13 (ce7c31b): anzai: one skill folder for every vendor; runtime glossary; neutral wording
         "03de44b374f59f2d827a20dd8e7bfa2678199aeb79d2b93c7fab0b954f93d7bb",
         # 2026-09-13 (29eb227): anzai: add the codex_exec backend and per-persona model vendors
@@ -234,6 +236,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-09-13 (ce7c31b): anzai: one skill folder for every vendor; runtime glossary; neutral wording
+        "410d86b9dc732f54cc3354f97f3f4eba7fc5bc0c3c81071fe7294386589140f1",
         # 2026-08 (prior ship): sweep-memory before the vendor-neutral wording
         "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
         # 2026-08-03 (gate lockstep + deferred compaction): anzai: pre ship
@@ -309,10 +313,10 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
     "drive-journal": "077f54e2df66e3971cc83deb28d33f146522852fdef9f889a7762e71103d6c42",
-    "journal-autodrive": "e1858cd442c9c871326765603f82361578f909f0039bc75f0394011c47600711",
+    "journal-autodrive": "7289adb0b91b38706c1f9a1ce637c5be9dda2eb136709f33a025b71c859aab17",
     "journal-new": "0cc31c57a5fc20a3637c43c0d3b222b078c686f54b4ed4c2a7a74feb38705a27",
     "slack-notify": "1d6e910cf773bc5d6506cd0ac2ced8429ab5b9a8c49ca79fc5b437eae4210173",
-    "sweep-memory": "410d86b9dc732f54cc3354f97f3f4eba7fc5bc0c3c81071fe7294386589140f1",
+    "sweep-memory": "4731afd819b0a3fa3441da2d8e1faea595e2788870ff28f2b65ca7a7a80f7fe6",
     "tigerharness-basics": "9fa94549edb6894b2f2582b14d0ac92624233c3df721bb79fb2a4d161e0df59f",
     "workflow-append-steps": "231e5ad5fb3f75be6590455824887fc2a58e1340a14255b0e7a3c29b39228e14",
 }

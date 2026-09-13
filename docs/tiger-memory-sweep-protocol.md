@@ -76,6 +76,16 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
      own persona, if pending, is first and floor-exempt; the cap applies
      to the others) or `"own-only"` (targets is exactly the own persona;
      `sweep-complete` will NOT advance the team watermark for this run).
+   - **Lanes (ADR 0012).** `sweep-plan --lane-of <persona>` (Python:
+     `allowed=sweep.lane_members(team_memories_dir, persona)`) restricts
+     a team run's OTHER targets to the personas on that persona's
+     vendor/model lane, so a session never extracts another vendor's
+     persona; the own persona is never filtered, and a malformed vendor
+     logs and lifts the restriction rather than blocking the sweep.
+     `sweep-plan --own-only` (`force_own_only=True`) never widens to a
+     team run: `own-only` when the own persona has pending sources,
+     else `not_due` — what autodrive's per-lane maintenance session runs
+     for each pending persona on its lane.
 
 2. **Per target persona: stage → extract in stacks → glue.** For each
    target:

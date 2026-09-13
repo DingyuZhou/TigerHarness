@@ -62,7 +62,12 @@ supply the inputs):
   is kept in exact lockstep with staging, so a claimed own-only run
   always stages at least one slice.
 - **Other personas -- the team floor.** Everyone else stays gated by
-  the team watermark + `sweep.floor_hours` exactly as before.
+  the team watermark + `sweep.floor_hours` exactly as before -- **and by
+  your lane** (ADR 0012): pass `--lane-of <your-persona>` and a team run
+  sweeps only the OTHER personas on your vendor/model lane, so a session
+  never extracts another vendor's persona's transcripts. Personas on
+  other lanes are swept by autodrive's per-lane sweep fires (below) or
+  by their own sessions. A one-lane team sees no difference.
 - **Silent cases.** Own persona has nothing pending AND the team is
   inside the floor (`reason: "not_due"`), or another session holds the
   lease (`reason: "busy"`) -> proceed straight to the requested work.
@@ -160,8 +165,15 @@ the read-only `card-check` ruler on their own draft (steps 2d and 3).
 
 ```bash
 $TM --config "$DRIVER" sweep-plan --token <stable-token> --max-personas 3 \
-    --own-persona <your-persona> --exclude-session <your-session-uuid>
+    --own-persona <your-persona> --exclude-session <your-session-uuid> \
+    --lane-of <your-persona>
 ```
+
+`--lane-of` is the lane restriction (ADR 0012): the OTHER personas this
+wake processes are only those on your persona's vendor/model lane (the
+JSON's `lane.members` lists them). Always pass it when you have a
+persona identity; omit it, like `--own-persona`, in the no-identity
+fallback.
 
 `--own-persona` is the split gate's input -- your persona per the
 resolution list above (`$DRIVER` must be that persona's config; omit the
@@ -228,6 +240,26 @@ It prints JSON:
   ask), plain sequential processing (2a -> 2e in order) is fine. The
   lease is renewed by every `sweep-done`, and a ~30-min claim is
   stealable only when you go silent.
+
+### 1b. Lane maintenance: own-only sweeps (autodrive)
+
+When the roster mixes vendors, autodrive's idle path fires one
+**maintenance session per lane** that still has personas with un-swept
+sessions, on that lane's vendor, with a prompt naming those personas.
+Such a session does NOT claim a team run. For each named persona P, in
+order:
+
+```bash
+$TM --config memories/P/tiger-memory.config.yaml sweep-plan \
+    --own-persona P --own-only --token <stable-token>
+```
+
+`--own-only` never widens to a team run: it claims `scope: "own-only"`
+when P has pending sources and answers `not_due` otherwise (skip P).
+Then run steps 2 and 3 for that claim exactly as below (P is the single
+target; `sweep-complete` leaves the team watermark untouched). When
+every named persona is done, run `tigerharness slack-bridge
+compact-idle` once and stop.
 
 ### 2. Per target persona: stage -> extract in stacks -> glue
 
@@ -490,6 +522,10 @@ process several `targets` concurrently (each its own plan -> stacks ->
   idle past the cursor, or still-active over the active-slice
   threshold -- so a claimed own-only run always stages at least one
   slice), and an own-only run never advances the team watermark.
+- **Lane restriction** (`--lane-of`) -> a team run never extracts a
+  persona on another vendor's lane; `--own-only` lets a per-lane
+  maintenance session sweep its own personas without claiming the team
+  run (ADR 0012).
 - **Lease renewal** -> every `sweep-done` refreshes the claim lease, so
   a healthy long run (many personas, big fan-outs) is never stolen
   mid-flight; only a genuinely silent driver loses the claim.

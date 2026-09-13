@@ -1871,3 +1871,166 @@ def test_cmd_status_prints_the_lanes_line(tmp_path, capsys, monkeypatch):
     assert cli.cmd_status(_args(["status"])) == 0
     out = capsys.readouterr().out
     assert "lanes:        off (pinned by --backend/--model/--prompt)" in out
+
+
+# --------------------------------------------------------------------------
+# Memory sweeps per lane (ADR 0012 part 2): the sweep probe, the idle path
+# --------------------------------------------------------------------------
+
+def _memory_team(tmp_path, *, pending_for=("Rukawa",)):
+    """A two-lane team whose personas have tiger-memory configs; the
+    personas in *pending_for* have one idle, never-ingested transcript."""
+    from tigerharness.journal.paths import JournalPaths
+    team = tmp_path / "team"
+    (team / "configs").mkdir(parents=True)
+    (team / "configs" / "personas.yaml").write_text(_LANE_ROSTER)
+    paths = JournalPaths(root=team / "journal")
+    paths.ensure()
+    for name in ("Ayako", "Akagi", "Rukawa"):
+        mdir = team / "memories" / name
+        mdir.mkdir(parents=True)
+        proj = tmp_path / f"proj-{name}"
+        proj.mkdir()
+        (mdir / "tiger-memory.config.yaml").write_text(
+            f"agent: {{name: {name}, role: r}}\n"
+            f"store: {{root: {mdir}}}\n"
+            f"sources:\n  - kind: claude_code\n    project_path: {proj}/\n"
+            "summarizer: {backend: anthropic, model: m, prompts: default/v1}\n"
+            "rebuild: {idle_threshold_hours: 0}\n"
+        )
+        if name in pending_for:
+            t = proj / "11111111-2222-3333-4444-555555555555.jsonl"
+            t.write_text(json.dumps({
+                "type": "user", "timestamp": "2026-09-13T10:00:00Z",
+                "message": {"role": "user", "content": "hello"},
+            }) + "\n")
+            # Idle (idle_threshold_hours: 0) but inside the 7-day discovery
+            # window, and never ingested: exactly what "pending" means.
+            import time as _time
+            recent = _time.time() - 3600
+            os.utime(t, (recent, recent))
+    return team, paths
+
+
+def test_probe_sweep_lanes_groups_pending_personas(tmp_path):
+    team, paths = _memory_team(tmp_path, pending_for=("Rukawa", "Akagi", "Ayako"))
+    lanes = runner.probe_sweep_lanes(_cfg(driver="Akagi", journal_root=str(paths.root)))
+    assert [(lw.key, lw.driver, lw.personas) for lw in lanes] == [
+        ("claude", "Akagi", ("Ayako", "Akagi")),   # configured driver on this lane
+        ("chatgpt/gpt-6-astra", "Rukawa", ("Rukawa",)),
+    ]
+    # Without a configured driver the lane's first pending persona drives.
+    lanes = runner.probe_sweep_lanes(_cfg(driver=None, journal_root=str(paths.root)))
+    assert [lw.driver for lw in lanes] == ["Ayako", "Rukawa"]
+
+
+def test_probe_sweep_lanes_skips_broken_config_and_fails_soft(tmp_path, caplog):
+    team, paths = _memory_team(tmp_path, pending_for=("Rukawa",))
+    (team / "memories" / "Ayako" / "tiger-memory.config.yaml").write_text("not: [valid\n")
+    with caplog.at_level(logging.WARNING, logger="tigerharness.autodrive.runner"):
+        lanes = runner.probe_sweep_lanes(_cfg(driver="Ayako", journal_root=str(paths.root)))
+    assert [lw.key for lw in lanes] == ["chatgpt/gpt-6-astra"]
+    assert "sweep probe skipped Ayako" in caplog.text
+    assert runner.probe_sweep_lanes(_cfg(journal_root=None)) == []
+    from tigerharness.journal.paths import JournalPaths
+    solo = JournalPaths(root=tmp_path / "solo" / "journal")
+    solo.ensure()
+    assert runner.probe_sweep_lanes(_cfg(journal_root=str(solo.root))) == []
+    (team / "configs" / "personas.yaml").write_text("personas:\n  - name: Rukawa\n    vendor: gemini\n")
+    with caplog.at_level(logging.WARNING, logger="tigerharness.autodrive.runner"):
+        assert runner.probe_sweep_lanes(_cfg(driver="Rukawa", journal_root=str(paths.root))) == []
+    assert "sweep-lane probe failed" in caplog.text
+
+
+def test_maintenance_prompt_names_the_lane_and_personas():
+    p = runner.maintenance_prompt("Rukawa", lane="chatgpt/gpt-6-astra", personas=("Rukawa", "Mitsui"))
+    assert "lane chatgpt/gpt-6-astra, running as Rukawa" in p
+    assert "un-swept sessions: Rukawa, Mitsui" in p
+    assert "--own-persona P --own-only" in p and "do NOT drive it" in p
+
+
+@pytest.mark.asyncio
+async def test_run_loop_sweeps_pending_lanes_before_the_maintenance_fire(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    seen = []
+    calls = {"n": 0}
+
+    async def fake_drive(cfg, *, backend=None):
+        seen.append((cfg.driver, cfg.backend, "maintenance session" in cfg.prompt))
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0)
+
+    def sweep_probe(cfg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [runner.LaneWork("chatgpt", "codex_exec", None, "Rukawa", 1, ("Rukawa",))]
+        return []
+
+    notifier = _RecordingNotifier()
+    n = await runner.run_loop(
+        _cfg(driver="Ayako"), p, run_drive=fake_drive, sleep=fake_sleep,
+        now=lambda: "T", notifier=notifier,
+        probe=lambda cfg: runner.QUEUE_IDLE, sweep_lane_probe=sweep_probe,
+    )
+    # One sweep fire (Rukawa on codex, the maintenance prompt), then the
+    # ordinary maintenance drive, then the drained exit.
+    assert n == 2
+    assert seen == [("Rukawa", "codex_exec", True), ("Ayako", "claude_p", False)]
+    assert "lane=chatgpt as Rukawa" in notifier.heartbeats[0]
+    assert any("queue drained" in h for h in notifier.heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_failed_sweep_lane_is_not_retried(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    seen = []
+
+    async def drive(cfg, *, backend=None):
+        seen.append(cfg.driver)
+        if "maintenance session" in cfg.prompt:
+            raise RuntimeError("codex not installed")
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0)
+
+    notifier = _RecordingNotifier()
+    n = await runner.run_loop(
+        _cfg(driver="Ayako"), p, run_drive=drive, sleep=fake_sleep,
+        now=lambda: "T", notifier=notifier, probe=lambda cfg: runner.QUEUE_IDLE,
+        sweep_lane_probe=lambda cfg: [
+            runner.LaneWork("chatgpt", "codex_exec", None, "Rukawa", 1, ("Rukawa",)),
+        ],
+    )
+    # The failing lane is tried once, then the maintenance drive runs and
+    # the daemon still stops on the drained queue.
+    assert n == 2 and seen == ["Rukawa", "Ayako"]
+    assert any("FAILED" in text and "codex not installed" in text for _, text in notifier.updates)
+    assert any("queue drained" in h for h in notifier.heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_lanes_off_skips_the_sweep_probe(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    probes = {"n": 0}
+
+    async def fake_drive(cfg, *, backend=None):
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        pass
+
+    def sweep_probe(cfg):
+        probes["n"] += 1
+        return []
+
+    n = await runner.run_loop(
+        _cfg(driver="Ayako", lanes=False), p, run_drive=fake_drive, sleep=fake_sleep,
+        now=lambda: "T", probe=lambda cfg: runner.QUEUE_IDLE, sweep_lane_probe=sweep_probe,
+    )
+    assert n == 1 and probes["n"] == 0

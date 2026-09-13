@@ -143,8 +143,11 @@ backend and model -- keeping at most one drive per lane in flight, and
 a drive that finishes cleanly wakes the loop early (a workflow step may
 just have been handed to another lane; a 60 s per-lane floor keeps
 that from becoming a storm). `--backend`, `--model` or `--prompt` pin
-every drive and turn lanes off (`status` shows `lanes: off`). A
-one-vendor team has one lane and behaves exactly as before.
+every drive and turn lanes off (`status` shows `lanes: off`). On an
+idle queue the same coordinator fires one **memory-sweep session per
+lane** whose personas have un-swept sessions (own-only sweeps, on that
+lane's vendor) before the ordinary maintenance drive runs and the daemon
+stops. A one-vendor team has one lane and behaves exactly as before.
 
 ## What it does each fire
 

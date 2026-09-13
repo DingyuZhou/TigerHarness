@@ -127,14 +127,13 @@ literal in three modules.
    clean completion so a workflow handoff between lanes does not wait out
    an interval. The one stated simplification: a workflow's compile loop
    runs as a unit on the captain's lane.
-2. **The memory sweep runs on whichever session triggers it.** The
-   sweep-memory skill's executor rule is "helper sub-agents, never a
-   shelled-out model process" — for isolation and oversight. A ChatGPT
-   persona's sweep therefore runs on ChatGPT exactly when its *own* session
-   triggers it (the Slack bootstrap flow, own-persona floor-exempt) and on
-   the driver's vendor when the autodrive idle tail sweeps the roster.
-   Making the sweep vendor-aware per target would mean shelling out the
-   other vendor's CLI from inside a session — the pattern the rule bans.
+2. **The memory sweep runs on whichever session triggers it.** *Resolved
+   by [ADR 0012](0012-drive-lanes.md) part 2.* A team sweep now restricts
+   itself to the sweeping persona's lane (`sweep-plan --lane-of`), and
+   autodrive's idle path fires one own-only sweep session per lane with
+   pending personas, on that lane's vendor, before its maintenance drive.
+   The executor rule is untouched: extraction still runs in the sweeping
+   session's own helper sub-agents.
 3. **The team's skills are written for Claude Code.** *Resolved the same
    day.* The bundled skills now use a vendor-neutral vocabulary ("helper
    session", "headless CLI session") defined once in the `AGENTS.md`

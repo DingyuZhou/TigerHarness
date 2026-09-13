@@ -210,6 +210,18 @@ def main(argv: list[str] | None = None) -> int:
                        help="The calling session's conversation uuid — "
                             "excluded from the own-persona pending check so "
                             "a live session never counts itself.")
+    p_swp.add_argument("--lane-of", default=None, metavar="PERSONA",
+                       help="Lane restriction (ADR 0012): sweep, besides the "
+                            "own persona, only OTHER personas on the same "
+                            "vendor/model lane as PERSONA (per "
+                            "configs/personas.yaml). Pass your own persona "
+                            "whenever you have one; a one-lane team sees no "
+                            "difference.")
+    p_swp.add_argument("--own-only", action="store_true",
+                       help="Never widen to a team run: claim own-only when "
+                            "--own-persona has pending sources, else "
+                            "not_due. What a lane maintenance session "
+                            "(autodrive) runs per persona.")
 
     p_swd = sub.add_parser(
         "sweep-done", help="Mark one persona completed in the in-flight run.")
@@ -332,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
             floor_hours=args.floor_hours, lease_seconds=args.lease_seconds,
             now=args.now, own_persona=args.own_persona,
             exclude_session=args.exclude_session,
+            lane_of=args.lane_of, own_only=args.own_only,
         )
     if args.cmd == "sweep-done":
         return _cmd_sweep_done(cfg, args.persona)
@@ -758,10 +771,23 @@ def _cmd_sweep_plan(
     max_personas: int | None, floor_hours: float | None,
     lease_seconds: float | None, now: str | None,
     own_persona: str | None = None, exclude_session: str | None = None,
+    lane_of: str | None = None, own_only: bool = False,
 ) -> int:
     import uuid
 
     from . import sweep
+
+    if own_only and not own_persona:
+        print(
+            "error: --own-only needs --own-persona (the persona whose "
+            "pending sources decide the claim).",
+            file=sys.stderr,
+        )
+        return 2
+    allowed = (
+        sweep.lane_members(_team_memories_dir(cfg), lane_of)
+        if lane_of else None
+    )
 
     # Split gate: the own-persona pending check (cheap, no LLM) runs
     # against THIS config's sources + cursors — the config must belong to
@@ -793,6 +819,7 @@ def _cmd_sweep_plan(
             else cfg.sweep.lease_seconds
         ),
         own_persona=own_persona, own_pending=own_pending,
+        allowed=allowed, force_own_only=own_only,
     )
     plan = decision.plan
     payload = {
@@ -801,6 +828,11 @@ def _cmd_sweep_plan(
         "token": claim_token,
         "scope": decision.scope,
         "own": own,
+        "lane": (
+            {"of": lane_of, "members": sorted(allowed) if allowed is not None else None}
+            if lane_of else None
+        ),
+        "own_only": own_only,
         "targets": [
             {"name": t.name, "config_path": str(t.config_path)}
             for t in (plan.targets if plan else [])

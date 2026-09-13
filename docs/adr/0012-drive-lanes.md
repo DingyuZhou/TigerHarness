@@ -103,6 +103,33 @@ lane's work, and hands the rest to autodrive. Without an autodrive (the
 team never opted in), the other lane's work waits until someone drives
 on that vendor or passes `--any-lane` — the sweep output says which.
 
+### 6. Part 2 — memory sweeps per lane (same coordinator)
+
+The sweep-memory skill's executor rule stands: extraction runs in a
+session's own helper sub-agents, never in a shelled-out model process.
+So the vendor of a persona's sweep is the vendor of the session that
+sweeps it, and the fix is again to launch the right session:
+
+- `tiger-memory sweep-plan --lane-of <persona>` restricts a team run's
+  *other* targets to the personas on that lane (`sweep.lane_members`),
+  so a Claude session never extracts a ChatGPT persona's transcripts.
+  The skill passes it whenever it has a persona identity.
+- `tiger-memory sweep-plan --own-only` never widens to a team run: it
+  claims `own-only` when the named persona has pending sources, else
+  `not_due`.
+- Autodrive's idle path asks `probe_sweep_lanes` which lanes hold
+  personas with un-swept sessions (the split gate's exact pending check,
+  per persona) and, while any does, fires **one sweep session for the
+  first such lane** with `maintenance_prompt` naming those personas —
+  own-only sweeps, on that lane's vendor — before the ordinary
+  maintenance fire runs and arms the auto-stop. A failed sweep fire marks
+  its lane for the rest of the daemon run.
+
+The team watermark stays a single team-wide value on purpose: a lane's
+personas are swept by exact pending checks (per persona), not by the
+floor, so no per-lane watermark is needed and the sweep-state file keeps
+one writer at a time under the existing lease.
+
 ## Consequences
 
 - A persona's vendor now decides the brain that does its journal work,
@@ -115,9 +142,11 @@ on that vendor or passes `--any-lane` — the sweep output says which.
 - Persona attribution in memory is unchanged: `step-done` still stamps
   the step's persona, `release --output` the task's persona, and the
   driver's thin trace lands in the driver's store.
-- Not done here: making the *memory sweep* per lane, which is the
-  second ADR 0011 limit and follows the same coordinator pattern in a
-  separate change.
+- The memory sweep follows the same coordinator pattern (part 2 above):
+  a persona's transcripts are extracted by a session on its own lane
+  whenever an autodrive daemon or the persona's own session does the
+  sweeping; a team without autodrive relies on each persona's own
+  sessions for the other lanes.
 
 **Rejected:** letting the driver session itself spawn a child session on
 the other vendor. It would work, but the daemon already knows the queue,
