@@ -117,13 +117,15 @@ sweeps it, and the fix is again to launch the right session:
 - `tiger-memory sweep-plan --own-only` never widens to a team run: it
   claims `own-only` when the named persona has pending sources, else
   `not_due`.
-- Autodrive's idle path asks `probe_sweep_lanes` which lanes hold
-  personas with un-swept sessions (the split gate's exact pending check,
-  per persona) and, while any does, fires **one sweep session for the
-  first such lane** with `maintenance_prompt` naming those personas —
-  own-only sweeps, on that lane's vendor — before the ordinary
-  maintenance fire runs and arms the auto-stop. A failed sweep fire marks
-  its lane for the rest of the daemon run.
+- Autodrive's idle path asks `probe_sweep_lanes` which lanes **other
+  than the maintenance drive's own** hold personas with un-swept sessions
+  (the split gate's exact pending check, per persona) and, while any
+  does, fires **one sweep session for the first such lane** with
+  `maintenance_prompt` naming those personas — own-only sweeps, on that
+  lane's vendor — before the ordinary maintenance fire runs, sweeps its
+  own lane, and arms the auto-stop. A one-vendor team therefore keeps
+  exactly its old single maintenance fire. A failed sweep fire marks its
+  lane for the rest of the daemon run.
 
 The team watermark stays a single team-wide value on purpose: a lane's
 personas are swept by exact pending checks (per persona), not by the

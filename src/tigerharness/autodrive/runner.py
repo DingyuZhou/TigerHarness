@@ -542,8 +542,11 @@ def probe_sweep_lanes(cfg: AutodriveConfig) -> list[LaneWork]:
     For every roster persona with a tiger-memory config, the split gate's
     own pending check (``has_pending_source``, in lockstep with staging)
     decides whether a sweep would stage anything; pending personas are
-    grouped by lane. Each entry's ``driver`` is the configured driver when
-    it lives on that lane, else the lane's first pending persona, and
+    grouped by lane. The **home lane** -- the configured driver's, else
+    the team default persona's -- is left out: the ordinary maintenance
+    drive sweeps it (its sweep-memory run passes ``--lane-of``), so a
+    one-vendor team keeps exactly its old single maintenance fire. Each
+    remaining entry's ``driver`` is the lane's first pending persona, and
     ``personas`` lists the pending ones. Fail-soft like the other probes:
     no journal root / team root, the memory extra missing, or any error
     returns ``[]`` and the daemon falls back to the single maintenance fire.
@@ -553,6 +556,7 @@ def probe_sweep_lanes(cfg: AutodriveConfig) -> list[LaneWork]:
         return []
     try:
         from ..journal import lanes as _lanes
+        from ..journal.scaffold import resolve_default_persona
         from ..tiger_memory.config import load_config
         from ..tiger_memory.lifecycle import has_pending_source
         from ..tiger_memory.store import Store
@@ -563,6 +567,8 @@ def probe_sweep_lanes(cfg: AutodriveConfig) -> list[LaneWork]:
         if team_root is None:
             return []
         data = read_personas_yaml(team_root)
+        home_persona = cfg.driver or resolve_default_persona(team_root)
+        home_lane = _lanes.lane_of(team_root, home_persona, data=data)
         buckets: dict[Any, list[str]] = {}
         order: list[Any] = []
         for target in enumerate_persona_configs(team_root / "memories"):
@@ -577,18 +583,16 @@ def probe_sweep_lanes(cfg: AutodriveConfig) -> list[LaneWork]:
                 )
                 continue
             lane = _lanes.lane_of(team_root, target.name, data=data)
+            if lane == home_lane:
+                continue  # the maintenance drive's own lane
             if lane not in buckets:
                 buckets[lane] = []
                 order.append(lane)
             buckets[lane].append(target.name)
-        configured = cfg.driver
-        configured_lane = (
-            _lanes.lane_of(team_root, configured, data=data) if configured else None
-        )
         return [
             LaneWork(
                 key=lane.key, backend=lane.backend, model=lane.model,
-                driver=(configured if lane == configured_lane else buckets[lane][0]),
+                driver=buckets[lane][0],
                 items=len(buckets[lane]), personas=tuple(buckets[lane]),
             )
             for lane in order
@@ -957,13 +961,14 @@ async def run_loop(
     same lane so a fast no-op drive cannot turn the cadence into a storm.
 
     **Memory sweeps per lane (ADR 0012, part 2).** On an idle cycle with
-    nothing in flight, ``sweep_lane_probe`` asks which lanes hold personas
-    with un-swept sessions; while any does, the daemon fires **one** sweep
-    session for the first such lane (as a persona on it, with
-    :func:`maintenance_prompt`) instead of the maintenance drive, and only
-    once none is left does the ordinary maintenance fire run and arm the
-    auto-stop. A sweep fire that errors marks its lane failed for this
-    daemon run so it cannot pin the daemon open.
+    nothing in flight, ``sweep_lane_probe`` asks which lanes *other than
+    the maintenance drive's own* hold personas with un-swept sessions;
+    while any does, the daemon fires **one** sweep session for the first
+    such lane (as a persona on it, with :func:`maintenance_prompt`) instead
+    of the maintenance drive, and only once none is left does the ordinary
+    maintenance fire run (sweeping its own lane) and arm the auto-stop. A
+    sweep fire that errors marks its lane failed for this daemon run so it
+    cannot pin the daemon open.
 
     Each cycle probes the queue (:func:`probe_queue`, plain Python, no model
     call), and when there is work to do posts a heartbeat (the parent

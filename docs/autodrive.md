@@ -182,8 +182,10 @@ agentic drive session can spawn). Both are cheap no-ops when fresh.
 
 **Memory sweeps per lane come first (ADR 0012, part 2).** On a roster that
 mixes vendors, an idle cycle with nothing in flight first asks a non-AI probe
-(`probe_sweep_lanes`) which lanes hold personas with un-swept sessions (the
-split gate's own pending check, per persona). While any does, the daemon
+(`probe_sweep_lanes`) which lanes *other than the maintenance drive's own*
+hold personas with un-swept sessions (the split gate's own pending check, per
+persona; the home lane is the driver's, else the team default persona's, and
+the maintenance drive sweeps it). While any does, the daemon
 fires **one sweep session for the first such lane** -- as a persona on that
 lane, on that lane's vendor -- whose prompt names the pending personas and
 asks for an own-only sweep of each (`sweep-plan --own-persona P --own-only`).

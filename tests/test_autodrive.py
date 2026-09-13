@@ -1914,14 +1914,21 @@ def _memory_team(tmp_path, *, pending_for=("Rukawa",)):
 
 def test_probe_sweep_lanes_groups_pending_personas(tmp_path):
     team, paths = _memory_team(tmp_path, pending_for=("Rukawa", "Akagi", "Ayako"))
+    # The driver's own (claude) lane is the maintenance drive's job and is
+    # left out; the other lane is driven by its first pending persona.
     lanes = runner.probe_sweep_lanes(_cfg(driver="Akagi", journal_root=str(paths.root)))
     assert [(lw.key, lw.driver, lw.personas) for lw in lanes] == [
-        ("claude", "Akagi", ("Ayako", "Akagi")),   # configured driver on this lane
         ("chatgpt/gpt-6-astra", "Rukawa", ("Rukawa",)),
     ]
-    # Without a configured driver the lane's first pending persona drives.
+    # No configured driver: the team default persona's lane is home.
     lanes = runner.probe_sweep_lanes(_cfg(driver=None, journal_root=str(paths.root)))
-    assert [lw.driver for lw in lanes] == ["Ayako", "Rukawa"]
+    assert [lw.driver for lw in lanes] == ["Rukawa"]
+    # A chatgpt driver flips it: the claude lane's pending personas are
+    # grouped (roster order) and the chatgpt lane is home.
+    lanes = runner.probe_sweep_lanes(_cfg(driver="Rukawa", journal_root=str(paths.root)))
+    assert [(lw.key, lw.driver, lw.personas) for lw in lanes] == [
+        ("claude", "Ayako", ("Ayako", "Akagi")),
+    ]
 
 
 def test_probe_sweep_lanes_skips_broken_config_and_fails_soft(tmp_path, caplog):
