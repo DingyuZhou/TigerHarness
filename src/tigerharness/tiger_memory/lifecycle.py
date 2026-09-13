@@ -19,7 +19,7 @@ Two write paths share the same parse + ingest core:
   that already has a :class:`Summarizer`.
 - **in-session sub-agent** (``plan_extraction`` → ``executor.ingest_extraction``):
   ``plan_extraction`` stages one prompt per flagged transcript under
-  ``.sweep-staging/``; an in-persona Task sub-agent reads the staged prompt,
+  ``.sweep-staging/``; an in-persona helper sub-agent reads the staged prompt,
   emits the bundle, and writes it back via the CLI (so the bulky transcript
   never transits the driver's context). This is the subscription-rail path
   (design §2 — never an inline ``claude -p``).

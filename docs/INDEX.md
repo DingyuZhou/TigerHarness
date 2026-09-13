@@ -81,10 +81,12 @@ plain `claude -p` subprocess (a persona may run on `codex exec` instead —
   who-did-what ([adr/0008](adr/0008-team-event-log.md)). Design:
   [DESIGN-memory.md](DESIGN-memory.md),
   [adr/0007](adr/0007-topic-store-revamp.md).
-- **Team tooling.** `tigerharness init` scaffolds a team and installs six
-  bundled Claude Code skills (drive-journal, journal-new, journal-autodrive,
-  slack-notify, workflow-append-steps, tigerharness-basics), hash-aware so
-  hand-edited skills are never overwritten; `dismiss` tears down. `agent_sdk`
+- **Team tooling.** `tigerharness init` scaffolds a team and installs seven
+  bundled skills (drive-journal, journal-new, journal-autodrive, slack-notify,
+  sweep-memory, workflow-append-steps, tigerharness-basics) -- one folder,
+  worded for every vendor, that Claude Code reads at `.claude/skills` and
+  Codex through the `.agents/skills` symlink -- hash-aware so hand-edited
+  skills are never overwritten; `dismiss` tears down. `agent_sdk`
   is a typed, backend-agnostic API over the `claude -p`, `codex exec`, and
   Claude Agent SDK runtimes, chosen per persona through
   `configs/personas.yaml` ([adr/0011](adr/0011-model-vendors-per-persona.md)).

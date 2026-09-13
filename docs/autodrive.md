@@ -144,8 +144,8 @@ self-gating chores — `tigerharness slack-bridge compact-idle` (its only model
 call is one bounded `/compact` turn per heavy, quiet Slack bridge lane, when
 the team opted in — see docs/slack-bridge.md "Idle compaction") and the
 `sweep-memory` skill (team memory refresh, gated by its staleness floor +
-watermark + lease; its summarize work runs in Task-tool sub-agents, which a
-`claude -p` drive session can spawn). Both are cheap no-ops when fresh.
+watermark + lease; its summarize work runs in helper sub-agents, which any
+agentic drive session can spawn). Both are cheap no-ops when fresh.
 
 Once that fire **completes**, nothing is in flight, and the next probe is
 still `idle`, the loop exits cleanly and the state file is cleared. Nothing is

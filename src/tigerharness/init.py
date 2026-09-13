@@ -72,6 +72,8 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-08-13 (prior ship): drive-journal before the vendor-neutral wording
+        "20d8521342086b2c6702097396da6b1beda5258f8aa5451580799e3cdc9ac627",
         # 2026-08-11 (wrong-thread notify fix): miyagi: pre origin-thread
         #   ship -- park notify text had no route-via---task pointer to the
         #   task's deferred_origin.json / release's origin-thread line.
@@ -134,6 +136,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "e882a7820610975b9bbd24d0594dc0f5fd89d3db5557ec0a1208869476f37e10",
     },
     "journal-autodrive": {
+        # 2026-09-13 (29eb227): anzai: add the codex_exec backend and per-persona model vendors
+        "8f5bc76583b076615b517ffccffdd4a53e766e98256a80f1247c68a92d977a74",
         # 2026-08-12 (a9fef88): anzai: inherit SLACK_NOTIFY_CHANNEL for autodrive notifications
         "94d59329ee4456cc7f8bfb1fe6c63be23fb1a5a88f2664d4c2fa19c1bedb13f2",
         # 2026-08-12 (notify-channel inheritance, ADR 0010 amendment): anzai:
@@ -151,6 +155,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "5271f7d54ad66c2c9c1d4449305d01dff682531def965b3260ddaa4221fac0c3",
     },
     "journal-new": {
+        # 2026-08 (prior ship): journal-new before the vendor-neutral wording
+        "c0f2384f0d3313ba4821d15ca82714a48a1704268b4c546fd25e5986dc9d6466",
         # 2026-08-12 (self-driving journal, ADR 0010): anzai: pre defer-test
         #   ship -- the skill only triggered on explicit "scaffold this"
         #   phrasing, so an ask that was simply too big never reached it.
@@ -177,6 +183,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "f9667640cda40128909f86f25f2d4d78b51c5986545c38bf337b25e1cc443d1d",
     },
     "slack-notify": {
+        # 2026-06 (prior ship): slack-notify before the vendor-neutral wording
+        "bc182b0f0dc5e07f3e7fa3506b3b1658d63fbedfb4e5d69c2cb7e6ad97767a99",
         # 2026-08-11 (wrong-thread notify fix): miyagi: pre --task ship --
         #   no journal-task routing section (notify text/file could not
         #   resolve a task's origin thread from deferred_origin.json).
@@ -188,6 +196,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
     },
     "tigerharness-basics": {
+        # 2026-09-13 (29eb227): anzai: add the codex_exec backend and per-persona model vendors
+        "98dac516cb00454b164a0ee5f7593eb0433354cc3126f8fd920347b6aca700d3",
         # 2026-08-14 (74cb243): anzai: sync .gitignore on init --refresh, not just skills
         "40d8265fe325e07362713a8ffe09b64b3fc8e4641cdc2a6aa0f138f7f0b56ce8",
         # 2026-08-14 (gitignore refresh): anzai: pre --refresh ship -- the
@@ -220,6 +230,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-08 (prior ship): sweep-memory before the vendor-neutral wording
+        "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
         # 2026-08-03 (gate lockstep + deferred compaction): anzai: pre ship
         #   -- own-pending was completed-transcripts-only (no active-slice
         #   lockstep) and split-mode ran own compaction blocking before the
@@ -276,6 +288,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "f00bcf6f6420935269dce6006f475c98312fe72e6826abc86823c9edf3a7af33",
     },
     "workflow-append-steps": {
+        # 2026-06 (prior ship): workflow-append-steps before the vendor-neutral wording
+        "cd95580475094b10cf5cd8fcd3d080a2e97221c83d22384d9049d29b6e9a8ea5",
         # 2026-08-14 (drafter split escape): mitsui: pre-escape ship -- the
         #   bundle section taught no way to put a literal `## step:` line in
         #   a body, so a body documenting the format split the bundle.
@@ -290,13 +304,13 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "20d8521342086b2c6702097396da6b1beda5258f8aa5451580799e3cdc9ac627",
-    "journal-autodrive": "8f5bc76583b076615b517ffccffdd4a53e766e98256a80f1247c68a92d977a74",
-    "journal-new": "c0f2384f0d3313ba4821d15ca82714a48a1704268b4c546fd25e5986dc9d6466",
-    "slack-notify": "bc182b0f0dc5e07f3e7fa3506b3b1658d63fbedfb4e5d69c2cb7e6ad97767a99",
-    "sweep-memory": "88a20ec085fa75d1b17363e346092cc359e58caad861a6585935d486e98c9aae",
-    "tigerharness-basics": "98dac516cb00454b164a0ee5f7593eb0433354cc3126f8fd920347b6aca700d3",
-    "workflow-append-steps": "cd95580475094b10cf5cd8fcd3d080a2e97221c83d22384d9049d29b6e9a8ea5",
+    "drive-journal": "ae61ba4c6d95524d0920346d3420ad2e51faff2722f180e41ce279d1d54b6b3a",
+    "journal-autodrive": "03de44b374f59f2d827a20dd8e7bfa2678199aeb79d2b93c7fab0b954f93d7bb",
+    "journal-new": "0cc31c57a5fc20a3637c43c0d3b222b078c686f54b4ed4c2a7a74feb38705a27",
+    "slack-notify": "1d6e910cf773bc5d6506cd0ac2ced8429ab5b9a8c49ca79fc5b437eae4210173",
+    "sweep-memory": "410d86b9dc732f54cc3354f97f3f4eba7fc5bc0c3c81071fe7294386589140f1",
+    "tigerharness-basics": "9fa94549edb6894b2f2582b14d0ac92624233c3df721bb79fb2a4d161e0df59f",
+    "workflow-append-steps": "231e5ad5fb3f75be6590455824887fc2a58e1340a14255b0e7a3c29b39228e14",
 }
 
 
@@ -639,12 +653,30 @@ manual -- before substantive work. Other key locations:
   team's default model vendor (`default_vendor` / `default_model`; a
   persona entry may override with its own `vendor:` / `model:`).
 - **`.claude/skills/<name>/SKILL.md`** -- the team's skills (drive-journal,
-  journal-new, sweep-memory, ...). Claude Code loads them natively; an
-  agent on another vendor (Codex, Cursor) reads a skill's `SKILL.md`
-  directly whenever its description matches the task at hand.
+  journal-new, sweep-memory, ...), written once for every vendor.
+  Claude Code discovers them there; `.agents/skills` is a symlink to the
+  same folder so Codex discovers the very same files. Any other agent
+  reads a skill's `SKILL.md` directly whenever its description matches
+  the task at hand.
 - A journal's **`OPERATING.md`** governs task/queue work; drive it through
   the `drive-journal` skill and `tigerharness journal` CLIs -- never
   hand-edit journal state.
+
+## Runtime glossary (the vendor-neutral words the skills use)
+
+The skills are one set of files read by every vendor, so they name
+capabilities, not products. When a skill says:
+
+- **helper session** (also *sub-agent*): an isolated child agent you
+  spawn for one bounded job, which returns a short result while the bulky
+  work stays in its own context -- the **Task tool** in Claude Code,
+  **`spawn_agent`** in Codex.
+- **headless CLI session**: an agent started non-interactively by a
+  program -- **`claude -p`** (Claude Code) or **`codex exec`** (Codex).
+  The journal's "never drive from a headless CLI / cron / API" rule means
+  these; autodrive is the Operator-sanctioned exception.
+- **the agent app**: the interactive Claude Code or Codex session a human
+  is sitting in -- the subscription rail.
 """
 
 # CLAUDE.md: a thin pointer that imports AGENTS.md so Claude Code auto-loads
@@ -1090,7 +1122,8 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
 
     Claude Code reads ``.claude/settings.json`` from the project root
     to inject env vars into ``claude -p`` subprocesses, and discovers
-    skills from ``.claude/skills/<name>/SKILL.md``. Scaffolding these
+    skills from ``.claude/skills/<name>/SKILL.md``; Codex discovers the
+    same files through the ``.agents/skills`` symlink. Scaffolding these
     at ``tigerharness init`` time means every new team gets:
 
     - ``TIGERHARNESS_PERSONAS_CONFIG`` wired up automatically, so
@@ -1132,8 +1165,56 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
     # Each skill lives at _bundled_skills/<name>/SKILL.md, shipped as
     # package data so they're available in installed wheels too.
     created.extend(install_bundled_skills(team_dir).created)
+    # ... and the second door to the same folder, for Codex.
+    link = ensure_agents_skills_link(team_dir)
+    if link is not None:
+        created.append(link)
 
     return created
+
+
+#: Where Codex looks for a team's skills, relative to the team root, and
+#: what it links to. Claude Code reads ``.claude/skills/``; Codex reads
+#: ``.agents/skills/`` and follows a symlink there (verified against Codex
+#: CLI 0.154). One folder, two doors -- never a second copy.
+AGENTS_SKILLS_LINK = Path(".agents") / "skills"
+AGENTS_SKILLS_LINK_TARGET = Path("..") / ".claude" / "skills"
+
+
+def ensure_agents_skills_link(team_dir: Path) -> Path | None:
+    """Create ``<team>/.agents/skills -> ../.claude/skills`` if absent.
+
+    Returns the link path when this call created it, else ``None``: an
+    existing symlink (any target) is left alone, a missing
+    ``.claude/skills`` means there is nothing to link yet, a real directory or file
+    at that path is left alone with a warning (an operator may keep
+    Codex-only skills there on purpose), and an OS that refuses the
+    symlink is logged rather than fatal -- Codex then simply does not see
+    the team skills until the link is made by hand.
+    """
+    link = team_dir / AGENTS_SKILLS_LINK
+    if link.is_symlink():
+        return None
+    if not (team_dir / ".claude" / "skills").is_dir():
+        return None  # nothing to link to yet (no bundled skills installed)
+    if link.exists():
+        log.warning(
+            "%s exists and is not a symlink; leaving it alone (Codex reads "
+            "it as-is, but it is not the team's .claude/skills folder)",
+            link,
+        )
+        return None
+    try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(AGENTS_SKILLS_LINK_TARGET, target_is_directory=True)
+    except OSError as exc:
+        log.warning(
+            "could not create %s -> %s (%s); Codex will not discover the "
+            "team skills until that symlink exists",
+            link, AGENTS_SKILLS_LINK_TARGET, exc,
+        )
+        return None
+    return link
 
 
 def install_bundled_skills(team_dir: Path, *, refresh: bool = False) -> SkillSync:
@@ -2137,7 +2218,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         sync = install_bundled_skills(team_dir, refresh=True)
         gi = sync_gitignore(team_dir, refresh=True)
-        if not sync.changed and not gi.changed:
+        link = ensure_agents_skills_link(team_dir)
+        if not sync.changed and not gi.changed and link is None:
             msg = (
                 f"Nothing to do -- bundled skills and .gitignore are "
                 f"already up to date under "
@@ -2168,6 +2250,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             for p in sync.kept_handedited:
                 print(f"  {_format_path(p, search_root)}")
+        if link is not None:
+            print(
+                f"Linked {_format_path(link, search_root)} -> "
+                f"{AGENTS_SKILLS_LINK_TARGET} (Codex skill discovery)"
+            )
         if gi.created:
             print(
                 f"Created .gitignore from the shipped template: "

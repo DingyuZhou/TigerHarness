@@ -161,8 +161,8 @@ class AutodriveConfig:
 def default_prompt(driver: str | None) -> str:
     """The self-contained instruction handed to each drive.
 
-    It must *override* the drive-journal skill's "never drive from claude
-    -p / cron / API" boundary, because that is exactly what this process
+    It must *override* the drive-journal skill's "never drive from a
+    headless CLI / cron / API" boundary, because that is exactly what this process
     is -- but an Operator-authorized one. Spelling that out in the prompt
     is what keeps the spawned agent from (correctly, per its skill)
     refusing to drive.
@@ -184,7 +184,7 @@ def default_prompt(driver: str | None) -> str:
     return (
         "You are an Operator-authorized automatic journal driver "
         "(`tigerharness autodrive`). This is a SANCTIONED programmatic "
-        "drive: the usual 'never drive from claude -p / cron / API' "
+        "drive: the usual 'never drive from a headless CLI / cron / API' "
         "boundary is deliberately lifted for THIS process by explicit "
         "Operator authorization. Drive the journal now using the "
         "drive-journal skill -- sweep, pick exactly one actionable task, "
@@ -199,7 +199,7 @@ def default_prompt(driver: str | None) -> str:
         "its only model call is one bounded /compact turn per heavy idle "
         "lane) and the team's sweep-memory skill (self-gating via its "
         f"split gate + watermark + lease{own}; its summarize work runs "
-        "in Task-tool sub-agents, which THIS session may spawn). Then "
+        "in helper sessions (sub-agents), which THIS session may spawn). Then "
         "stop cleanly."
     )
 

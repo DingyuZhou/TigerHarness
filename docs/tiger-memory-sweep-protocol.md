@@ -11,7 +11,7 @@
 This is the vendor-neutral contract an **interactive persona session**
 executes to keep the whole team's tiger-memory fresh on the
 **subscription rail** — extraction runs in an isolated **sub-agent**
-(Task tool), never a programmatic `claude -p`, so it bills to the
+(a helper session: the Task tool in Claude Code, `spawn_agent` in Codex), never a programmatic headless CLI (`claude -p` / `codex exec`), so it bills to the
 subscription regardless of which conversation triggered it (B8). It is
 the memory analogue of the journal's `OPERATING.md`: non-AI bookkeeping in
 Python (the `tiger_memory.sweep` module + the `tiger-memory` CLI), AI in
@@ -92,7 +92,7 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
       ingests, so a backlog fans out across many fresh contexts instead of
       one agent looping over — and re-reading — every transcript (the
       worse-than-linear cost the stacking fixes).
-   b. For each **stack**, spawn **one constrained sub-agent** (Task tool)
+   b. For each **stack**, spawn **one constrained helper sub-agent** (the Task tool in Claude Code, `spawn_agent` in Codex)
       — the B7 trust boundary. Stacks are independent, so run the
       sub-agents in parallel (a sane concurrency cap). Each sub-agent:
       - **Reads**: ONLY its staged prompt files — each `<uuid>.prompt.md`
@@ -193,7 +193,7 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
       under `<store>/.compact-staging/` and prints the manifest. If the
       manifest's `targets` list is **empty**, skip straight to 2e —
       nothing needs compacting (the common case). Otherwise:
-      - Spawn **one Task sub-agent per staged prompt**. Each sub-agent
+      - Spawn **one helper sub-agent per staged prompt**. Each sub-agent
         reads its `<key>.prompt.md` (the prompt embeds the surface's
         current content and a strict marker contract —
         `@@MUST_REMEMBER@@`, `@@SKILLS@@`, `@@TOPIC_ROSTER@@`, or
@@ -244,7 +244,7 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
      team event log** (ADR 0008, team-level, once per completed sweep,
      while still holding the claim): run `tiger-memory --config <driver
      config> team-events-compact-plan`. `targets: []` (the common case)
-     → move on. Otherwise spawn one Task sub-agent per staged prompt
+     → move on. Otherwise spawn one helper sub-agent per staged prompt
      (read `prompt_path`, write the folded bullets to exactly
      `card_path` per the prompt's strict `@@TEAM_EVENTS@@` contract,
      return a one-line confirmation), then `tiger-memory --config

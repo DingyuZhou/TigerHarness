@@ -127,8 +127,10 @@ tigers/
 ├── .claude/
 │   ├── settings.json             # wires TIGERHARNESS_PERSONAS_CONFIG
 │   └── skills/                   # bundled skills (drive-journal, journal-new,
-│                                 #   journal-autodrive, slack-notify,
+│                                 #   journal-autodrive, slack-notify, sweep-memory,
 │                                 #   workflow-append-steps, tigerharness-basics)
+├── .agents/
+│   └── skills -> ../.claude/skills   # symlink: Codex discovers the same skills
 ├── configs/
 │   ├── personas.yaml              # team registry + default model vendor (auto-updated)
 │   └── .env                       # Slack tokens (gitignored)

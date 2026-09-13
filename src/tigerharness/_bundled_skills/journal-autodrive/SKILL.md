@@ -7,7 +7,8 @@ description: Start, check, or stop a background process that drives the journal 
 
 A small daemon that **fires "drive the journal" on a fixed cadence**. Every
 `interval` seconds it checks the queue and, if there is work, spawns an
-agentic backend (default `claude -p`) with a self-contained,
+agentic backend (the driver persona's vendor: `claude -p` or `codex
+exec`) with a self-contained,
 Operator-authorized drive prompt and immediately goes back to waiting -- it
 does **not** wait for the drive to finish, so **overlap is allowed** and each
 fire is a **fresh, context-clean session**. It is **not** built on Claude
@@ -21,8 +22,9 @@ autodrive isn't running" -- on a drained queue, that is the correct state.
 
 The journal is a **human-triggered** subscription backend -- "no
 programmatic driver by design". This is the deliberate, **Operator-
-authorized** exception, and it is **only safe while `claude -p` bills the
-Claude subscription** rather than API tokens. If that billing flips, an
+authorized** exception, and it is **only safe while the vendor CLI
+(`claude -p` / `codex exec`) bills its subscription** rather than API
+tokens. If that billing flips, an
 unattended autodrive spends real dollars on **every fire**. Guardrails:
 
 - **`--max-budget <usd>`** caps each drive's reported cost. Strongly
@@ -63,7 +65,7 @@ and acts on the verdict:
   `sweep-memory` skill. When that finishes and the queue is still idle, the
   **daemon exits** and clears its state file.
 
-So an idle interval costs a file walk, not a `claude -p` session, and a
+So an idle interval costs a file walk, not a model session, and a
 drained queue costs nothing at all. This applies to **every** daemon,
 including one you started by hand.
 
@@ -135,8 +137,8 @@ Stop:
 ## What it does each fire
 
 Spawns the backend in the team root (in a **fresh session**, no `--resume`)
-with a prompt that **explicitly lifts** the "never drive from claude -p /
-cron / API" boundary for this sanctioned process, then drives via the
+with a prompt that **explicitly lifts** the "never drive from a headless
+CLI / cron / API" boundary for this sanctioned process, then drives via the
 **drive-journal** skill (sweep -> claim one actionable task with `--driver
 <persona> --allow-api-drive` -> work it -> cascade). The loop does not wait
 for the drive: it records the launch and returns to the cadence, so a slow

@@ -10,9 +10,10 @@ journal task -- either single-persona (`kind=task`) or multi-persona
 (`kind=workflow`) -- on disk under `journal/active/<task-id>/`. The
 `drive-journal` skill then drives the task from there.
 
-The subscription backend runs work through the *interactive* Claude
-Code app instead of through a programmatic `claude -p` driver (rails
-and billing: `docs/subscription-backend.md`). See `docs/journal.md`
+The subscription backend runs work through the *interactive* agent app
+(Claude Code or Codex) instead of a programmatic headless driver
+(`claude -p` / `codex exec`; rails and billing:
+`docs/subscription-backend.md`). See `docs/journal.md`
 for the architecture and `docs/journal-workflow-mode.md` for the
 workflow-mode details.
 

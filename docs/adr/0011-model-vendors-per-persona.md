@@ -129,21 +129,22 @@ literal in three modules.
    has bitten this team before (the rescue-storm OOM, ADR 0010), so it is a
    separate design, not a patch on this one.
 2. **The memory sweep runs on whichever session triggers it.** The
-   sweep-memory skill's executor rule is "Task-tool sub-agents, never a
+   sweep-memory skill's executor rule is "helper sub-agents, never a
    shelled-out model process" — for isolation and oversight. A ChatGPT
    persona's sweep therefore runs on ChatGPT exactly when its *own* session
    triggers it (the Slack bootstrap flow, own-persona floor-exempt) and on
    the driver's vendor when the autodrive idle tail sweeps the roster.
    Making the sweep vendor-aware per target would mean shelling out the
    other vendor's CLI from inside a session — the pattern the rule bans.
-3. **The team's skills are written for Claude Code.** `drive-journal` and
-   `sweep-memory` speak of the Task tool and `claude -p`. `AGENTS.md` now
-   tells a non-Claude agent where the skills live and to read a `SKILL.md`
-   directly when its description matches; making those two skills
-   vendor-neutral in their wording is follow-up work. Until then a
-   ChatGPT persona is fully supported for Slack conversations and for
-   anything a plain agentic session can do, and *mechanically* supported as
-   an autodrive driver.
+3. **The team's skills are written for Claude Code.** *Resolved the same
+   day.* The bundled skills now use a vendor-neutral vocabulary ("helper
+   session", "headless CLI session") defined once in the `AGENTS.md`
+   runtime glossary, and `init` links `.agents/skills -> .claude/skills`
+   so Codex discovers the very same files (Codex reads `.agents/skills/`
+   and follows the symlink; verified on Codex CLI 0.154, as was its
+   ability to spawn a helper sub-agent that writes a file -- the executor
+   the sweep skill relies on). One copy of every skill, no per-vendor
+   forks.
 4. **Codex transcripts are not ingested by tiger-memory.** Codex writes its
    sessions under `~/.codex/sessions/`, which the `claude_transcript` source
    does not read. A ChatGPT persona's Slack turns therefore do not reach its

@@ -347,7 +347,7 @@ One file per team, beside the per-persona stores:
   is older than `recent_days` (default 30) fold into one `## YYYY-MM`
   section; month sections whose year ended more than `year_after_days`
   (default 400) ago fold into one `## YYYY` section. Folds are staged
-  by `team-events-compact-plan` (non-AI), carded by Task sub-agents
+  by `team-events-compact-plan` (non-AI), carded by helper sub-agents
   (subscription rail, strict `@@TEAM_EVENTS@@` bullet contract), and
   applied by `team-events-compact-apply` (non-AI; bullets appended
   between plan and apply survive; an oversized card is hard-trimmed).
@@ -387,7 +387,7 @@ When a surface crosses its `overflow_limit`, the sweep stages a compaction
    would clobber a same-run detail rewrite; a full index replacement
    would dangle it) — the oversized detail re-stages against the settled
    store.
-2. **Card sub-agents** (Task tool, isolated context) each write one
+2. **Card sub-agents** (helper sessions, isolated context) each write one
    `<key>.card.md` per the prompt's embedded strict contract, then run
    `tiger-memory card-check <card>` — the deterministic, read-only ruler
    (same parse + merge code path as apply, incl. team-events fold cards)
@@ -580,7 +580,7 @@ kinds above.
 ## Adding a new summarizer vendor
 
 The production sweep path is model-free glue — its AI steps run as staged
-Task sub-agents, so no summarizer backend is invoked there. The pluggable
+helper sub-agents, so no summarizer backend is invoked there. The pluggable
 summarizer registry remains for the in-process convenience path
 (`extract_and_ingest`) and tests. The `anthropic` backend is pre-registered;
 plug in any other vendor in three steps:

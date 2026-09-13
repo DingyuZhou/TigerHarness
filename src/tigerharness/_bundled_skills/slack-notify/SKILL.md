@@ -1,11 +1,11 @@
 ---
 name: slack-notify
-description: Send a Slack message (text or file) from a Claude agent. Use when the agent needs to proactively message a user during a run -- questions, completion notices, blockers, file uploads.
+description: Send a Slack message (text or file) from an agent on any vendor (Claude Code, Codex, ...). Use when the agent needs to proactively message a user during a run -- questions, completion notices, blockers, file uploads.
 ---
 
 # slack-notify
 
-Procedural skill for any Claude agent to message a user via the notify CLI.
+Procedural skill for any agent (Claude Code, Codex, ...) to message a user via the notify CLI.
 
 ## When to use this skill
 

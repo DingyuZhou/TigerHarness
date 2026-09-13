@@ -21,9 +21,9 @@ real work (step 3) — a no-op fire never loads it.
 
 "drive the journal" · "pick up the next task" · "work what's queued" ·
 "continue the journal" · or you're given the floor and entries are
-waiting. **Do NOT** drive from a non-interactive context (`claude -p` /
-cron / API) — the driver is human-triggered by design; surface that
-boundary instead. That hard rule includes Slack: a **Slack-triggered
+waiting. **Do NOT** drive from a non-interactive context (a headless CLI
+session — `claude -p` / `codex exec` — cron, or API) — the driver is
+human-triggered by design; surface that boundary instead. That hard rule includes Slack: a **Slack-triggered
 (bridge-spawned) session bills API tokens** — it may SCHEDULE journal
 tasks (the `journal-new` skill) but must **NEVER drive** them. `journal
 claim` enforces this mechanically: it refuses when the bridge's
@@ -202,9 +202,11 @@ ceiling (step 7 — hand off instead).
    or still active past the active-slice threshold — bypass the team
    staleness floor; every other persona keeps the floor + watermark +
    soft lease) — a fresh team is a few tokens of no-op. Its summarize
-   work runs in Task-tool sub-agents, which any agent drive session
-   (including an autodrive `claude -p` fire) can spawn; the executor
-   rule only bars plain daemons, which cannot host sub-agents.
+   work runs in helper sessions (sub-agents — see the runtime glossary
+   in AGENTS.md: the Task tool in Claude Code, `spawn_agent` in Codex),
+   which any agent drive session (including an autodrive fire) can
+   spawn; the executor rule only bars plain daemons, which cannot host
+   sub-agents.
 
 Order matters slightly: compact first (bounded, usually a no-op), then
 the memory sweep (it may fan out sub-agents). If the sweep claims work,
@@ -219,7 +221,7 @@ seems to contradict it, **OPERATING.md wins** (it shipped with this
 specific journal; this skill is generic guidance). Common reminders the
 full contract spells out: don't skip the sweep; never work a *busy* task;
 one task at a time; use `claim`/`release` (never hand-edit state); the
-in-session compile is `claude -p`-free (API budget zero). In a drive, mark
+in-session compile spawns no headless CLI (API budget zero). In a drive, mark
 `done` only through the gate (`kind=task` → `release --state done --output
 <note>`; `kind=workflow` → walk to `__done__` via `step-done`) and never
 hand-write `worklog/` — the gate stamps each entry's persona attribution.

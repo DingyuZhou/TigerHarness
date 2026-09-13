@@ -61,7 +61,8 @@ upgrading tigerharness:
 - **Skills** (`.claude/skills/`) — installs bundled skills the team is
   missing, refreshes any skill whose on-disk content still matches a
   previously shipped version, and leaves hand-edited skills untouched
-  (delete one to re-adopt the shipped version).
+  (delete one to re-adopt the shipped version). Also recreates the
+  `.agents/skills` symlink (how Codex finds the same files) if missing.
 - **`.gitignore`** — appends any line from the shipped template the
   team doesn't have yet, with the comment that explains it.
   **Append-only**: nothing is removed, reordered, or rewritten, so your
@@ -85,7 +86,8 @@ slack-bridge systemd unit. Always try `--dry-run` first.
 
 The file-based **subscription backend**: tasks live as folders under
 `journal/active/` at your team root, driven by interactive
-(subscription-billed) sessions instead of API-billed `claude -p`.
+(subscription-billed) sessions instead of an API-billed programmatic
+driver.
 Run journal commands **from the team root** — the journal root
 resolves to `<team>/journal/` when the cwd is a team folder (an
 explicit `TIGERHARNESS_JOURNAL_DIR` env var overrides; with neither,
@@ -186,6 +188,10 @@ maintained by the tooling.
   (`drive-journal`, `journal-autodrive`, `journal-new`, `slack-notify`,
   `workflow-append-steps`, `tigerharness-basics`, `sweep-memory`).
   Generated; refreshed by `--refresh`; hand-edits preserved.
+- `.agents/skills` — a symlink to `.claude/skills`, so Codex (which
+  discovers skills under `.agents/skills/`) reads the very same files.
+  One copy of every skill; generated, recreated by `--refresh` if
+  missing.
 - `memories/<Name>/` — per-persona tiger-memory config + store.
 - `journal/` — NOT scaffolded by init: created on first journal use at
   the team root (then holds `OPERATING.md`, `active/`, `done/`).

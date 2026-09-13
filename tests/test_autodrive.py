@@ -78,6 +78,11 @@ def test_default_prompt_with_driver():
     assert "--driver Anzai --allow-api-drive" in p
     assert "Operator-authorized" in p
     assert "drive-journal" in p
+    # Vendor-neutral wording: the prompt is handed to claude -p and codex
+    # exec alike, so it names capabilities, not one vendor's tools.
+    assert "never drive from a headless CLI / cron / API" in p
+    assert "helper sessions (sub-agents)" in p
+    assert "Task-tool" not in p and "claude -p" not in p
 
 
 def test_default_prompt_without_driver():

@@ -1,15 +1,17 @@
 ---
 name: sweep-memory
-description: Keep the whole team's tiger-memory fresh. Runs at every sweep trigger -- the first Slack message of a new thread (the bridge's Slack-bootstrap flow), persona-session bootstrap, a drive's idle-maintenance tail, the autodrive idle path, or an explicit "sweep memory" / "refresh team memory" / "rebuild memories" ask. Claims a team-wide sweep under the split gate (the calling persona's un-swept transcripts -- completed ones, or a still-active session past the active-slice threshold -- bypass the staleness floor; every other persona keeps it), then extracts each target persona's new transcripts into their three bounded memory stores via constrained Task-tool sub-agents -- never an inline `claude -p`. A cheap no-op when nothing is pending, so firing on every trigger is safe.
+description: Keep the whole team's tiger-memory fresh. Runs at every sweep trigger -- the first Slack message of a new thread (the bridge's Slack-bootstrap flow), persona-session bootstrap, a drive's idle-maintenance tail, the autodrive idle path, or an explicit "sweep memory" / "refresh team memory" / "rebuild memories" ask. Claims a team-wide sweep under the split gate (the calling persona's un-swept transcripts -- completed ones, or a still-active session past the active-slice threshold -- bypass the staleness floor; every other persona keeps it), then extracts each target persona's new transcripts into their three bounded memory stores via constrained helper sessions (sub-agents) -- never an inline headless CLI (`claude -p` / `codex exec`). A cheap no-op when nothing is pending, so firing on every trigger is safe.
 ---
 
 # sweep-memory
 
 The **in-session** memory refresh. One invocation keeps the *whole
 roster* fresh: any human contact with any teammate is the heartbeat. The
-bulky extraction work runs in isolated **Task-tool sub-agents**, so the
-transcripts and extraction bundles never enter the triggering
-conversation's context -- you only ever see short confirmations.
+bulky extraction work runs in isolated **helper sessions** (sub-agents:
+the Task tool in Claude Code, `spawn_agent` in Codex -- see the runtime
+glossary in AGENTS.md), so the transcripts and extraction bundles never
+enter the triggering conversation's context -- you only ever see short
+confirmations.
 
 This skill drives the topic-store memory model (design
 `docs/DESIGN-memory.md`, ADR 0007): each persona has **three** bounded
@@ -108,15 +110,16 @@ For the Slack trigger only, the in-thread UX is part of the contract:
 
 ## The executor rule (load-bearing -- do not get this wrong)
 
-- The executor for every extraction is a **Task-tool sub-agent**: it
+- The executor for every extraction is a **helper session** (sub-agent): it
   runs in an isolated context window, writes card files, and returns a
   short confirmation, so the bulky transcript and extraction bundle
   live in the **sub-agent's** context, never yours.
-- NEVER extract by shelling out to `claude -p`: a shelled-out model
+- NEVER extract by shelling out to a headless CLI (`claude -p` /
+  `codex exec`): a shelled-out model
   process runs outside the session's supervision and context
   management -- no isolation guarantee, no oversight, no resumability.
 - Only an *agent session* (interactive, or a sanctioned agentic drive
-  such as an autodrive fire) can spawn a Task sub-agent. A plain daemon
+  such as an autodrive fire) can spawn a helper session. A plain daemon
   process (e.g. the slack-bridge itself) cannot -- which is why every
   trigger routes the sweep INTO a session: the bridge injects the
   bootstrap instruction into the persona session's first turn rather
@@ -143,7 +146,7 @@ The per-target `plan` / `ingest-staged` / `rebuild` use
 `<target.config_path>` from the sweep-plan manifest, not `$DRIVER`. Every
 `tiger-memory` invocation below is written as `$TM`.
 
-**Sub-agent caveat:** a Task sub-agent runs in a *fresh* shell, so the
+**Sub-agent caveat:** a helper session runs in a *fresh* shell, so the
 `$TM` you exported in the driver shell is NOT inherited. In each
 sub-agent's brief, spell out the full invocation form literally. The
 extraction sub-agents below run **no** `tiger-memory` command at all
@@ -246,7 +249,7 @@ a. **Stage the work** (non-AI; bulky content stays out of your context):
    backlog fans out across many small fresh contexts instead of one agent
    looping over -- and re-reading -- every transcript.
 
-b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
+b. **Spawn ONE helper session (sub-agent) per stack** (the trust boundary + the
    fresh-window). Stacks are independent, so run the sub-agents **in
    parallel** (a sane cap, e.g. ~6 concurrent). Each sub-agent's brief:
    - **Read**: each `<uuid>.prompt.md` in its assigned stack (the prompt
@@ -340,7 +343,7 @@ d. **Compact what outgrew its bound** (staged, same sub-agent shape as
    see step 1's ordering rule; run `compact-apply` when the cards land,
    then a second `rebuild`.)
 
-   Otherwise, spawn **ONE Task sub-agent per target** (parallel, same
+   Otherwise, spawn **ONE helper session per target** (parallel, same
    cap). Each sub-agent's brief: read its `prompt_path` (the prompt
    embeds the store content and the strict output contract), emit ONLY
    the contracted replacement, **write it to exactly `card_path`**, then
@@ -505,15 +508,15 @@ process several `targets` concurrently (each its own plan -> stacks ->
   overflow limit, never drops a *fresh* `operator_explicit` directive
   (a stale one goes only as a logged last resort), and
   never forgets/merges a fresh topic.
-- **Context-safe** -> the executor is always the Task sub-agent
+- **Context-safe** -> the executor is always the helper session
   (extraction AND compaction); bulky content stays in sub-agent
   windows.
 
 ## What NOT to do
 
-- **Never** extract via `claude -p` -- the executor is always a
-  Task-tool sub-agent (the executor rule above: isolation, oversight,
-  resumability).
+- **Never** extract via a headless CLI (`claude -p` / `codex exec`) --
+  the executor is always a helper session (the executor rule above:
+  isolation, oversight, resumability).
 - **Never** let the bulky transcript or extraction bundle into your own
   context -- a sub-agent reads the prompt files and writes card files; you
   see only short confirmations and the `ingest-staged` JSON summary.

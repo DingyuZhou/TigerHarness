@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import builtins
+import logging
+import os
 import json
 import runpy
 from pathlib import Path
@@ -3164,3 +3166,76 @@ class TestTeamVendorBlock:
         assert rc == 0
         text = (team / "configs" / "personas.yaml").read_text()
         assert text.count("default_vendor:") == 1 and "default_vendor: chatgpt" in text
+
+
+# ---------------------------------------------------------------------------
+# .agents/skills symlink + runtime glossary (ADR 0011, skills for every vendor)
+# ---------------------------------------------------------------------------
+
+class TestAgentsSkillsLink:
+    def test_new_team_gets_the_link(self, tmp_path: Path):
+        from tigerharness.init import AGENTS_SKILLS_LINK_TARGET
+        team = tmp_path / "tigers"
+        created = create_team(team, include_slack=False)
+        link = team / ".agents" / "skills"
+        assert link in created
+        assert link.is_symlink()
+        assert os.readlink(link) == str(AGENTS_SKILLS_LINK_TARGET)
+        # Resolves to the real skills folder, so Codex sees the same files.
+        assert (link / "drive-journal" / "SKILL.md").is_file()
+        assert link.resolve() == (team / ".claude" / "skills").resolve()
+
+    def test_idempotent(self, tmp_path: Path):
+        from tigerharness.init import ensure_agents_skills_link
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        assert ensure_agents_skills_link(team) is None
+
+    def test_real_directory_is_left_alone(self, tmp_path: Path, caplog):
+        from tigerharness.init import ensure_agents_skills_link
+        team = tmp_path / "tigers"
+        (team / ".claude" / "skills").mkdir(parents=True)
+        (team / ".agents" / "skills" / "mine").mkdir(parents=True)
+        with caplog.at_level(logging.WARNING, logger="tigerharness.init"):
+            assert ensure_agents_skills_link(team) is None
+        assert "not a symlink" in caplog.text
+        assert (team / ".agents" / "skills" / "mine").is_dir()
+
+    def test_symlink_refused_by_os_is_a_warning(self, tmp_path: Path, monkeypatch, caplog):
+        from tigerharness.init import ensure_agents_skills_link
+
+        def boom(self, target, target_is_directory=False):
+            raise OSError("symlinks not permitted")
+        monkeypatch.setattr(Path, "symlink_to", boom)
+        (tmp_path / "tigers" / ".claude" / "skills").mkdir(parents=True)
+        with caplog.at_level(logging.WARNING, logger="tigerharness.init"):
+            assert ensure_agents_skills_link(tmp_path / "tigers") is None
+        assert "could not create" in caplog.text
+
+    def test_refresh_creates_the_link_on_an_older_team(self, tmp_path: Path, capsys):
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        (team / ".agents" / "skills").unlink()
+        rc = main(["--refresh", "--team-dir", str(team), "--dir", str(tmp_path)])
+        assert rc == 0
+        assert (team / ".agents" / "skills").is_symlink()
+        assert "Linked" in capsys.readouterr().out
+        # And a second refresh has nothing to do.
+        rc = main(["--refresh", "--team-dir", str(team), "--dir", str(tmp_path)])
+        assert rc == 0
+        assert "Nothing to do" in capsys.readouterr().out
+
+    def test_agents_md_carries_the_glossary(self, tmp_path: Path):
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        text = (team / "AGENTS.md").read_text()
+        assert "## Runtime glossary" in text
+        assert "helper session" in text and "spawn_agent" in text
+        assert "`.agents/skills` is a symlink" in text
+
+    def test_no_skills_folder_means_no_link(self, tmp_path: Path):
+        from tigerharness.init import ensure_agents_skills_link
+        team = tmp_path / "tigers"
+        team.mkdir()
+        assert ensure_agents_skills_link(team) is None
+        assert not (team / ".agents").exists()
