@@ -8,6 +8,9 @@ The concrete adapters:
     - ClaudeTranscriptAdapter (handles both ``claude_code`` and
       ``slack_thread`` kinds — same underlying JSONL transcript;
       origin determined by Slack-bridge threads.json reverse lookup).
+    - CodexTranscriptAdapter (``codex`` kind: OpenAI Codex session
+      rollouts under ~/.codex/sessions, attributed by the session's cwd
+      and the same threads.json reverse lookup).
     - DocsAdapter (one-shot for backfill).
     - JournalWorklogAdapter (per-persona journal memory: one synthetic
       conversation per ``(task, persona)`` from journal worklog files).
@@ -19,11 +22,13 @@ from __future__ import annotations
 
 from .base import SourceAdapter, SourceRecord
 from .claude_transcript import ClaudeTranscriptAdapter
+from .codex_transcript import CodexTranscriptAdapter
 from .docs import DocsAdapter
 from .journal_worklog import JournalWorklogAdapter
 
 __all__ = [
     "ClaudeTranscriptAdapter",
+    "CodexTranscriptAdapter",
     "DocsAdapter",
     "JournalWorklogAdapter",
     "SourceAdapter",

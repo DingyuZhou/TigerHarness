@@ -599,6 +599,17 @@ _PROJECT_PATH_EXPECTED_COMMENT = (
     "    # ^ Where Claude Code WILL write transcripts for this team.\n"
     "    #   The dir is created on the first claude_p dispatch.\n"
 )
+# The Codex counterpart of the claude_code source: sessions a persona on
+# `vendor: chatgpt` runs land under ~/.codex/sessions (a global tree), so
+# `cwd: auto` keeps only the sessions opened in this team root. Harmless
+# on a team with no Codex personas (the tree is simply empty).
+_CODEX_SOURCE_COMMENT = (
+    "  - kind: codex\n"
+    "    # OpenAI Codex sessions (`codex exec`, personas on vendor: chatgpt).\n"
+    "    # `cwd: auto` = only sessions opened in this team root.\n"
+    "    sessions_path: ~/.codex/sessions\n"
+    "    cwd: auto\n"
+)
 
 _SKILLS_README = """\
 # Team skills
@@ -1530,10 +1541,12 @@ def _render_memory_config(
             f"    # persona == \"{persona}\". Excludes other personas' threads\n"
             f"    # and unattributed local `claude -p` sessions (strict mode).\n"
             f"    persona: {persona}\n"
+            f"{_CODEX_SOURCE_COMMENT}"
+            f"    persona: {persona}\n"
             f"  - kind: slack_thread\n"
             f"    # The bridge's per-team state file -- provides the\n"
             f"    # session_id -> (thread_ts, persona) reverse map used\n"
-            f"    # by the per-persona filter above.\n"
+            f"    # by the per-persona filters above.\n"
             f"    threads_json: ~/.local/state/slack-bridge/{team}/threads.json\n"
         )
     else:
@@ -1541,6 +1554,7 @@ def _render_memory_config(
             f"  - kind: claude_code\n"
             f"    project_path: {project_path}\n"
             f"{comment}"
+            f"{_CODEX_SOURCE_COMMENT}"
         )
 
     return _MEMORY_CONFIG_TEMPLATE.format(

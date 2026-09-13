@@ -655,6 +655,30 @@ def _build_adapters(cfg: Config, *, max_age_days: int | None = 7) -> list[Source
                     drive_sessions_json=drive_sessions_json,
                 )
             )
+        elif s.kind == "codex":
+            # OpenAI Codex session rollouts (ADR 0011 limit 4). Same
+            # attribution knobs as claude_code; the sessions tree is global,
+            # so ``cwd`` (default ``auto`` = this team's root) selects the
+            # team's sessions.
+            from .sources import CodexTranscriptAdapter
+
+            persona = s.fields.get("persona")
+            persona = persona.strip() if isinstance(persona, str) and persona.strip() else None
+            team = s.fields.get("team")
+            team = team.strip() if isinstance(team, str) and team.strip() else None
+            include_unattributed = bool(s.fields.get("include_unattributed", False))
+            adapters.append(
+                CodexTranscriptAdapter(
+                    sessions_path=s.fields.get("sessions_path") or None,
+                    threads_json=threads_json,
+                    cwd=_resolve_team_cwd(s.fields.get("cwd", "auto"), repo_root, cfg),
+                    persona=persona,
+                    team=team,
+                    include_unattributed=include_unattributed,
+                    max_age_days=max_age_days,
+                    drive_sessions_json=drive_sessions_json,
+                )
+            )
         elif s.kind == "journal_worklog":
             journal_root = _resolve_journal_root(s.fields["journal_root"], repo_root)
             team = s.fields.get("team")
@@ -672,6 +696,20 @@ def _build_adapters(cfg: Config, *, max_age_days: int | None = 7) -> list[Source
             )
         # slack_thread / docs / auto_memory carry no live adapter on this path.
     return adapters
+
+
+def _resolve_team_cwd(field_cwd: object, repo_root: Path, cfg: Config) -> Path | None:
+    """Resolve a ``codex`` source's ``cwd`` field: ``auto`` (the default)
+    is the team root the config lives under (two levels above the
+    config's directory, or the cwd for a path-less config); an explicit
+    path is used with ``~`` expanded; an empty value disables the cwd
+    filter (every session under ``sessions_path`` is read)."""
+    raw = str(field_cwd).strip() if field_cwd is not None else ""
+    if not raw:
+        return None
+    if raw == "auto":
+        return repo_root.parent.parent if cfg.source_path else Path.cwd()
+    return Path(raw).expanduser()
 
 
 def _resolve_project_path(field_path: object, repo_root: Path, cfg: Config) -> Path:

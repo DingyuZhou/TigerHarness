@@ -144,11 +144,14 @@ literal in three modules.
    ability to spawn a helper sub-agent that writes a file -- the executor
    the sweep skill relies on). One copy of every skill, no per-vendor
    forks.
-4. **Codex transcripts are not ingested by tiger-memory.** Codex writes its
-   sessions under `~/.codex/sessions/`, which the `claude_transcript` source
-   does not read. A ChatGPT persona's Slack turns therefore do not reach its
-   memory through the transcript rail (the journal worklog rail is
-   unaffected). A `codex_transcript` source is the natural follow-up.
+4. **Codex transcripts are not ingested by tiger-memory.** *Resolved the
+   same day.* A `codex` source (`sources/codex_transcript.py`) reads
+   `~/.codex/sessions/**/rollout-*.jsonl`, keeps the sessions opened in the
+   team root, attributes them through the same threads.json reverse map
+   (the bridge records the Codex thread id as the session id), skips
+   helper-session rollouts, and shares the attribution / filtering /
+   record shape with the Claude adapter through one base class. New
+   personas get the source by default; existing configs add three lines.
 5. **The Codex CLI must be on the daemon's `PATH`**, exactly as `claude`
    must (README, "Known limitations"). On this host it lives in
    `~/.local/bin`, which the bridge's systemd drop-in must include.

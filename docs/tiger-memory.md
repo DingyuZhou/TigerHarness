@@ -133,6 +133,15 @@ sources:
     # Optional, for multi-persona Slack-bridge setups:
     # persona: ayako                    # only ingest sessions owned by this persona
     # include_unattributed: false        # opt-in to also include local claude-p sessions
+  - kind: codex
+    # OpenAI Codex session rollouts -- what a persona on `vendor: chatgpt`
+    # (ADR 0011) writes. The tree is global, so `cwd: auto` keeps only the
+    # sessions opened in this team root (an explicit path works; empty
+    # disables the filter). `persona:` / `include_unattributed:` behave
+    # exactly as for claude_code; helper-session (sub-agent) rollouts are
+    # skipped like Claude's sidechain rows.
+    sessions_path: ~/.codex/sessions
+    cwd: auto
 
 summarizer:
   backend: anthropic
