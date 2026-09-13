@@ -1484,3 +1484,390 @@ def test_cmd_start_refuses_a_malformed_vendor(tmp_path, capsys):
 def test_start_parser_defaults_leave_backend_and_model_unset():
     args = _args(["start"])
     assert args.backend is None and args.model is None
+
+
+# --------------------------------------------------------------------------
+# Drive lanes (ADR 0012): the lane probe, per-lane fan-out, early wake
+# --------------------------------------------------------------------------
+
+_LANE_ROSTER = """\
+default_persona: Ayako
+default_vendor: claude
+personas:
+  - name: Ayako
+  - name: Akagi
+  - name: Rukawa
+    vendor: chatgpt
+    model: gpt-6-astra
+"""
+
+
+def _lane_team(tmp_path, roster=_LANE_ROSTER):
+    from tigerharness.journal.paths import JournalPaths
+    team = tmp_path / "team"
+    (team / "configs").mkdir(parents=True)
+    (team / "configs" / "personas.yaml").write_text(roster)
+    paths = JournalPaths(root=team / "journal")
+    paths.ensure()
+    return team, paths
+
+
+def _lane_task(paths, task_id, persona):
+    from tigerharness.journal.models import Status
+    st = Status.new(id=task_id, title=f"T {task_id}", persona=persona)
+    (paths.active / task_id).mkdir(parents=True, exist_ok=True)
+    paths.status_json(task_id).write_text(st.to_json())
+
+
+def _lane_workflow_no_captain(paths, task_id):
+    from tigerharness.journal.models import Status
+    st = Status.new_workflow(id=task_id, title="W", playbook_name="default")
+    (paths.active / task_id).mkdir(parents=True, exist_ok=True)
+    paths.status_json(task_id).write_text(st.to_json())
+
+
+def test_probe_lanes_groups_work_by_lane(tmp_path):
+    from tigerharness.journal.deferred import defer_entry
+    team, paths = _lane_team(tmp_path)
+    _lane_task(paths, "t-ayako", "Ayako")
+    _lane_task(paths, "t-rukawa", "Rukawa")
+    _lane_task(paths, "t-akagi", "Akagi")
+    defer_entry(paths, title="d", team="T", payload_text="p", kind="task", persona="Rukawa")
+    cfg = _cfg(driver="Ayako", journal_root=str(paths.root))
+    lanes = runner.probe_lanes(cfg)
+    assert [(lw.key, lw.backend, lw.model, lw.driver, lw.items) for lw in lanes] == [
+        ("claude", "claude_p", None, "Ayako", 2),
+        ("chatgpt/gpt-6-astra", "codex_exec", "gpt-6-astra", "Rukawa", 2),
+    ]
+
+
+def test_probe_lanes_driver_selection(tmp_path):
+    team, paths = _lane_team(tmp_path)
+    _lane_task(paths, "t-akagi", "Akagi")
+    _lane_workflow_no_captain(paths, "wf-nobody")
+    # Configured driver on another lane: the claude lane's driver is the
+    # first owner on it (Akagi), never the chatgpt driver.
+    lanes = runner.probe_lanes(_cfg(driver="Rukawa", journal_root=str(paths.root)))
+    assert [(lw.key, lw.driver) for lw in lanes] == [("claude", "Akagi")]
+    # No configured driver and only ownerless work: the team default persona
+    # drives its own lane.
+    for tid in ("t-akagi",):
+        import shutil
+        shutil.rmtree(paths.active / tid)
+    lanes = runner.probe_lanes(_cfg(driver=None, journal_root=str(paths.root)))
+    assert [(lw.key, lw.driver) for lw in lanes] == [("claude", "Ayako")]
+
+
+def test_probe_lanes_skips_a_lane_nobody_can_drive(tmp_path, caplog):
+    team, paths = _lane_team(
+        tmp_path,
+        "default_vendor: claude\npersonas:\n  - name: Rukawa\n    vendor: chatgpt\n",
+    )
+    _lane_workflow_no_captain(paths, "wf-nobody")  # owner None -> claude lane
+    with caplog.at_level(logging.WARNING, logger="tigerharness.autodrive.runner"):
+        lanes = runner.probe_lanes(_cfg(driver="Rukawa", journal_root=str(paths.root)))
+    assert lanes == []
+    assert "no persona to drive it as" in caplog.text
+
+
+def test_probe_lanes_fail_soft(tmp_path, caplog):
+    assert runner.probe_lanes(_cfg(journal_root=None)) == []
+    # A personal journal (no team root) has no lanes.
+    from tigerharness.journal.paths import JournalPaths
+    personal = JournalPaths(root=tmp_path / "solo" / "journal")
+    personal.ensure()
+    assert runner.probe_lanes(_cfg(journal_root=str(personal.root))) == []
+    # A malformed vendor: warn and fall back to the single default drive.
+    team, paths = _lane_team(tmp_path, "personas:\n  - name: Ayako\n    vendor: gemini\n")
+    _lane_task(paths, "t1", "Ayako")
+    with caplog.at_level(logging.WARNING, logger="tigerharness.autodrive.runner"):
+        assert runner.probe_lanes(_cfg(driver="Ayako", journal_root=str(paths.root))) == []
+    assert "lane probe failed" in caplog.text
+
+
+def _lw(key, driver, backend="claude_p", model=None):
+    return runner.LaneWork(key=key, backend=backend, model=model, driver=driver, items=1)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_fires_one_drive_per_lane(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    seen = []
+
+    async def fake_drive(cfg, *, backend=None):
+        seen.append((cfg.driver, cfg.backend, cfg.model, cfg.prompt))
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0)
+
+    notifier = _RecordingNotifier()
+    n = await runner.run_loop(
+        _cfg(driver="Ayako"), p, max_ticks=2, run_drive=fake_drive,
+        sleep=fake_sleep, now=lambda: "T", notifier=notifier,
+        probe=lambda cfg: runner.QUEUE_ACTIONABLE,
+        lane_probe=lambda cfg: [
+            _lw("claude", "Ayako"),
+            _lw("chatgpt/gpt-6-astra", "Rukawa", "codex_exec", "gpt-6-astra"),
+        ],
+    )
+    assert n == 2
+    assert seen[0][:3] == ("Ayako", "claude_p", None)
+    assert seen[1][:3] == ("Rukawa", "codex_exec", "gpt-6-astra")
+    assert "LANE RULE" in seen[1][3] and "lane chatgpt/gpt-6-astra as Rukawa" in seen[1][3]
+    assert "lane=claude as Ayako" in notifier.heartbeats[0]
+    assert "lane=chatgpt/gpt-6-astra as Rukawa" in notifier.heartbeats[1]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_keeps_one_drive_per_lane_in_flight(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    gate = asyncio.Event()
+    fired = []
+
+    async def drive(cfg, *, backend=None):
+        fired.append(cfg.driver)
+        if cfg.driver == "Ayako":
+            await gate.wait()  # lane claude stays busy
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0)
+
+    calls = {"n": 0}
+
+    def lane_probe(cfg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [_lw("claude", "Ayako")]
+        return [_lw("claude", "Ayako"), _lw("chatgpt", "Rukawa", "codex_exec")]
+
+    notifier = _RecordingNotifier()
+
+    def should_stop():
+        if len(fired) >= 2:
+            gate.set()
+            return True
+        return False
+
+    n = await runner.run_loop(
+        _cfg(driver="Ayako"), p, run_drive=drive, sleep=fake_sleep,
+        now=lambda: "T", notifier=notifier, should_stop=should_stop,
+        probe=lambda cfg: runner.QUEUE_ACTIONABLE, lane_probe=lane_probe,
+    )
+    # Cycle 1 fired claude; cycle 2 saw claude still out and fired only chatgpt.
+    assert n == 2 and fired == ["Ayako", "Rukawa"]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_pulses_when_every_lane_has_a_drive_out(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    gate = asyncio.Event()
+
+    async def slow(cfg, *, backend=None):
+        await gate.wait()
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        await asyncio.sleep(0)
+
+    notifier = _RecordingNotifier()
+
+    def should_stop():
+        # Stop once the busy cycle has pulsed; release the drive so the
+        # exit drain completes.
+        if any(runner.SKIP_LANES_BUSY in h for h in notifier.heartbeats):
+            gate.set()
+            return True
+        return False
+
+    n = await runner.run_loop(
+        _cfg(driver="Ayako"), p, run_drive=slow, sleep=fake_sleep,
+        now=lambda: "T", notifier=notifier, should_stop=should_stop,
+        probe=lambda cfg: runner.QUEUE_ACTIONABLE,
+        lane_probe=lambda cfg: [_lw("claude", "Ayako")],
+    )
+    assert n == 1
+    assert any(runner.SKIP_LANES_BUSY in h for h in notifier.heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_lanes_off_or_empty_fires_the_default_drive(tmp_path):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    seen = []
+    probes = {"n": 0}
+
+    async def fake_drive(cfg, *, backend=None):
+        seen.append(cfg.driver)
+        return _FakeResult()
+
+    async def fake_sleep(secs):
+        pass
+
+    def lane_probe(cfg):
+        probes["n"] += 1
+        return [_lw("chatgpt", "Rukawa", "codex_exec")]
+
+    # Pinned daemon: the lane probe is never consulted, and the interval
+    # sleep is the plain injected sleep (no early-wake race).
+    slept = []
+
+    async def plain_sleep(secs):
+        slept.append(secs)
+
+    n = await runner.run_loop(
+        _cfg(driver="Ayako", lanes=False), p, max_ticks=2, run_drive=fake_drive,
+        sleep=plain_sleep, now=lambda: "T",
+        probe=lambda cfg: runner.QUEUE_ACTIONABLE, lane_probe=lane_probe,
+    )
+    assert n == 2 and seen == ["Ayako", "Ayako"] and probes["n"] == 0
+    assert slept == [600.0]
+    seen.clear()
+    # Lanes on but nothing attributable: the single default drive.
+    runner.write_state(p, {"pid": 1})
+    n = await runner.run_loop(
+        _cfg(driver="Ayako"), p, max_ticks=1, run_drive=fake_drive,
+        sleep=fake_sleep, now=lambda: "T",
+        probe=lambda cfg: runner.QUEUE_ACTIONABLE, lane_probe=lambda cfg: [],
+    )
+    assert n == 1 and seen == ["Ayako"]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_wakes_early_when_a_drive_completes(tmp_path):
+    """A clean completion interrupts the interval sleep: the next probe (idle
+    here) runs at once and the maintenance drive fires, instead of waiting
+    out a 600 s interval."""
+    import time as _time
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    verdicts = iter([runner.QUEUE_ACTIONABLE, runner.QUEUE_IDLE, runner.QUEUE_IDLE])
+
+    async def fake_drive(cfg, *, backend=None):
+        await asyncio.sleep(0.05)
+        return _FakeResult()
+
+    t0 = _time.monotonic()
+    n = await runner.run_loop(
+        _cfg(driver="Ayako"), p, max_ticks=2, run_drive=fake_drive,
+        sleep=asyncio.sleep, now=lambda: "T",
+        probe=lambda cfg: next(verdicts),
+        lane_probe=lambda cfg: [_lw("claude", "Ayako")],
+    )
+    assert n == 2
+    assert _time.monotonic() - t0 < 5
+
+
+@pytest.mark.asyncio
+async def test_run_loop_early_wake_respects_the_per_lane_floor(tmp_path, caplog):
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    never = asyncio.Event()
+    sleeps = {"n": 0}
+
+    async def fake_sleep(secs):
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            await never.wait()  # the first interval is cut short by the wake
+        await asyncio.sleep(0)
+
+    async def fake_drive(cfg, *, backend=None):
+        return _FakeResult()
+
+    # clock() calls: cycle 1 floor check + fire stamp (0, 0); cycle 2 --
+    # woken early -- floor check (10 -> held); cycle 3 floor check + fire
+    # stamp (200, 200). max_ticks=3 bounds cycles, not just fires.
+    ticks = iter([0.0, 0.0, 10.0, 200.0, 200.0, 200.0, 200.0])
+    notifier = _RecordingNotifier()
+    with caplog.at_level(logging.INFO, logger="tigerharness.autodrive.runner"):
+        n = await runner.run_loop(
+            _cfg(driver="Ayako"), p, max_ticks=3, run_drive=fake_drive,
+            sleep=fake_sleep, now=lambda: "T", notifier=notifier,
+            probe=lambda cfg: runner.QUEUE_ACTIONABLE,
+            lane_probe=lambda cfg: [_lw("claude", "Ayako")],
+            clock=lambda: next(ticks),
+        )
+    assert n == 2
+    assert "woke early" in caplog.text
+    assert "fired 10s ago; holding until the floor" in caplog.text
+    assert any(runner.SKIP_LANES_BUSY in h for h in notifier.heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_errored_drive_does_not_wake(tmp_path):
+    """An exception is not a clean completion: no early wake, so the loop
+    sleeps its full (fake) interval and the cadence is unchanged."""
+    p = tmp_path / "s.json"
+    runner.write_state(p, {"pid": 1})
+    slept = []
+
+    async def boom(cfg, *, backend=None):
+        raise RuntimeError("kaboom")
+
+    async def fake_sleep(secs):
+        slept.append(secs)
+        await asyncio.sleep(0)
+
+    n = await runner.run_loop(
+        _cfg(driver="Ayako"), p, max_ticks=2, run_drive=boom, sleep=fake_sleep,
+        now=lambda: "T", probe=lambda cfg: runner.QUEUE_ACTIONABLE,
+        lane_probe=lambda cfg: [_lw("claude", "Ayako")],
+    )
+    assert n == 2 and slept == [600.0]
+
+
+def test_heartbeat_text_names_the_lane():
+    assert runner.heartbeat_text(3, "T", 1) == "autodrive heartbeat - fire #3 launched T (in-flight 1)"
+    assert runner.heartbeat_text(3, "T", 1, lane="chatgpt", driver="Rukawa").endswith(
+        " lane=chatgpt as Rukawa"
+    )
+    assert runner.heartbeat_text(3, "T", 1, lane="claude").endswith(" lane=claude as (none)")
+
+
+def test_default_prompt_lane_rule():
+    p = runner.default_prompt("Rukawa", lane="chatgpt/gpt-6-astra")
+    assert "LANE RULE (ADR 0012): this drive runs on lane chatgpt/gpt-6-astra as Rukawa" in p
+    assert "journal sweep --driver Rukawa" in p and "handoff:" in p
+    assert "LANE RULE" not in runner.default_prompt("Rukawa")
+    assert "LANE RULE" not in runner.default_prompt(None, lane="claude")
+
+
+def test_config_lanes_round_trip():
+    cfg = _cfg(lanes=False)
+    assert runner.config_to_dict(cfg)["lanes"] is False
+    assert runner.config_from_state(runner.config_to_dict(cfg)).lanes is False
+    # An older state file (no key) reads as lanes on.
+    old = runner.config_to_dict(_cfg())
+    del old["lanes"]
+    assert runner.config_from_state(old).lanes is True
+
+
+def test_cmd_start_pins_lanes_off_with_explicit_backend(tmp_path):
+    _make_team(tmp_path)
+    args = _args(["start", "--journal-dir", str(tmp_path / "journal"), "--backend", "claude_p"])
+    with pytest.raises(RealDaemonSpawnBlocked):
+        cli.cmd_start(args, now=lambda: "T")
+    state = runner.read_state(runner.state_path(tmp_path / "journal"))
+    assert state["lanes"] is False
+    runner.state_path(tmp_path / "journal").unlink()  # no daemon on record
+    args = _args(["start", "--journal-dir", str(tmp_path / "journal")])
+    with pytest.raises(RealDaemonSpawnBlocked):
+        cli.cmd_start(args, now=lambda: "T")
+    assert runner.read_state(runner.state_path(tmp_path / "journal"))["lanes"] is True
+
+
+def test_cmd_status_prints_the_lanes_line(tmp_path, capsys, monkeypatch):
+    team = _team_root(tmp_path)
+    runner.write_state(
+        runner.state_path(team / "journal"),
+        {"pid": os.getpid(), "interval_seconds": 600, "tick_count": 0,
+         "journal_root": str(team / "journal"), "lanes": False},
+    )
+    monkeypatch.chdir(team)
+    assert cli.cmd_status(_args(["status"])) == 0
+    out = capsys.readouterr().out
+    assert "lanes:        off (pinned by --backend/--model/--prompt)" in out

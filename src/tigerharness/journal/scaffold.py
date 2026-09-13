@@ -58,6 +58,9 @@ log = logging.getLogger("tigerharness.journal.scaffold")
 # (matching neither current nor a prior ship) is left untouched. **When
 # you change OPERATING_MD, append the OLD rendered content's sha256 here.**
 _PRIOR_OPERATING_HASHES = {
+    # 2026-09-13 (ADR 0011 ship, pre drive-lanes): before the lane rules
+    # (sweep --driver lane view, claim/step-done lane gate, handoff cue).
+    "ef7ddfa1281dc2e24a40b36bddfb00fb0ba21dd48f396f4b61fc5913f5e4338d",
     # Each entry is a previously-shipped rendered OPERATING.md an existing
     # journal may still have on disk; all refresh to the current (merged
     # cascade + per-persona-memory) template.
@@ -134,7 +137,7 @@ _PRIOR_OPERATING_HASHES = {
 # value into _PRIOR_OPERATING_HASHES and roll it. It also gives every future
 # prior a provenance the suite itself pinned while that template was live.
 _CURRENT_OPERATING_HASH = (
-    "ef7ddfa1281dc2e24a40b36bddfb00fb0ba21dd48f396f4b61fc5913f5e4338d"
+    "2a7d5fa442246b04f4a7330e50d53a5de2d8e0b4a016664b930edc623d5a22fe"
 )
 
 

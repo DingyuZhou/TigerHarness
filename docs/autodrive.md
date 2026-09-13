@@ -135,6 +135,39 @@ resumable. A drive that raises is logged as `last_error` and the loop keeps
 firing; one bad drive never takes the daemon down. On `stop`, any still-running
 drives are drained so their results are recorded before the daemon exits.
 
+### Drive lanes: one drive per vendor/model with work (ADR 0012)
+
+A persona's vendor decides the brain that does its journal work, and
+autodrive is the coordinator that makes it so. On an actionable cycle the
+daemon runs a second non-AI probe (`probe_lanes`) that attributes every
+actionable task and inbox entry to its owner persona and that persona's
+**lane** (vendor + model, per `configs/personas.yaml`), then fires **one
+drive per lane** that has work: as a persona on that lane (the configured
+`--driver` when it lives there, else the owner of the lane's first item,
+else the team default persona when it is on that lane), on that lane's
+backend and model, with a drive prompt that carries the lane rule. The
+drive then takes only work `journal sweep --driver` marks `[mine]`;
+`journal claim` refuses the rest (exit 3), and `journal step-done` hands a
+workflow to another lane by asking the drive to release it.
+
+Guardrails:
+
+- **At most one drive per lane is in flight.** A cycle whose lanes all
+  have a drive out pulses `lanes busy` and fires nothing.
+- **Early wake, floored.** A drive that completes *cleanly* wakes the loop
+  before the interval elapses (its release may have handed a step to
+  another lane). A lane is not fired again within 60 s of its last fire on
+  a woken cycle, so a fast no-op drive cannot turn the cadence into a
+  storm; an errored drive never wakes.
+- **Fail-soft.** No team root, a malformed vendor, or any probe error means
+  "no lanes": the single default drive fires exactly as before. `--backend`,
+  `--model` or `--prompt` pin every drive and turn lanes off (`status`
+  shows `lanes: off`). The maintenance fire is always a single default
+  drive. The rescue hold stays global.
+
+A one-vendor team has one lane and behaves exactly as before. Design and
+the ownership table: [adr/0012](adr/0012-drive-lanes.md).
+
 ### The idle fire runs the maintenance tail, then the daemon stops
 
 When the probe returns `idle`, the daemon fires **exactly one** drive — the

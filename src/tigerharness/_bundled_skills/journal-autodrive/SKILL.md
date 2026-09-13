@@ -134,6 +134,18 @@ Stop:
 - A bare "keep the queue moving automatically" -> `start` at the default
   10-minute interval; mention the `stop` command and the budget cap.
 
+## Lanes: one drive per vendor/model with work (ADR 0012)
+
+When the roster mixes vendors (`vendor:` per persona in
+`configs/personas.yaml`), an actionable cycle fires **one drive per
+lane** that has work -- as a persona on that lane, on that lane's
+backend and model -- keeping at most one drive per lane in flight, and
+a drive that finishes cleanly wakes the loop early (a workflow step may
+just have been handed to another lane; a 60 s per-lane floor keeps
+that from becoming a storm). `--backend`, `--model` or `--prompt` pin
+every drive and turn lanes off (`status` shows `lanes: off`). A
+one-vendor team has one lane and behaves exactly as before.
+
 ## What it does each fire
 
 Spawns the backend in the team root (in a **fresh session**, no `--resume`)

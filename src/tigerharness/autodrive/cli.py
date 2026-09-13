@@ -432,6 +432,10 @@ def cmd_start(
 
     cwd = str(team_root if team_root is not None else journal_root.parent)
     prompt = args.prompt if args.prompt else default_prompt(driver)
+    # Per-lane fan-out (ADR 0012) is on unless the operator pinned every
+    # drive's shape by hand: an explicit backend, model or prompt applies
+    # to the one drive it describes, so lanes stand down.
+    lanes = not (args.backend or args.model or args.prompt)
     cfg = AutodriveConfig(
         interval_seconds=interval,
         driver=driver,
@@ -444,6 +448,7 @@ def cmd_start(
         notify=notify,
         notify_channel=notify_channel,
         journal_root=str(journal_root),
+        lanes=lanes,
     )
     logf = log_path(state_root)
     # Pin the journal the spawned drives target and drop the caller's
@@ -652,6 +657,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  backend:      {state.get('backend')}")
     print(f"  model:        {state.get('model') or '(backend default)'}")
     print(f"  driver:       {state.get('driver') or '(none)'}")
+    print(
+        f"  lanes:        "
+        f"{'on (one drive per vendor/model lane with work)' if state.get('lanes', True) else 'off (pinned by --backend/--model/--prompt)'}"
+    )
     print(f"  max_budget:   {state.get('max_budget_usd')}")
     print(f"  notify:       {notify_target}")
     print(f"  started_at:   {state.get('started_at')}")

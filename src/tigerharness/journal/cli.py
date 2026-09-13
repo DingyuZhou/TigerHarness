@@ -21,6 +21,7 @@ import os
 import secrets
 import sys
 from pathlib import Path
+from typing import Any
 
 from tigerharness.journal.compile_cli import build_subparsers as _build_compile_subparsers
 from tigerharness.journal.models import (
@@ -59,7 +60,7 @@ from tigerharness.journal.sweep import (
     stuck_timeout_from_env,
     sweep,
 )
-from tigerharness.journal import drive_sessions, walk, worklog
+from tigerharness.journal import drive_sessions, lanes, walk, worklog
 
 log = logging.getLogger("tigerharness.journal.cli")
 
@@ -679,6 +680,31 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         return 2
     result = sweep(paths, stuck_timeout_sec=timeout)
 
+    # Lane view (ADR 0012): with --driver, say which actionable items this
+    # drive may take (same vendor/model lane as the driver persona) and
+    # which belong to another lane's drive. A malformed vendor in
+    # personas.yaml is a config error, reported like a bad --stuck-timeout.
+    driver = getattr(args, "driver", None)
+    lane_view: dict[str, dict[str, Any]] = {}
+    deferred_view: dict[str, dict[str, Any]] = {}
+    driver_lane_key: str | None = None
+    deferred_ids = list_deferred(paths)
+    if driver:
+        team_root = lanes.team_root_for(paths.root)
+        try:
+            driver_lane_key = lanes.lane_of(team_root, driver).key
+            for s in result.actionable():
+                lane_view[s.id] = _lane_entry(
+                    team_root, driver, lanes.work_owner(paths, s),
+                )
+            for did in deferred_ids:
+                deferred_view[did] = _lane_entry(
+                    team_root, driver, lanes.deferred_owner(paths, did),
+                )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
     if args.format == "json":
         payload = {
             "summary": result.to_summary(),
@@ -693,17 +719,33 @@ def cmd_sweep(args: argparse.Namespace) -> int:
                 for m in result.malformed
             ],
             "actionable": [s.id for s in result.actionable()],
-            "deferred": list_deferred(paths),
+            "deferred": deferred_ids,
             "misplaced": [
                 {"task_id": tid, "recorded_root": root}
                 for tid, root in result.misplaced
             ],
             "provenance_unknown": result.provenance_unknown,
         }
+        if driver:
+            payload["driver"] = driver
+            payload["driver_lane"] = driver_lane_key
+            payload["lanes"] = lane_view
+            payload["actionable_mine"] = [
+                tid for tid, v in lane_view.items() if v["mine"]
+            ]
+            payload["actionable_other_lane"] = [
+                tid for tid, v in lane_view.items() if not v["mine"]
+            ]
+            payload["deferred_lanes"] = deferred_view
+            payload["deferred_mine"] = [
+                did for did, v in deferred_view.items() if v["mine"]
+            ]
         print(json.dumps(payload, indent=2))
         return 0
 
     print(result.to_summary())
+    if driver:
+        print(f"Lane view for driver {driver} (lane {driver_lane_key}).")
     if result.archived:
         print()
         print("Archived (moved to done/):")
@@ -713,7 +755,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         print()
         print("Actionable (pick one of these next):")
         for s in result.actionable():
-            print(f"  - {s.id}  [{s.state.value}]  {s.title}")
+            print(f"  - {s.id}  [{s.state.value}]  {s.title}{_lane_suffix(lane_view.get(s.id))}")
     if result.in_progress_busy:
         print()
         print("Busy (LEAVE ALONE -- a live session owns these):")
@@ -743,7 +785,6 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             f"({len(result.provenance_unknown)} task(s) predate "
             f"provenance recording -- placement unknown, not checked.)"
         )
-    deferred_ids = list_deferred(paths)
     if deferred_ids:
         print()
         print(
@@ -751,8 +792,48 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             "first -- `journal materialize <id>`):"
         )
         for did in deferred_ids:
-            print(f"  - {did}")
+            print(f"  - {did}{_lane_suffix(deferred_view.get(did))}")
     return 0
+
+
+def _lane_entry(
+    team_root: Path | None, driver: str, owner: str | None,
+) -> dict[str, Any]:
+    """One sweep lane-view row: who owns the work, which lane that is,
+    and whether this driver may take it."""
+    check = lanes.lane_check(team_root, driver, owner)
+    return {"owner": owner, "lane": check.owner_lane.key, "mine": check.same}
+
+
+def _lane_suffix(entry: dict[str, Any] | None) -> str:
+    if entry is None:
+        return ""
+    if entry["mine"]:
+        return "  [mine]"
+    return f"  [lane {entry['lane']} -- not yours; owner {entry['owner'] or 'team default'}]"
+
+
+def _refuse_if_other_lane(
+    paths: JournalPaths, status: Status, driver: str, *, owner: str | None,
+) -> tuple[int, str | None]:
+    """The lane gate (ADR 0012): ``(0, driver_lane_key)`` when the driver
+    may take work owned by *owner*, else a non-zero CLI code with the
+    error already printed -- 3 for a lane mismatch, 2 for a malformed
+    vendor in personas.yaml. Read-only: a refusal changes nothing."""
+    team_root = lanes.team_root_for(paths.root)
+    try:
+        check = lanes.lane_check(team_root, driver, owner)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2, None
+    if not check.same:
+        log.warning(
+            "lane refused: %s (owner %s on %s) vs driver %s on %s",
+            status.id, owner, check.owner_lane.key, driver, check.driver_lane.key,
+        )
+        print(f"error: {check.refusal(status.id)}", file=sys.stderr)
+        return 3, None
+    return 0, check.driver_lane.key
 
 
 # ---------------------------------------------------------------------------
@@ -1068,6 +1149,27 @@ def cmd_claim(args: argparse.Namespace) -> int:
         else ("resume" if klass == "idle" else "rescue")
     )
 
+    # Lane gate (ADR 0012): a drive takes only work whose owner persona
+    # runs on the same vendor/model lane as its --driver persona. Before
+    # any mutation, so a refused claim provably changes nothing; --any-lane
+    # is the deliberate override (a hand drive with no other lane's driver
+    # available). No --driver = no lane identity = no gate.
+    lane_key: str | None = None
+    if getattr(args, "driver", None):
+        if not getattr(args, "any_lane", False):
+            rc, lane_key = _refuse_if_other_lane(
+                paths, status, args.driver, owner=lanes.work_owner(paths, status),
+            )
+            if rc:
+                return rc
+        else:
+            try:
+                lane_key = lanes.lane_of(
+                    lanes.team_root_for(paths.root), args.driver,
+                ).key
+            except ValueError:
+                lane_key = None
+
     # Budget guard: a task already at its session cap must not be run
     # past it. A crash/clean-stop that left an at-cap task in_progress
     # (instead of blocked) could otherwise be re-claimed forever, and the
@@ -1159,6 +1261,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
             "sessions": status.sessions,
             "max_sessions": status.max_sessions,
             "kind": status.kind,
+            "lane": lane_key,
         }, indent=2))
     else:
         log.info("claimed %s session_ref=%s sessions=%d/%d kind=%s",
@@ -1498,6 +1601,15 @@ def cmd_step_done(args: argparse.Namespace) -> int:
     if persona is None:
         return 1  # _read_step_persona_role printed the error
 
+    # Lane gate (ADR 0012): the step's persona must run on this drive's
+    # lane, or the note would be recorded as work done on the wrong
+    # vendor. Before the worklog write, so a refusal changes nothing.
+    driver = getattr(args, "driver", None)
+    if driver and not getattr(args, "any_lane", False):
+        rc, _ = _refuse_if_other_lane(paths, status, driver, owner=persona)
+        if rc:
+            return rc
+
     # Write the worklog entry FIRST (the note is the ticket); only then
     # advance the cursor. If the worklog write fails we do NOT advance, so
     # the session retries the same step rather than losing the note. The
@@ -1550,6 +1662,25 @@ def cmd_step_done(args: argparse.Namespace) -> int:
         )
 
     terminal = next_step in walk.SENTINELS
+    # Handoff cue (ADR 0012): when the NEXT step's persona runs on another
+    # lane, this drive must release the task so a drive on that lane can
+    # claim it (the lane gate would refuse this drive's next step-done).
+    handoff: dict[str, Any] | None = None
+    if driver and not terminal:
+        next_owner = lanes.step_owner(paths, status.id, next_step)
+        try:
+            check = lanes.lane_check(
+                lanes.team_root_for(paths.root), driver, next_owner,
+            )
+        except ValueError as exc:
+            log.warning("step-done: lane check for %s failed: %s", next_step, exc)
+            check = None
+        if check is not None and not check.same:
+            handoff = {
+                "step": next_step,
+                "persona": next_owner,
+                "lane": check.owner_lane.key,
+            }
     if getattr(args, "format", "text") == "json":
         print(json.dumps({
             "task_id": status.id,
@@ -1559,6 +1690,7 @@ def cmd_step_done(args: argparse.Namespace) -> int:
             "role": role,
             "next": next_step,
             "terminal": terminal,
+            "handoff": handoff,
             "worklog_seq": stamped.seq,
             "worklog_path": str(stamped.path),
         }, indent=2))
@@ -1575,6 +1707,14 @@ def cmd_step_done(args: argparse.Namespace) -> int:
             )
         else:
             print(f"  next: {next_step}")
+        if handoff is not None:
+            print(
+                f"  handoff: {next_step} belongs to {handoff['persona']} on "
+                f"lane {handoff['lane']} -- release this task now "
+                f"(`journal release {status.id} --driver {driver} "
+                f"--next-action \"handoff to {handoff['persona']}: step "
+                f"{next_step}\"`) so a drive on that lane picks it up."
+            )
     return 0
 
 
@@ -2076,6 +2216,16 @@ def build_parser() -> argparse.ArgumentParser:
             f"{DEFAULT_STUCK_TIMEOUT_SEC}."
         ),
     )
+    sw.add_argument(
+        "--driver", default=None,
+        help=(
+            "Persona this drive runs as. Adds the lane view: each "
+            "actionable item and deferred entry is marked [mine] (its "
+            "owner runs on the same vendor/model lane) or not yours (a "
+            "drive on that lane takes it). JSON adds actionable_mine / "
+            "actionable_other_lane / deferred_mine."
+        ),
+    )
     sw.set_defaults(func=cmd_sweep)
 
     cl = sub.add_parser(
@@ -2115,6 +2265,14 @@ def build_parser() -> argparse.ArgumentParser:
             "automatically from the TIGERHARNESS_SLACK_THREAD_TS env var "
             "the bridge sets. Pass it explicitly only to override that or "
             "outside the bridge."
+        ),
+    )
+    cl.add_argument(
+        "--any-lane", action="store_true",
+        help=(
+            "Deliberately claim work whose owner persona runs on another "
+            "vendor/model lane than --driver. Without it, claim refuses "
+            "such work (exit 3) so a drive on the owner's lane takes it."
         ),
     )
     cl.add_argument(
@@ -2236,6 +2394,19 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument(
         "--session-ref", default=None,
         help="If given, must match the current holder before advancing.",
+    )
+    sd.add_argument(
+        "--driver", default=None,
+        help=(
+            "Persona this drive runs as. Enables the lane gate (the step's "
+            "persona must run on the driver's vendor/model lane; exit 3 "
+            "otherwise) and the handoff cue when the NEXT step belongs to "
+            "another lane."
+        ),
+    )
+    sd.add_argument(
+        "--any-lane", action="store_true",
+        help="Record the step even if its persona runs on another lane.",
     )
     sd.add_argument("--format", choices=["text", "json"], default="text")
     sd.set_defaults(func=cmd_step_done)

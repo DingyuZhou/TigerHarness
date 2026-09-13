@@ -120,14 +120,13 @@ literal in three modules.
 **What it does not yet do — stated so nobody assumes otherwise.**
 
 1. **A journal task runs on the driver's vendor, not the task's persona's.**
-   A drive is one cascading session (`drive-journal`) that claims tasks and
-   adopts their personas in-session. The vendor is fixed when that session
-   is launched — by the autodrive `--driver` persona's policy. Routing each
-   task to its *assigned* persona's vendor means autodrive firing one drive
-   per persona with actionable work and the drive prompt restricting claims
-   to that persona's tasks. That touches the daemon's firing model, which
-   has bitten this team before (the rescue-storm OOM, ADR 0010), so it is a
-   separate design, not a patch on this one.
+   *Resolved by [ADR 0012](0012-drive-lanes.md) (drive lanes).* A drive
+   now takes only work whose owner persona runs on its own vendor/model
+   lane (`claim` and `step-done` enforce it; `sweep --driver` shows it),
+   and autodrive fires one drive per lane with work, waking early on a
+   clean completion so a workflow handoff between lanes does not wait out
+   an interval. The one stated simplification: a workflow's compile loop
+   runs as a unit on the captain's lane.
 2. **The memory sweep runs on whichever session triggers it.** The
    sweep-memory skill's executor rule is "helper sub-agents, never a
    shelled-out model process" — for isolation and oversight. A ChatGPT

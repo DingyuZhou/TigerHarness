@@ -72,6 +72,8 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-09-13 (ce7c31b): anzai: one skill folder for every vendor; runtime glossary; neutral wording
+        "ae61ba4c6d95524d0920346d3420ad2e51faff2722f180e41ce279d1d54b6b3a",
         # 2026-08-13 (prior ship): drive-journal before the vendor-neutral wording
         "20d8521342086b2c6702097396da6b1beda5258f8aa5451580799e3cdc9ac627",
         # 2026-08-11 (wrong-thread notify fix): miyagi: pre origin-thread
@@ -136,6 +138,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "e882a7820610975b9bbd24d0594dc0f5fd89d3db5557ec0a1208869476f37e10",
     },
     "journal-autodrive": {
+        # 2026-09-13 (ce7c31b): anzai: one skill folder for every vendor; runtime glossary; neutral wording
+        "03de44b374f59f2d827a20dd8e7bfa2678199aeb79d2b93c7fab0b954f93d7bb",
         # 2026-09-13 (29eb227): anzai: add the codex_exec backend and per-persona model vendors
         "8f5bc76583b076615b517ffccffdd4a53e766e98256a80f1247c68a92d977a74",
         # 2026-08-12 (a9fef88): anzai: inherit SLACK_NOTIFY_CHANNEL for autodrive notifications
@@ -304,8 +308,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "ae61ba4c6d95524d0920346d3420ad2e51faff2722f180e41ce279d1d54b6b3a",
-    "journal-autodrive": "03de44b374f59f2d827a20dd8e7bfa2678199aeb79d2b93c7fab0b954f93d7bb",
+    "drive-journal": "077f54e2df66e3971cc83deb28d33f146522852fdef9f889a7762e71103d6c42",
+    "journal-autodrive": "e1858cd442c9c871326765603f82361578f909f0039bc75f0394011c47600711",
     "journal-new": "0cc31c57a5fc20a3637c43c0d3b222b078c686f54b4ed4c2a7a74feb38705a27",
     "slack-notify": "1d6e910cf773bc5d6506cd0ac2ced8429ab5b9a8c49ca79fc5b437eae4210173",
     "sweep-memory": "410d86b9dc732f54cc3354f97f3f4eba7fc5bc0c3c81071fe7294386589140f1",

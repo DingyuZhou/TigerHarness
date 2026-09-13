@@ -33,7 +33,10 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
 
 ## The checklist — run top to bottom, every invocation
 
-1. **Sweep (cheap, always first).** Run `tigerharness journal sweep`. It
+1. **Sweep (cheap, always first).** Run `tigerharness journal sweep`
+   (in a drive: `journal sweep --driver <your-persona>`, which adds the
+   **lane view** -- each actionable item marked `[mine]` or "not yours";
+   see step 2). It
    archives `done/` and classifies each `in_progress` task as **idle**
    (detached — resumable now), **busy** (a live session owns it: attached
    *and* heartbeat fresh within the stuck-timeout — default 30 min,
@@ -67,6 +70,14 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    fire is the one-session-per-loop-fire anti-pattern the cascade kills;
    the only turn-ends are nothing-actionable / a real blocker / the human
    / the genuine context ceiling.
+   **Lanes (ADR 0012).** In a drive you only take work marked `[mine]`
+   by the sweep's lane view: work whose owner persona runs on the same
+   vendor/model *lane* as your `--driver` persona (per
+   `configs/personas.yaml`). `claim --driver` refuses another lane's
+   work with **exit 3** and changes nothing -- leave it; autodrive
+   fires a separate drive on that lane (or a human drives on that
+   vendor; `--any-lane` is the deliberate override when neither will
+   happen). One-vendor teams have one lane and notice nothing.
    **Claim it atomically:** `tigerharness journal claim <id>` *before*
    working (sets `session_ref`, bumps `sessions`, refreshes the heartbeat,
    compare-and-set). If claim exits non-zero (another session won the
@@ -101,7 +112,12 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    sub-protocols *in OPERATING.md*: in a **graph walk**, end each step at
    the `tigerharness journal step-done --task <id> --step <id> --verdict
    <V> --output <note>` gate — it writes that step persona's worklog entry
-   and prints the next step, so do **not** follow the edges by hand; in the
+   and prints the next step, so do **not** follow the edges by hand. In a
+   drive pass `--driver <your-persona>` to it as well: it refuses a step
+   whose persona is on another lane (exit 3) and prints a `handoff:` line
+   when the NEXT step is -- then **release the task immediately**
+   (`journal release <id> --driver <you> --next-action "handoff to
+   <persona>: step <id>"`) and go on to the next `[mine]` item; in the
    **compile** sub-protocol, `land-compile` records its own per-round
    worklogs). **Heartbeat** every ~10 min of work (append to
    `progress.md` + refresh `updated_at`), so a concurrent loop correctly

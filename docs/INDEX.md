@@ -33,8 +33,9 @@ plain `claude -p` subprocess (a persona may run on `codex exec` instead —
 | Run the team-wide memory sweep | [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md) |
 | Use the backend-agnostic agent SDK | [agent_sdk.md](agent_sdk.md) |
 | Put a persona (or the whole team) on ChatGPT via `codex exec` instead of Claude | [adr/0011](adr/0011-model-vendors-per-persona.md), [slack-bridge.md](slack-bridge.md#per-persona-model-vendors), [agent_sdk.md](agent_sdk.md#choosing-a-backend-per-persona-model-vendors) |
+| Understand which vendor does a journal task (drive lanes, `claim` exit 3, the `handoff:` cue) | [adr/0012](adr/0012-drive-lanes.md), [journal.md](journal.md#drive-lanes-which-vendor-does-the-work), [autodrive.md](autodrive.md#drive-lanes-one-drive-per-vendormodel-with-work-adr-0012) |
 | Make the queue self-driving (scheduling starts the daemon, draining stops it) | [adr/0010](adr/0010-self-driving-journal.md), [autodrive.md](autodrive.md) |
-| Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep, 0007 topic-store revamp, 0008 team event log, 0009 remove single-tenant bridge, 0010 self-driving journal, 0011 model vendors per persona) |
+| Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep, 0007 topic-store revamp, 0008 team event log, 0009 remove single-tenant bridge, 0010 self-driving journal, 0011 model vendors per persona, 0012 drive lanes) |
 
 ## Must-not-miss rules (one hop, never bury these)
 

@@ -252,6 +252,18 @@ completed task until no actionable tasks remain.
    `--drive-thread <thread_ts>` only to override). Omit `--driver`
    outside a Slack-driven drive.
 
+   **Lanes (ADR 0012).** With `--driver`, the work you may take is
+   limited to your *lane* -- the vendor/model your driver persona runs
+   on per `configs/personas.yaml`. Run the sweep as `tigerharness
+   journal sweep --driver <your-persona>`: it marks each actionable
+   item and inbox entry `[mine]` or "not yours" (with its owner and
+   lane). Pick only `[mine]`. `claim --driver` refuses another lane's
+   work with **exit 3** before touching anything; that work belongs to
+   a drive on its own lane (autodrive fires one per lane with work).
+   `--any-lane` is the deliberate override for a hand drive when no such
+   drive exists. A single-vendor team has one lane and sees no
+   difference.
+
    - **NEVER** work a *busy* task -- the attach token + fresh heartbeat
      means a live session owns it right now.
    - Skip `blocked` tasks; surface them in the summary so the human can
@@ -734,9 +746,20 @@ For each step:
    verdict's edge, and prints the NEXT step id (or `__done__` /
    `__escalate__`). It REFUSES (non-zero, walk **not** advanced) if
    `--output` is missing or empty -- the note is the ticket.
+
+   In a drive, pass the same `--driver <your-persona>` here too. The
+   gate then also refuses (exit 3, nothing written) a step whose
+   persona runs on another lane -- a note must never be recorded as
+   work done on the wrong vendor -- and, when the NEXT step belongs to
+   another lane, prints a `handoff:` line.
 3. **Drive whatever step the gate names next.** Repeat until the gate
    prints `__done__` (walk complete -> `release --state done`) or
-   `__escalate__` (-> `release --state blocked`).
+   `__escalate__` (-> `release --state blocked`). **On a `handoff:`
+   line, do not drive the next step:** release the task right away
+   (`journal release <task-id> --driver <you> --next-action "handoff
+   to <persona>: step <id>"`) -- it goes idle, a drive on that lane
+   claims it, walks its steps, and hands back the same way. Then
+   continue with the next item marked `[mine]`.
 
 Routing reference (the gate applies this for you, from `--verdict`):
 
