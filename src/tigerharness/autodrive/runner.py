@@ -191,8 +191,10 @@ def default_prompt(driver: str | None, *, lane: str | None = None) -> str:
                 f"Pass `--driver {driver}` to `journal step-done` too; when it "
                 f"prints a `handoff:` line, release the task right away "
                 f"(`journal release <id> --driver {driver} --next-action "
-                f"\"handoff ...\"`) and continue with the next item marked "
-                f"[mine]"
+                f"\"handoff ...\"`) and re-sweep. When nothing actionable is "
+                f"[mine] but other lanes still have work, end the drive "
+                f"WITHOUT the idle-maintenance tail (lane-idle: their drives "
+                f"take it; the daemon decides maintenance)"
             )
     else:
         claim = "Claim each task with `--allow-api-drive`"
@@ -569,9 +571,17 @@ def probe_sweep_lanes(cfg: AutodriveConfig) -> list[LaneWork]:
         data = read_personas_yaml(team_root)
         home_persona = cfg.driver or resolve_default_persona(team_root)
         home_lane = _lanes.lane_of(team_root, home_persona, data=data)
+        # Cheap first: which personas live on another lane at all? On a
+        # one-vendor roster that is nobody, and no memory config is opened.
+        others = [
+            t for t in enumerate_persona_configs(team_root / "memories")
+            if _lanes.lane_of(team_root, t.name, data=data) != home_lane
+        ]
+        if not others:
+            return []
         buckets: dict[Any, list[str]] = {}
         order: list[Any] = []
-        for target in enumerate_persona_configs(team_root / "memories"):
+        for target in others:
             try:
                 mcfg = load_config(target.config_path)
                 if not has_pending_source(mcfg, Store(mcfg.store.root)):
@@ -583,8 +593,6 @@ def probe_sweep_lanes(cfg: AutodriveConfig) -> list[LaneWork]:
                 )
                 continue
             lane = _lanes.lane_of(team_root, target.name, data=data)
-            if lane == home_lane:
-                continue  # the maintenance drive's own lane
             if lane not in buckets:
                 buckets[lane] = []
                 order.append(lane)

@@ -125,9 +125,11 @@ def _toml_string(text: str) -> str:
     escaping is a strict subset of TOML's basic-string escapes (``\\n``,
     ``\\t``, ``\\"``, ``\\\\``, ``\\uXXXX``; JSON never emits ``\\/``), so
     ``json.dumps`` produces a valid TOML basic string for any input,
-    including multi-paragraph persona prompts with quotes and ``=``.
+    including multi-paragraph persona prompts with quotes and ``=`` --
+    with one gap closed here: TOML also forbids a raw DEL (U+007F), which
+    JSON leaves unescaped.
     """
-    return json.dumps(text, ensure_ascii=False)
+    return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007F")
 
 
 # ---------- Session ----------
@@ -194,6 +196,7 @@ class CodexExecBackend:
                 "'bypassPermissions'} for coarse policy."
             )
 
+        self._check_cli()  # before any temp file exists, so a missing CLI leaks nothing
         schema_path = self._write_schema(config, session)
         argv = self._build_argv(config, session, schema_path=schema_path)
         stdin_payload = self._build_stdin_payload(prompt)
@@ -253,6 +256,14 @@ class CodexExecBackend:
             json.dump(schema, fh)
         return Path(name)
 
+    def _check_cli(self) -> None:
+        if shutil.which(self.cli) is None and not os.path.isfile(self.cli):
+            raise CLIError(
+                f"`{self.cli}` not found on PATH. Install the Codex CLI "
+                "(https://github.com/openai/codex) and sign in with "
+                "`codex login`, or pass `cli=` to CodexExecBackend()."
+            )
+
     def _build_argv(
         self,
         cfg: AgentConfig,
@@ -260,12 +271,7 @@ class CodexExecBackend:
         *,
         schema_path: Path | None = None,
     ) -> list[str]:
-        if shutil.which(self.cli) is None and not os.path.isfile(self.cli):
-            raise CLIError(
-                f"`{self.cli}` not found on PATH. Install the Codex CLI "
-                "(https://github.com/openai/codex) and sign in with "
-                "`codex login`, or pass `cli=` to CodexExecBackend()."
-            )
+        self._check_cli()
 
         resume = self._is_resume(session)
         argv: list[str] = [self.cli, "exec"]

@@ -72,6 +72,8 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-09-13 (ccb4510): anzai: memory sweeps per lane -- pre review-pass wording
+        "077f54e2df66e3971cc83deb28d33f146522852fdef9f889a7762e71103d6c42",
         # 2026-09-13 (ce7c31b): anzai: one skill folder for every vendor; runtime glossary; neutral wording
         "ae61ba4c6d95524d0920346d3420ad2e51faff2722f180e41ce279d1d54b6b3a",
         # 2026-08-13 (prior ship): drive-journal before the vendor-neutral wording
@@ -138,6 +140,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "e882a7820610975b9bbd24d0594dc0f5fd89d3db5557ec0a1208869476f37e10",
     },
     "journal-autodrive": {
+        # 2026-09-13 (ccb4510): anzai: memory sweeps per lane -- pre review-pass wording
+        "7289adb0b91b38706c1f9a1ce637c5be9dda2eb136709f33a025b71c859aab17",
         # 2026-09-13 (6627029): anzai: drive lanes -- journal work runs on its owner persona's vendor
         "e1858cd442c9c871326765603f82361578f909f0039bc75f0394011c47600711",
         # 2026-09-13 (ce7c31b): anzai: one skill folder for every vendor; runtime glossary; neutral wording
@@ -202,6 +206,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
     },
     "tigerharness-basics": {
+        # 2026-09-13 (ccb4510): anzai: memory sweeps per lane -- pre review-pass wording
+        "9fa94549edb6894b2f2582b14d0ac92624233c3df721bb79fb2a4d161e0df59f",
         # 2026-09-13 (29eb227): anzai: add the codex_exec backend and per-persona model vendors
         "98dac516cb00454b164a0ee5f7593eb0433354cc3126f8fd920347b6aca700d3",
         # 2026-08-14 (74cb243): anzai: sync .gitignore on init --refresh, not just skills
@@ -236,6 +242,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "0e4a149557ccb0453f47e9cc4e4020d2a834e0a72084aab12faed82ee77ef63d",
     },
     "sweep-memory": {
+        # 2026-09-13 (ccb4510): anzai: memory sweeps per lane -- pre review-pass wording
+        "4731afd819b0a3fa3441da2d8e1faea595e2788870ff28f2b65ca7a7a80f7fe6",
         # 2026-09-13 (ce7c31b): anzai: one skill folder for every vendor; runtime glossary; neutral wording
         "410d86b9dc732f54cc3354f97f3f4eba7fc5bc0c3c81071fe7294386589140f1",
         # 2026-08 (prior ship): sweep-memory before the vendor-neutral wording
@@ -312,12 +320,12 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "077f54e2df66e3971cc83deb28d33f146522852fdef9f889a7762e71103d6c42",
-    "journal-autodrive": "7289adb0b91b38706c1f9a1ce637c5be9dda2eb136709f33a025b71c859aab17",
+    "drive-journal": "2e7dcae6003d420141bb15622c5a26184454e6679853fe03627b3cd201a06d76",
+    "journal-autodrive": "7d0a00959dd208f66a685fd7515f114b181a5000ba7b5f1f8fc9b4e5be35a7c6",
     "journal-new": "0cc31c57a5fc20a3637c43c0d3b222b078c686f54b4ed4c2a7a74feb38705a27",
     "slack-notify": "1d6e910cf773bc5d6506cd0ac2ced8429ab5b9a8c49ca79fc5b437eae4210173",
-    "sweep-memory": "4731afd819b0a3fa3441da2d8e1faea595e2788870ff28f2b65ca7a7a80f7fe6",
-    "tigerharness-basics": "9fa94549edb6894b2f2582b14d0ac92624233c3df721bb79fb2a4d161e0df59f",
+    "sweep-memory": "fed46d260479de281cc1c324ad98cb594943176064683f5a00de62481b2212cd",
+    "tigerharness-basics": "17da8cf5b2f38ea12e3f996e7811f71df2a5b7157133929fc7249d5a3df0b423",
     "workflow-append-steps": "231e5ad5fb3f75be6590455824887fc2a58e1340a14255b0e7a3c29b39228e14",
 }
 
@@ -502,8 +510,11 @@ _PERSONAS_YAML_VENDOR_BLOCK = """\
 # its own entry sets `vendor:` / `model:` (see the commented hints on
 # each entry). Vendors: `claude` runs `claude -p` (Claude Code);
 # `chatgpt` runs `codex exec` (OpenAI Codex). A blank model means the
-# vendor CLI's own default model. Read by the Slack bridge (per
-# persona), autodrive (its --driver persona), and idle compaction.
+# vendor CLI's own default model; a persona inherits `default_model`
+# only while it is on the team's `default_vendor` (a model id belongs
+# to one vendor). Read by the Slack bridge (per persona), autodrive (one
+# drive per vendor/model lane with work, ADR 0012 -- not just its
+# --driver), and idle compaction.
 default_vendor: {vendor}
 default_model: "{model}"
 
@@ -532,7 +543,7 @@ _PERSONA_ENTRY = """\
     prompt_file: {persona}/prompt
     description: "{description}"
     # vendor: default   # claude | chatgpt | default (the team's default_vendor)
-    # model: default    # a model id, or default (inherit; see default_model)
+    # model: default    # a model id, or default (= default_model while on the team's vendor, else the vendor CLI's own)
     # extra:
     #   add_dirs: [../skills]   # uncomment to expose team-shared skills
 """
@@ -1924,6 +1935,14 @@ def init(
     # idle compaction) reads it. --vendor / --model skip the prompt;
     # --yes (ask_extras=False) takes claude with no model pin.
     vendor_name = normalize_vendor(vendor, where="--vendor")
+    if not is_new_team and (vendor_name is not None or model):
+        print(
+            f"note: team {team} already exists, so --vendor/--model are "
+            "ignored; its default vendor and model live in "
+            "configs/personas.yaml (edit `default_vendor` / `default_model` "
+            "there, or `vendor:` / `model:` on a persona entry).",
+            file=sys.stderr,
+        )
     if vendor_name is None and is_new_team and ask_extras:
         choices = _vendor_choices()
         idx = _prompt_choice(

@@ -81,7 +81,10 @@ staging), one card sub-agent per target, `tiger-memory compact-apply`
      a team run's OTHER targets to the personas on that persona's
      vendor/model lane, so a session never extracts another vendor's
      persona; the own persona is never filtered, and a malformed vendor
-     logs and lifts the restriction rather than blocking the sweep.
+     logs and lifts the restriction rather than blocking the sweep. It
+     defaults to `--own-persona`. The claim records the restriction
+     (`allowed` in the state file) so `sweep-complete` counts only that
+     lane's personas as required-done.
      `sweep-plan --own-only` (`force_own_only=True`) never widens to a
      team run: `own-only` when the own persona has pending sources,
      else `not_due` — what autodrive's per-lane maintenance session runs

@@ -1933,11 +1933,13 @@ def test_probe_sweep_lanes_groups_pending_personas(tmp_path):
 
 def test_probe_sweep_lanes_skips_broken_config_and_fails_soft(tmp_path, caplog):
     team, paths = _memory_team(tmp_path, pending_for=("Rukawa",))
-    (team / "memories" / "Ayako" / "tiger-memory.config.yaml").write_text("not: [valid\n")
+    # A broken config on another lane skips that persona (with a warning)
+    # and leaves the lane without pending work.
+    (team / "memories" / "Rukawa" / "tiger-memory.config.yaml").write_text("not: [valid\n")
     with caplog.at_level(logging.WARNING, logger="tigerharness.autodrive.runner"):
         lanes = runner.probe_sweep_lanes(_cfg(driver="Ayako", journal_root=str(paths.root)))
-    assert [lw.key for lw in lanes] == ["chatgpt/gpt-6-astra"]
-    assert "sweep probe skipped Ayako" in caplog.text
+    assert lanes == []
+    assert "sweep probe skipped Rukawa" in caplog.text
     assert runner.probe_sweep_lanes(_cfg(journal_root=None)) == []
     from tigerharness.journal.paths import JournalPaths
     solo = JournalPaths(root=tmp_path / "solo" / "journal")
@@ -2041,3 +2043,32 @@ async def test_run_loop_lanes_off_skips_the_sweep_probe(tmp_path):
         now=lambda: "T", probe=lambda cfg: runner.QUEUE_IDLE, sweep_lane_probe=sweep_probe,
     )
     assert n == 1 and probes["n"] == 0
+
+
+def test_probe_sweep_lanes_single_lane_roster_opens_no_memory_config(tmp_path, monkeypatch):
+    """A one-vendor roster never touches a memory config: the home lane is
+    the maintenance drive's job, so there is nothing to probe."""
+    team, paths = _memory_team(tmp_path, pending_for=("Rukawa",))
+    (team / "configs" / "personas.yaml").write_text(
+        "default_persona: Ayako\npersonas:\n  - name: Ayako\n  - name: Akagi\n  - name: Rukawa\n"
+    )
+    import tigerharness.tiger_memory.config as mcfg
+    calls = {"n": 0}
+    real = mcfg.load_config
+
+    def spy(path):
+        calls["n"] += 1
+        return real(path)
+    monkeypatch.setattr(mcfg, "load_config", spy)
+    assert runner.probe_sweep_lanes(_cfg(driver="Ayako", journal_root=str(paths.root))) == []
+    assert calls["n"] == 0
+
+
+def test_default_prompt_lane_rule_names_the_lane_idle_exit():
+    p = runner.default_prompt("Rukawa", lane="chatgpt")
+    assert "end the drive WITHOUT the idle-maintenance tail" in p
+
+
+def test_probe_sweep_lanes_other_lane_without_pending_is_empty(tmp_path):
+    team, paths = _memory_team(tmp_path, pending_for=("Akagi",))  # home lane only
+    assert runner.probe_sweep_lanes(_cfg(driver="Ayako", journal_root=str(paths.root))) == []

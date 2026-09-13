@@ -214,8 +214,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="Lane restriction (ADR 0012): sweep, besides the "
                             "own persona, only OTHER personas on the same "
                             "vendor/model lane as PERSONA (per "
-                            "configs/personas.yaml). Pass your own persona "
-                            "whenever you have one; a one-lane team sees no "
+                            "configs/personas.yaml). Defaults to "
+                            "--own-persona; a one-lane team sees no "
                             "difference.")
     p_swp.add_argument("--own-only", action="store_true",
                        help="Never widen to a team run: claim own-only when "
@@ -784,6 +784,10 @@ def _cmd_sweep_plan(
             file=sys.stderr,
         )
         return 2
+    # The lane restriction defaults to the calling persona: a persona
+    # session gets it for free; only the no-identity fallback (no persona,
+    # hence no lane) runs unrestricted.
+    lane_of = lane_of or own_persona
     allowed = (
         sweep.lane_members(_team_memories_dir(cfg), lane_of)
         if lane_of else None

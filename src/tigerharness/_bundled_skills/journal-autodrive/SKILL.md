@@ -1,6 +1,6 @@
 ---
 name: journal-autodrive
-description: Start, check, or stop a background process that drives the journal on a fixed interval via the agent SDK (vendor-agnostic; default backend `claude -p`). Use when the user asks to "drive the journal every N minutes", "autodrive the journal", "keep working the queue automatically", "start/stop the auto-driver", "is the autodrive running?", or "why did the autodrive stop?". Wraps `tigerharness autodrive`. This is the Operator-authorized exception to the journal's human-only drive rule -- read the safety note before starting one.
+description: Start, check, or stop a background process that drives the journal on a fixed interval via the agent SDK (vendor-agnostic; each drive runs on its driver persona's vendor, `claude -p` or `codex exec`). Use when the user asks to "drive the journal every N minutes", "autodrive the journal", "keep working the queue automatically", "start/stop the auto-driver", "is the autodrive running?", or "why did the autodrive stop?". Wraps `tigerharness autodrive`. This is the Operator-authorized exception to the journal's human-only drive rule -- read the safety note before starting one.
 ---
 
 # journal-autodrive
@@ -60,7 +60,9 @@ and acts on the verdict:
   entry) -- fire a drive.
 - **busy** (a live session owns the in-flight task) -- **skip the fire.** A
   drive would only sweep, see busy, and exit; the tick is free instead.
-- **idle** (nothing actionable, nothing busy) -- fire **one** drive, the
+- **idle** (nothing actionable, nothing busy) -- on a mixed-vendor roster,
+  first one memory-sweep session per *other* lane that still has personas
+  with un-swept sessions (see Lanes below); then fire **one** drive, the
   maintenance one whose tail runs `slack-bridge compact-idle` + the
   `sweep-memory` skill. When that finishes and the queue is still idle, the
   **daemon exits** and clears its state file.
@@ -102,8 +104,8 @@ them on the command line.
   actually invoke skills/tools and drive; a raw chat-completion backend
   cannot.
 - `--model` overrides the model (default: the driver persona's `model:`
-  from personas.yaml, else the team's `default_model`, else the backend's
-  own). `--permission-mode` and `--prompt` override the unattended
+  from personas.yaml, else the team's `default_model` while the persona is
+  on the team's vendor, else the backend's own). `--permission-mode` and `--prompt` override the unattended
   permission mode (default `bypassPermissions`) and the built-in drive
   instruction.
 - `--notify {slack,none}` (default `slack`) and `--notify-channel <id>`
@@ -145,9 +147,12 @@ just have been handed to another lane; a 60 s per-lane floor keeps
 that from becoming a storm). `--backend`, `--model` or `--prompt` pin
 every drive and turn lanes off (`status` shows `lanes: off`). On an
 idle queue the same coordinator fires one **memory-sweep session per
-lane** whose personas have un-swept sessions (own-only sweeps, on that
-lane's vendor) before the ordinary maintenance drive runs and the daemon
-stops. A one-vendor team has one lane and behaves exactly as before.
+lane other than the maintenance drive's own** whose personas have
+un-swept sessions (own-only sweeps, on that lane's vendor); the
+maintenance drive then sweeps its own lane and the daemon stops. A
+one-vendor team has one lane and behaves exactly as before. A persona's
+`vendor:` therefore matters whenever it owns work or memory, not only
+when it is the `--driver`.
 
 ## What it does each fire
 

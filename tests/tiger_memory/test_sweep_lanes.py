@@ -152,3 +152,48 @@ class TestCli:
         assert rc == 0
         out = json.loads(capsys.readouterr().out)
         assert out["ran"] is False and out["reason"] == "not_due" and out["own_only"] is True
+
+
+class TestLaneRestrictedRunCompletes:
+    """The review-pass reproduction: a --lane-of team run must be able to
+    sweep-complete once ITS lane's personas are done."""
+
+    def test_sweep_complete_counts_only_the_lane(self, tmp_path: Path, capsys) -> None:
+        cfg = TestCli()._cfg(tmp_path)
+        rc = main(["--config", cfg, "sweep-plan", "--token", "T", "--max-personas", "9", "--lane-of", "Rukawa"])
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert [t["name"] for t in out["targets"]] == ["Rukawa", "Mitsui"]
+        mem = tmp_path / "memories"
+        assert read_sweep_state(mem)["allowed"] == ["Mitsui", "Rukawa"]
+        for name in ("Rukawa", "Mitsui"):
+            assert main(["--config", cfg, "sweep-done", "--persona", name]) == 0
+        capsys.readouterr()
+        rc = main(["--config", cfg, "sweep-complete", "--token", "T"])
+        assert rc == 0, capsys.readouterr().err
+        assert "watermark advanced" in capsys.readouterr().out
+        state = read_sweep_state(mem)
+        assert "allowed" not in state and state.get("last_sweep_at")
+
+    def test_release_clears_the_lane_record(self, tmp_path: Path, capsys) -> None:
+        cfg = TestCli()._cfg(tmp_path)
+        assert main(["--config", cfg, "sweep-plan", "--token", "T", "--lane-of", "Rukawa"]) == 0
+        capsys.readouterr()
+        assert main(["--config", cfg, "sweep-release", "--token", "T"]) == 0
+        assert "allowed" not in read_sweep_state(tmp_path / "memories")
+
+    def test_unrestricted_run_still_needs_everyone(self, tmp_path: Path, capsys) -> None:
+        cfg = TestCli()._cfg(tmp_path)
+        assert main(["--config", cfg, "sweep-plan", "--token", "T", "--max-personas", "9"]) == 0
+        capsys.readouterr()
+        assert main(["--config", cfg, "sweep-done", "--persona", "Rukawa"]) == 0
+        capsys.readouterr()
+        assert main(["--config", cfg, "sweep-complete", "--token", "T"]) == 3
+
+    def test_lane_of_defaults_to_own_persona(self, tmp_path: Path, capsys) -> None:
+        cfg = TestCli()._cfg(tmp_path)
+        rc = main(["--config", cfg, "sweep-plan", "--token", "T", "--max-personas", "9", "--own-persona", "Rukawa"])
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["lane"]["of"] == "Rukawa" and out["lane"]["members"] == ["Mitsui", "Rukawa"]
+        assert [t["name"] for t in out["targets"]] == ["Rukawa", "Mitsui"]

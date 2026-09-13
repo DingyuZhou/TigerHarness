@@ -65,9 +65,10 @@ supply the inputs):
   the team watermark + `sweep.floor_hours` exactly as before -- **and by
   your lane** (ADR 0012): pass `--lane-of <your-persona>` and a team run
   sweeps only the OTHER personas on your vendor/model lane, so a session
-  never extracts another vendor's persona's transcripts. Personas on
-  other lanes are swept by autodrive's per-lane sweep fires (below) or
-  by their own sessions. A one-lane team sees no difference.
+  never extracts another vendor's persona's transcripts. Your own lane
+  is swept by whichever session runs the team sweep (you, or autodrive's
+  maintenance drive); other lanes get autodrive's own-only sweep fires
+  (1b below) or their own sessions. A one-lane team sees no difference.
 - **Silent cases.** Own persona has nothing pending AND the team is
   inside the floor (`reason: "not_due"`), or another session holds the
   lease (`reason: "busy"`) -> proceed straight to the requested work.
@@ -171,9 +172,12 @@ $TM --config "$DRIVER" sweep-plan --token <stable-token> --max-personas 3 \
 
 `--lane-of` is the lane restriction (ADR 0012): the OTHER personas this
 wake processes are only those on your persona's vendor/model lane (the
-JSON's `lane.members` lists them). Always pass it when you have a
-persona identity; omit it, like `--own-persona`, in the no-identity
-fallback.
+JSON's `lane.members` lists them). It defaults to `--own-persona`, so a
+persona session is restricted for free; the claim records the lane so
+`sweep-complete` measures the run against it. In the no-identity
+fallback there is no persona and hence no lane: the run is unrestricted
+-- on a mixed-vendor roster adopt the team's default persona first so
+the restriction applies.
 
 `--own-persona` is the split gate's input -- your persona per the
 resolution list above (`$DRIVER` must be that persona's config; omit the

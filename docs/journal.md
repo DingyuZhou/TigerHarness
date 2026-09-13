@@ -364,7 +364,11 @@ work whose owner is on its own lane:
   (JSON: `actionable_mine`, `actionable_other_lane`, `deferred_mine`,
   `lanes`).
 - `claim --driver <p>` refuses another lane's work with exit code 3
-  before any mutation; `--any-lane` overrides deliberately.
+  before any mutation (1 stays busy / claim lost; 2 is a malformed
+  vendor); `--any-lane` overrides deliberately. The sweep's **lane
+  verdict** (`lane_verdict` in JSON: `mine` / `other-lanes` / `idle`)
+  tells a drive whether to pick, to end without the idle-maintenance
+  tail because only other lanes have work, or that the queue is idle.
 - `step-done --driver <p>` refuses a step whose persona is on another lane
   (exit 3, no note written) and prints a `handoff:` cue when the *next*
   step is -- the drive then releases the task so a drive on that lane

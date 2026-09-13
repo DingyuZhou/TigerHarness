@@ -3239,3 +3239,14 @@ class TestAgentsSkillsLink:
         team.mkdir()
         assert ensure_agents_skills_link(team) is None
         assert not (team / ".agents").exists()
+
+    def test_existing_team_notes_that_vendor_flags_are_ignored(self, tmp_path: Path, capsys: pytest.CaptureFixture):
+        team = tmp_path / "tigers"
+        create_team(team, include_slack=False)
+        rc = main([
+            "--dir", str(tmp_path), "--team", "tigers", "--persona", "scout",
+            "--yes", "--no-slack", "--no-memory", "--vendor", "chatgpt",
+        ])
+        assert rc == 0
+        assert "--vendor/--model are ignored" in capsys.readouterr().err
+        assert "default_vendor: claude" in (team / "configs" / "personas.yaml").read_text()

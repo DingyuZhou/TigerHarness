@@ -2491,3 +2491,22 @@ class TestLanes:
         assert rc == 0
         assert json.loads(capsys.readouterr().out)["handoff"] is None
         assert "lane check for build failed" in caplog.text
+
+    def test_sweep_lane_verdicts(self, team, journal_dir, capsys):
+        from tigerharness.journal.deferred import defer_entry
+        # Nothing at all.
+        JournalPaths(root=journal_dir).ensure()
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"]) == 0
+        assert "Lane verdict: nothing actionable on any lane." in capsys.readouterr().out
+        # Only another lane's work.
+        paths = self._task(journal_dir, "t-rukawa", "Rukawa")
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["lane_verdict"] == "other-lanes"
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"]) == 0
+        assert "end this drive WITHOUT the idle-maintenance tail" in capsys.readouterr().out
+        # A deferred entry of mine counts as mine.
+        defer_entry(paths, title="d", team="T", payload_text="p", kind="task", persona="Ayako")
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["lane_verdict"] == "mine"
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"]) == 0
+        assert "0 actionable + 1 deferred item(s) are yours -- pick one." in capsys.readouterr().out

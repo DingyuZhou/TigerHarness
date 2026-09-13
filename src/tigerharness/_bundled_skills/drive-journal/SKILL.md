@@ -80,8 +80,11 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    happen). One-vendor teams have one lane and notice nothing.
    **Claim it atomically:** `tigerharness journal claim <id>` *before*
    working (sets `session_ref`, bumps `sessions`, refreshes the heartbeat,
-   compare-and-set). If claim exits non-zero (another session won the
-   race), re-sweep and pick again, or stop. Skip `blocked` — surface them.
+   compare-and-set). Claim's exit codes mean different things: **1** =
+   busy / claim lost (another session won -- re-sweep and pick again, or
+   stop); **3** = the task belongs to another lane (leave it; it is not
+   yours); **2** = a configuration error (a malformed vendor in
+   personas.yaml -- stop and surface it). Skip `blocked` — surface them.
    **In a Slack-driven drive,** add `--driver <your-persona>` so the work
    lands in the right persona's store (see OPERATING.md "Per-persona
    memory"): `tigerharness journal claim <id> --driver <your-persona>`.
@@ -89,9 +92,11 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    Slack thread registers automatically (the bridge passes it via the
    `TIGERHARNESS_SLACK_THREAD_TS` env var), so tiger-memory does **not**
    double-count the fat drive transcript — no copying the thread_ts by
-   hand. (`--drive-thread <thread_ts>` overrides it; **omit `--driver`
-   entirely outside a drive** — claim/release then behave as the plain
-   backend with no memory side-effect.)
+   hand. (`--drive-thread <thread_ts>` overrides it.) **In a hand drive
+   by a persona session, pass `--driver <your-persona>` too** -- it is
+   the identity the lane gate and the memory attribution need. Omit
+   `--driver` only for plain backend use with no persona identity
+   (claim/release then have no memory side-effect and no lane gate).
 
 3. **Load the procedure + context** (reached only when there's real work).
    Read `<journal>/OPERATING.md` for the full procedure, **then** the
@@ -117,7 +122,10 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    whose persona is on another lane (exit 3) and prints a `handoff:` line
    when the NEXT step is -- then **release the task immediately**
    (`journal release <id> --driver <you> --next-action "handoff to
-   <persona>: step <id>"`) and go on to the next `[mine]` item; in the
+   <persona>: step <id>"`) and re-sweep: resume another `[mine]` item if
+   one is idle/crashed, but pending work still waits until nothing is in
+   progress (finish-before-start holds across lanes), and if only other
+   lanes' work remains, end the turn (lane-idle, no tail); in the
    **compile** sub-protocol, `land-compile` records its own per-round
    worklogs). **Heartbeat** every ~10 min of work (append to
    `progress.md` + refresh `updated_at`), so a concurrent loop correctly
@@ -170,13 +178,16 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    for the next loop fire between sessions. Run a task's entire
    `max_sessions` budget, and the whole queue, **back-to-back in one
    sitting — never one-session-per-loop-fire.** Only end the invocation
-   when step 1 finds nothing actionable, the human ends it, or you hit the
+   when step 1 finds nothing actionable, when nothing actionable is
+   `[mine]` (**lane-idle**: the sweep's lane verdict says so -- other
+   lanes' drives take the rest), the human ends it, or you hit the
    true context ceiling (step 7). **Never manufacture a stopping point
    just because a session finished or the conversation feels long.**
    **Ending because nothing is actionable AND nothing is busy? Run the
    idle-maintenance tail (below) first, then stop.** (Ending on the
-   busy cheap-exit or the context ceiling skips the tail — a job is
-   running, or you have no context to spare.)
+   busy cheap-exit, the lane-idle verdict, or the context ceiling skips
+   the tail — a job is running elsewhere, another lane still has work
+   and the daemon decides maintenance, or you have no context to spare.)
 
 7. **Checkpoint-and-hand-off near the ceiling — "context heavy" still is
    NOT a panic.** Every session checkpoints to `progress.md` +

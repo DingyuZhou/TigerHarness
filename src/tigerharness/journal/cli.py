@@ -740,12 +740,14 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             payload["deferred_mine"] = [
                 did for did, v in deferred_view.items() if v["mine"]
             ]
+            payload["lane_verdict"] = _lane_verdict(lane_view, deferred_view)[0]
         print(json.dumps(payload, indent=2))
         return 0
 
     print(result.to_summary())
     if driver:
         print(f"Lane view for driver {driver} (lane {driver_lane_key}).")
+        print(_lane_verdict(lane_view, deferred_view)[1])
     if result.archived:
         print()
         print("Archived (moved to done/):")
@@ -803,6 +805,30 @@ def _lane_entry(
     and whether this driver may take it."""
     check = lanes.lane_check(team_root, driver, owner)
     return {"owner": owner, "lane": check.owner_lane.key, "mine": check.same}
+
+
+def _lane_verdict(
+    lane_view: dict[str, dict[str, Any]], deferred_view: dict[str, dict[str, Any]],
+) -> tuple[str, str]:
+    """``(code, sentence)`` telling a drive what its lane view means:
+    ``mine`` (pick one), ``other-lanes`` (nothing yours; end the drive
+    WITHOUT the idle-maintenance tail -- other lanes' drives take the
+    rest), or ``idle`` (nothing actionable on any lane)."""
+    mine = sum(1 for v in lane_view.values() if v["mine"])
+    mine_deferred = sum(1 for v in deferred_view.values() if v["mine"])
+    other = (len(lane_view) - mine) + (len(deferred_view) - mine_deferred)
+    if mine or mine_deferred:
+        return "mine", (
+            f"Lane verdict: {mine} actionable + {mine_deferred} deferred "
+            f"item(s) are yours -- pick one."
+        )
+    if other:
+        return "other-lanes", (
+            f"Lane verdict: nothing for your lane; {other} item(s) belong to "
+            f"other lanes -- end this drive WITHOUT the idle-maintenance "
+            f"tail (their lanes' drives take them)."
+        )
+    return "idle", "Lane verdict: nothing actionable on any lane."
 
 
 def _lane_suffix(entry: dict[str, Any] | None) -> str:

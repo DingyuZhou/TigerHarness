@@ -236,8 +236,10 @@ completed task until no actionable tasks remain.
    sets `session_ref` to a fresh token, flips the task to `in_progress`,
    bumps `sessions`, and refreshes the heartbeat -- atomically, with a
    compare-and-set re-read so two concurrent drives cannot both grab it.
-   If claim exits non-zero ("busy" / "claim lost"), another session won:
-   re-sweep and pick again, or exit.
+   Claim's exit codes: **1** = busy / claim lost (another session won:
+   re-sweep and pick again, or exit); **3** = the task belongs to
+   another lane (leave it -- see "Lanes" below); **2** = a configuration
+   error (a malformed vendor in personas.yaml: stop and surface it).
 
    **In a Slack-driven drive**, add the driver flag (see "Per-persona
    memory" above):
@@ -261,7 +263,12 @@ completed task until no actionable tasks remain.
    work with **exit 3** before touching anything; that work belongs to
    a drive on its own lane (autodrive fires one per lane with work).
    `--any-lane` is the deliberate override for a hand drive when no such
-   drive exists. A single-vendor team has one lane and sees no
+   drive exists. The sweep prints a **lane verdict**: when nothing
+   actionable is yours but other lanes still have work, end the
+   invocation WITHOUT the idle-maintenance tail (lane-idle: their drives
+   take it, and the daemon decides maintenance); pending work of yours
+   still waits until nothing is in progress (finish-before-start holds
+   across lanes). A single-vendor team has one lane and sees no
    difference.
 
    - **NEVER** work a *busy* task -- the attach token + fresh heartbeat
@@ -759,7 +766,9 @@ For each step:
    (`journal release <task-id> --driver <you> --next-action "handoff
    to <persona>: step <id>"`) -- it goes idle, a drive on that lane
    claims it, walks its steps, and hands back the same way. Then
-   continue with the next item marked `[mine]`.
+   re-sweep: resume another `[mine]` item if one is idle/crashed;
+   pending work still waits for an empty in-progress set; if only other
+   lanes' work remains, end the invocation (lane-idle, no tail).
 
 Routing reference (the gate applies this for you, from `--verdict`):
 

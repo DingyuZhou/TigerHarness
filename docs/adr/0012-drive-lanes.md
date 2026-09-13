@@ -62,9 +62,13 @@ adopts every Claude persona in turn, as it always has.
   vendor logs and yields no cue); the gate on the current step is not.
 
 The ordering rules of the queue are untouched: "finish before you start"
-still holds across lanes, so a busy task on one lane still holds pending
-work on another. Lanes decide *who* takes actionable work, never *when*
-work becomes actionable.
+still holds across lanes, so a busy *or idle* task on one lane still
+holds pending work on another. Lanes decide *who* takes actionable work,
+never *when* work becomes actionable. A drive whose sweep finds nothing
+`[mine]` while other lanes still have work is **lane-idle**: it ends
+without the idle-maintenance tail (the sweep's lane verdict says so),
+because the queue is not idle -- another lane's drive owns the rest and
+the daemon decides maintenance.
 
 ### 4. Autodrive is the coordinator: one drive per lane with work
 
@@ -112,8 +116,11 @@ sweeps it, and the fix is again to launch the right session:
 
 - `tiger-memory sweep-plan --lane-of <persona>` restricts a team run's
   *other* targets to the personas on that lane (`sweep.lane_members`),
-  so a Claude session never extracts a ChatGPT persona's transcripts.
-  The skill passes it whenever it has a persona identity.
+  so a Claude session never extracts a ChatGPT persona's transcripts. It
+  defaults to `--own-persona`, and the claim records the lane so
+  `sweep-complete` measures a restricted run against its own lane rather
+  than the whole roster (a restricted run could otherwise never
+  complete). The no-identity fallback has no lane and runs unrestricted.
 - `tiger-memory sweep-plan --own-only` never widens to a team run: it
   claims `own-only` when the named persona has pending sources, else
   `not_due`.

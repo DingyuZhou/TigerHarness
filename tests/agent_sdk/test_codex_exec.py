@@ -673,3 +673,18 @@ class TestStreamEdges:
         result = await backend.run(AgentConfig(name="x"), "hi")
         assert result.final_output == "Hello there."
         assert result.raw is None
+
+
+class TestReviewPass:
+    def test_missing_cli_leaves_no_schema_tempfile(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        import tempfile
+        tempfile.tempdir = None
+        backend = CodexExecBackend(cli=str(tmp_path / "no-such-codex"))
+        with pytest.raises(CLIError):
+            backend.run_stream(AgentConfig(name="x", output_schema={"type": "object"}), "hi")
+        assert not list(tmp_path.glob("tigerharness-codex-schema-*"))
+        tempfile.tempdir = None
+
+    def test_toml_string_escapes_del(self) -> None:
+        assert _toml_string("a\x7fb") == '"a\\u007Fb"'

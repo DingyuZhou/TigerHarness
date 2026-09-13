@@ -131,8 +131,15 @@ def try_claim_sweep(
     own_persona: str | None = None,
     own_pending: bool = False,
     force_own_only: bool = False,
+    allowed: set[str] | None = None,
 ) -> ClaimResult:
     """Decide whether THIS session runs the team sweep.
+
+    *allowed* (the lane restriction, ADR 0012) is recorded on the claim
+    as ``allowed`` so :func:`mark_sweep_complete` measures a lane-
+    restricted run against its own lane, not the whole roster -- without
+    that a restricted run could never complete and the claim would
+    dangle until the lease expired.
 
     *force_own_only* (``sweep-plan --own-only``, ADR 0012): never widen to
     a team run -- claim ``own-only`` when the own persona has pending
@@ -204,6 +211,10 @@ def try_claim_sweep(
         state["own_persona"] = own_persona
     else:
         state.pop("own_persona", None)
+    if allowed is not None:
+        state["allowed"] = sorted(allowed)
+    else:
+        state.pop("allowed", None)
     write_sweep_state(team_memories_dir, state)
     log.info("team sweep: claimed (scope=%s)", scope)
     return ClaimResult(True, "claimed", scope)
@@ -250,6 +261,7 @@ def release_sweep_claim(
     # fresh, so a released claim leaves no stale scope behind.
     state.pop("scope", None)
     state.pop("own_persona", None)
+    state.pop("allowed", None)
     write_sweep_state(team_memories_dir, state)
     return True
 
@@ -285,9 +297,14 @@ def mark_sweep_complete(
             own = state.get("own_persona")
             pending = [own] if own and own not in done else []
         else:
+            # A lane-restricted run (ADR 0012) is complete when ITS lane's
+            # personas are done; the others were never in scope.
+            allowed = state.get("allowed")
+            in_scope = set(allowed) if isinstance(allowed, list) else None
             pending = [
                 t.name for t in enumerate_persona_configs(team_memories_dir)
                 if t.name not in done
+                and (in_scope is None or t.name in in_scope)
             ]
         if pending:
             log.warning(
@@ -310,6 +327,7 @@ def mark_sweep_complete(
     state.pop("run_started_at", None)
     state.pop("scope", None)
     state.pop("own_persona", None)
+    state.pop("allowed", None)
     write_sweep_state(team_memories_dir, state)
     return True
 
@@ -554,7 +572,7 @@ def maybe_sweep_roster(
         team_memories_dir, now=now, token=token,
         floor_hours=floor_hours, lease_seconds=lease_seconds,
         own_persona=own_persona, own_pending=own_pending,
-        force_own_only=force_own_only,
+        force_own_only=force_own_only, allowed=allowed,
     )
     if not claim.claimed:
         return SweepDecision(ran=False, reason=claim.reason, plan=None)

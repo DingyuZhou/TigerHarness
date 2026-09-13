@@ -215,8 +215,11 @@ maintained by the tooling.
    uses Slack) make sure the persona is reachable by name. If the
    recruit should run on a different vendor than the team default,
    uncomment its `vendor:` (`claude` / `chatgpt`) and, optionally,
-   `model:` -- the Slack bridge honours it after a restart, autodrive
-   when the recruit is the `--driver`.
+   `model:` -- the Slack bridge honours it after a restart; autodrive
+   fires a drive on the recruit's lane whenever it owns actionable work
+   (and a memory-sweep session when it has un-swept sessions), not only
+   when it is the `--driver`. Without a `model:` the recruit inherits
+   `default_model` only while on the team's `default_vendor`.
 4. Verify what the recruit produced: `personas/<NewName>/prompt.md`
    exists and is filled in, and `configs/personas.yaml` has the new
    row with the right `prompt_file`. (`journal validate-personas` is
