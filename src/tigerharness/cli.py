@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _usage() -> None:
-    print("tigerharness -- Claude Code agent harness")
+    print("tigerharness -- vendor-agnostic agent harness (Claude Code / OpenAI Codex)")
     print()
     print("Sub-commands:")
     print("  init               Scaffold a new project (personas, .env, config)")

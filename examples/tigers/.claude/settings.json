@@ -1,0 +1,5 @@
+{
+  "env": {
+    "TIGERHARNESS_PERSONAS_CONFIG": "configs/personas.yaml"
+  }
+}

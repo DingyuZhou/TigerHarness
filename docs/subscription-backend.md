@@ -13,9 +13,10 @@
 ## Details
 
 A file-based, human-driven execution model that runs agent work —
-single-persona tasks and multi-persona workflows alike — through the
-**interactive** Claude Code app, so the work counts against a monthly
-subscription instead of token-billed API usage.
+single-persona tasks and multi-persona workflows alike — through an
+**interactive** agent session (Claude Code or Codex, per the persona's
+vendor), so the work counts against a monthly subscription instead of
+token-billed API usage.
 
 > **Status:** Phase 1 + Phase 1.5 shipped; Phase 2 partially shipped.
 > Phase 1 (journal + scaffolder + `drive-journal` skill with the
@@ -52,15 +53,14 @@ interactive session, while a file-based journal holds durable,
 resume-able state so the work can be driven in bursts and picked up by
 any future session (or any other vendor's agent).
 
-It does **not** remove the existing API-based runners. They remain
-available as an opt-in mode for users who want autonomous, parallel
-throughput and are willing to pay per token — and for a future where
-token prices may fall. The two coexist behind a config switch whose
-default is `subscription` (Phase 2).
+When first written this did **not** remove the API-based runners; they
+were later removed outright ([ADR 0003](adr/0003-remove-legacy-runners.md))
+once the journal proved sufficient, so the per-task config switch
+planned for Phase 2 never shipped. The journal is the only rail.
 
 ## Push vs pull
 
-| | **API backend** (task/workflow-runner, exists) | **subscription backend** (this doc) |
+| | **API backend** (task/workflow-runner — removed, ADR 0003; kept for contrast) | **subscription backend** (this doc) |
 |---|---|---|
 | Auth | API token (paid per token) | Monthly subscription (interactive app) |
 | Control flow | **Push** — the runner spawns and supervises agents | **Pull** — a human-driven session pulls work from the journal |
@@ -80,7 +80,7 @@ human stops it — then writes its state back.
 1. You write a PRD describing the task.
 2. You run a command (or invoke a skill) that **scaffolds** a journal
    folder from that PRD.
-3. You open the interactive Claude Code app and invoke the **driver**
+3. You open the interactive agent app (Claude Code or Codex) and invoke the **driver**
    skill (`drive-journal`). Each invocation begins with a **lazy
    sweep** of `active/` — archive anything that finished, classify
    each `in_progress` task as **idle** (detached — `session_ref`
@@ -397,8 +397,8 @@ records** instead of the raw transcript:
   `thread_ts` — harness-enforced via the `TIGERHARNESS_SLACK_THREAD_TS`
   env var the bridge sets per turn, so the agent never copies it by hand
   — is recorded to `journal/.drive-sessions.json`. tiger-memory's
-  `claude_transcript` adapter reads that registry and **skips** a
-  registered drive's transcript — the worklog already owns that content,
+  `claude_transcript` and `codex_transcript` adapters read that registry
+  and **skip** a registered drive's transcript — the worklog already owns that content,
   so the driver doesn't *also* get a fat summary of the whole drive.
 - **Ingestion.** A `journal_worklog` tiger-memory source discovers
   `*/worklog/*.md` under the journal root, groups them per `(task,
@@ -536,8 +536,11 @@ only happens inside an interactive session a human started.
 ### The one exception, and what ADR 0010 changed about it
 
 [`autodrive`](autodrive.md) is the single Operator-authorized break in that
-rule, and it rests on one load-bearing fact: **`claude -p` bills the
-subscription, not the API.** Re-confirmed by the Operator on 2026-08-12.
+rule, and it rests on one load-bearing fact: **each vendor CLI a drive runs
+on (`claude -p`, `codex exec`) bills its own subscription, not an API key.**
+Re-confirmed by the Operator on 2026-08-12 and again on 2026-09-13 ("no more
+subscription limitation for `claude -p`"); `codex exec` bills the ChatGPT
+subscription by construction ([ADR 0011](adr/0011-model-vendors-per-persona.md)).
 
 [ADR 0010](adr/0010-self-driving-journal.md) moved autodrive's *trigger* from
 a human hand to a queue write: with `TIGERHARNESS_AUTODRIVE_AUTOSTART` set in
@@ -556,9 +559,9 @@ That **narrows** the rails doctrine rather than widening it:
   Operator-authorized daemon** — one per team, now guarded by an atomic
   `flock` rather than a read-then-write check.
 - Idle cost went **down**, not up: the daemon probes the queue with plain
-  Python and only spends a `claude -p` session when there is something to do.
+  Python and only spends a vendor-CLI session when there is something to do.
 
-If `claude -p` ever moves to API billing, set
+If either vendor CLI ever moves to API billing, set
 `TIGERHARNESS_AUTODRIVE_AUTOSTART=0` — the system reverts to human-triggered
 with no code change.
 
@@ -697,24 +700,14 @@ The doc deliberately omits an explicit *hard* lock (cut from the MVP):
 serial single-human workflow. A dedicated file lock / `lease.json` is
 a Phase 2 hardening only if concurrent drivers ever become real.
 
-## Configuration (Phase 2)
+## Configuration (Phase 2 — abandoned)
 
-The intended switch follows tigerharness's env-var-driven config
-model:
-
-| Env var | Values | Meaning |
-|---|---|---|
-| `TIGERHARNESS_RUNNER_BACKEND` | `subscription` (default) / `api` | **Planned — not yet in code.** Which backend the task/workflow runner would use. |
-
-By default (in `subscription` mode) the runner CLI does **not**
-execute anything — `assign` / `start` simply scaffold a journal entry
-and notify. The human is the engine. Opt in to `api` mode for the
-legacy behaviour, where the runner spawns and supervises agents as it
-does today.
-
-This integration — and unifying `task_journal/` and `workflow_journal/`
-under `journal/` — is Phase 2 and intentionally deferred so it doesn't
-churn the existing runners while the model is still settling.
+The planned `TIGERHARNESS_RUNNER_BACKEND` switch (`subscription` /
+`api`) never shipped: the api runners were removed outright
+([ADR 0003](adr/0003-remove-legacy-runners.md)), so there is nothing to
+switch between and the journal is the only rail. The team-level knob
+that did ship on this rail is `TIGERHARNESS_JOURNAL_SLACK_DRIVES`
+([ADR 0013](adr/0013-slack-drives-team-setting.md)), covered above.
 
 ## Phasing
 
@@ -726,10 +719,10 @@ churn the existing runners while the model is still settling.
   end to end. The previous draft split scaffolder/driver/journal from
   the watcher across two phases; collapsing the watcher into
   `drive-journal` collapses the split.
-- **Phase 2 — integration (deferred).** Wire the backend behind
-  `TIGERHARNESS_RUNNER_BACKEND` (defaulting to `subscription`, with
-  `api` as the opt-in legacy mode); unify the journal folders;
-  optional lease/locking if concurrent drivers ever become a goal.
+- **Phase 2 — integration (superseded).** The planned
+  `TIGERHARNESS_RUNNER_BACKEND` switch was overtaken by the removal of
+  the runners ([ADR 0003](adr/0003-remove-legacy-runners.md)); the
+  journal folders are unified under `journal/`.
 
 Phase 1 is the agreed scope for the first build — lazy-triggering the
 sweep folded what was previously a separate phase into the driver
@@ -744,9 +737,9 @@ skill, so the MVP is one chunk.
   keystroke automation (tmux/pty) to fake autonomy is brittle and runs
   against the subscription's intended use. The human trigger is the
   design, not a limitation to engineer around.
-- **Replacing the API backend.** The two coexist; `subscription` is
-  the default, and you can opt into `api` per task when you want
-  fast-and-paid instead of cheap-and-human-paced.
+- **Replacing the API backend.** (Historical: the api runners were
+  later removed outright, [ADR 0003](adr/0003-remove-legacy-runners.md);
+  the journal is the only rail.)
 
 ## Related
 

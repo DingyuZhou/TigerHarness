@@ -4,8 +4,9 @@
 [![Python](https://img.shields.io/pypi/pyversions/tigerharness.svg)](https://pypi.org/project/tigerharness/)
 [![License](https://img.shields.io/pypi/l/tigerharness.svg)](https://github.com/DingyuZhou/TigerHarness/blob/main/LICENSE)
 
-A generic Claude Code agent harness: iterative task execution, Slack
-integration, and persistent memory management.
+A vendor-agnostic agent harness for Claude Code and OpenAI Codex:
+iterative task execution, Slack integration, and persistent memory
+management.
 
 > **Docs:** [`docs/INDEX.md`](docs/INDEX.md) is the home — it routes you to the
 > right doc in one hop (and separates current reference from design history).
@@ -15,17 +16,19 @@ integration, and persistent memory management.
 | Package | Description |
 |---|---|
 | `tigerharness.agent_sdk` | Backend-agnostic agent SDK. Same caller code, swappable runtimes: the `claude -p` subprocess backend, the `codex exec` subprocess backend (OpenAI's Codex CLI), and Anthropic's `claude-agent-sdk` backend, with a shared typed event/retry/error model. Which one a persona runs on is declared per persona in `configs/personas.yaml` (`vendor: claude \| chatgpt`, with a team default) — see [ADR 0011](docs/adr/0011-model-vendors-per-persona.md). |
-| `tigerharness.journal` | **File-based subscription backend.** Routes agent work through the interactive Claude Code app so it counts against a monthly subscription instead of token-billed API. Single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`) compiled in-session by a drafter/two-critic loop over mechanical validators, then walked through gates that enforce step order and write persona-stamped worklog notes (the per-persona memory rail). Crash-safe by lease: tasks classify idle/busy/crashed and a fresh session resumes a crashed walk at the same step. Team-pinned scheduling: every task records the journal root it was scheduled into (provenance), scheduling verbs refuse to fall back silently to the per-user journal, and the sweep flags misplaced tasks. A `deferred/` inbox makes Slack-side scheduling cheap: `journal defer` parks the conversation verbatim; `journal materialize` (inside a drive) turns it into a real task. 20 CLI verbs under `journal`. See [docs/journal.md](docs/journal.md), [docs/journal-workflow-mode.md](docs/journal-workflow-mode.md), [docs/journal-instant-resume.md](docs/journal-instant-resume.md). |
-| `tigerharness.autodrive` | **Periodic journal driver** (the Operator-authorized exception to the human-only drive rule). A detached daemon fires "drive the journal" on a fixed cadence via the backend-agnostic `agent_sdk` (default `claude -p`) — fire every N seconds without waiting, so drives may overlap; each fire is a fresh, context-clean session; not built on `/loop`. Overlap is safe and self-limiting because the journal's busy lease makes a redundant fire a cheap no-op. Before each fire it runs the journal's plain-Python sweep itself, so a busy tick is skipped and an idle tick costs a file walk instead of a model session. **Self-driving when opted in** (`TIGERHARNESS_AUTODRIVE_AUTOSTART` in the team's `configs/.env`): scheduling work starts the daemon, and a drained queue — after the idle memory sweep + context compaction — stops it, so steady state is no process running. Only safe while `claude -p` bills the subscription, so it ships with a `--max-budget` cap (mind the N×-concurrent multiplier), a 60s interval floor, an atomically-locked single-instance-per-team daemon, and an `autodrive stop` off-switch. See [docs/autodrive.md](docs/autodrive.md) and [ADR 0010](docs/adr/0010-self-driving-journal.md). |
-| `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to a `claude -p` backend and posts replies back to the thread. |
-| `tigerharness.tiger_memory` | Persistent **bounded** agent memory: three self-pruning stores (skills/must_remember/topics) projected into an index-only session-start briefing, with forgetting via staged compaction ([ADR 0007](docs/adr/0007-topic-store-revamp.md)). Includes the team-wide sweep protocol (`sweep-plan`/`sweep-done`/`sweep-complete`/`sweep-release` under a lease, watermark, and per-wake cap), a lazy team event log ([ADR 0008](docs/adr/0008-team-event-log.md)), and subscription-rail staging (`plan`, `ingest-extraction`/`ingest-staged`) so memory extraction bills to the subscription. See [docs/tiger-memory.md](docs/tiger-memory.md), [docs/tiger-memory-sweep-protocol.md](docs/tiger-memory-sweep-protocol.md). |
+| `tigerharness.journal` | **File-based subscription backend.** Routes agent work through the interactive agent app (Claude Code or Codex, per persona) so it counts against a monthly subscription instead of token-billed API. Single-persona tasks (`kind=task`) and multi-persona workflows (`kind=workflow`) compiled in-session by a drafter/two-critic loop over mechanical validators, then walked through gates that enforce step order and write persona-stamped worklog notes (the per-persona memory rail). Crash-safe by lease: tasks classify idle/busy/crashed and a fresh session resumes a crashed walk at the same step. Team-pinned scheduling: every task records the journal root it was scheduled into (provenance), scheduling verbs refuse to fall back silently to the per-user journal, and the sweep flags misplaced tasks. A `deferred/` inbox makes Slack-side scheduling cheap: `journal defer` parks the conversation verbatim; `journal materialize` (inside a drive) turns it into a real task. **Drive lanes:** every task, workflow step and inbox entry runs on its owner persona's vendor/model — `claim` refuses other-lane work (exit 3) and `step-done` prints a `handoff:` cue ([ADR 0012](docs/adr/0012-drive-lanes.md)); whether a Slack session may drive at all is a team setting, `TIGERHARNESS_JOURNAL_SLACK_DRIVES` ([ADR 0013](docs/adr/0013-slack-drives-team-setting.md)). 20 CLI verbs under `journal`. See [docs/journal.md](docs/journal.md), [docs/journal-workflow-mode.md](docs/journal-workflow-mode.md), [docs/journal-instant-resume.md](docs/journal-instant-resume.md). |
+| `tigerharness.autodrive` | **Periodic journal driver** (the Operator-authorized exception to the human-only drive rule). A detached daemon fires "drive the journal" on a fixed cadence via the backend-agnostic `agent_sdk` — one drive per vendor/model lane that has work, on that lane's backend ([ADR 0012](docs/adr/0012-drive-lanes.md)) — fire every N seconds without waiting, so drives may overlap; each fire is a fresh, context-clean session; not built on `/loop`. Overlap is safe and self-limiting because the journal's busy lease makes a redundant fire a cheap no-op. Before each fire it runs the journal's plain-Python sweep itself, so a busy tick is skipped and an idle tick costs a file walk instead of a model session. **Self-driving when opted in** (`TIGERHARNESS_AUTODRIVE_AUTOSTART` in the team's `configs/.env`): scheduling work starts the daemon, and a drained queue — after the idle memory sweep + context compaction — stops it, so steady state is no process running. Only safe while each vendor CLI (`claude -p`, `codex exec`) bills its subscription, so it ships with a `--max-budget` cap on Claude lanes (Codex has no per-run budget flag; mind the N×-concurrent multiplier), a 60s interval floor, an atomically-locked single-instance-per-team daemon, and an `autodrive stop` off-switch. See [docs/autodrive.md](docs/autodrive.md) and [ADR 0010](docs/adr/0010-self-driving-journal.md). |
+| `tigerharness.slack_bridge` | Slack Socket Mode bridge. Forwards DMs to each persona's vendor backend (`claude -p` or `codex exec`, resolved from `configs/personas.yaml`) and posts replies back to the thread. See [docs/slack-bridge.md](docs/slack-bridge.md). |
+| `tigerharness.tiger_memory` | Persistent **bounded** agent memory: three self-pruning stores (skills/must_remember/topics) projected into an index-only session-start briefing, with forgetting via staged compaction ([ADR 0007](docs/adr/0007-topic-store-revamp.md)). Includes the team-wide sweep protocol (`sweep-plan`/`sweep-done`/`sweep-complete`/`sweep-release` under a lease, watermark, and per-wake cap), a lazy team event log ([ADR 0008](docs/adr/0008-team-event-log.md)), and subscription-rail staging (`plan`, `ingest-extraction`/`ingest-staged`) so memory extraction bills to the subscription. Sources: Claude Code transcripts (`claude_code`), Codex session rollouts (`codex`), Slack threads and journal worklogs; a team sweep can be restricted to one vendor/model lane (`sweep-plan --lane-of`). See [docs/tiger-memory.md](docs/tiger-memory.md), [docs/tiger-memory-sweep-protocol.md](docs/tiger-memory-sweep-protocol.md). |
 
-## Bundled Claude Code skills
+## Bundled agent skills (Claude Code + Codex)
 
-`tigerharness init` installs six Claude Code skills into a new
-team's `.claude/skills/`: `drive-journal` (the subscription drive
-loop), `journal-new` (task/workflow scaffolding), `journal-autodrive`
-(start/stop the periodic journal driver), `slack-notify`
+`tigerharness init` installs seven skills into a new team's
+`.claude/skills/` — one vendor-neutral copy that Claude Code reads there
+and Codex reads through the `.agents/skills` symlink: `drive-journal`
+(the subscription drive loop), `journal-new` (task/workflow
+scaffolding), `journal-autodrive` (start/stop the periodic journal
+driver), `sweep-memory` (the team-wide memory sweep), `slack-notify`
 (proactive Slack messages), `workflow-append-steps` (runtime
 graph extension), and `tigerharness-basics` (how to operate the team
 itself: the CLI, the file layout, recruiting personas, creating
@@ -79,10 +82,10 @@ you don't use:
 
 | Extra | Pulls in | Enables / required for |
 |---|---|---|
-| *(none)* | — | `init` scaffolder, `dismiss` teardown, the `journal` subscription backend |
+| *(none)* | — | `init` scaffolder, `dismiss` teardown, the `journal` subscription backend, `autodrive` (its Slack notices need `[slack]`), and the `claude_p` / `codex_exec` subprocess backends |
 | `[anthropic]` | `claude-agent-sdk` | The official Claude Agent SDK backend (`anthropic_sdk`) |
 | `[slack]` | `slack-bolt`, `aiohttp`, `python-dotenv` | `slack-bridge` (Slack Socket Mode DM bridge) |
-| `[memory]` | `pyyaml` | `tiger-memory` (per-persona persistent memory) |
+| `[memory]` | `pyyaml` | `tiger-memory` (per-persona persistent memory) and reading `configs/personas.yaml` for per-persona vendor/model resolution (without it every persona falls back to `claude`) |
 | `[all]` | union of everything above | Everything works out of the box |
 
 Pick the union that matches what you'll use, e.g.
@@ -99,20 +102,24 @@ persistent memory and the official SDK backend.
 
 `tigerharness init` is interactive — it walks you through:
 
-1. Multi-team Slack mode (recommended for new setups) — opt in or out.
-2. Persona name + team.
-3. Slack `.env` template + memory config (optional toggles).
-4. For a new team: which model vendor it defaults to — Claude
+1. Persona name + team (pick an existing team or create one).
+2. Optional toggles: the Slack `.env` template, multi-team Slack mode
+   (recommended for new setups), and the per-persona memory config.
+3. For a new team: which model vendor it defaults to — Claude
    (`claude -p`) or ChatGPT (`codex exec`) — and an optional default
    model. Written to `configs/personas.yaml`; `--vendor` / `--model`
    skip the prompt and `--yes` takes Claude. Any persona can override
    with its own `vendor:` / `model:` in that file.
+4. The new team's goal (one sentence, seeds the charter's Mission) and
+   the persona's initial traits (recorded in its prompt) — `--goal` /
+   `--traits` skip the prompts.
 5. Slack user-ID allowlist for the team's bridge bot (optional).
 
-The memory store is auto-initialized for each new persona and the
-Claude Code transcripts path is auto-detected from the team root, so
-the user never has to come back and edit placeholders. Every persona
-always belongs to a team, and a team is a self-contained directory.
+The memory store is auto-initialized for each new persona with both
+transcript sources wired in (the Claude Code project path, auto-detected
+from the team root, and the Codex sessions tree), so the user never has
+to come back and edit placeholders. Every persona always belongs to a
+team, and a team is a self-contained directory.
 
 Every team gets two governance folders alongside the runtime config:
 `charter/` holds the team's operating manual (mission, scope, allowed
@@ -124,6 +131,10 @@ rather than decorative.
 
 ```
 tigers/
+├── AGENTS.md                      # vendor-neutral session bootstrap (which persona you are,
+│                                  #   where the manual lives, the runtime glossary)
+├── CLAUDE.md                      # imports AGENTS.md so Claude Code loads it
+├── .gitignore                     # secrets + runtime state (topped up by `init --refresh`)
 ├── .claude/
 │   ├── settings.json             # wires TIGERHARNESS_PERSONAS_CONFIG
 │   └── skills/                   # bundled skills (drive-journal, journal-new,
@@ -133,7 +144,10 @@ tigers/
 │   └── skills -> ../.claude/skills   # symlink: Codex discovers the same skills
 ├── configs/
 │   ├── personas.yaml              # team registry + default model vendor (auto-updated)
-│   └── .env                       # Slack tokens (gitignored)
+│   ├── repos.yaml                 # path map: team_root + the project the team works on
+│   ├── tiger-memory.defaults.yaml # team-wide memory defaults (per-persona configs inherit)
+│   ├── slack-bridge.yaml          # this team's bridge lane fragment (multi-team mode)
+│   └── .env                       # Slack tokens + team knobs (gitignored)
 ├── charter/
 │   └── README.md                  # team's mission, scope, conventions
 │                                  # (single entry point for personas)
@@ -149,6 +163,7 @@ tigers/
 └── memories/
     ├── chief/
     │   └── tiger-memory.config.yaml   # per-persona memory config
+    │                                  #   (claude_code + codex sources)
     └── scout/
         └── tiger-memory.config.yaml
 ```
@@ -252,8 +267,12 @@ for the full setup and
 ### Tiger memory
 
 Each persona has its own memory config under
-`tigers/memories/<persona>/tiger-memory.config.yaml`. Edit it to point
-at your Claude Code project path, then:
+`tigers/memories/<persona>/tiger-memory.config.yaml`. `init` fills in
+both transcript sources (the Claude Code project path detected from the
+team root, and the Codex sessions tree), so it works as-is; to also
+ingest the persona's journal work, add a `journal_worklog` source (see
+[docs/per-persona-journal-memory.md](docs/per-persona-journal-memory.md)).
+Then:
 
 `--config` is a top-level option for the `tiger-memory` sub-command, so
 it must appear **before** the verb:
@@ -265,40 +284,54 @@ CFG=tigers/memories/chief/tiger-memory.config.yaml
 # 1. Initialize the memory store (per persona)
 tigerharness tiger-memory --config $CFG init
 
-# 2. Bootstrap (one-time backfill from existing transcripts)
-tigerharness tiger-memory --config $CFG bootstrap --dry-run
-tigerharness tiger-memory --config $CFG bootstrap
-
-# 3. Rebuild (incremental, run after each session)
+# 2. Rebuild the session-start briefing (no model call; the in-session
+#    `sweep-memory` skill does the actual extraction)
 tigerharness tiger-memory --config $CFG rebuild
 
-# 4. Search memory
+# 3. Search memory
 tigerharness tiger-memory --config $CFG search "solar energy"
 
-# 5. Pin a must-memorize fact
+# 4. Pin a must-memorize fact
 tigerharness tiger-memory --config $CFG pin "Prefers solar over wind"
 ```
 
 ## Configuration
 
 All paths are resolved from environment variables -- no hardcoded paths.
+"Where" says which file a variable belongs in: the **team `configs/.env`**
+(per-team, read by the bridge lane, the journal and autodrive; never
+pollutes the process env), the **bridge process env** (`multi-bridge.env`
+via systemd `EnvironmentFile=`), or the **session / process env** of
+whatever CLI or agent session is running.
 
-| Variable | Default | Description |
-|---|---|---|
-| `TIGERHARNESS_BRIDGES_CONFIG` | (none; **required** for the bridge) | Path to the `slack-bridge.yaml` lanes index (see [docs/slack-bridge.md](docs/slack-bridge.md)) |
-| `TIGERHARNESS_SLACK_ENV` | (none) | Explicit `.env` path for the notify CLI's credential lookup |
-| `TIGERHARNESS_ATTACHMENT_DIR` | `/tmp/slack-attachments` | Where to stage downloaded files |
-| `TIGER_MEMORY_CONFIG` | (none) | Path to tiger-memory YAML config |
-| `TIGER_MEMORY_CLI` | (none) | Path to tiger-memory CLI binary |
-| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `1800` (30 min) | Heartbeat age (seconds) past which the journal sweep treats an attached `in_progress` task as **crashed** (below it, **busy**) |
+| Variable | Where | Default | Description |
+|---|---|---|---|
+| `TIGERHARNESS_BRIDGES_CONFIG` | bridge process env | (none; **required** for the bridge) | Path to the `slack-bridge.yaml` lanes index (see [docs/slack-bridge.md](docs/slack-bridge.md)) |
+| `TIGERHARNESS_PERSONAS_CONFIG` | `.claude/settings.json` (written by `init`) or session env | (none) | Path to the team's `configs/personas.yaml` for journal verbs run inside a session |
+| `SLACK_ALLOWED_USER_IDS` | team `configs/.env` | (none) | Comma-separated Slack user IDs the bridge answers; the notify CLI's DM target |
+| `SLACK_NOTIFY_CHANNEL` | team `configs/.env` | (none → operator DM) | Ops-log channel for proactive notifies, turn-progress heartbeats and autodrive notices (invite the bot to it) |
+| `TIGERHARNESS_JOURNAL_SLACK_DRIVES` | team `configs/.env` | unset (off) | `1` lets a Slack-triggered session `journal claim` (drive) without `--allow-api-drive`; off means Slack schedules, never drives ([ADR 0013](docs/adr/0013-slack-drives-team-setting.md)) |
+| `TIGERHARNESS_AUTODRIVE_AUTOSTART` | team `configs/.env` | unset (off) | `1` makes scheduling start the autodrive daemon and a drained queue stop it ([ADR 0010](docs/adr/0010-self-driving-journal.md)) |
+| `TIGERHARNESS_AUTODRIVE_INTERVAL` | team `configs/.env` | `600` | Seconds between daemon fires (floor `60`) |
+| `TIGERHARNESS_AUTODRIVE_MAX_BUDGET` | team `configs/.env` | (none = uncapped) | USD cap handed to each drive's backend |
+| `TIGERHARNESS_AUTODRIVE_DRIVER` | team `configs/.env` | the team's default persona | `--driver` persona for daemon drives; its vendor/model is the daemon's home lane |
+| `TIGERHARNESS_AUTODRIVE_NOTIFY`, `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` | team `configs/.env` | `slack`; channel falls back to `SLACK_NOTIFY_CHANNEL`, then the operator DM | `slack` or `none`: daemon heartbeats + threaded drive summaries; the channel value `dm` pins them to the operator DM (see [docs/autodrive-notifications.md](docs/autodrive-notifications.md)) |
+| `TIGERHARNESS_SLACK_ENV` | notify CLI process env | (none) | Explicit `.env` path for the notify CLI's credential lookup and the turn-progress heartbeats' env fallback |
+| `TIGERHARNESS_ATTACHMENT_DIR` | bridge process env | `/tmp/slack-attachments` | Where to stage downloaded files |
+| `TIGER_MEMORY_CONFIG` | session / process env | (none) | Path to tiger-memory YAML config |
+| `TIGER_MEMORY_CLI` | team `configs/.env` | (none → `tiger-memory` on `PATH`) | tiger-memory CLI binary for the bridge's post-thread rebuild |
+| `TIGERHARNESS_JOURNAL_DIR` | session / process env | the team root's `journal/` when the cwd is a team dir, else `$XDG_STATE_HOME/tigerharness-journal` (`~/.local/state/…`) | Overrides the journal root (autodrive sets it for the drives it launches) |
+| `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | session / process env | `1800` (30 min) | Heartbeat age (seconds) past which the journal sweep treats an attached `in_progress` task as **crashed** (below it, **busy**) |
+| `TIGERHARNESS_LOG_LEVEL` | session / process env | `WARNING` (`notify`: `INFO`) | Log level for every tigerharness CLI and daemon |
 
 ## Examples
 
 See [`examples/`](examples/) for a fully-populated sample team folder
 (`examples/tigers/`) and standalone reference configs:
-- [`examples/tigers/`](examples/tigers/) -- sample team scaffolded by `tigerharness init`
+- [`examples/tigers/`](examples/tigers/) -- sample team scaffolded by `tigerharness init --yes` (regenerated, never hand-edited; see [CONTRIBUTING](CONTRIBUTING.md#examples))
 - [`tiger-memory.config.yaml`](examples/tiger-memory.config.yaml) -- annotated memory config (standalone)
-- [`env.example`](examples/env.example) -- Slack bridge env template (standalone)
+- [`env.example`](examples/env.example) -- team `configs/.env` template: Slack tokens + team knobs (standalone)
+- [`slack-bridge-multi.service`](examples/slack-bridge-multi.service) -- reference systemd unit for the multi-team bridge
 
 ## Requirements
 
@@ -326,7 +359,7 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
   - `multi-bridge.env` (referenced by systemd `EnvironmentFile=`): loaded into the bridge process's `os.environ`. Used **only** for the bootstrap pointer `TIGERHARNESS_BRIDGES_CONFIG`. Adding other env vars here does **not** reach per-lane behavior, because the per-team loader reads from disk into a separate dict.
   - per-team `configs/.env` (referenced by the YAML index's per-lane `env:` key): loaded via `_load_env_file` into a per-lane dict that deliberately does **not** pollute `os.environ`. This is where Slack tokens, `TIGER_MEMORY_CLI`, `SLACK_NOTIFY_CHANNEL`, `TIGERHARNESS_PERSONAS_CONFIG`, and any agent-facing env vars go.
 
-  The Configuration table above doesn't distinguish which env vars belong in which file. Worth a docs pass (or a single config table with a "where it goes" column) so users don't have to read the loader to find out.
+  The Configuration table above carries a "where it goes" column for exactly this reason.
 
 ### Bridge shutdown
 
@@ -341,7 +374,7 @@ Gaps we've hit in real use, tracked here so they can be picked up later. None of
 - **Notifications require the bot to be in `SLACK_NOTIFY_CHANNEL`.** Each team has its own Slack app (own bot user). After creating a new team's Slack app and setting `SLACK_NOTIFY_CHANNEL` in `configs/.env`, the bot must be **invited to that channel** (`/invite @BotName` in Slack). Without this, `chat.postMessage` returns `channel_not_found` and notifications are silently skipped. The notify CLI logs the error to stderr but doesn't surface it to the user.
   - **Fix candidate**: `tigerharness init` could print a reminder ("Don't forget to invite your bot to the ops-log channel"), or the notifier could log a more prominent first-time warning.
   - This now also covers **autodrive**, which inherits `SLACK_NOTIFY_CHANNEL` as the last layer of its notify-channel chain. A team that set the key but never invited the bot can decline the inheritance with `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL=dm` and keep its daemon heartbeats in the operator DM. See [autodrive.md](docs/autodrive.md).
-- **Agents need `.claude/settings.json` + skills to send proactive DMs.** Agents use the `slack-notify` skill to send per-iteration updates via `python -m tigerharness.slack_bridge.notify`. Without `.claude/settings.json` (which wires `TIGERHARNESS_PERSONAS_CONFIG`) and `.claude/skills/slack-notify/SKILL.md` (which teaches the agent the notify CLI exists), the agent doesn't know how to send Slack messages. As of v0.2.1+, `tigerharness init` scaffolds these automatically for new teams. Existing teams adopt them with `tigerharness init --refresh`, which installs any missing skills, refreshes un-customized ones to the latest, and tops up `.gitignore` with any newly-shipped rule — without clobbering hand edits.
+- **Agents need `.claude/settings.json` + skills to send proactive DMs.** Agents use the `slack-notify` skill to send per-iteration updates via `python -m tigerharness.slack_bridge.notify`. Without `.claude/settings.json` (which wires `TIGERHARNESS_PERSONAS_CONFIG`) and `.claude/skills/slack-notify/SKILL.md` (which teaches the agent the notify CLI exists), the agent doesn't know how to send Slack messages. As of v0.2.1+, `tigerharness init` scaffolds these automatically for new teams. Existing teams adopt them with `tigerharness init --refresh`, which installs any missing skills, refreshes un-customized ones to the latest, recreates the `.agents/skills` symlink if missing, and tops up `.gitignore` with any newly-shipped rule — without clobbering hand edits.
 - **`--thread` must be passed when notifying from a Slack thread.** When an agent sends a proactive message from a Slack DM thread, it must pass `--thread <slack_thread_ts>` (from the `[bridge-context]` block) so notifications land in the right thread. Without it, notifications go to a new top-level message instead of the conversation thread. The `slack-notify` skill documents this prominently, but it's easy to forget.
 
 ### `tigerharness init`

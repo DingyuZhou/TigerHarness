@@ -1,8 +1,16 @@
 # Anthropic Agent SDK vs. OpenAI Agents SDK — Common Interface (v2)
 
+> **Design record** (written around Nov 2025 against the upstream SDKs of
+> that time; folded into tigerharness in May 2026). Current behaviour is the code under
+> `src/tigerharness/agent_sdk/` and its reference `docs/agent_sdk.md`.
+> Since this was written a fourth backend shipped: `codex_exec`, a
+> subprocess over OpenAI's `codex exec` with the same shape as the
+> `claude -p` backend sketched in §5.3.
+
 A comparison of the two Python agent SDKs, plus a portable abstraction you can
 drop into production code and back with whichever runtime you want
-(`anthropic.claude-agent-sdk`, `openai-agents`, or `claude -p` as a subprocess).
+(`anthropic.claude-agent-sdk`, `openai-agents`, or `claude -p` / `codex exec` as
+a subprocess).
 
 This is the second pass of the design — the v1 sketch had real holes that
 would have blown up in production. The fixes are spelled out in section 3.

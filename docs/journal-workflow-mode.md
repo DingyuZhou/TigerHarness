@@ -41,14 +41,16 @@ free-form PRD — the single-persona iterative workload. The Operator's question
 on 2026-06-03: *how do I trigger workflow-runner-style work through
 this backend?*
 
-Answer today: you can't. `Status.from_dict` rejects `kind=workflow` so
-neither the scaffolder nor the driver will touch one. The api-backed
-`workflow-runner` is still available, but its `claude -p` runtime
-moves to token billing in mid-June 2026, which defeats the whole
-point of the subscription backend.
+Answer when this was written (June 2026): you couldn't.
+`Status.from_dict` rejected `kind=workflow` so neither the scaffolder
+nor the driver would touch one, and the only multi-persona rail was the
+api-backed `workflow-runner`, since removed
+([ADR 0003](adr/0003-remove-legacy-runners.md)). (The billing scare
+that motivated the timing never materialized: `claude -p` still bills
+the subscription, and so does `codex exec`.)
 
-Phase 1.5 closes that gap: multi-persona workflow work driven by the
-interactive Claude Code app, using the same `journal/` folder, the
+Phase 1.5 closes that gap: multi-persona workflow work driven by an
+interactive agent session, using the same `journal/` folder, the
 same `drive-journal` skill, the same lazy sweep, and an extended
 `status.json` schema. The compile pipeline that turns a playbook +
 brief into a step graph is **reused from Wave 2** (the modules under
@@ -156,6 +158,10 @@ Driver (drive-journal skill, interactive session)
          writes that step's persona-attributed `worklog/` entry, routes
          along the verdict's edge, and prints the next step -- the driver
          does NOT follow edges by hand. (Per-persona memory; see below.)
+         In a drive, pass `--driver <persona>`: the lane gate refuses a
+         step owned by another vendor/model lane (exit 3, `--any-lane`
+         overrides) and prints a `handoff:` cue when the NEXT step is on
+         another lane -- see journal.md, "Drive lanes".
   3. Cascade after each task lands.
 ```
 
@@ -648,9 +654,10 @@ needed to implement Phase 1.5 the same shape as Phase 1.
 
 ## Non-goals
 
-- **Replacing the existing api-backed workflow-runner.** It stays;
-  Phase 1.5 just makes the journal a viable subscription-friendly
-  alternative for the same shape of workload.
+- **Replacing the existing api-backed workflow-runner.** (Historical:
+  the runner was later removed outright, [ADR
+  0003](adr/0003-remove-legacy-runners.md); Phase 1.5 made the journal
+  the subscription-friendly rail for the same shape of workload.)
 - **Inventing a new graph format.** We reuse
   the compile core's output verbatim — `orchestration.json`
   + `steps/<id>.md` per the existing schema.

@@ -91,7 +91,7 @@ Three moving parts:
    revamp — only the extraction contract + stores downstream changed; see
    [`tiger-memory.md`](tiger-memory.md)).
 3. **Double-count suppression:** the drive transcript is marked so the
-   `claude_transcript` adapter skips it — otherwise the driver would
+   `claude_transcript` and `codex_transcript` adapters skip it — otherwise the driver would
    *also* get a fat summary of the whole drive, defeating the "thin"
    goal.
 
@@ -206,7 +206,7 @@ style, trivial to write atomically per turn.
   ```
 
   and a matching branch in `lifecycle.py:_build_adapters`
-  (alongside `claude_code` / `slack_thread` / `docs`).
+  (alongside `claude_code` and `codex`).
 - **Sweep staleness must see worklog activity.** A specialist (e.g.
   Rukawa) may have *no* direct Slack threads — only worklog entries from
   drives. The team-sweep's per-persona "due / stale" detection must
@@ -216,12 +216,14 @@ style, trivial to write atomically per turn.
 
 ### 4. Double-count suppression
 
-Without this, the `claude_transcript` adapter would still fold the whole
+Without this, the transcript adapters (`claude_transcript`,
+`codex_transcript`) would still fold the whole
 drive into the driver's store (fat) — defeating decision #2.
 
 - At `claim`, record the drive session's `thread_ts` to a registry,
   `journal/.drive-sessions.json`.
-- `ClaudeTranscriptAdapter` reads the registry and **skips** transcripts
+- `ClaudeTranscriptAdapter` and `CodexTranscriptAdapter` (shared base
+  `sources/_transcripts.py`) read the registry and **skip** transcripts
   whose `thread_ts` is a registered drive session; the worklog now owns
   that content (persona slices → specialists, thin trace → driver).
 
@@ -232,10 +234,10 @@ agent remembering a flag:
 1. The slack bridge sets `TIGERHARNESS_SLACK_THREAD_TS=<thread_ts>` in
    *every* turn's subprocess environment. It does this per-turn via a
    copy of the persona's `AgentConfig` carrying the value in
-   `extra["env"]`, which the `claude_p` backend merges into the
-   subprocess env — no mutation of the shared `os.environ`, so
+   `extra["env"]`, which the `claude_p` and `codex_exec` backends merge
+   into the subprocess env — no mutation of the shared `os.environ`, so
    concurrent turns never race (`slack_bridge.bridge._with_thread_env`,
-   `agent_sdk.backends.claude_p`).
+   `agent_sdk.backends.claude_p`, `agent_sdk.backends.codex_exec`).
 2. In-session, `journal claim --driver <p>` reads that env var as the
    fallback for `--drive-thread`. The fallback is **gated on `--driver`**
    so it only fires inside a real drive (where the per-persona worklog
@@ -245,7 +247,7 @@ agent remembering a flag:
 
 **Registry growth is bounded.** Each `register()` write prunes entries
 whose `last_seen_at` is older than `_REGISTRY_TTL_DAYS` (30d) — far
-longer than the `claude_transcript` ingestion window (`max_age_days`,
+longer than the transcript sources' ingestion window (`max_age_days`,
 default 7), so a pruned entry's transcript is itself long past
 ingestion. Entries with an unparseable/absent stamp are kept (fail-safe:
 never drop a live suppression).

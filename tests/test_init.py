@@ -728,6 +728,25 @@ class TestAppendPersonaToYaml:
         # The first persona added becomes the team's default.
         assert "default_persona: chief" in text
 
+    def test_seeds_default_persona_into_empty_scaffold(self, tmp_path: Path):
+        """create_team pre-writes preamble + vendor block + a bare
+        `personas:` before the first recruit; that empty roster is not a
+        hand-managed file, so the first recruit becomes default_persona
+        exactly as on the fresh-file path (the AGENTS.md bootstrap and
+        `journal new` without --persona both read that key)."""
+        from tigerharness.init import _personas_yaml_header
+        yp = tmp_path / "personas.yaml"
+        yp.write_text(_personas_yaml_header("tigers", vendor="claude", model=""))
+        assert _append_persona_to_yaml(yp, "chief", "desc", "tigers") is True
+        text = yp.read_text()
+        assert "default_persona: chief" in text
+        assert text.index("default_persona: chief") < text.index("personas:\n  - name: chief")
+        # The vendor block written by create_team survives, once.
+        assert text.count("default_vendor: claude") == 1
+        # A second recruit does not touch it.
+        assert _append_persona_to_yaml(yp, "scout", "desc", "tigers") is True
+        assert yp.read_text().count("default_persona:") == 1
+
     def test_does_not_inject_default_persona_into_existing_file(
         self, tmp_path: Path,
     ):

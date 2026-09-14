@@ -1,4 +1,7 @@
 # tiger-memory config for persona 'scout' (team 'tigers').
+# Shared settings (summarizer, rebuild, etc.) are inherited from
+# configs/tiger-memory.defaults.yaml. Override any key here to
+# customize this persona.
 # Docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
 
 agent:
@@ -11,17 +14,23 @@ store:
 
 sources:
   - kind: claude_code
-    project_path: ~/.claude/projects/-home-user-myproject/
-    # ^ Replace with your Claude Code project path.
-    #   Find yours under ~/.claude/projects/ -- the directory name
-    #   encodes the absolute project path with dashes replacing slashes.
-summarizer:
-  backend: anthropic
-  model: claude-sonnet-4-6
-  prompts: default/v1
-
+    project_path: ~/.claude/projects/<encoded-team-root>/
+    # ^ Where Claude Code WILL write transcripts for this team.
+    #   The dir is created on the first claude_p dispatch.
+    # Filter: only ingest threads where the bridge stored
+    # persona == "scout". Excludes other personas' threads
+    # and unattributed local `claude -p` sessions (strict mode).
+    persona: scout
+  - kind: codex
+    # OpenAI Codex sessions (`codex exec`, personas on vendor: chatgpt).
+    # `cwd: auto` = only sessions opened in this team root.
+    sessions_path: ~/.codex/sessions
+    cwd: auto
+    persona: scout
+  - kind: slack_thread
+    # The bridge's per-team state file -- provides the
+    # session_id -> (thread_ts, persona) reverse map used
+    # by the per-persona filters above.
+    threads_json: ~/.local/state/slack-bridge/tigers/threads.json
 rebuild:
   lock_path: /tmp/tiger-memory-tigers-scout.lock
-  idle_threshold_hours: 1
-  resummarize_window_days: 7
-  rebuild_timeout_minutes: 60

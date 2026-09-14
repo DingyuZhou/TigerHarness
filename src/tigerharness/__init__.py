@@ -1,4 +1,4 @@
-"""tigerharness — a generic Claude Code agent harness.
+"""tigerharness — a vendor-agnostic agent harness for Claude Code and OpenAI Codex.
 
 Sub-packages:
     tigerharness.agent_sdk     — backend-agnostic agent SDK

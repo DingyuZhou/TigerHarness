@@ -5,22 +5,26 @@ this project. It assumes you've read nothing else.
 
 ## TL;DR
 
-We built a backend-agnostic Python agent SDK in `agent_sdk/`. The user wants
-to write production code against a stable interface and swap the underlying
-runtime — currently a `claude -p` subprocess — for the official
-`claude-agent-sdk` or OpenAI's `openai-agents` later, without rewriting
-caller code.
+We built a backend-agnostic Python agent SDK in `src/tigerharness/agent_sdk/`.
+The user wants to write production code against a stable interface and
+swap the underlying runtime — a `claude -p` or `codex exec` subprocess, or
+the official `claude-agent-sdk` — for another without rewriting caller
+code (OpenAI's `openai-agents` is the remaining stub).
 
 - **Working backends**:
   - `claude_p` — subprocess to `claude -p` (always available).
+  - `codex_exec` — subprocess to `codex exec --json` (OpenAI's Codex CLI;
+    always available, needs `codex` on `PATH`). The `chatgpt` vendor of
+    `tigerharness.vendors`; same shape as `claude_p`.
   - `anthropic_sdk` — wraps Anthropic's official `claude-agent-sdk`
     Python package (install via `pip install tigerharness[anthropic]`).
 - **Stub backend**: `openai_sdk` — raises `BackendNotImplementedError`
   on construction. Wiring sketch is in `agent_sdk_comparison.md` and
   the module's docstring.
-- **Tests**: ~200 tests against the SDK alone (more across the whole
-  tigerharness suite). Coverage is enforced at 98.5% at the
-  tigerharness package level.
+- **Tests**: `tests/agent_sdk/` (11 modules, incl. `test_codex_exec.py`)
+  inside the tigerharness suite (~3.9k tests). Coverage is enforced at
+  **100% line + branch** at the tigerharness package level
+  (`fail_under = 100` in `pyproject.toml`).
 - **Design rationale**: see `agent_sdk_comparison.md` (this directory).
   It documents the v2 interface, the OpenAI ↔ Anthropic mapping, what
   intentionally doesn't generalize, and why.
@@ -29,12 +33,12 @@ caller code.
 
 | What | Required for | Install |
 |---|---|---|
-| Python 3.10+ | everything | system / pyenv |
-| `claude` CLI on `PATH` | running `agent_sdk` against real Claude | install Claude Code (see anthropic.com/claude-code), then run `claude` once to log in |
-| `pytest` | running tests | `pip install pytest` |
-| `coverage` | coverage reports | `pip install coverage` |
-| `pydantic` (v1 or v2) | one test exercises pydantic-as-output_schema | `pip install pydantic` |
-| `mypy` | optional type check | `pip install mypy` |
+| Python 3.11+ | everything | system / pyenv |
+| `claude` CLI on `PATH` | running `claude_p` against real Claude | install Claude Code (see anthropic.com/claude-code), then run `claude` once to log in |
+| `codex` CLI on `PATH` | running `codex_exec` against real Codex | install the Codex CLI, then `codex login` |
+| `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage` | running tests | `uv sync --extra all` (extras + the default `dev` group) |
+| `pydantic` (v1 or v2) | one test exercises pydantic-as-output_schema | optional, `pip install pydantic` |
+| `mypy` | optional type check (not in the dev group) | `pip install mypy` |
 
 The package source itself has **no third-party Python dependencies** — only
 stdlib (`asyncio`, `json`, `subprocess` via asyncio, `signal`, `shutil`,
@@ -67,44 +71,42 @@ before implementing the stub backends — the public surfaces drift.
 ## Workspace map
 
 ```
-~/projects/tigerleap/agent-sdk/   ← project root (kebab-case)
-├── README.md                     ← project entry point + uv install instructions
-├── pyproject.toml                ← PEP 621 metadata, hatchling build, uv dev group
-├── .gitignore                    ← Python noise (caches, build artifacts, .venv)
-├── .coveragerc                   ← coverage config (omits examples/ + tests/, writes to /tmp)
-└── agent_sdk/                    ← THE importable package (snake_case)
-    ├── __init__.py               ← public re-exports + factory glue
-    ├── types.py                  ← single source of truth for the public surface
-    ├── errors.py                 ← AgentSDKError hierarchy
-    ├── factory.py                ← get_backend() / register_backend() / list_backends()
-    ├── README.md                 ← user-facing usage docs + extras + limits
-    ├── backends/
-    │   ├── _base.py              ← BaseStreamHandle + run_via_stream helper
-    │   ├── claude_p.py           ← working backend (subprocess + stream-json)
-    │   ├── anthropic_sdk.py      ← working backend (wraps claude-agent-sdk)
-    │   └── openai_sdk.py         ← stub, raises with wiring notes
-    ├── examples/                 ← basic / streaming / multi_turn / builtin_tools
-    ├── tests/                    ← shipped inside the package (excluded from wheel)
-    │   ├── conftest.py           ← asyncio_test decorator, isolated_registry, fake-CLI fixtures
-    │   ├── test_types.py
-    │   ├── test_errors.py
-    │   ├── test_factory.py
-    │   ├── test_base.py
-    │   ├── test_claude_p.py      ← the bulk; argv/stdin/runtime/edge cases
-    │   ├── test_stub_backends.py
-    │   └── test_examples.py
-    └── docs/
-        ├── HANDOFF.md            ← this file
-        └── agent_sdk_comparison.md  ← design doc; v1 critique + v2 interface
+<tigerharness repo>/
+├── pyproject.toml                ← ONE project: tigerharness (hatchling, uv dev group,
+│                                   [tool.coverage] with fail_under = 100)
+├── docs/agent_sdk.md             ← the user-facing reference for this package
+├── src/tigerharness/
+│   ├── vendors.py                ← vendor -> backend map + per-persona resolution (ADR 0011)
+│   └── agent_sdk/                ← THE importable package
+│       ├── __init__.py           ← public re-exports + factory glue
+│       ├── types.py              ← single source of truth for the public surface
+│       ├── errors.py             ← AgentSDKError hierarchy
+│       ├── factory.py            ← get_backend() / register_backend() / list_backends()
+│       ├── retry.py              ← run_with_retry (exponential backoff)
+│       ├── README.md             ← usage docs + extras + limits
+│       ├── backends/
+│       │   ├── _base.py          ← BaseStreamHandle + run_via_stream helper
+│       │   ├── claude_p.py       ← working backend (claude -p subprocess + stream-json)
+│       │   ├── codex_exec.py     ← working backend (codex exec --json subprocess)
+│       │   ├── anthropic_sdk.py  ← working backend (wraps claude-agent-sdk)
+│       │   └── openai_sdk.py     ← stub, raises with wiring notes
+│       ├── examples/             ← basic / streaming / multi_turn / builtin_tools
+│       └── docs/
+│           ├── HANDOFF.md        ← this file
+│           └── agent_sdk_comparison.md  ← design record; v1 critique + v2 interface
+└── tests/agent_sdk/              ← outside the package (not in the wheel)
+    ├── conftest.py               ← isolated_registry, fake-CLI fixtures
+    ├── _helpers.py               ← asyncio_test decorator
+    ├── test_types.py / test_errors.py / test_factory.py / test_base.py
+    ├── test_claude_p.py          ← the bulk; argv/stdin/runtime/edge cases
+    ├── test_codex_exec.py        ← the codex exec twin
+    ├── test_anthropic_sdk.py / test_stub_backends.py / test_retry.py
+    └── test_examples.py / test_coverage_push.py
 ```
 
-> **Layout note (May 2026 reorg):** the project was moved from
-> `tigerleap/research/` to `tigerleap/agent-sdk/`. Tests moved from
-> `tests/` at the workspace root into `agent_sdk/tests/` so the package
-> ships standalone. Design docs moved to `agent_sdk/docs/`. A
-> `pyproject.toml` was added (hatchling + uv) so sibling tigerleap
-> projects can depend on this via
-> `[tool.uv.sources] agent-sdk = { path = "../agent-sdk", editable = true }`.
+> **Layout note:** the SDK was folded into the tigerharness package in
+> May 2026 (`src/tigerharness/agent_sdk/`); there is no standalone
+> `agent-sdk` project or path source any more.
 
 ## Out of scope (deliberately — don't try to "fix")
 
@@ -173,7 +175,7 @@ Other key types:
   backends.
 
 The full public surface is re-exported from `agent_sdk/__init__.py`
-(`__all__` lists 40 names).
+(`__all__` lists 41 names).
 
 ### Event types at a glance
 
@@ -241,6 +243,28 @@ Hard limitations (raise `BackendNotImplementedError` upfront):
 - `BuiltinTool(..., config={...})` — the CC CLI configures hosted tools via
   settings files, not flags.
 
+### `codex_exec` — done
+
+`agent_sdk/backends/codex_exec.py`. The `chatgpt` vendor of
+`tigerharness.vendors`. Spawns `codex exec --json` (or `codex exec resume
+<thread-id> --json` for a later turn) per `run_stream` call, sends the
+prompt on stdin and parses Codex's JSONL event stream (`thread.started` /
+`turn.started` / `item.*` / `turn.completed` / `turn.failed`) into the same
+normalized events `claude_p` emits.
+
+Capabilities: multi-turn via the captured thread id; `instructions` as
+`-c developer_instructions=<TOML string>`; `model` -> `-m`;
+`permission_mode` mapped onto Codex's sandbox/approval flags
+(`bypassPermissions` / `dontAsk` -> `--dangerously-bypass-approvals-and-sandbox`,
+`acceptEdits` -> `workspace-write`, `plan` -> `read-only`); `add_dirs` and
+`output_schema` (new sessions only); per-call `env`; `cli_args`;
+cancellation via SIGINT. Knobs Codex has no per-run flag for (`max_turns`,
+`max_budget_usd`, `disallowed_tools`, `settings`, `builtin_tools`) are
+logged at DEBUG and ignored, so a config written for `claude_p` runs
+unchanged. Same hard limitations as `claude_p` (no `ToolSpec`, no approval
+callback). Tests: `tests/agent_sdk/test_codex_exec.py`, driven by fake
+`codex` scripts.
+
 ### `anthropic_sdk` — working
 
 `agent_sdk/backends/anthropic_sdk.py`. Wraps Anthropic's official
@@ -298,12 +322,12 @@ type-check against `AgentBackend`.
 
 ## How to run things
 
-Requires Python 3.10+ (PEP 604 union types, `match`, `from __future__ import
+Requires Python 3.11+ (PEP 604 union types, `match`, `from __future__ import
 annotations`).
 
 ```bash
-# One-time dev setup (from agent-sdk/ project root):
-uv sync --group dev                          # pytest, coverage, mypy, pydantic
+# One-time dev setup (from the tigerharness repo root):
+uv sync --extra all                          # extras + the default dev group (pytest, pytest-asyncio, pytest-cov, coverage)
 
 # Use the package (uv run puts the venv on PATH):
 uv run python -m tigerharness.agent_sdk.examples.basic    # needs `claude` CLI on PATH
@@ -311,31 +335,19 @@ uv run python -m tigerharness.agent_sdk.examples.streaming
 uv run python -m tigerharness.agent_sdk.examples.multi_turn
 uv run python -m tigerharness.agent_sdk.examples.builtin_tools
 
-# Test (pyproject.toml has testpaths = agent_sdk/tests):
-uv run pytest                                # 160 tests, ~3s
-uv run coverage run -m pytest && uv run coverage report -m  # 100%
-uv run mypy --python-version 3.10 agent_sdk  # clean
+# Test (pyproject.toml has testpaths = ["tests"]):
+uv run pytest tests/agent_sdk -q             # the SDK alone
+uv run pytest -q --cov=tigerharness --cov-report=term   # whole repo, 100% gate
+uv run mypy --python-version 3.11 src/tigerharness/agent_sdk  # optional; mypy not in the dev group
 
-# Sandbox-specific gotchas (not normally needed):
+# Sandbox-specific gotcha (not normally needed):
 #   - mypy can't cache to read-only volumes; use --no-incremental --cache-dir=/tmp/...
-#   - coverage's data file path is overridden via .coveragerc -> /tmp/.coverage_agent_sdk
 ```
 
-A `pyproject.toml` ships at the project root (hatchling backend, PEP 621
-metadata). Other tigerleap projects depend on this as a path source:
-
-```toml
-# in sibling-project/pyproject.toml
-[project]
-dependencies = ["agent-sdk"]
-
-[tool.uv.sources]
-agent-sdk = { path = "../agent-sdk", editable = true }
-```
-
-The wheel build excludes `agent_sdk/tests/**` and `agent_sdk/docs/**` so
-they don't ship to consumers — only the importable source goes into the
-distribution.
+The SDK ships inside the `tigerharness` distribution (`pip install
+tigerharness`). The wheel packages the whole `src/tigerharness` tree —
+this `docs/` folder included — and the tests live outside it at
+`tests/`.
 
 ## Code conventions in this codebase
 
@@ -343,7 +355,7 @@ Match these when adding code so the package stays internally consistent:
 
 - **Every module starts with `from __future__ import annotations`.** Keeps
   type annotations lazy so PEP 604 unions and forward refs work uniformly
-  on 3.10.
+  on 3.11.
 - **No third-party imports in `agent_sdk/` source.** The package itself
   must remain stdlib-only. SDK backend dependencies (`claude-agent-sdk`,
   `openai-agents`) go inside the backend module and are imported lazily
@@ -357,8 +369,10 @@ Match these when adding code so the package stays internally consistent:
 - **`# pragma: no cover`** is reserved for defensive cleanup paths that
   fire only on rare OS signals (already-dead processes, SIGINT timeouts).
   Don't use it to paper over untested logic.
-- **Tests use `asyncio_test` from `tests/conftest.py`**, not pytest-asyncio.
-  Pure pytest + a thin `asyncio.run` wrapper.
+- **Tests use `asyncio_test` from `tests/agent_sdk/_helpers.py`** — a thin
+  `asyncio.run` wrapper. The repo also runs `pytest-asyncio` in
+  `asyncio_mode = "auto"`; the two coexist, and either style is fine in
+  new tests.
 - **Public surface is re-exported from `agent_sdk/__init__.py`** and listed
   in `__all__`. New types should be added there.
 
@@ -371,10 +385,10 @@ Match these when adding code so the package stays internally consistent:
   Open one session per logical conversation.
 - **Pre-1.0** (`__version__ = "0.1.0"`). Breaking interface changes are
   acceptable. There's no compat layer to maintain yet.
-- **Don't install `pytest-asyncio`.** It would compete with our
-  `asyncio_test` decorator (the decorator wraps a sync function with
-  `asyncio.run`; pytest-asyncio would try to drive coroutines directly).
-  Plain `pytest` is what we use.
+- **`pytest-asyncio` is installed** (dev group, `asyncio_mode = "auto"`).
+  The older `asyncio_test` decorator wraps a *sync* function with
+  `asyncio.run`, so pytest-asyncio never sees a coroutine there and the
+  two do not compete.
 
 ## Conventions and gotchas (learned the hard way)
 
@@ -437,7 +451,7 @@ A backend is "complete" when:
    shape mirrors the table above for `claude_p`.
 5. Coverage of the new module is 100% (use `# pragma: no cover` only on
    defensive cleanup paths, like we did for `claude_p`).
-6. Mypy clean: `mypy --python-version 3.10 agent_sdk`.
+6. Mypy clean: `mypy --python-version 3.11 src/tigerharness/agent_sdk` (mypy is not in the dev group; install it separately).
 
 ### Items
 
@@ -462,11 +476,10 @@ A backend is "complete" when:
    `temperature` and synthesise a temp settings file automatically, but
    that's invasive — leave as-is unless someone asks.
 
-5. ~~**Move tests inside `agent_sdk/tests/`**~~ — done in the May 2026
-   reorg. Tests now live at `agent_sdk/tests/`; pyproject's
-   `[tool.pytest.ini_options].testpaths` points there; the wheel excludes
-   them. The two `from tests.conftest import asyncio_test` imports were
-   updated to `from tests.agent_sdk._helpers import asyncio_test`.
+5. ~~**Move tests inside `agent_sdk/tests/`**~~ — superseded by the fold
+   into tigerharness. Tests now live at `tests/agent_sdk/` in the repo
+   (`testpaths = ["tests"]`), outside the wheel; `asyncio_test` is
+   imported from `tests.agent_sdk._helpers`.
 
 6. **Per-backend kwargs on `get_backend`.** Already supported (kwargs are
    forwarded), but no validation. If a typo is silently accepted by
@@ -515,12 +528,11 @@ So future agents understand why the code looks the way it does:
 | `StreamNotConsumedError: Stream has not been fully consumed` | Reading `handle.result` before iteration finished, or after a `break` without `async with` | Iterate to `RunDone`, or wrap with `async with`, or call `await handle.cancel()` then keep iterating |
 | `CLIError: \`claude\` not found on PATH` | Claude Code CLI not installed | install Claude Code (see anthropic.com/claude-code) and run `claude` once to log in |
 | `BackendNotImplementedError: anthropic_sdk backend requires the claude-agent-sdk package` | `claude-agent-sdk` not installed | `pip install tigerharness[anthropic]` |
-| `BackendNotImplementedError: openai_sdk backend is not yet implemented` | Trying to use the remaining stub | Use `claude_p` or `anthropic_sdk`; or implement the stub (see Open Work) |
+| `BackendNotImplementedError: openai_sdk backend is not yet implemented` | Trying to use the remaining stub | Use `claude_p`, `codex_exec` or `anthropic_sdk`; or implement the stub (see Open Work) |
 | `BackendNotImplementedError: claude_p backend does not support user-defined ToolSpecs` | Passing `cfg.tools=[ToolSpec(...)]` to claude_p | Use `cfg.builtin_tools` instead. (`anthropic_sdk` also doesn't translate custom ToolSpecs yet -- would need an MCP server via `create_sdk_mcp_server`.) |
 | Test suite hangs on `test_concurrent_stderr_drain_does_not_deadlock` | Concurrent stderr drainer was removed/broken; the `asyncio.wait_for(timeout=10)` should fail it fast | Inspect `_iter()` in `claude_p.py` — `stderr_task = asyncio.create_task(_drain_stderr())` must be present |
 | `ModuleNotFoundError: No module named 'tigerharness.tigerharness.agent_sdk.examples.01_basic'` | Imported a digit-prefixed module name | Examples were renamed to `basic`, `streaming`, `multi_turn`, `builtin_tools`. Use those |
 | `mypy: sqlite3.OperationalError: disk I/O error` | mypy can't write its cache to a read-only volume | `mypy --no-incremental --cache-dir=/tmp/.mypy_cache` |
-| `coverage: PermissionError: [Errno 1] ... '.coverage'` | Same root cause as above; coverage's data file path | `.coveragerc` already redirects to `/tmp/.coverage_agent_sdk` |
 | `isinstance(handle, StreamHandle)` raises `StreamNotConsumedError` | `runtime_checkable` Protocol invokes `@property` getters | Use `inspect.getattr_static` to verify the surface, or skip the isinstance check |
 | Tests pass but a regression slips through | Coverage hits the line but the assertion is too loose | Run mutation testing — see "Sanity check on the test suite" |
 
@@ -532,8 +544,9 @@ So future agents understand why the code looks the way it does:
   end-to-end. The approval-loop and event-mapping sketches in
   `agent_sdk_comparison.md` §5 are the templates for the SDK-based
   backends.
-- For test patterns, read `tests/conftest.py` (the fake-CLI factory and
-  `asyncio_test` decorator) plus one of `tests/test_claude_p.py`'s test
-  classes.
-- Run `pytest tests/ -q` first to confirm the baseline is green before
-  changing anything.
+- For test patterns, read `tests/agent_sdk/conftest.py` (the fake-CLI
+  factory) and `tests/agent_sdk/_helpers.py` (`asyncio_test`), plus one of
+  `tests/agent_sdk/test_claude_p.py`'s test classes; `test_codex_exec.py`
+  is its twin for the Codex wire format.
+- Run `uv run pytest tests/agent_sdk -q` first to confirm the baseline is
+  green before changing anything.

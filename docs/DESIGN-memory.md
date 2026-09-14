@@ -51,8 +51,8 @@ a first-class, self-pruning home — the **topics** store.
 - **The persona processes its own memory, on the subscription rail.** Both
   extraction (turning a finished session into memory) and compaction run
   **as that persona, in character**, via constrained helper sub-agents (the
-  sweep-memory pattern) — never an inline `claude -p`, never an in-process
-  vendor API call. The AI steps are *staged* as prompt files; the CLI verbs
+  sweep-memory pattern) — never an inline headless CLI session (`claude -p`
+  / `codex exec`), never an in-process vendor API call. The AI steps are *staged* as prompt files; the CLI verbs
   around them are non-AI glue.
 
 ## 3. What we retired (ADR 0007)
@@ -347,7 +347,9 @@ not O(store).
 ## 8. Config schema (the `memory:` block)
 
 `tiger_memory/config.py` parses and validates this block; every key is
-optional (these are the defaults, Operator-set 2026-07-23).
+optional (these are the defaults, Operator-set 2026-07-23). The
+`memory.team_events` sub-block (ADR 0008) is documented in
+[tiger-memory.md](tiger-memory.md) and omitted here.
 
 ```yaml
 memory:
@@ -415,13 +417,16 @@ protected-fresh and forget-eligible).
 | `check.py` | `tiger-memory check [--fix]` format gate + quarantine, three frontmatter stores |
 | `state.py` | the `tiger-memory state` JSON snapshot: per store `count` / `chars` (index chars for skills/topics, entry length for must_remember) / `max` / `over_overflow` / `bound_unit` + `details_over_overflow` for skills/topics |
 | `briefing.py` | session-start assembly (§7): README, notice, must_remember, indexes, detail copies, MANIFEST, fingerprint |
-| `sweep.py` | team-sweep gating (claim / done / complete / release) |
+| `sweep.py` | team-sweep gating (claim / done / complete / release), incl. the per-lane restriction (`lane_members`, ADR 0012) |
+| `team_events.py` | the team-wide event log (ADR 0008): append, age-tiered folds, size backstop |
+| `inspect_tools.py` | the Operator read/fix loop behind `search` / `forget` / `doctor` |
+| `templates/` | `briefing_readme.md`, the README the briefing assembles |
 | `cursor.py` | per-session high-water-mark cursors (`.sweep-cursors.json`, ADR 0006 Part 2) |
 | `prefilter.py` | transcript pre-filter (drop tool results / system reminders before staging) |
 | `store.py` | on-disk layout (`Paths`) + crash-safe serialization (`atomic_write`, `atomic_swap_dir`, state helpers) |
-| `sources/` | source adapters: `ClaudeTranscriptAdapter` (both `claude_code` and, via the threads.json map, `slack_thread`) and `JournalWorklogAdapter` are the live sweep-path adapters; `DocsAdapter` exists but is dropped by `_build_adapters`; `auto_memory` has no adapter |
+| `sources/` | source adapters: `ClaudeTranscriptAdapter` (both `claude_code` and, via the threads.json map, `slack_thread`), `CodexTranscriptAdapter` (`codex`, sharing the `_transcripts.py` base) and `JournalWorklogAdapter` are the live sweep-path adapters; `DocsAdapter` exists but is dropped by `_build_adapters`; `auto_memory` has no adapter |
 | `summarizers/` | the prompt-template tree (`prompts/default/v1/` — `extract_memory.md`, `chunk_condense.md`, the `compact_*.md` set) + the pluggable in-process backends |
-| `cli.py` | `init` / `rebuild` / `pin` / `migrate-to-topics` / `state` / `plan` / `ingest-extraction` / `build-reduce-prompts` / `ingest-staged` / `compact-plan` / `compact-apply` / `sweep-*` / `check` |
+| `cli.py` | `init` / `rebuild` / `pin` / `migrate-to-topics` / `state` / `plan` / `ingest-extraction` / `build-reduce-prompts` / `ingest-staged` / `compact-plan` / `compact-apply` / `card-check` / `team-events-compact-plan` / `team-events-compact-apply` / `sweep-*` / `check` / `search` / `forget` / `doctor` |
 
 ## 11. History
 

@@ -29,7 +29,7 @@ self-prunes instead of growing forever.
 ## Architecture
 
 ```
-Sources (Claude transcripts, Slack-bridge threads, journal worklogs)
+Sources (Claude transcripts, Codex rollouts, Slack-bridge threads, journal worklogs)
     |
     v
 Extraction (lifecycle.py): a finished session -> a strict
@@ -104,7 +104,7 @@ compaction may merge near-duplicate topics or tighten summaries.
 | `sweep.py` | team-sweep gating (claim / done / complete / release) |
 | `cursor.py` | per-session incremental-sweep cursors (ADR 0006 Part 2) |
 | `briefing.py` | assemble the session-start briefing (indexes + details + notice) |
-| `sources/` | source adapters. Live on the sweep path: `ClaudeTranscriptAdapter` (both `claude_code` and, via the threads.json map, `slack_thread`) and `JournalWorklogAdapter`. `DocsAdapter` exists but `lifecycle._build_adapters` drops `docs` sources; `auto_memory` has no adapter at all |
+| `sources/` | source adapters. Live on the sweep path: `ClaudeTranscriptAdapter` (both `claude_code` and, via the threads.json map, `slack_thread`), `CodexTranscriptAdapter` (`codex`; both transcript adapters share the `_transcripts.py` base) and `JournalWorklogAdapter`. `DocsAdapter` exists but `lifecycle._build_adapters` drops `docs` sources; `auto_memory` has no adapter at all |
 | `summarizers/` | the prompt templates (`prompts/default/v1/`) + pluggable in-process backends |
 | `state.py` | per-store JSON state snapshot |
 
@@ -247,7 +247,7 @@ executor verbs (`plan` / `ingest-extraction` / `build-reduce-prompts` /
 | `card-check <card>` | non-AI, **read-only ruler for card authors**: resolve `<card>` through the `manifest.json` beside it, parse + merge through the exact `compact-apply` code path (post-merge store size for `must_remember` / `skills` / `topic_roster` against the live store, rendered detail for `topic_detail` / `skill_detail`, apply-time bullet accounting for team-events `month`/`year` fold cards), and report `{chars, max, over_by, fits}` — the pre-trim answer to "does my draft fit?". Exit 0 fits / 4 over-bound / 1 malformed card / 2 no card, no manifest, or not a staged target |
 | `team-events-compact-plan` | non-AI, **team-level** (ADR 0008): run the size backstop, then stage one fold prompt per aged-out team-event period under `memories/team/.compact-staging/` (empty `targets` = nothing aged out) |
 | `team-events-compact-apply` | non-AI: validate + apply every staged team-events fold card in ONE process (deterministic trim; post-plan appends survive). Exit 0 clean / 1 ≥1 malformed card / 2 no manifest |
-| `sweep-plan` / `sweep-done` / `sweep-complete [--token]` / `sweep-release [--token]` | team-sweep gating (non-AI). `sweep-done` renews the claim lease and stamps the durable per-persona `done_at` map (the roster walk is least-recently-swept first); with `--token`, complete/release are refused (exit 3) when another session now owns the claim |
+| `sweep-plan [--own-persona P] [--lane-of P] [--own-only]` / `sweep-done` / `sweep-complete [--token] [--force]` / `sweep-release [--token]` | team-sweep gating (non-AI). `--lane-of` (defaults to `--own-persona`) restricts a team run's *other* targets to the personas on that vendor/model lane and `--own-only` never widens to a team run (ADR 0012); `sweep-done` renews the claim lease and stamps the durable per-persona `done_at` map (the roster walk is least-recently-swept first); with `--token`, complete/release are refused (exit 3) when another session now owns the claim; `--force` completes even when roster personas were not recorded done this run |
 | `search <term> [--team] [--store S]` | case-insensitive content search over the stores (and the team event log); `--team` walks every roster persona. The read half of the Operator find-it/fix-it loop |
 | `forget --store S (--id I \| --slug SLUG)` | Operator-authority removal of one entry (locked RMW; the removed block is archived to `journal/<store>.forgotten.md`, never silently lost; may drop even a fresh `operator_explicit` — the Operator IS the authority the protection serves). Rebuilds the briefing |
 | `doctor [--json]` | team-wide health table: per-persona bounds/overflow, staged files, quarantines, sweep `done_at`, data-through, last still_over/malformed reports, cross-persona topic-slug collisions. Exit 1 when anything is flagged (cron-friendly) |
@@ -559,8 +559,8 @@ drill-down detail.
 **Double-count suppression.** A drive session's own (fat) transcript would
 otherwise be folded whole into the driver's store, double-counting work the
 worklog already captured. At `journal claim`, the drive's Slack `thread_ts`
-is recorded to `journal/.drive-sessions.json`; the `claude_code`
-(`ClaudeTranscriptAdapter`) source reads that registry — wired in
+is recorded to `journal/.drive-sessions.json`; the `claude_code` and `codex`
+(`ClaudeTranscriptAdapter` / `CodexTranscriptAdapter`) sources read that registry — wired in
 automatically when a `journal_worklog` source is present in the same config
 — and **skips** any session whose `thread_ts` is a registered drive. The
 registry reader is tolerant: a missing/corrupt registry suppresses
@@ -580,7 +580,7 @@ The config validator also accepts `auto_memory` and `docs` as source
 kinds — **for forward-compatibility only**. Neither carries a live
 adapter on the sweep path: `lifecycle._build_adapters` builds adapters
 only for `claude_code` (which also covers `slack_thread` sessions via
-the threads.json map) and `journal_worklog`; a configured `auto_memory`
+the threads.json map), `codex`, and `journal_worklog`; a configured `auto_memory`
 or `docs` source is silently inert (a `DocsAdapter` class still exists
 in `sources/` but nothing constructs it). Listing them does not break a
 config, but they contribute nothing to extraction — use the live source

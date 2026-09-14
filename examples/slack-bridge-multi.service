@@ -49,7 +49,7 @@ RestartSec=5
 TimeoutStopSec=120
 
 # Only SIGTERM the main process, not the whole cgroup. Otherwise each
-# `claude -p` child also gets SIGTERM mid-stream and the dispatch
+# `claude -p` / `codex exec` child also gets SIGTERM mid-stream and the dispatch
 # returns with final_output=None -- Slack sees "(empty reply)". With
 # `mixed`, children keep running until the bridge's graceful drain
 # completes; SIGKILL at TimeoutStopSec still hits the whole cgroup.
