@@ -72,6 +72,8 @@ log = logging.getLogger("tigerharness.init")
 # are ``<date> (<commit>): <subject>`` of the ship that produced the hash.
 _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
     "drive-journal": {
+        # 2026-09-13 (e8c4aae): anzai: review pass -- pre ADR 0013 (Slack drives as a team setting)
+        "2e7dcae6003d420141bb15622c5a26184454e6679853fe03627b3cd201a06d76",
         # 2026-09-13 (ccb4510): anzai: memory sweeps per lane -- pre review-pass wording
         "077f54e2df66e3971cc83deb28d33f146522852fdef9f889a7762e71103d6c42",
         # 2026-09-13 (ce7c31b): anzai: one skill folder for every vendor; runtime glossary; neutral wording
@@ -165,6 +167,8 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "5271f7d54ad66c2c9c1d4449305d01dff682531def965b3260ddaa4221fac0c3",
     },
     "journal-new": {
+        # 2026-09-13 (e8c4aae): anzai: review pass -- pre ADR 0013 (Slack drives as a team setting)
+        "0cc31c57a5fc20a3637c43c0d3b222b078c686f54b4ed4c2a7a74feb38705a27",
         # 2026-08 (prior ship): journal-new before the vendor-neutral wording
         "c0f2384f0d3313ba4821d15ca82714a48a1704268b4c546fd25e5986dc9d6466",
         # 2026-08-12 (self-driving journal, ADR 0010): anzai: pre defer-test
@@ -320,9 +324,9 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
 # _PRIOR_SKILL_HASHES (so existing teams auto-refresh) and (ii) update the
 # entry here to the new hash.
 _CURRENT_SKILL_HASHES: dict[str, str] = {
-    "drive-journal": "2e7dcae6003d420141bb15622c5a26184454e6679853fe03627b3cd201a06d76",
+    "drive-journal": "db48c8b7acbc486b0dae0f6bbf0d86ac51d96a0ce7503510f0a94bc855c0e8cd",
     "journal-autodrive": "7d0a00959dd208f66a685fd7515f114b181a5000ba7b5f1f8fc9b4e5be35a7c6",
-    "journal-new": "0cc31c57a5fc20a3637c43c0d3b222b078c686f54b4ed4c2a7a74feb38705a27",
+    "journal-new": "426d575dbce6cfb1bce5c66946a2f20bc580123f8a46a2bbe2ed3562da5f72b2",
     "slack-notify": "1d6e910cf773bc5d6506cd0ac2ced8429ab5b9a8c49ca79fc5b437eae4210173",
     "sweep-memory": "fed46d260479de281cc1c324ad98cb594943176064683f5a00de62481b2212cd",
     "tigerharness-basics": "17da8cf5b2f38ea12e3f996e7811f71df2a5b7157133929fc7249d5a3df0b423",

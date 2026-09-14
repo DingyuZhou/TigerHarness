@@ -306,13 +306,16 @@ gate — so a new thread's first message may legitimately trigger a
 sweep.) All real journal work happens later, on the subscription rail,
 via `drive-journal` in an interactive session.
 
-**2. Driving is forbidden (hard rule).** A Slack-triggered session
-must never drive the journal — no `drive-journal`, no claim, no
+**2. Driving is a team setting.** By default a Slack-triggered session
+must not drive the journal — no `drive-journal`, no claim, no
 graph-walk, no compile turns. `journal claim` enforces this
 mechanically: the bridge exports `TIGERHARNESS_SLACK_THREAD_TS` into
 every turn it spawns, and claim refuses when that marker is present
-(exit 1, nothing mutated). An Operator who deliberately wants a
-bridge-side drive can pass `--allow-api-drive` to override (see
+(exit 1, nothing mutated). A team that wants its Slack sessions to
+drive sets `TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in its `configs/.env`
+([ADR 0013](adr/0013-slack-drives-team-setting.md)); an Operator who
+wants a one-off bridge-side drive on a team without the knob passes
+`--allow-api-drive` (see
 [`subscription-backend.md`](subscription-backend.md)).
 
 ## The bridge: one process, 1..N lanes

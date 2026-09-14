@@ -80,6 +80,25 @@ SCHEDULE_DEPRECATION_NOTE = (
 )
 
 
+#: Team policy knob: when truthy (process env, else the team's
+#: ``configs/.env``), a Slack-triggered (bridge-spawned) session may claim
+#: journal work without ``--allow-api-drive``. Off by default: the rail
+#: rule stays "Slack schedules, never drives" for teams that never opted
+#: in. Read through the same dependency-free ``.env`` reader autodrive
+#: uses, so one file carries every team knob.
+SLACK_DRIVES_ENV = "TIGERHARNESS_JOURNAL_SLACK_DRIVES"
+
+
+def slack_drives_allowed(journal_root: Path) -> bool:
+    """Does this team permit Slack-triggered sessions to drive the journal?
+    ``journal_root`` locates the team (``<team>/journal``); a personal
+    journal has no team file and answers from the process env only."""
+    from tigerharness.autodrive.settings import Settings
+    from tigerharness.journal.lanes import team_root_for
+
+    return Settings(team_root=team_root_for(journal_root)).flag(SLACK_DRIVES_ENV)
+
+
 def _paths_from_args(args: argparse.Namespace) -> JournalPaths:
     """Resolve the journal root. ``--journal-dir`` wins over the env."""
     if args.journal_dir:
@@ -1103,33 +1122,39 @@ def cmd_claim(args: argparse.Namespace) -> int:
     ``in_progress``, bump ``sessions``, refresh ``updated_at``, write
     atomically, then re-read and confirm our token won (compare-and-set).
     """
-    # Cost-discipline rail guard -- runs FIRST, before any status read
-    # or mutation, so a refused claim provably changes nothing. The
-    # slack bridge exports ``TIGERHARNESS_SLACK_THREAD_TS`` into every
-    # turn it spawns (the API-billed rail); interactive sessions never
-    # carry it (they register a drive thread via the explicit
-    # ``--drive-thread`` flag instead). Slack-triggered sessions may
-    # only SCHEDULE journal tasks (``journal new``), never drive them;
-    # ``--allow-api-drive`` is the deliberate override, under which the
+    # Rail guard -- runs FIRST, before any status read or mutation, so a
+    # refused claim provably changes nothing. The slack bridge exports
+    # ``TIGERHARNESS_SLACK_THREAD_TS`` into every turn it spawns;
+    # interactive sessions never carry it (they register a drive thread
+    # via the explicit ``--drive-thread`` flag instead). A bridge session
+    # may claim when the TEAM allows Slack drives (``SLACK_DRIVES_ENV``,
+    # ADR 0013) or when ``--allow-api-drive`` is passed deliberately;
+    # otherwise Slack schedules, never drives. Either way the
     # thread-registration path below still works.
+    paths = _paths_from_args(args)
     if (os.environ.get("TIGERHARNESS_SLACK_THREAD_TS")
             and not getattr(args, "allow_api_drive", False)):
-        log.warning(
-            "claim refused: %s bridge session (TIGERHARNESS_SLACK_THREAD_TS"
-            " set) -- Slack schedules, never drives", args.task_id,
-        )
-        print(
-            "error: claim refused: this session looks bridge-spawned "
-            "(TIGERHARNESS_SLACK_THREAD_TS is set), which bills API "
-            "tokens. Slack-triggered sessions may only schedule journal "
-            "tasks (journal new), never drive them; drive from an "
-            "interactive session instead, or pass --allow-api-drive to "
-            "proceed deliberately. Rails and billing: "
-            "docs/subscription-backend.md.",
-            file=sys.stderr,
-        )
-        return 1
-    paths = _paths_from_args(args)
+        if slack_drives_allowed(paths.root):
+            log.info(
+                "claim: bridge session allowed by team policy (%s)",
+                SLACK_DRIVES_ENV,
+            )
+        else:
+            log.warning(
+                "claim refused: %s bridge session (TIGERHARNESS_SLACK_THREAD_TS"
+                " set) -- Slack schedules, never drives", args.task_id,
+            )
+            print(
+                "error: claim refused: this session looks bridge-spawned "
+                "(TIGERHARNESS_SLACK_THREAD_TS is set) and this team does "
+                "not permit Slack drives. Slack-triggered sessions may "
+                "schedule journal tasks (journal new); to let them drive, "
+                f"set {SLACK_DRIVES_ENV}=1 in the team's configs/.env, or "
+                "pass --allow-api-drive to proceed deliberately this once. "
+                "Rails: docs/subscription-backend.md.",
+                file=sys.stderr,
+            )
+            return 1
     status = _read_status_or_none(paths, args.task_id)
     if status is None:
         print(f"error: no task with id {args.task_id!r} in {paths.active}",
@@ -2304,11 +2329,11 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument(
         "--allow-api-drive", action="store_true",
         help=(
-            "Deliberately allow claiming from a bridge-spawned (API-"
-            "billed) session. Without this flag, claim refuses when "
-            "TIGERHARNESS_SLACK_THREAD_TS is set in the environment: "
-            "Slack-triggered sessions may only schedule journal tasks, "
-            "never drive them. Rails and billing: "
+            "Deliberately allow claiming from a bridge-spawned session "
+            "this once. Without it, claim refuses when "
+            "TIGERHARNESS_SLACK_THREAD_TS is set in the environment "
+            "unless the team permits Slack drives "
+            f"({SLACK_DRIVES_ENV}=1 in configs/.env). Rails: "
             "docs/subscription-backend.md."
         ),
     )

@@ -2510,3 +2510,57 @@ class TestLanes:
         assert json.loads(capsys.readouterr().out)["lane_verdict"] == "mine"
         assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"]) == 0
         assert "0 actionable + 1 deferred item(s) are yours -- pick one." in capsys.readouterr().out
+
+
+class TestSlackDrivesTeamSetting:
+    """ADR 0013: a bridge session may claim when the team permits Slack
+    drives (process env, or the team's configs/.env), and is refused with a
+    pointer to the knob otherwise. --allow-api-drive keeps working."""
+
+    KNOB = "TIGERHARNESS_JOURNAL_SLACK_DRIVES"
+
+    def _team(self, tmp_path):
+        (tmp_path / "configs").mkdir()
+        (tmp_path / "configs" / "personas.yaml").write_text("personas:\n  - name: Anzai\n")
+        paths = JournalPaths(root=tmp_path / "journal")
+        _seed(paths, "t1", state=State.PENDING)
+        return paths
+
+    def test_process_env_allows_and_registers_the_drive_thread(self, tmp_path, monkeypatch, caplog):
+        paths = self._team(tmp_path)
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        monkeypatch.setenv(self.KNOB, "1")
+        with caplog.at_level(logging.INFO, logger="tigerharness.journal.cli"):
+            assert main(["--journal-dir", str(paths.root), "claim", "t1", "--driver", "Anzai"]) == 0
+        assert "allowed by team policy" in caplog.text
+        assert drive_sessions.registered_threads(paths.drive_sessions_json) == {"555.42"}
+
+    def test_team_env_file_allows(self, tmp_path, monkeypatch):
+        paths = self._team(tmp_path)
+        (tmp_path / "configs" / ".env").write_text(f"{self.KNOB}=true  # Operator, 2026-09-13\n")
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        monkeypatch.delenv(self.KNOB, raising=False)
+        assert main(["--journal-dir", str(paths.root), "claim", "t1", "--driver", "Anzai"]) == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+
+    def test_off_or_false_still_refuses_and_names_the_knob(self, tmp_path, monkeypatch, capsys):
+        paths = self._team(tmp_path)
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        for value in (None, "0", "no"):
+            if value is None:
+                monkeypatch.delenv(self.KNOB, raising=False)
+            else:
+                monkeypatch.setenv(self.KNOB, value)
+            assert main(["--journal-dir", str(paths.root), "claim", "t1"]) == 1
+            err = capsys.readouterr().err
+            assert "does not permit Slack drives" in err and self.KNOB in err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.PENDING and s.session_ref is None
+
+    def test_personal_journal_reads_process_env_only(self, tmp_path, monkeypatch):
+        from tigerharness.journal.cli import slack_drives_allowed
+        monkeypatch.delenv(self.KNOB, raising=False)
+        assert slack_drives_allowed(tmp_path / "solo" / "journal") is False
+        monkeypatch.setenv(self.KNOB, "yes")
+        assert slack_drives_allowed(tmp_path / "solo" / "journal") is True

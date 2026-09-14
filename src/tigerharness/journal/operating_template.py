@@ -160,16 +160,19 @@ Outside a Slack-driven drive (a plain terminal with no `[bridge-context]`
 and no persona identity), **omit `--driver`** -- claim/release behave
 exactly as the plain subscription backend with no memory side-effect.
 
-## The Slack rail rule (hard, red-light)
+## The Slack rail rule (a team setting)
 
-Slack-triggered (bridge-spawned) sessions bill API tokens: they may
-SCHEDULE journal tasks (`journal new`) but must NEVER drive them -- no
-`drive-journal`, no claim, no graph-walk, no compile turns; driving
-belongs to the subscription rail (interactive sessions). `journal
-claim` enforces this mechanically: it refuses when
+Slack-triggered (bridge-spawned) sessions may always SCHEDULE journal
+tasks (`journal new`). Whether they may DRIVE is the team's call:
+with `TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in the team's `configs/.env`
+a bridge session drives exactly like an interactive one (pass
+`--driver <you>` at claim); without it, Slack schedules and never
+drives -- no `drive-journal`, no claim, no graph-walk, no compile
+turns. `journal claim` enforces this mechanically: it refuses when
 `TIGERHARNESS_SLACK_THREAD_TS` is set in the environment unless the
-deliberate `--allow-api-drive` override is passed. Rails and billing:
-`docs/subscription-backend.md` in the tigerharness repo.
+team knob is on or the deliberate one-off `--allow-api-drive` override
+is passed. Rails: `docs/subscription-backend.md` (ADR 0013) in the
+tigerharness repo.
 
 ## The decision procedure
 

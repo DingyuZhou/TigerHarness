@@ -23,13 +23,17 @@ real work (step 3) — a no-op fire never loads it.
 "continue the journal" · or you're given the floor and entries are
 waiting. **Do NOT** drive from a non-interactive context (a headless CLI
 session — `claude -p` / `codex exec` — cron, or API) — the driver is
-human-triggered by design; surface that boundary instead. That hard rule includes Slack: a **Slack-triggered
-(bridge-spawned) session bills API tokens** — it may SCHEDULE journal
-tasks (the `journal-new` skill) but must **NEVER drive** them. `journal
-claim` enforces this mechanically: it refuses when the bridge's
-`TIGERHARNESS_SLACK_THREAD_TS` env marker is present, unless the
-deliberate `--allow-api-drive` override is passed. Rails and billing:
-`docs/subscription-backend.md`.
+human-triggered by design; surface that boundary instead. **Slack
+(bridge-spawned) sessions are a team decision:** every team may
+SCHEDULE journal tasks from Slack (the `journal-new` skill); a team
+that sets `TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in its `configs/.env`
+may also DRIVE from Slack, exactly like an interactive session (pass
+`--driver <you>`). `journal claim` enforces it mechanically: with the
+bridge's `TIGERHARNESS_SLACK_THREAD_TS` marker present it refuses
+unless the team knob is on or the deliberate one-off
+`--allow-api-drive` override is passed. Off by default -- "Slack
+schedules, never drives" until a team opts in. Rails:
+`docs/subscription-backend.md` (ADR 0013).
 
 ## The checklist — run top to bottom, every invocation
 

@@ -58,6 +58,9 @@ log = logging.getLogger("tigerharness.journal.scaffold")
 # (matching neither current nor a prior ship) is left untouched. **When
 # you change OPERATING_MD, append the OLD rendered content's sha256 here.**
 _PRIOR_OPERATING_HASHES = {
+    # 2026-09-13 (e8c4aae): review-pass render, before the Slack-drives
+    # team setting (ADR 0013) made the rail rule conditional.
+    "e9eea10a9c00c42285c9db8d8633b587d72bd838f959fec35a70ca024498dc57",
     # 2026-09-13 (6627029): drive-lanes render before the review pass
     # (claim exit-code table, lane-idle turn end).
     "2a7d5fa442246b04f4a7330e50d53a5de2d8e0b4a016664b930edc623d5a22fe",
@@ -140,7 +143,7 @@ _PRIOR_OPERATING_HASHES = {
 # value into _PRIOR_OPERATING_HASHES and roll it. It also gives every future
 # prior a provenance the suite itself pinned while that template was live.
 _CURRENT_OPERATING_HASH = (
-    "e9eea10a9c00c42285c9db8d8633b587d72bd838f959fec35a70ca024498dc57"
+    "723714b9cc6f2fe3e81200896a19f671690475f4d4f3f954c4f21e5a87093f9d"
 )
 
 

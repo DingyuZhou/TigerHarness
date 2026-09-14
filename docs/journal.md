@@ -210,8 +210,10 @@ queue write succeeds. It is a **no-op unless
 and it **never fails the scheduling command** — a daemon that cannot start
 logs a warning and the task is still queued. Combined with the daemon's
 auto-stop, the effect is: scheduling work starts the driver, draining the
-queue stops it, and nothing runs in between. The Slack rule is unchanged —
-Slack schedules, never drives. See [autodrive.md](autodrive.md).
+queue stops it, and nothing runs in between. The Slack rule is unchanged
+by auto-start: Slack schedules, and drives only where the team permits it
+([ADR 0013](adr/0013-slack-drives-team-setting.md)). See
+[autodrive.md](autodrive.md).
 
 ## Team-level defaults (`configs/personas.yaml`)
 
