@@ -5,8 +5,10 @@
   — work runs on the interactive (subscription) rail, not token-billed API.
 - **When you need it:** scheduling/driving cost rules, the Slack rail rule, or
   the `status.json` field semantics.
-- **Must-not-miss:** a Slack-triggered session may SCHEDULE journal tasks but
-  must NEVER drive them — `journal claim` enforces it.
+- **Must-not-miss:** a Slack-triggered session may SCHEDULE journal tasks;
+  whether it may DRIVE them is a team setting (`TIGERHARNESS_JOURNAL_SLACK_DRIVES`
+  in `configs/.env`, off by default) — `journal claim` enforces it
+  ([ADR 0013](adr/0013-slack-drives-team-setting.md)).
 
 ## Details
 
@@ -544,10 +546,12 @@ start the daemon, and the daemon stops itself once the queue drains.
 
 That **narrows** the rails doctrine rather than widening it:
 
-- Slack still **schedules, never drives.** `journal claim` refuses a bridge
-  session mechanically (`TIGERHARNESS_SLACK_THREAD_TS` set, no
-  `--allow-api-drive`). A `defer` from Slack rings a bell; it does not become
-  a driver.
+- Slack still **schedules**; it **drives only where the team allows it**
+  (`TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in `configs/.env`, [ADR
+  0013](adr/0013-slack-drives-team-setting.md)). Otherwise `journal claim`
+  refuses a bridge session mechanically (`TIGERHARNESS_SLACK_THREAD_TS` set,
+  no `--allow-api-drive`). A `defer` from Slack rings a bell; it does not
+  become a driver.
 - The driver is still the **same single, budget-capped, killable,
   Operator-authorized daemon** — one per team, now guarded by an atomic
   `flock` rather than a read-then-write check.

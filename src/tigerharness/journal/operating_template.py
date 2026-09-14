@@ -160,16 +160,19 @@ Outside a Slack-driven drive (a plain terminal with no `[bridge-context]`
 and no persona identity), **omit `--driver`** -- claim/release behave
 exactly as the plain subscription backend with no memory side-effect.
 
-## The Slack rail rule (hard, red-light)
+## The Slack rail rule (a team setting)
 
-Slack-triggered (bridge-spawned) sessions bill API tokens: they may
-SCHEDULE journal tasks (`journal new`) but must NEVER drive them -- no
-`drive-journal`, no claim, no graph-walk, no compile turns; driving
-belongs to the subscription rail (interactive sessions). `journal
-claim` enforces this mechanically: it refuses when
+Slack-triggered (bridge-spawned) sessions may always SCHEDULE journal
+tasks (`journal new`). Whether they may DRIVE is the team's call:
+with `TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in the team's `configs/.env`
+a bridge session drives exactly like an interactive one (pass
+`--driver <you>` at claim); without it, Slack schedules and never
+drives -- no `drive-journal`, no claim, no graph-walk, no compile
+turns. `journal claim` enforces this mechanically: it refuses when
 `TIGERHARNESS_SLACK_THREAD_TS` is set in the environment unless the
-deliberate `--allow-api-drive` override is passed. Rails and billing:
-`docs/subscription-backend.md` in the tigerharness repo.
+team knob is on or the deliberate one-off `--allow-api-drive` override
+is passed. Rails: `docs/subscription-backend.md` (ADR 0013) in the
+tigerharness repo.
 
 ## The decision procedure
 
@@ -236,8 +239,10 @@ completed task until no actionable tasks remain.
    sets `session_ref` to a fresh token, flips the task to `in_progress`,
    bumps `sessions`, and refreshes the heartbeat -- atomically, with a
    compare-and-set re-read so two concurrent drives cannot both grab it.
-   If claim exits non-zero ("busy" / "claim lost"), another session won:
-   re-sweep and pick again, or exit.
+   Claim's exit codes: **1** = busy / claim lost (another session won:
+   re-sweep and pick again, or exit); **3** = the task belongs to
+   another lane (leave it -- see "Lanes" below); **2** = a configuration
+   error (a malformed vendor in personas.yaml: stop and surface it).
 
    **In a Slack-driven drive**, add the driver flag (see "Per-persona
    memory" above):
@@ -251,6 +256,23 @@ completed task until no actionable tasks remain.
    `TIGERHARNESS_SLACK_THREAD_TS` env var the bridge sets (pass
    `--drive-thread <thread_ts>` only to override). Omit `--driver`
    outside a Slack-driven drive.
+
+   **Lanes (ADR 0012).** With `--driver`, the work you may take is
+   limited to your *lane* -- the vendor/model your driver persona runs
+   on per `configs/personas.yaml`. Run the sweep as `tigerharness
+   journal sweep --driver <your-persona>`: it marks each actionable
+   item and inbox entry `[mine]` or "not yours" (with its owner and
+   lane). Pick only `[mine]`. `claim --driver` refuses another lane's
+   work with **exit 3** before touching anything; that work belongs to
+   a drive on its own lane (autodrive fires one per lane with work).
+   `--any-lane` is the deliberate override for a hand drive when no such
+   drive exists. The sweep prints a **lane verdict**: when nothing
+   actionable is yours but other lanes still have work, end the
+   invocation WITHOUT the idle-maintenance tail (lane-idle: their drives
+   take it, and the daemon decides maintenance); pending work of yours
+   still waits until nothing is in progress (finish-before-start holds
+   across lanes). A single-vendor team has one lane and sees no
+   difference.
 
    - **NEVER** work a *busy* task -- the attach token + fresh heartbeat
      means a live session owns it right now.
@@ -734,9 +756,22 @@ For each step:
    verdict's edge, and prints the NEXT step id (or `__done__` /
    `__escalate__`). It REFUSES (non-zero, walk **not** advanced) if
    `--output` is missing or empty -- the note is the ticket.
+
+   In a drive, pass the same `--driver <your-persona>` here too. The
+   gate then also refuses (exit 3, nothing written) a step whose
+   persona runs on another lane -- a note must never be recorded as
+   work done on the wrong vendor -- and, when the NEXT step belongs to
+   another lane, prints a `handoff:` line.
 3. **Drive whatever step the gate names next.** Repeat until the gate
    prints `__done__` (walk complete -> `release --state done`) or
-   `__escalate__` (-> `release --state blocked`).
+   `__escalate__` (-> `release --state blocked`). **On a `handoff:`
+   line, do not drive the next step:** release the task right away
+   (`journal release <task-id> --driver <you> --next-action "handoff
+   to <persona>: step <id>"`) -- it goes idle, a drive on that lane
+   claims it, walks its steps, and hands back the same way. Then
+   re-sweep: resume another `[mine]` item if one is idle/crashed;
+   pending work still waits for an empty in-progress set; if only other
+   lanes' work remains, end the invocation (lane-idle, no tail).
 
 Routing reference (the gate applies this for you, from `--verdict`):
 

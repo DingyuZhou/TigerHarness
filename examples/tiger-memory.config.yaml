@@ -14,6 +14,12 @@ store:
   root: ~/.local/share/tiger-memory/researcher
 
 sources:
+  - kind: codex
+    # OpenAI Codex session rollouts (personas on `vendor: chatgpt`). The
+    # tree is global, so `cwd: auto` keeps only sessions opened in this
+    # team root; `persona:` / `include_unattributed:` work as above.
+    sessions_path: ~/.codex/sessions
+    cwd: auto
   - kind: claude_code
     # Replace with your actual Claude Code project path.
     # Find yours under ~/.claude/projects/ — the directory name encodes

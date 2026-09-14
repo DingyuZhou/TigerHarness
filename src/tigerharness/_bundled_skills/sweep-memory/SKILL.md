@@ -1,15 +1,17 @@
 ---
 name: sweep-memory
-description: Keep the whole team's tiger-memory fresh. Runs at every sweep trigger -- the first Slack message of a new thread (the bridge's Slack-bootstrap flow), persona-session bootstrap, a drive's idle-maintenance tail, the autodrive idle path, or an explicit "sweep memory" / "refresh team memory" / "rebuild memories" ask. Claims a team-wide sweep under the split gate (the calling persona's un-swept transcripts -- completed ones, or a still-active session past the active-slice threshold -- bypass the staleness floor; every other persona keeps it), then extracts each target persona's new transcripts into their three bounded memory stores via constrained Task-tool sub-agents -- never an inline `claude -p`. A cheap no-op when nothing is pending, so firing on every trigger is safe.
+description: Keep the whole team's tiger-memory fresh. Runs at every sweep trigger -- the first Slack message of a new thread (the bridge's Slack-bootstrap flow), persona-session bootstrap, a drive's idle-maintenance tail, the autodrive idle path, or an explicit "sweep memory" / "refresh team memory" / "rebuild memories" ask. Claims a team-wide sweep under the split gate (the calling persona's un-swept transcripts -- completed ones, or a still-active session past the active-slice threshold -- bypass the staleness floor; every other persona keeps it), then extracts each target persona's new transcripts into their three bounded memory stores via constrained helper sessions (sub-agents) -- never an inline headless CLI (`claude -p` / `codex exec`). A cheap no-op when nothing is pending, so firing on every trigger is safe.
 ---
 
 # sweep-memory
 
 The **in-session** memory refresh. One invocation keeps the *whole
 roster* fresh: any human contact with any teammate is the heartbeat. The
-bulky extraction work runs in isolated **Task-tool sub-agents**, so the
-transcripts and extraction bundles never enter the triggering
-conversation's context -- you only ever see short confirmations.
+bulky extraction work runs in isolated **helper sessions** (sub-agents:
+the Task tool in Claude Code, `spawn_agent` in Codex -- see the runtime
+glossary in AGENTS.md), so the transcripts and extraction bundles never
+enter the triggering conversation's context -- you only ever see short
+confirmations.
 
 This skill drives the topic-store memory model (design
 `docs/DESIGN-memory.md`, ADR 0007): each persona has **three** bounded
@@ -60,7 +62,13 @@ supply the inputs):
   is kept in exact lockstep with staging, so a claimed own-only run
   always stages at least one slice.
 - **Other personas -- the team floor.** Everyone else stays gated by
-  the team watermark + `sweep.floor_hours` exactly as before.
+  the team watermark + `sweep.floor_hours` exactly as before -- **and by
+  your lane** (ADR 0012): pass `--lane-of <your-persona>` and a team run
+  sweeps only the OTHER personas on your vendor/model lane, so a session
+  never extracts another vendor's persona's transcripts. Your own lane
+  is swept by whichever session runs the team sweep (you, or autodrive's
+  maintenance drive); other lanes get autodrive's own-only sweep fires
+  (1b below) or their own sessions. A one-lane team sees no difference.
 - **Silent cases.** Own persona has nothing pending AND the team is
   inside the floor (`reason: "not_due"`), or another session holds the
   lease (`reason: "busy"`) -> proceed straight to the requested work.
@@ -108,15 +116,16 @@ For the Slack trigger only, the in-thread UX is part of the contract:
 
 ## The executor rule (load-bearing -- do not get this wrong)
 
-- The executor for every extraction is a **Task-tool sub-agent**: it
+- The executor for every extraction is a **helper session** (sub-agent): it
   runs in an isolated context window, writes card files, and returns a
   short confirmation, so the bulky transcript and extraction bundle
   live in the **sub-agent's** context, never yours.
-- NEVER extract by shelling out to `claude -p`: a shelled-out model
+- NEVER extract by shelling out to a headless CLI (`claude -p` /
+  `codex exec`): a shelled-out model
   process runs outside the session's supervision and context
   management -- no isolation guarantee, no oversight, no resumability.
 - Only an *agent session* (interactive, or a sanctioned agentic drive
-  such as an autodrive fire) can spawn a Task sub-agent. A plain daemon
+  such as an autodrive fire) can spawn a helper session. A plain daemon
   process (e.g. the slack-bridge itself) cannot -- which is why every
   trigger routes the sweep INTO a session: the bridge injects the
   bootstrap instruction into the persona session's first turn rather
@@ -143,7 +152,7 @@ The per-target `plan` / `ingest-staged` / `rebuild` use
 `<target.config_path>` from the sweep-plan manifest, not `$DRIVER`. Every
 `tiger-memory` invocation below is written as `$TM`.
 
-**Sub-agent caveat:** a Task sub-agent runs in a *fresh* shell, so the
+**Sub-agent caveat:** a helper session runs in a *fresh* shell, so the
 `$TM` you exported in the driver shell is NOT inherited. In each
 sub-agent's brief, spell out the full invocation form literally. The
 extraction sub-agents below run **no** `tiger-memory` command at all
@@ -157,8 +166,18 @@ the read-only `card-check` ruler on their own draft (steps 2d and 3).
 
 ```bash
 $TM --config "$DRIVER" sweep-plan --token <stable-token> --max-personas 3 \
-    --own-persona <your-persona> --exclude-session <your-session-uuid>
+    --own-persona <your-persona> --exclude-session <your-session-uuid> \
+    --lane-of <your-persona>
 ```
+
+`--lane-of` is the lane restriction (ADR 0012): the OTHER personas this
+wake processes are only those on your persona's vendor/model lane (the
+JSON's `lane.members` lists them). It defaults to `--own-persona`, so a
+persona session is restricted for free; the claim records the lane so
+`sweep-complete` measures the run against it. In the no-identity
+fallback there is no persona and hence no lane: the run is unrestricted
+-- on a mixed-vendor roster adopt the team's default persona first so
+the restriction applies.
 
 `--own-persona` is the split gate's input -- your persona per the
 resolution list above (`$DRIVER` must be that persona's config; omit the
@@ -226,6 +245,26 @@ It prints JSON:
   lease is renewed by every `sweep-done`, and a ~30-min claim is
   stealable only when you go silent.
 
+### 1b. Lane maintenance: own-only sweeps (autodrive)
+
+When the roster mixes vendors, autodrive's idle path fires one
+**maintenance session per lane** that still has personas with un-swept
+sessions, on that lane's vendor, with a prompt naming those personas.
+Such a session does NOT claim a team run. For each named persona P, in
+order:
+
+```bash
+$TM --config memories/P/tiger-memory.config.yaml sweep-plan \
+    --own-persona P --own-only --token <stable-token>
+```
+
+`--own-only` never widens to a team run: it claims `scope: "own-only"`
+when P has pending sources and answers `not_due` otherwise (skip P).
+Then run steps 2 and 3 for that claim exactly as below (P is the single
+target; `sweep-complete` leaves the team watermark untouched). When
+every named persona is done, run `tigerharness slack-bridge
+compact-idle` once and stop.
+
 ### 2. Per target persona: stage -> extract in stacks -> glue
 
 For each `target` in `targets`:
@@ -246,7 +285,7 @@ a. **Stage the work** (non-AI; bulky content stays out of your context):
    backlog fans out across many small fresh contexts instead of one agent
    looping over -- and re-reading -- every transcript.
 
-b. **Spawn ONE Task sub-agent per stack** (the trust boundary + the
+b. **Spawn ONE helper session (sub-agent) per stack** (the trust boundary + the
    fresh-window). Stacks are independent, so run the sub-agents **in
    parallel** (a sane cap, e.g. ~6 concurrent). Each sub-agent's brief:
    - **Read**: each `<uuid>.prompt.md` in its assigned stack (the prompt
@@ -340,7 +379,7 @@ d. **Compact what outgrew its bound** (staged, same sub-agent shape as
    see step 1's ordering rule; run `compact-apply` when the cards land,
    then a second `rebuild`.)
 
-   Otherwise, spawn **ONE Task sub-agent per target** (parallel, same
+   Otherwise, spawn **ONE helper session per target** (parallel, same
    cap). Each sub-agent's brief: read its `prompt_path` (the prompt
    embeds the store content and the strict output contract), emit ONLY
    the contracted replacement, **write it to exactly `card_path`**, then
@@ -487,6 +526,10 @@ process several `targets` concurrently (each its own plan -> stacks ->
   idle past the cursor, or still-active over the active-slice
   threshold -- so a claimed own-only run always stages at least one
   slice), and an own-only run never advances the team watermark.
+- **Lane restriction** (`--lane-of`) -> a team run never extracts a
+  persona on another vendor's lane; `--own-only` lets a per-lane
+  maintenance session sweep its own personas without claiming the team
+  run (ADR 0012).
 - **Lease renewal** -> every `sweep-done` refreshes the claim lease, so
   a healthy long run (many personas, big fan-outs) is never stolen
   mid-flight; only a genuinely silent driver loses the claim.
@@ -505,15 +548,15 @@ process several `targets` concurrently (each its own plan -> stacks ->
   overflow limit, never drops a *fresh* `operator_explicit` directive
   (a stale one goes only as a logged last resort), and
   never forgets/merges a fresh topic.
-- **Context-safe** -> the executor is always the Task sub-agent
+- **Context-safe** -> the executor is always the helper session
   (extraction AND compaction); bulky content stays in sub-agent
   windows.
 
 ## What NOT to do
 
-- **Never** extract via `claude -p` -- the executor is always a
-  Task-tool sub-agent (the executor rule above: isolation, oversight,
-  resumability).
+- **Never** extract via a headless CLI (`claude -p` / `codex exec`) --
+  the executor is always a helper session (the executor rule above:
+  isolation, oversight, resumability).
 - **Never** let the bulky transcript or extraction bundle into your own
   context -- a sub-agent reads the prompt files and writes card files; you
   see only short confirmations and the `ingest-staged` JSON summary.

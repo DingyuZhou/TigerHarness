@@ -21,19 +21,26 @@ real work (step 3) — a no-op fire never loads it.
 
 "drive the journal" · "pick up the next task" · "work what's queued" ·
 "continue the journal" · or you're given the floor and entries are
-waiting. **Do NOT** drive from a non-interactive context (`claude -p` /
-cron / API) — the driver is human-triggered by design; surface that
-boundary instead. That hard rule includes Slack: a **Slack-triggered
-(bridge-spawned) session bills API tokens** — it may SCHEDULE journal
-tasks (the `journal-new` skill) but must **NEVER drive** them. `journal
-claim` enforces this mechanically: it refuses when the bridge's
-`TIGERHARNESS_SLACK_THREAD_TS` env marker is present, unless the
-deliberate `--allow-api-drive` override is passed. Rails and billing:
-`docs/subscription-backend.md`.
+waiting. **Do NOT** drive from a non-interactive context (a headless CLI
+session — `claude -p` / `codex exec` — cron, or API) — the driver is
+human-triggered by design; surface that boundary instead. **Slack
+(bridge-spawned) sessions are a team decision:** every team may
+SCHEDULE journal tasks from Slack (the `journal-new` skill); a team
+that sets `TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in its `configs/.env`
+may also DRIVE from Slack, exactly like an interactive session (pass
+`--driver <you>`). `journal claim` enforces it mechanically: with the
+bridge's `TIGERHARNESS_SLACK_THREAD_TS` marker present it refuses
+unless the team knob is on or the deliberate one-off
+`--allow-api-drive` override is passed. Off by default -- "Slack
+schedules, never drives" until a team opts in. Rails:
+`docs/subscription-backend.md` (ADR 0013).
 
 ## The checklist — run top to bottom, every invocation
 
-1. **Sweep (cheap, always first).** Run `tigerharness journal sweep`. It
+1. **Sweep (cheap, always first).** Run `tigerharness journal sweep`
+   (in a drive: `journal sweep --driver <your-persona>`, which adds the
+   **lane view** -- each actionable item marked `[mine]` or "not yours";
+   see step 2). It
    archives `done/` and classifies each `in_progress` task as **idle**
    (detached — resumable now), **busy** (a live session owns it: attached
    *and* heartbeat fresh within the stuck-timeout — default 30 min,
@@ -67,10 +74,21 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    fire is the one-session-per-loop-fire anti-pattern the cascade kills;
    the only turn-ends are nothing-actionable / a real blocker / the human
    / the genuine context ceiling.
+   **Lanes (ADR 0012).** In a drive you only take work marked `[mine]`
+   by the sweep's lane view: work whose owner persona runs on the same
+   vendor/model *lane* as your `--driver` persona (per
+   `configs/personas.yaml`). `claim --driver` refuses another lane's
+   work with **exit 3** and changes nothing -- leave it; autodrive
+   fires a separate drive on that lane (or a human drives on that
+   vendor; `--any-lane` is the deliberate override when neither will
+   happen). One-vendor teams have one lane and notice nothing.
    **Claim it atomically:** `tigerharness journal claim <id>` *before*
    working (sets `session_ref`, bumps `sessions`, refreshes the heartbeat,
-   compare-and-set). If claim exits non-zero (another session won the
-   race), re-sweep and pick again, or stop. Skip `blocked` — surface them.
+   compare-and-set). Claim's exit codes mean different things: **1** =
+   busy / claim lost (another session won -- re-sweep and pick again, or
+   stop); **3** = the task belongs to another lane (leave it; it is not
+   yours); **2** = a configuration error (a malformed vendor in
+   personas.yaml -- stop and surface it). Skip `blocked` — surface them.
    **In a Slack-driven drive,** add `--driver <your-persona>` so the work
    lands in the right persona's store (see OPERATING.md "Per-persona
    memory"): `tigerharness journal claim <id> --driver <your-persona>`.
@@ -78,9 +96,11 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    Slack thread registers automatically (the bridge passes it via the
    `TIGERHARNESS_SLACK_THREAD_TS` env var), so tiger-memory does **not**
    double-count the fat drive transcript — no copying the thread_ts by
-   hand. (`--drive-thread <thread_ts>` overrides it; **omit `--driver`
-   entirely outside a drive** — claim/release then behave as the plain
-   backend with no memory side-effect.)
+   hand. (`--drive-thread <thread_ts>` overrides it.) **In a hand drive
+   by a persona session, pass `--driver <your-persona>` too** -- it is
+   the identity the lane gate and the memory attribution need. Omit
+   `--driver` only for plain backend use with no persona identity
+   (claim/release then have no memory side-effect and no lane gate).
 
 3. **Load the procedure + context** (reached only when there's real work).
    Read `<journal>/OPERATING.md` for the full procedure, **then** the
@@ -101,7 +121,15 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    sub-protocols *in OPERATING.md*: in a **graph walk**, end each step at
    the `tigerharness journal step-done --task <id> --step <id> --verdict
    <V> --output <note>` gate — it writes that step persona's worklog entry
-   and prints the next step, so do **not** follow the edges by hand; in the
+   and prints the next step, so do **not** follow the edges by hand. In a
+   drive pass `--driver <your-persona>` to it as well: it refuses a step
+   whose persona is on another lane (exit 3) and prints a `handoff:` line
+   when the NEXT step is -- then **release the task immediately**
+   (`journal release <id> --driver <you> --next-action "handoff to
+   <persona>: step <id>"`) and re-sweep: resume another `[mine]` item if
+   one is idle/crashed, but pending work still waits until nothing is in
+   progress (finish-before-start holds across lanes), and if only other
+   lanes' work remains, end the turn (lane-idle, no tail); in the
    **compile** sub-protocol, `land-compile` records its own per-round
    worklogs). **Heartbeat** every ~10 min of work (append to
    `progress.md` + refresh `updated_at`), so a concurrent loop correctly
@@ -154,13 +182,16 @@ deliberate `--allow-api-drive` override is passed. Rails and billing:
    for the next loop fire between sessions. Run a task's entire
    `max_sessions` budget, and the whole queue, **back-to-back in one
    sitting — never one-session-per-loop-fire.** Only end the invocation
-   when step 1 finds nothing actionable, the human ends it, or you hit the
+   when step 1 finds nothing actionable, when nothing actionable is
+   `[mine]` (**lane-idle**: the sweep's lane verdict says so -- other
+   lanes' drives take the rest), the human ends it, or you hit the
    true context ceiling (step 7). **Never manufacture a stopping point
    just because a session finished or the conversation feels long.**
    **Ending because nothing is actionable AND nothing is busy? Run the
    idle-maintenance tail (below) first, then stop.** (Ending on the
-   busy cheap-exit or the context ceiling skips the tail — a job is
-   running, or you have no context to spare.)
+   busy cheap-exit, the lane-idle verdict, or the context ceiling skips
+   the tail — a job is running elsewhere, another lane still has work
+   and the daemon decides maintenance, or you have no context to spare.)
 
 7. **Checkpoint-and-hand-off near the ceiling — "context heavy" still is
    NOT a panic.** Every session checkpoints to `progress.md` +
@@ -202,9 +233,11 @@ ceiling (step 7 — hand off instead).
    or still active past the active-slice threshold — bypass the team
    staleness floor; every other persona keeps the floor + watermark +
    soft lease) — a fresh team is a few tokens of no-op. Its summarize
-   work runs in Task-tool sub-agents, which any agent drive session
-   (including an autodrive `claude -p` fire) can spawn; the executor
-   rule only bars plain daemons, which cannot host sub-agents.
+   work runs in helper sessions (sub-agents — see the runtime glossary
+   in AGENTS.md: the Task tool in Claude Code, `spawn_agent` in Codex),
+   which any agent drive session (including an autodrive fire) can
+   spawn; the executor rule only bars plain daemons, which cannot host
+   sub-agents.
 
 Order matters slightly: compact first (bounded, usually a no-op), then
 the memory sweep (it may fan out sub-agents). If the sweep claims work,
@@ -219,7 +252,7 @@ seems to contradict it, **OPERATING.md wins** (it shipped with this
 specific journal; this skill is generic guidance). Common reminders the
 full contract spells out: don't skip the sweep; never work a *busy* task;
 one task at a time; use `claim`/`release` (never hand-edit state); the
-in-session compile is `claude -p`-free (API budget zero). In a drive, mark
+in-session compile spawns no headless CLI (API budget zero). In a drive, mark
 `done` only through the gate (`kind=task` → `release --state done --output
 <note>`; `kind=workflow` → walk to `__done__` via `step-done`) and never
 hand-write `worklog/` — the gate stamps each entry's persona attribution.

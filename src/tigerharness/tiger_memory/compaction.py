@@ -8,7 +8,7 @@ subscription-rail shape the sweep's extraction uses:
   a manifest entry. Deterministic pre-passes that need no judgement run
   here: topics stale beyond ``forget_days`` are dropped outright (oldest
   first) when the topic index is over its ``max``.
-- Task sub-agents (spawned by the sweep skill) each read one prompt and
+- helper sub-agents (spawned by the sweep skill) each read one prompt and
   write one ``<target>.card.md`` — the compacted replacement, per the
   prompt's strict marker contract.
 - :func:`compact_apply` (non-AI) validates each card and applies it

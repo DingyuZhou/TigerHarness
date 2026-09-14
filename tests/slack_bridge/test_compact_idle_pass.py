@@ -534,3 +534,27 @@ class TestMidPassRaces:
         assert sent == ["sess-a"]
         assert report["compacted"] == ["a.1"]
         assert report["skipped"] == {"latch_failed": 1}
+
+
+class TestVendorGate:
+    """``/compact`` is a Claude Code turn: records opened on another
+    backend are skipped, and the skip is reported (ADR 0011)."""
+
+    @pytest.mark.asyncio
+    async def test_codex_records_are_skipped(self, tmp_path: Path):
+        team = _team(tmp_path)
+        _seed(team, {
+            "a.1": {"session_id": "sess-a", "team": "Shohoku", "persona": "Rukawa",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD,
+                    "backend": "codex_exec"},
+            "b.1": {"session_id": "sess-b", "team": "Shohoku", "persona": "Ayako",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD,
+                    "backend": "claude_p"},
+            "c.1": {"session_id": "sess-c", "team": "Shohoku", "persona": "Anzai",
+                    "last_usage": HOT_USAGE, "last_turn_at": OLD},
+        })
+        send, sent = _sender()
+        report = await compact_idle_once(team, send=send, now=NOW)
+        assert sorted(sent) == ["sess-b", "sess-c"]
+        assert report["skipped"]["vendor_unsupported"] == 1
+        assert sorted(report["compacted"]) == ["b.1", "c.1"]

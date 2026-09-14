@@ -135,6 +135,39 @@ resumable. A drive that raises is logged as `last_error` and the loop keeps
 firing; one bad drive never takes the daemon down. On `stop`, any still-running
 drives are drained so their results are recorded before the daemon exits.
 
+### Drive lanes: one drive per vendor/model with work (ADR 0012)
+
+A persona's vendor decides the brain that does its journal work, and
+autodrive is the coordinator that makes it so. On an actionable cycle the
+daemon runs a second non-AI probe (`probe_lanes`) that attributes every
+actionable task and inbox entry to its owner persona and that persona's
+**lane** (vendor + model, per `configs/personas.yaml`), then fires **one
+drive per lane** that has work: as a persona on that lane (the configured
+`--driver` when it lives there, else the owner of the lane's first item,
+else the team default persona when it is on that lane), on that lane's
+backend and model, with a drive prompt that carries the lane rule. The
+drive then takes only work `journal sweep --driver` marks `[mine]`;
+`journal claim` refuses the rest (exit 3), and `journal step-done` hands a
+workflow to another lane by asking the drive to release it.
+
+Guardrails:
+
+- **At most one drive per lane is in flight.** A cycle whose lanes all
+  have a drive out pulses `lanes busy` and fires nothing.
+- **Early wake, floored.** A drive that completes *cleanly* wakes the loop
+  before the interval elapses (its release may have handed a step to
+  another lane). A lane is not fired again within 60 s of its last fire on
+  a woken cycle, so a fast no-op drive cannot turn the cadence into a
+  storm; an errored drive never wakes.
+- **Fail-soft.** No team root, a malformed vendor, or any probe error means
+  "no lanes": the single default drive fires exactly as before. `--backend`,
+  `--model` or `--prompt` pin every drive and turn lanes off (`status`
+  shows `lanes: off`). The maintenance fire is always a single default
+  drive. The rescue hold stays global.
+
+A one-vendor team has one lane and behaves exactly as before. Design and
+the ownership table: [adr/0012](adr/0012-drive-lanes.md).
+
 ### The idle fire runs the maintenance tail, then the daemon stops
 
 When the probe returns `idle`, the daemon fires **exactly one** drive — the
@@ -144,8 +177,22 @@ self-gating chores — `tigerharness slack-bridge compact-idle` (its only model
 call is one bounded `/compact` turn per heavy, quiet Slack bridge lane, when
 the team opted in — see docs/slack-bridge.md "Idle compaction") and the
 `sweep-memory` skill (team memory refresh, gated by its staleness floor +
-watermark + lease; its summarize work runs in Task-tool sub-agents, which a
-`claude -p` drive session can spawn). Both are cheap no-ops when fresh.
+watermark + lease; its summarize work runs in helper sub-agents, which any
+agentic drive session can spawn). Both are cheap no-ops when fresh.
+
+**Memory sweeps per lane come first (ADR 0012, part 2).** On a roster that
+mixes vendors, an idle cycle with nothing in flight first asks a non-AI probe
+(`probe_sweep_lanes`) which lanes *other than the maintenance drive's own*
+hold personas with un-swept sessions (the split gate's own pending check, per
+persona; the home lane is the driver's, else the team default persona's, and
+the maintenance drive sweeps it). While any does, the daemon
+fires **one sweep session for the first such lane** -- as a persona on that
+lane, on that lane's vendor -- whose prompt names the pending personas and
+asks for an own-only sweep of each (`sweep-plan --own-persona P --own-only`).
+Those fires never arm the auto-stop; a sweep fire that errors marks its lane
+failed for this daemon run so a broken vendor cannot hold the daemon open.
+Only when no lane is pending does the ordinary maintenance fire run, and its
+own sweep passes `--lane-of` so it too extracts only its lane's personas.
 
 Once that fire **completes**, nothing is in flight, and the next probe is
 still `idle`, the loop exits cleanly and the state file is cleared. Nothing is
@@ -218,8 +265,8 @@ tigerharness autodrive stop
 | `--interval` | `600` (10 min) | Seconds between *fires* (cadence, not spacing — the loop does not wait for a drive to finish). **Floor 60** — keeps a typo from piling up dozens of concurrent drives. |
 | `--driver` | team `default_persona` | Persona the work is attributed to (worklogs land in its memory store). |
 | `--max-budget` | none | Per-drive USD cap, passed to the backend. **Strongly advised** — your protection for the day billing changes. |
-| `--backend` | `claude_p` | agent SDK backend name. **Vendor-agnostic caveat:** only an *agentic CLI* backend can actually invoke skills and drive; a raw chat-completion backend cannot. |
-| `--model` | backend default | Model override. |
+| `--backend` | the driver persona's vendor (`configs/personas.yaml`), else `claude_p` | agent SDK backend name (`claude_p`, `codex_exec`) or a vendor name (`claude`, `chatgpt`). **Vendor-agnostic caveat:** only an *agentic CLI* backend can actually invoke skills and drive; a raw chat-completion backend cannot. |
+| `--model` | the driver persona's model (`configs/personas.yaml`), else the backend default | Model override. Applied from personas.yaml only when the drive runs on the persona's own backend — an explicit `--backend` that differs gets no model unless `--model` says which. |
 | `--permission-mode` | `bypassPermissions` | Unattended permission mode (the daemon must never stall on a prompt). |
 | `--prompt` | built-in | Override the built-in "drive the journal" instruction. |
 | `--journal-dir` | env / cwd-as-team / XDG | Journal root to manage. |
@@ -306,6 +353,17 @@ invocation:
 | `TIGERHARNESS_AUTODRIVE_DRIVER` | team `default_persona` | Attribution persona |
 | `TIGERHARNESS_AUTODRIVE_NOTIFY` | `slack` | `slack` or `none` |
 | `TIGERHARNESS_AUTODRIVE_NOTIFY_CHANNEL` | `SLACK_NOTIFY_CHANNEL`, else operator DM | Slack channel id, or `dm` |
+
+#### The backend and model come from `personas.yaml`, not `.env`
+
+Which vendor a drive runs on is a property of the **driver persona**, so it
+is read from the team roster, not from a process-wide key: flag >
+`configs/personas.yaml` (the persona's own `vendor:` / `model:`, else the
+team's `default_vendor` / `default_model`) > built-in `claude_p`. The
+auto-start hook resolves the same way. A malformed vendor there makes
+`start` exit 2 instead of quietly starting the daemon on the other vendor's
+bill. See [adr/0011](adr/0011-model-vendors-per-persona.md) — including
+why a *task* runs on the driver's vendor rather than its assigned persona's.
 
 #### The notify channel inherits `SLACK_NOTIFY_CHANNEL`
 
@@ -416,7 +474,7 @@ and clears the state file.
 
 | Path | What |
 |---|---|
-| `<team>/journal/.autodrive.json` | State **and the team-canonical lock**: pid, interval, backend, driver, max_budget, notify config, started_at, plus two gauges — **launched** (`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`, `last_tick_at`, `last_stop_reason` / `last_error`). With overlap the two diverge while drives are in flight. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. Anchored to the team's canonical journal regardless of `--journal-dir`, so the one-per-team guard holds (a personal, non-team journal keeps the lock under its own root). |
+| `<team>/journal/.autodrive.json` | State **and the team-canonical lock**: pid, interval, backend, model, driver, max_budget, notify config, started_at, plus two gauges — **launched** (`fire_count`, `last_fire_at`, `in_flight`) and **completed** (`tick_count`, `last_tick_at`, `last_stop_reason` / `last_error`). With overlap the two diverge while drives are in flight. `status` reads it; `stop` clears it. Written atomically; a corrupt file reads as "no daemon" so a fresh `start` can recover. Anchored to the team's canonical journal regardless of `--journal-dir`, so the one-per-team guard holds (a personal, non-team journal keeps the lock under its own root). |
 | `<team>/journal/.autodrive.lock` | `flock` target serializing the two decisions that must not interleave: `start`'s check-and-spawn (so two simultaneous `start`/auto-start calls cannot both spawn) and the daemon's drained-exit handover (so a stop cannot lose a wakeup). Deliberately **not** `.autodrive.json`: that file is replaced on every write and `flock` follows the inode. Zero-length; never read. |
 | `<team>/journal/.autodrive.log` | Appended stdout/stderr of the detached `_loop` process. |
 

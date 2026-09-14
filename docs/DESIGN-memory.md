@@ -50,7 +50,7 @@ a first-class, self-pruning home — the **topics** store.
   **characters**, never tokens. No dependency on Claude's skill system.
 - **The persona processes its own memory, on the subscription rail.** Both
   extraction (turning a finished session into memory) and compaction run
-  **as that persona, in character**, via constrained Task sub-agents (the
+  **as that persona, in character**, via constrained helper sub-agents (the
   sweep-memory pattern) — never an inline `claude -p`, never an in-process
   vendor API call. The AI steps are *staged* as prompt files; the CLI verbs
   around them are non-AI glue.
@@ -205,7 +205,7 @@ skills/topics and the flat entry length for must_remember;
 ## 6. Staged compaction — replaces meditation
 
 Compaction (`compaction.py`) has the same subscription-rail shape as the
-sweep's extraction: non-AI plan → Task sub-agents write cards → non-AI
+sweep's extraction: non-AI plan → helper sub-agents write cards → non-AI
 apply. The bulky store content transits only the sub-agent's context, never
 the driver's.
 
@@ -252,7 +252,7 @@ roster, so a same-run detail rewrite would either dangle or be
 overwritten. The still-oversized detail simply re-stages next sweep
 against the settled store (the deferral is logged).
 
-### 6.2 Card sub-agents (Task tool, subscription-billed)
+### 6.2 Card sub-agents (helper sessions, subscription-billed)
 
 One sub-agent per staged prompt reads `<key>.prompt.md` and writes
 `<key>.card.md` — the compacted replacement, per the prompt's embedded

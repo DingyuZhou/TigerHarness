@@ -133,7 +133,8 @@ to rewire one existing edge. Today, `append-steps` only adds nodes.
 - **Don't use it before compile is complete.** Until the original
   graph lands, you'd be appending to nothing. The CLI checks
   `status.compile_phase` and refuses if it's not `complete`.
-- **Don't invoke from a `claude -p` / cron context.** Same rule as the
+- **Don't invoke from a headless CLI (`claude -p` / `codex exec`) or
+  cron context.** Same rule as the
   rest of the journal driver: skill-only by design, because the
   subscription billing model depends on a human-driven interactive
   session.

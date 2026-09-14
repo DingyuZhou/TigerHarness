@@ -210,8 +210,10 @@ queue write succeeds. It is a **no-op unless
 and it **never fails the scheduling command** — a daemon that cannot start
 logs a warning and the task is still queued. Combined with the daemon's
 auto-stop, the effect is: scheduling work starts the driver, draining the
-queue stops it, and nothing runs in between. The Slack rule is unchanged —
-Slack schedules, never drives. See [autodrive.md](autodrive.md).
+queue stops it, and nothing runs in between. The Slack rule is unchanged
+by auto-start: Slack schedules, and drives only where the team permits it
+([ADR 0013](adr/0013-slack-drives-team-setting.md)). See
+[autodrive.md](autodrive.md).
 
 ## Team-level defaults (`configs/personas.yaml`)
 
@@ -334,12 +336,50 @@ tigerharness journal status <task-id>
 tigerharness journal sweep
 tigerharness journal sweep --format json
 tigerharness journal sweep --stuck-timeout 600
+tigerharness journal sweep --driver Ayako   # lane view: [mine] / not yours
+
+# Drive lanes (ADR 0012): with --driver, claim and step-done refuse work
+# whose owner persona runs on another vendor/model lane (exit 3, nothing
+# changed); --any-lane is the deliberate override. step-done --driver
+# prints a `handoff:` line when the NEXT step belongs to another lane.
+tigerharness journal claim <task-id> --driver Ayako
+tigerharness journal claim <task-id> --driver Ayako --any-lane
+tigerharness journal step-done --task <id> --step <id> --verdict APPROVE \
+    --output note.md --driver Ayako
 ```
 
 The driver is **skill-only by design**: there is no
 `tigerharness journal drive` CLI because a CLI driver would
 reintroduce programmatic billing and defeat the subscription model.
 Driving only happens inside an interactive Claude Code session.
+
+## Drive lanes (which vendor does the work)
+
+A **lane** is one vendor + model, what `tigerharness.vendors` resolves a
+persona to from `configs/personas.yaml`. Every unit of journal work has
+an owner persona -- a task's assigned persona; a workflow's captain
+while it compiles, then the persona of the step the walk is at; a
+deferred entry's persona -- and a drive with `--driver` may only take
+work whose owner is on its own lane:
+
+- `sweep --driver <p>` marks each actionable item `[mine]` or "not yours"
+  (JSON: `actionable_mine`, `actionable_other_lane`, `deferred_mine`,
+  `lanes`).
+- `claim --driver <p>` refuses another lane's work with exit code 3
+  before any mutation (1 stays busy / claim lost; 2 is a malformed
+  vendor); `--any-lane` overrides deliberately. The sweep's **lane
+  verdict** (`lane_verdict` in JSON: `mine` / `other-lanes` / `idle`)
+  tells a drive whether to pick, to end without the idle-maintenance
+  tail because only other lanes have work, or that the queue is idle.
+- `step-done --driver <p>` refuses a step whose persona is on another lane
+  (exit 3, no note written) and prints a `handoff:` cue when the *next*
+  step is -- the drive then releases the task so a drive on that lane
+  claims it.
+
+Queue ordering is unchanged ("finish before you start" holds across
+lanes). Autodrive fires one drive per lane with work
+([autodrive.md](autodrive.md)); a one-vendor team has one lane and sees
+no difference. Design: [adr/0012](adr/0012-drive-lanes.md).
 
 ## Scheduled (recurring) tasks -- DEPRECATED
 

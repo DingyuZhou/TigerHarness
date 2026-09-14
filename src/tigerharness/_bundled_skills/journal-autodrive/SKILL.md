@@ -1,13 +1,14 @@
 ---
 name: journal-autodrive
-description: Start, check, or stop a background process that drives the journal on a fixed interval via the agent SDK (vendor-agnostic; default backend `claude -p`). Use when the user asks to "drive the journal every N minutes", "autodrive the journal", "keep working the queue automatically", "start/stop the auto-driver", "is the autodrive running?", or "why did the autodrive stop?". Wraps `tigerharness autodrive`. This is the Operator-authorized exception to the journal's human-only drive rule -- read the safety note before starting one.
+description: Start, check, or stop a background process that drives the journal on a fixed interval via the agent SDK (vendor-agnostic; each drive runs on its driver persona's vendor, `claude -p` or `codex exec`). Use when the user asks to "drive the journal every N minutes", "autodrive the journal", "keep working the queue automatically", "start/stop the auto-driver", "is the autodrive running?", or "why did the autodrive stop?". Wraps `tigerharness autodrive`. This is the Operator-authorized exception to the journal's human-only drive rule -- read the safety note before starting one.
 ---
 
 # journal-autodrive
 
 A small daemon that **fires "drive the journal" on a fixed cadence**. Every
 `interval` seconds it checks the queue and, if there is work, spawns an
-agentic backend (default `claude -p`) with a self-contained,
+agentic backend (the driver persona's vendor: `claude -p` or `codex
+exec`) with a self-contained,
 Operator-authorized drive prompt and immediately goes back to waiting -- it
 does **not** wait for the drive to finish, so **overlap is allowed** and each
 fire is a **fresh, context-clean session**. It is **not** built on Claude
@@ -21,8 +22,9 @@ autodrive isn't running" -- on a drained queue, that is the correct state.
 
 The journal is a **human-triggered** subscription backend -- "no
 programmatic driver by design". This is the deliberate, **Operator-
-authorized** exception, and it is **only safe while `claude -p` bills the
-Claude subscription** rather than API tokens. If that billing flips, an
+authorized** exception, and it is **only safe while the vendor CLI
+(`claude -p` / `codex exec`) bills its subscription** rather than API
+tokens. If that billing flips, an
 unattended autodrive spends real dollars on **every fire**. Guardrails:
 
 - **`--max-budget <usd>`** caps each drive's reported cost. Strongly
@@ -58,12 +60,14 @@ and acts on the verdict:
   entry) -- fire a drive.
 - **busy** (a live session owns the in-flight task) -- **skip the fire.** A
   drive would only sweep, see busy, and exit; the tick is free instead.
-- **idle** (nothing actionable, nothing busy) -- fire **one** drive, the
+- **idle** (nothing actionable, nothing busy) -- on a mixed-vendor roster,
+  first one memory-sweep session per *other* lane that still has personas
+  with un-swept sessions (see Lanes below); then fire **one** drive, the
   maintenance one whose tail runs `slack-bridge compact-idle` + the
   `sweep-memory` skill. When that finishes and the queue is still idle, the
   **daemon exits** and clears its state file.
 
-So an idle interval costs a file walk, not a `claude -p` session, and a
+So an idle interval costs a file walk, not a model session, and a
 drained queue costs nothing at all. This applies to **every** daemon,
 including one you started by hand.
 
@@ -92,12 +96,18 @@ them on the command line.
 - `--driver` persona the work is attributed to (defaults to the team's
   `default_persona`). Pass it so worklogs land in the right memory store.
 - `--max-budget` per-drive USD cap (advised; see safety note).
-- `--backend` agent_sdk backend (default `claude_p`). **Vendor-agnostic
-  caveat:** only an *agentic CLI* backend (like `claude_p`) can actually
-  invoke skills/tools and drive; a raw chat-completion backend cannot.
-- `--model`, `--permission-mode`, `--prompt` override the model, the
-  unattended permission mode (default `bypassPermissions`), and the
-  built-in drive instruction.
+- `--backend` agent_sdk backend name (`claude_p`, `codex_exec`) or a
+  vendor name (`claude`, `chatgpt`). Default: the driver persona's vendor
+  from the team's `configs/personas.yaml` (its own `vendor:`, else the
+  team's `default_vendor`), else `claude_p`. **Vendor-agnostic caveat:**
+  only an *agentic CLI* backend (like `claude_p` or `codex_exec`) can
+  actually invoke skills/tools and drive; a raw chat-completion backend
+  cannot.
+- `--model` overrides the model (default: the driver persona's `model:`
+  from personas.yaml, else the team's `default_model` while the persona is
+  on the team's vendor, else the backend's own). `--permission-mode` and `--prompt` override the unattended
+  permission mode (default `bypassPermissions`) and the built-in drive
+  instruction.
 - `--notify {slack,none}` (default `slack`) and `--notify-channel <id>`
   control daemon-level notifications: by default the daemon posts a Slack
   **heartbeat per fire** plus a **threaded status/summary on completion**;
@@ -126,11 +136,29 @@ Stop:
 - A bare "keep the queue moving automatically" -> `start` at the default
   10-minute interval; mention the `stop` command and the budget cap.
 
+## Lanes: one drive per vendor/model with work (ADR 0012)
+
+When the roster mixes vendors (`vendor:` per persona in
+`configs/personas.yaml`), an actionable cycle fires **one drive per
+lane** that has work -- as a persona on that lane, on that lane's
+backend and model -- keeping at most one drive per lane in flight, and
+a drive that finishes cleanly wakes the loop early (a workflow step may
+just have been handed to another lane; a 60 s per-lane floor keeps
+that from becoming a storm). `--backend`, `--model` or `--prompt` pin
+every drive and turn lanes off (`status` shows `lanes: off`). On an
+idle queue the same coordinator fires one **memory-sweep session per
+lane other than the maintenance drive's own** whose personas have
+un-swept sessions (own-only sweeps, on that lane's vendor); the
+maintenance drive then sweeps its own lane and the daemon stops. A
+one-vendor team has one lane and behaves exactly as before. A persona's
+`vendor:` therefore matters whenever it owns work or memory, not only
+when it is the `--driver`.
+
 ## What it does each fire
 
 Spawns the backend in the team root (in a **fresh session**, no `--resume`)
-with a prompt that **explicitly lifts** the "never drive from claude -p /
-cron / API" boundary for this sanctioned process, then drives via the
+with a prompt that **explicitly lifts** the "never drive from a headless
+CLI / cron / API" boundary for this sanctioned process, then drives via the
 **drive-journal** skill (sweep -> claim one actionable task with `--driver
 <persona> --allow-api-drive` -> work it -> cascade). The loop does not wait
 for the drive: it records the launch and returns to the cadence, so a slow

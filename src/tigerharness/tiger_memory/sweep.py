@@ -130,8 +130,22 @@ def try_claim_sweep(
     lease_seconds: float = DEFAULT_LEASE_SECONDS,
     own_persona: str | None = None,
     own_pending: bool = False,
+    force_own_only: bool = False,
+    allowed: set[str] | None = None,
 ) -> ClaimResult:
     """Decide whether THIS session runs the team sweep.
+
+    *allowed* (the lane restriction, ADR 0012) is recorded on the claim
+    as ``allowed`` so :func:`mark_sweep_complete` measures a lane-
+    restricted run against its own lane, not the whole roster -- without
+    that a restricted run could never complete and the claim would
+    dangle until the lease expired.
+
+    *force_own_only* (``sweep-plan --own-only``, ADR 0012): never widen to
+    a team run -- claim ``own-only`` when the own persona has pending
+    sources, else ``not_due`` even if the team floor is due. A lane
+    maintenance session uses it to sweep exactly its lane's pending
+    personas one by one without touching the team watermark.
 
     1. Staleness floor: if the last completed sweep is recent AND the
        calling persona has no pending own sources (*own_pending*), return
@@ -152,7 +166,7 @@ def try_claim_sweep(
     state = read_sweep_state(team_memories_dir)
     team_due = sweep_due(
         state.get("last_sweep_at"), now, floor_hours=floor_hours
-    )
+    ) and not force_own_only
     if not team_due and not own_pending:
         log.info("team sweep: not_due (inside staleness floor, no own "
                  "pending)")
@@ -197,6 +211,10 @@ def try_claim_sweep(
         state["own_persona"] = own_persona
     else:
         state.pop("own_persona", None)
+    if allowed is not None:
+        state["allowed"] = sorted(allowed)
+    else:
+        state.pop("allowed", None)
     write_sweep_state(team_memories_dir, state)
     log.info("team sweep: claimed (scope=%s)", scope)
     return ClaimResult(True, "claimed", scope)
@@ -243,6 +261,7 @@ def release_sweep_claim(
     # fresh, so a released claim leaves no stale scope behind.
     state.pop("scope", None)
     state.pop("own_persona", None)
+    state.pop("allowed", None)
     write_sweep_state(team_memories_dir, state)
     return True
 
@@ -278,9 +297,14 @@ def mark_sweep_complete(
             own = state.get("own_persona")
             pending = [own] if own and own not in done else []
         else:
+            # A lane-restricted run (ADR 0012) is complete when ITS lane's
+            # personas are done; the others were never in scope.
+            allowed = state.get("allowed")
+            in_scope = set(allowed) if isinstance(allowed, list) else None
             pending = [
                 t.name for t in enumerate_persona_configs(team_memories_dir)
                 if t.name not in done
+                and (in_scope is None or t.name in in_scope)
             ]
         if pending:
             log.warning(
@@ -303,6 +327,7 @@ def mark_sweep_complete(
     state.pop("run_started_at", None)
     state.pop("scope", None)
     state.pop("own_persona", None)
+    state.pop("allowed", None)
     write_sweep_state(team_memories_dir, state)
     return True
 
@@ -406,12 +431,50 @@ def record_persona_done(
     write_sweep_state(team_memories_dir, state)
 
 
+def lane_members(team_memories_dir: Path, persona: str) -> set[str] | None:
+    """Roster personas on *persona*'s vendor/model lane (ADR 0012), the
+    persona itself included when it is on the roster.
+
+    ``None`` means "no restriction": there is no readable roster, or a
+    vendor in it is malformed (logged) -- the sweep is a memory chore and
+    must never be blocked by a roster typo; the bridge and autodrive
+    already refuse to start on one.
+    """
+    from tigerharness.vendors import read_personas_yaml, resolve_model_policy
+
+    team_root = Path(team_memories_dir).parent
+    try:
+        data = read_personas_yaml(team_root)
+        if not data or not isinstance(data.get("personas"), list):
+            return None
+        mine = resolve_model_policy(team_root, persona, data=data)
+        key = (mine.vendor, mine.backend, mine.model)
+        names: set[str] = set()
+        for entry in data["personas"]:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            pol = resolve_model_policy(team_root, name.strip(), data=data)
+            if (pol.vendor, pol.backend, pol.model) == key:
+                names.add(name.strip())
+        return names
+    except ValueError as exc:
+        log.warning(
+            "team sweep: lane restriction unavailable (%s); sweeping "
+            "without it", exc,
+        )
+        return None
+
+
 def plan_team_sweep(
     team_memories_dir: Path,
     *,
     max_personas: int | None = DEFAULT_MAX_PERSONAS,
     own_persona: str | None = None,
     scope: str = "team",
+    allowed: set[str] | None = None,
 ) -> SweepPlan:
     """Sequence the roster for THIS wake: skip personas already done in the
     in-flight run, then take at most *max_personas* of the rest
@@ -427,6 +490,11 @@ def plan_team_sweep(
     - ``"team"`` without *own_persona* — the plain LRU walk; nobody is
       privileged. Callers pass *own_persona* only when its pending check
       fired.
+
+    *allowed* (ADR 0012, ``sweep-plan --lane-of``) restricts the OTHER
+    personas of a team run to a set of names -- the calling persona's
+    vendor/model lane -- so a session never extracts another vendor's
+    persona; the own persona is never filtered. ``None`` = no restriction.
 
     Pure sequencing (non-AI): the per-persona rebuild — a no-op when the
     persona has no new sessions — runs in the executor (slice c).
@@ -452,7 +520,10 @@ def plan_team_sweep(
     # left behind", B3). Ties keep roster order (sorted() is stable).
     done_at = persona_done_at(team_memories_dir)
     own_t = [t for t in pending if t.name == own_persona]
-    others = [t for t in pending if t.name != own_persona]
+    others = [
+        t for t in pending
+        if t.name != own_persona and (allowed is None or t.name in allowed)
+    ]
     others.sort(key=lambda t: done_at.get(t.name, ""))
     selected = others if max_personas is None else others[:max_personas]
     return SweepPlan(
@@ -480,6 +551,8 @@ def maybe_sweep_roster(
     max_personas: int | None = DEFAULT_MAX_PERSONAS,
     own_persona: str | None = None,
     own_pending: bool = False,
+    allowed: set[str] | None = None,
+    force_own_only: bool = False,
 ) -> SweepDecision:
     """The shared persona-session-bootstrap hook (B3). Tries to claim the
     team sweep; on success returns the roster `plan` for the caller to
@@ -499,6 +572,7 @@ def maybe_sweep_roster(
         team_memories_dir, now=now, token=token,
         floor_hours=floor_hours, lease_seconds=lease_seconds,
         own_persona=own_persona, own_pending=own_pending,
+        force_own_only=force_own_only, allowed=allowed,
     )
     if not claim.claimed:
         return SweepDecision(ran=False, reason=claim.reason, plan=None)
@@ -506,6 +580,7 @@ def maybe_sweep_roster(
         team_memories_dir, max_personas=max_personas,
         own_persona=own_persona if own_pending else None,
         scope=claim.scope or "team",
+        allowed=allowed,
     )
     return SweepDecision(
         ran=True, reason="claimed", plan=plan, scope=claim.scope

@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterator, Mapping
 from .._logging import configure_cli_logging
 from ..journal.paths import default_journal_root
 from ..journal.scaffold import resolve_default_persona
+from ..vendors import backend_for_vendor, is_vendor_name, resolve_model_policy
 from ..slack_bridge import notify_health
 from .notifier import build_notifier
 from .settings import (
@@ -181,6 +182,46 @@ def _resolve_journal_root(args: argparse.Namespace) -> Path:
     else:
         root = default_journal_root()
     return root if root.is_absolute() else (Path.cwd() / root)
+
+
+def resolve_drive_backend(
+    backend_flag: str | None,
+    model_flag: str | None,
+    team_root: Path | None,
+    driver: str | None,
+) -> tuple[str, str | None]:
+    """Which agent_sdk backend and model a drive runs on.
+
+    Precedence, per knob: the flag > the driver persona's vendor/model
+    from the team's ``configs/personas.yaml`` (its own ``vendor:`` /
+    ``model:``, else the team's ``default_vendor`` / ``default_model``)
+    > the built-in ``claude_p`` with no model pin. ``--backend`` accepts
+    a vendor name (``chatgpt``) as well as a backend name
+    (``codex_exec``).
+
+    A model id belongs to one vendor, so the persona's model is applied
+    only when the drive actually runs on the persona's backend: an
+    explicit ``--backend`` that differs from it gets no model unless
+    ``--model`` says which. Raises ``ValueError`` on a malformed vendor
+    in personas.yaml -- a typo there must not quietly start a daemon on
+    the other vendor's bill.
+    """
+    policy = resolve_model_policy(team_root, driver)
+    if backend_flag:
+        backend = (
+            backend_for_vendor(backend_flag)
+            if is_vendor_name(backend_flag)
+            else backend_flag
+        )
+    else:
+        backend = policy.backend
+    if model_flag:
+        model: str | None = model_flag
+    elif backend == policy.backend:
+        model = policy.model
+    else:
+        model = None
+    return backend, model
 
 
 def _team_root_for(journal_root: Path) -> Path | None:
@@ -365,6 +406,15 @@ def cmd_start(
     driver = args.driver or settings.get(DRIVER_ENV)
     if driver is None and team_root is not None:
         driver = resolve_default_persona(team_root)
+    # Backend + model: flag > the driver persona's vendor/model from the
+    # team's personas.yaml > built-in claude_p. See resolve_drive_backend.
+    try:
+        backend, model = resolve_drive_backend(
+            args.backend, args.model, team_root, driver,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     max_budget = args.max_budget
     if max_budget is None:
         max_budget = settings.number(MAX_BUDGET_ENV)
@@ -382,11 +432,15 @@ def cmd_start(
 
     cwd = str(team_root if team_root is not None else journal_root.parent)
     prompt = args.prompt if args.prompt else default_prompt(driver)
+    # Per-lane fan-out (ADR 0012) is on unless the operator pinned every
+    # drive's shape by hand: an explicit backend, model or prompt applies
+    # to the one drive it describes, so lanes stand down.
+    lanes = not (args.backend or args.model or args.prompt)
     cfg = AutodriveConfig(
         interval_seconds=interval,
         driver=driver,
-        backend=args.backend,
-        model=args.model,
+        backend=backend,
+        model=model,
         max_budget_usd=max_budget,
         permission_mode=args.permission_mode,
         prompt=prompt,
@@ -394,6 +448,7 @@ def cmd_start(
         notify=notify,
         notify_channel=notify_channel,
         journal_root=str(journal_root),
+        lanes=lanes,
     )
     logf = log_path(state_root)
     # Pin the journal the spawned drives target and drop the caller's
@@ -514,7 +569,7 @@ def ensure_running(
         journal_dir=str(journal_root),
         interval=None,
         driver=None,
-        backend=DEFAULT_BACKEND,
+        backend=None,   # resolved from the driver persona's vendor
         model=None,
         max_budget=None,
         permission_mode=DEFAULT_PERMISSION_MODE,
@@ -600,7 +655,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  journal:      {state.get('journal_root') or '(unknown)'}")
     print(f"  interval:     {int(float(state.get('interval_seconds', 0)))}s")
     print(f"  backend:      {state.get('backend')}")
+    print(f"  model:        {state.get('model') or '(backend default)'}")
     print(f"  driver:       {state.get('driver') or '(none)'}")
+    print(
+        f"  lanes:        "
+        f"{'on (one drive per vendor/model lane with work)' if state.get('lanes', True) else 'off (pinned by --backend/--model/--prompt)'}"
+    )
     print(f"  max_budget:   {state.get('max_budget_usd')}")
     print(f"  notify:       {notify_target}")
     print(f"  started_at:   {state.get('started_at')}")
@@ -768,11 +828,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_start.add_argument(
         "--backend",
-        default=DEFAULT_BACKEND,
-        help=f"agent_sdk backend name (default {DEFAULT_BACKEND!r}).",
+        default=None,
+        help=(
+            "agent_sdk backend name (claude_p, codex_exec, ...) or a model "
+            "vendor (claude, chatgpt). Default: the driver persona's vendor "
+            "from the team's configs/personas.yaml (`vendor:` on the "
+            f"persona, else `default_vendor`), else {DEFAULT_BACKEND!r}."
+        ),
     )
     p_start.add_argument(
-        "--model", default=None, help="Model override (backend-specific)."
+        "--model",
+        default=None,
+        help=(
+            "Model override. Default: the driver persona's `model:` from "
+            "configs/personas.yaml (else the team's `default_model`), "
+            "else the backend's own default."
+        ),
     )
     p_start.add_argument(
         "--max-budget",

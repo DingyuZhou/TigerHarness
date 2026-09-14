@@ -32,7 +32,7 @@ all of that work happens inside **one** Claude session — the
 human-triggered driver's. The driver adopts each persona *in-session*
 via the four-line preamble (`PERSONA:` / `ROLE:` / `STEP:` /
 `OBJECTIVE:`); no separate sessions, by design (the subscription
-billing rule forbids `claude -p` for persona steps, and Task sub-agents
+billing rule forbids a headless CLI (`claude -p` / `codex exec`) for persona steps, and helper sub-agents
 are dropped from memory by the sidechain filter, B7).
 
 tiger-memory attributes a whole transcript to **one** owner via

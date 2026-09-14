@@ -61,7 +61,8 @@ upgrading tigerharness:
 - **Skills** (`.claude/skills/`) — installs bundled skills the team is
   missing, refreshes any skill whose on-disk content still matches a
   previously shipped version, and leaves hand-edited skills untouched
-  (delete one to re-adopt the shipped version).
+  (delete one to re-adopt the shipped version). Also recreates the
+  `.agents/skills` symlink (how Codex finds the same files) if missing.
 - **`.gitignore`** — appends any line from the shipped template the
   team doesn't have yet, with the comment that explains it.
   **Append-only**: nothing is removed, reordered, or rewritten, so your
@@ -85,7 +86,8 @@ slack-bridge systemd unit. Always try `--dry-run` first.
 
 The file-based **subscription backend**: tasks live as folders under
 `journal/active/` at your team root, driven by interactive
-(subscription-billed) sessions instead of API-billed `claude -p`.
+(subscription-billed) sessions instead of an API-billed programmatic
+driver.
 Run journal commands **from the team root** — the journal root
 resolves to `<team>/journal/` when the cwd is a team folder (an
 explicit `TIGERHARNESS_JOURNAL_DIR` env var overrides; with neither,
@@ -163,8 +165,11 @@ maintained by the tooling.
   up append-only when tigerharness ships a new rule.
 - `AGENTS.md` — the always-loaded session bootstrap (vendor-neutral;
   source of truth). `CLAUDE.md` just imports it for Claude Code.
-- `configs/personas.yaml` — THE team roster + `default_persona`.
-  Source of truth; `init` appends a row per recruit.
+- `configs/personas.yaml` — THE team roster + `default_persona` + the
+  team's default model vendor (`default_vendor: claude | chatgpt` and
+  `default_model`; a persona row may override with its own `vendor:` /
+  `model:`). Source of truth; `init` appends a row per recruit and asks
+  the vendor question once, when the team is created.
 - `configs/repos.yaml` — path indirection: where the team root and the
   project repo live. Auto-detected when possible; otherwise created
   with a commented `# project:` placeholder and a stderr hint — fill
@@ -183,6 +188,10 @@ maintained by the tooling.
   (`drive-journal`, `journal-autodrive`, `journal-new`, `slack-notify`,
   `workflow-append-steps`, `tigerharness-basics`, `sweep-memory`).
   Generated; refreshed by `--refresh`; hand-edits preserved.
+- `.agents/skills` — a symlink to `.claude/skills`, so Codex (which
+  discovers skills under `.agents/skills/`) reads the very same files.
+  One copy of every skill; generated, recreated by `--refresh` if
+  missing.
 - `memories/<Name>/` — per-persona tiger-memory config + store.
 - `journal/` — NOT scaffolded by init: created on first journal use at
   the team root (then holds `OPERATING.md`, `active/`, `done/`).
@@ -203,7 +212,14 @@ maintained by the tooling.
 2. Write the persona's `prompt.md` — identity, role, boundaries.
    The template marks what to fill in.
 3. Edit the new roster row: description, aliases, and (if this team
-   uses Slack) make sure the persona is reachable by name.
+   uses Slack) make sure the persona is reachable by name. If the
+   recruit should run on a different vendor than the team default,
+   uncomment its `vendor:` (`claude` / `chatgpt`) and, optionally,
+   `model:` -- the Slack bridge honours it after a restart; autodrive
+   fires a drive on the recruit's lane whenever it owns actionable work
+   (and a memory-sweep session when it has un-swept sessions), not only
+   when it is the `--driver`. Without a `model:` the recruit inherits
+   `default_model` only while on the team's `default_vendor`.
 4. Verify what the recruit produced: `personas/<NewName>/prompt.md`
    exists and is filled in, and `configs/personas.yaml` has the new
    row with the right `prompt_file`. (`journal validate-personas` is

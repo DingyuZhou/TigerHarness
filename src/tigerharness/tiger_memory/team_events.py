@@ -29,7 +29,7 @@ Compaction (age-tiered, staged like ADR 0007):
   a month whose end is older than ``recent_days`` (fold its day
   sections), a year whose end is older than ``year_after_days`` (fold
   its month sections).
-- Task sub-agents (subscription rail) write one ``<key>.card.md`` each,
+- helper sub-agents (subscription rail) write one ``<key>.card.md`` each,
   per the prompt's strict ``@@TEAM_EVENTS@@`` contract.
 - :func:`compact_apply` (non-AI) validates each card, replaces the
   source sections atomically (bullets appended between plan and apply

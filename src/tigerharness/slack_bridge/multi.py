@@ -51,6 +51,13 @@ from .bridge import (
 )
 from .config import normalize_tiger_memory_trigger, redact_token
 from .idle_compact import IdleCompactConfig
+from tigerharness.vendors import (
+    ModelPolicy,
+    describe,
+    read_personas_yaml,
+    resolve_model_policy,
+    team_default_policy,
+)
 # Single-homed: the lane lookup below and the process-environment
 # fallback in `progress` must agree on the names AND their order, or a
 # lane and its fallback could resolve to different channels.
@@ -278,13 +285,17 @@ def _read_team_roster(team_dir: Path, where: str) -> tuple[list[str], dict[str, 
 def _build_persona_slot(
     team_dir: Path, persona_name: str, lane_name: str,
     roster: list[str], where: str,
+    *, policy: ModelPolicy | None = None,
 ) -> PersonaSlot:
     """Build a PersonaSlot for one persona in a team.
 
     Reads the persona's prompt file, composes the agent config with
     the team-awareness preamble appended, and finds the memory config
-    if one exists.
+    if one exists. *policy* is the persona's resolved vendor/model
+    (``tigerharness.vendors``); resolved here when the caller did not.
     """
+    if policy is None:
+        policy = resolve_model_policy(team_dir, persona_name)
     prompt_path = team_dir / "personas" / persona_name / "prompt.md"
     if not prompt_path.exists():
         raise ValueError(
@@ -296,12 +307,14 @@ def _build_persona_slot(
         prompt_text=prompt_text,
         team_name=lane_name,
         all_personas=roster,
+        model=policy.model,
     )
     memory_path = team_dir / "memories" / persona_name / "tiger-memory.config.yaml"
     return PersonaSlot(
         name=persona_name,
         agent_config=agent_cfg,
         tiger_memory_config_path=str(memory_path) if memory_path.exists() else "",
+        backend_name=policy.backend,
     )
 
 
@@ -376,9 +389,27 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
             f"{where}: default_persona '{default_persona}' is not in the "
             f"team's personas.yaml roster {roster}"
         )
+    # Vendor/model per persona (personas.yaml `default_vendor` /
+    # `default_model` + per-entry `vendor:` / `model:`). A malformed
+    # vendor is a startup failure like any other roster error.
+    try:
+        roster_data = read_personas_yaml(team_dir)
+        team_policy = team_default_policy(team_dir, data=roster_data)
+    except ValueError as exc:
+        raise ValueError(f"{where}: {exc}") from exc
     personas: dict[str, PersonaSlot] = {}
     for name in roster:
-        personas[name] = _build_persona_slot(team_dir, name, lane_name, roster, where)
+        try:
+            policy = resolve_model_policy(team_dir, name, data=roster_data)
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from exc
+        log.info(
+            "lane %r persona %r runs on %s (%s)",
+            lane_name, name, describe(policy), policy.source,
+        )
+        personas[name] = _build_persona_slot(
+            team_dir, name, lane_name, roster, where, policy=policy,
+        )
 
     team_ctx = TeamBridgeContext(
         team_name=lane_name,
@@ -393,6 +424,7 @@ def _build_lane(index_dir: Path, lane_name: str) -> LaneConfig:
         tiger_memory_trigger=tiger_memory_trigger,
         idle_compact=idle_compact,
         progress_channel=_progress_channel(env_vars),
+        default_backend_name=team_policy.backend,
     )
     return LaneConfig(name=lane_name, team_ctx=team_ctx, state_path=state_path)
 

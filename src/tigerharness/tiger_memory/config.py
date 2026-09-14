@@ -488,13 +488,13 @@ def _from_dict(raw: dict[str, Any], source_path: Path | None = None) -> Config:
             raise ConfigError(f"Invalid source entry: {s!r}")
         kind = s["kind"]
         if kind not in {
-            "claude_code", "slack_thread", "docs", "auto_memory",
+            "claude_code", "codex", "slack_thread", "docs", "auto_memory",
             "journal_worklog",
         }:
             raise ConfigError(
                 f"Unknown source kind: {kind!r}. "
-                "Allowed: claude_code, slack_thread, docs, auto_memory, "
-                "journal_worklog."
+                "Allowed: claude_code, codex, slack_thread, docs, "
+                "auto_memory, journal_worklog."
             )
         fields = {k: _expand_path_if_pathy(v) for k, v in s.items() if k != "kind"}
         sources.append(SourceConfig(kind=kind, fields=fields))

@@ -10,9 +10,10 @@ journal task -- either single-persona (`kind=task`) or multi-persona
 (`kind=workflow`) -- on disk under `journal/active/<task-id>/`. The
 `drive-journal` skill then drives the task from there.
 
-The subscription backend runs work through the *interactive* Claude
-Code app instead of through a programmatic `claude -p` driver (rails
-and billing: `docs/subscription-backend.md`). See `docs/journal.md`
+The subscription backend runs work through the *interactive* agent app
+(Claude Code or Codex) instead of a programmatic headless driver
+(`claude -p` / `codex exec`; rails and billing:
+`docs/subscription-backend.md`). See `docs/journal.md`
 for the architecture and `docs/journal-workflow-mode.md` for the
 workflow-mode details.
 
@@ -73,11 +74,12 @@ skill's own needs, design work, claiming, driving, compile turns,
 materializing. (Memory sweeps are no longer on this list: the
 `sweep-memory` skill's Slack-bootstrap flow -- notify-first, split
 gate -- governs them, and a Slack session runs it when triggered.)
-All real journal work happens later, on the subscription rail, via
-`drive-journal` in an interactive session -- and that is a hard rule,
-not a preference: Slack schedules, never drives (`journal claim`
-refuses bridge sessions mechanically). Rails and billing:
-`docs/subscription-backend.md`.
+All real journal work happens later via `drive-journal` -- in an
+interactive session, or from Slack only on a team that permits Slack
+drives (`TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in its `configs/.env`;
+`journal claim` refuses bridge sessions mechanically otherwise).
+Scheduling lean is the rule either way when scheduling is all that was
+asked. Rails: `docs/subscription-backend.md`.
 
 ## When to use this skill
 

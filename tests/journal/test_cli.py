@@ -2273,3 +2273,294 @@ class TestClaimRailGuard:
         _seed(paths, "t1", state=State.PENDING)
         assert main(["--journal-dir", str(journal_dir),
                      "claim", "t1", "--driver", "Anzai"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Drive lanes (ADR 0012): sweep --driver, the claim/step-done lane gate,
+# the handoff cue
+# ---------------------------------------------------------------------------
+
+_LANE_ROSTER = """\
+default_persona: Ayako
+default_vendor: claude
+personas:
+  - name: Ayako
+  - name: Akagi
+  - name: Rukawa
+    vendor: chatgpt
+    model: gpt-6-astra
+"""
+
+
+class TestLanes:
+    @pytest.fixture
+    def team(self, tmp_path):
+        (tmp_path / "configs").mkdir()
+        (tmp_path / "configs" / "personas.yaml").write_text(_LANE_ROSTER)
+        return tmp_path
+
+    def _task(self, journal_dir, task_id, persona):
+        paths = JournalPaths(root=journal_dir)
+        paths.ensure()
+        st = Status.new(id=task_id, title=f"T {task_id}", persona=persona)
+        (paths.active / task_id).mkdir(parents=True, exist_ok=True)
+        paths.status_json(task_id).write_text(st.to_json())
+        return paths
+
+    def test_sweep_driver_lane_view_text(self, team, journal_dir, capsys):
+        from tigerharness.journal.deferred import defer_entry
+        paths = self._task(journal_dir, "t-ayako", "Ayako")
+        self._task(journal_dir, "t-rukawa", "Rukawa")
+        defer_entry(paths, title="d", team="T", payload_text="p", kind="task", persona="Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Lane view for driver Ayako (lane claude)." in out
+        assert "t-ayako  [pending]  T t-ayako  [mine]" in out
+        assert "t-rukawa  [pending]  T t-rukawa  [lane chatgpt/gpt-6-astra -- not yours; owner Rukawa]" in out
+        assert "-- not yours; owner Rukawa]" in out.split("Deferred inbox")[1]
+
+    def test_sweep_driver_lane_view_json(self, team, journal_dir, capsys):
+        from tigerharness.journal.deferred import defer_entry
+        paths = self._task(journal_dir, "t-ayako", "Ayako")
+        self._task(journal_dir, "t-rukawa", "Rukawa")
+        mine = defer_entry(paths, title="d", team="T", payload_text="p", kind="task", persona="Akagi")
+        rc = main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Rukawa", "--format", "json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["driver"] == "Rukawa" and data["driver_lane"] == "chatgpt/gpt-6-astra"
+        assert data["actionable_mine"] == ["t-rukawa"]
+        assert data["actionable_other_lane"] == ["t-ayako"]
+        assert data["lanes"]["t-ayako"] == {"owner": "Ayako", "lane": "claude", "mine": False}
+        assert data["deferred_lanes"][mine.id]["mine"] is False
+        assert data["deferred_mine"] == []
+
+    def test_sweep_without_driver_is_unchanged(self, team, journal_dir, capsys):
+        self._task(journal_dir, "t-rukawa", "Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "sweep", "--format", "json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "lanes" not in data and "driver" not in data
+        rc = main(["--journal-dir", str(journal_dir), "sweep"])
+        out = capsys.readouterr().out
+        assert "Lane view" not in out and "[mine]" not in out
+
+    def test_sweep_driver_malformed_vendor_is_exit_2(self, team, journal_dir, capsys):
+        (team / "configs" / "personas.yaml").write_text("personas:\n  - name: Ayako\n    vendor: gemini\n")
+        self._task(journal_dir, "t1", "Ayako")
+        rc = main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"])
+        assert rc == 2
+        assert "unknown model vendor 'gemini'" in capsys.readouterr().err
+
+    def test_claim_refuses_another_lane_and_changes_nothing(self, team, journal_dir, capsys):
+        paths = self._task(journal_dir, "t-rukawa", "Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t-rukawa", "--driver", "Ayako"])
+        assert rc == 3
+        err = capsys.readouterr().err
+        assert "lane mismatch: t-rukawa belongs to Rukawa on lane chatgpt/gpt-6-astra" in err
+        st = Status.from_json(paths.status_json("t-rukawa").read_text())
+        assert st.state is State.PENDING and st.sessions == 0 and st.session_ref is None
+
+    def test_claim_any_lane_overrides_and_reports_driver_lane(self, team, journal_dir, capsys):
+        self._task(journal_dir, "t-rukawa", "Rukawa")
+        rc = main([
+            "--journal-dir", str(journal_dir), "claim", "t-rukawa",
+            "--driver", "Ayako", "--any-lane", "--format", "json",
+        ])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["lane"] == "claude"
+
+    def test_claim_own_lane_reports_it(self, team, journal_dir, capsys):
+        self._task(journal_dir, "t-rukawa", "Rukawa")
+        rc = main([
+            "--journal-dir", str(journal_dir), "claim", "t-rukawa",
+            "--driver", "Rukawa", "--format", "json",
+        ])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["lane"] == "chatgpt/gpt-6-astra"
+
+    def test_claim_without_driver_has_no_gate(self, team, journal_dir, capsys):
+        self._task(journal_dir, "t-rukawa", "Rukawa")
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t-rukawa", "--format", "json"])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["lane"] is None
+
+    def test_claim_malformed_vendor_is_exit_2(self, team, journal_dir, capsys):
+        (team / "configs" / "personas.yaml").write_text("personas:\n  - name: Ayako\n    vendor: gemini\n")
+        self._task(journal_dir, "t1", "Ayako")
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1", "--driver", "Ayako"])
+        assert rc == 2
+        assert "unknown model vendor" in capsys.readouterr().err
+        # And --any-lane on the same broken roster reports no lane rather than crashing.
+        rc = main(["--journal-dir", str(journal_dir), "claim", "t1", "--driver", "Ayako", "--any-lane", "--format", "json"])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["lane"] is None
+
+    def _wf(self, journal_dir):
+        paths = JournalPaths(root=journal_dir)
+        steps = [
+            _sf("plan", "Akagi", "planner", "build", "plan", "__escalate__"),
+            _sf("build", "Rukawa", "developer", "review", "build", "__escalate__"),
+            _sf("review", "Ayako", "qa", "__done__", "build", "__escalate__"),
+        ]
+        _seed_workflow_graph(paths, "wf1", steps, "plan")
+        return paths
+
+    def test_step_done_handoff_cue_then_lane_refusal(self, team, journal_dir, tmp_path, capsys):
+        from tigerharness.journal import walk as _walk
+        paths = self._wf(journal_dir)
+        note = _note(tmp_path)
+        # plan (Akagi, claude) as Akagi: fine, and the NEXT step is Rukawa's lane.
+        rc = main([
+            "--journal-dir", str(journal_dir), "step-done", "--task", "wf1",
+            "--step", "plan", "--verdict", "APPROVE", "--output", note,
+            "--driver", "Akagi",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "handoff: build belongs to Rukawa on lane chatgpt/gpt-6-astra" in out
+        assert "journal release wf1 --driver Akagi" in out
+        # build (Rukawa, chatgpt) as Akagi: refused, walk not advanced, no note.
+        rc = main([
+            "--journal-dir", str(journal_dir), "step-done", "--task", "wf1",
+            "--step", "build", "--verdict", "APPROVE", "--output", note,
+            "--driver", "Akagi",
+        ])
+        assert rc == 3
+        assert "lane mismatch: wf1 belongs to Rukawa" in capsys.readouterr().err
+        assert _walk.read(paths, "wf1").current == "build"
+        # ... unless deliberately overridden.
+        rc = main([
+            "--journal-dir", str(journal_dir), "step-done", "--task", "wf1",
+            "--step", "build", "--verdict", "APPROVE", "--output", note,
+            "--driver", "Akagi", "--any-lane", "--format", "json",
+        ])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["next"] == "review"
+        # review is Ayako's (claude) -- same lane as Akagi: no handoff.
+        assert data["handoff"] is None
+
+    def test_step_done_json_handoff_and_no_driver(self, team, journal_dir, tmp_path, capsys):
+        self._wf(journal_dir)
+        note = _note(tmp_path)
+        rc = main([
+            "--journal-dir", str(journal_dir), "step-done", "--task", "wf1",
+            "--step", "plan", "--verdict", "APPROVE", "--output", note,
+            "--driver", "Akagi", "--format", "json",
+        ])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["handoff"] == {"step": "build", "persona": "Rukawa", "lane": "chatgpt/gpt-6-astra"}
+        # Without --driver there is no lane identity: no gate, no cue.
+        rc = main([
+            "--journal-dir", str(journal_dir), "step-done", "--task", "wf1",
+            "--step", "build", "--verdict", "APPROVE", "--output", note,
+            "--format", "json",
+        ])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["handoff"] is None
+
+    def test_step_done_terminal_has_no_handoff(self, team, journal_dir, tmp_path, capsys):
+        paths = JournalPaths(root=journal_dir)
+        _seed_workflow_graph(
+            paths, "wf2",
+            [_sf("plan", "Akagi", "planner", "__done__", "plan", "__escalate__")],
+            "plan",
+        )
+        rc = main([
+            "--journal-dir", str(journal_dir), "step-done", "--task", "wf2",
+            "--step", "plan", "--verdict", "APPROVE", "--output", _note(tmp_path),
+            "--driver", "Akagi", "--format", "json",
+        ])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["terminal"] is True and data["handoff"] is None
+
+    def test_step_done_handoff_check_survives_a_bad_vendor(self, team, journal_dir, tmp_path, capsys, caplog):
+        (team / "configs" / "personas.yaml").write_text(
+            "default_persona: Ayako\npersonas:\n  - name: Ayako\n  - name: Akagi\n  - name: Rukawa\n    vendor: gemini\n"
+        )
+        self._wf(journal_dir)
+        with caplog.at_level(logging.WARNING, logger="tigerharness.journal.cli"):
+            rc = main([
+                "--journal-dir", str(journal_dir), "step-done", "--task", "wf1",
+                "--step", "plan", "--verdict", "APPROVE", "--output", _note(tmp_path),
+                "--driver", "Akagi", "--format", "json",
+            ])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["handoff"] is None
+        assert "lane check for build failed" in caplog.text
+
+    def test_sweep_lane_verdicts(self, team, journal_dir, capsys):
+        from tigerharness.journal.deferred import defer_entry
+        # Nothing at all.
+        JournalPaths(root=journal_dir).ensure()
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"]) == 0
+        assert "Lane verdict: nothing actionable on any lane." in capsys.readouterr().out
+        # Only another lane's work.
+        paths = self._task(journal_dir, "t-rukawa", "Rukawa")
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["lane_verdict"] == "other-lanes"
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"]) == 0
+        assert "end this drive WITHOUT the idle-maintenance tail" in capsys.readouterr().out
+        # A deferred entry of mine counts as mine.
+        defer_entry(paths, title="d", team="T", payload_text="p", kind="task", persona="Ayako")
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["lane_verdict"] == "mine"
+        assert main(["--journal-dir", str(journal_dir), "sweep", "--driver", "Ayako"]) == 0
+        assert "0 actionable + 1 deferred item(s) are yours -- pick one." in capsys.readouterr().out
+
+
+class TestSlackDrivesTeamSetting:
+    """ADR 0013: a bridge session may claim when the team permits Slack
+    drives (process env, or the team's configs/.env), and is refused with a
+    pointer to the knob otherwise. --allow-api-drive keeps working."""
+
+    KNOB = "TIGERHARNESS_JOURNAL_SLACK_DRIVES"
+
+    def _team(self, tmp_path):
+        (tmp_path / "configs").mkdir()
+        (tmp_path / "configs" / "personas.yaml").write_text("personas:\n  - name: Anzai\n")
+        paths = JournalPaths(root=tmp_path / "journal")
+        _seed(paths, "t1", state=State.PENDING)
+        return paths
+
+    def test_process_env_allows_and_registers_the_drive_thread(self, tmp_path, monkeypatch, caplog):
+        paths = self._team(tmp_path)
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        monkeypatch.setenv(self.KNOB, "1")
+        with caplog.at_level(logging.INFO, logger="tigerharness.journal.cli"):
+            assert main(["--journal-dir", str(paths.root), "claim", "t1", "--driver", "Anzai"]) == 0
+        assert "allowed by team policy" in caplog.text
+        assert drive_sessions.registered_threads(paths.drive_sessions_json) == {"555.42"}
+
+    def test_team_env_file_allows(self, tmp_path, monkeypatch):
+        paths = self._team(tmp_path)
+        (tmp_path / "configs" / ".env").write_text(f"{self.KNOB}=true  # Operator, 2026-09-13\n")
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        monkeypatch.delenv(self.KNOB, raising=False)
+        assert main(["--journal-dir", str(paths.root), "claim", "t1", "--driver", "Anzai"]) == 0
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.IN_PROGRESS
+
+    def test_off_or_false_still_refuses_and_names_the_knob(self, tmp_path, monkeypatch, capsys):
+        paths = self._team(tmp_path)
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        for value in (None, "0", "no"):
+            if value is None:
+                monkeypatch.delenv(self.KNOB, raising=False)
+            else:
+                monkeypatch.setenv(self.KNOB, value)
+            assert main(["--journal-dir", str(paths.root), "claim", "t1"]) == 1
+            err = capsys.readouterr().err
+            assert "does not permit Slack drives" in err and self.KNOB in err
+        s = Status.from_json(paths.status_json("t1").read_text())
+        assert s.state is State.PENDING and s.session_ref is None
+
+    def test_personal_journal_reads_process_env_only(self, tmp_path, monkeypatch):
+        from tigerharness.journal.cli import slack_drives_allowed
+        monkeypatch.delenv(self.KNOB, raising=False)
+        assert slack_drives_allowed(tmp_path / "solo" / "journal") is False
+        monkeypatch.setenv(self.KNOB, "yes")
+        assert slack_drives_allowed(tmp_path / "solo" / "journal") is True

@@ -65,6 +65,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,13 +157,18 @@ class AutodriveConfig:
     # deserializes to, so an upgrade never silently changes an existing
     # daemon's shape mid-flight.
     journal_root: str | None = None
+    # Per-lane fan-out (ADR 0012): when True, an actionable cycle fires one
+    # drive per vendor/model lane that has work, each as a persona on that
+    # lane. ``start`` turns it off when ``--backend``, ``--model`` or
+    # ``--prompt`` pin every drive to one shape.
+    lanes: bool = True
 
 
-def default_prompt(driver: str | None) -> str:
+def default_prompt(driver: str | None, *, lane: str | None = None) -> str:
     """The self-contained instruction handed to each drive.
 
-    It must *override* the drive-journal skill's "never drive from claude
-    -p / cron / API" boundary, because that is exactly what this process
+    It must *override* the drive-journal skill's "never drive from a
+    headless CLI / cron / API" boundary, because that is exactly what this process
     is -- but an Operator-authorized one. Spelling that out in the prompt
     is what keeps the spawned agent from (correctly, per its skill)
     refusing to drive.
@@ -175,6 +181,21 @@ def default_prompt(driver: str | None) -> str:
         own = (
             f" -- your --driver persona {driver} is the sweep's own persona"
         )
+        if lane:
+            claim += (
+                f". LANE RULE (ADR 0012): this drive runs on lane {lane} as "
+                f"{driver}. Run `tigerharness journal sweep --driver {driver}` "
+                f"and take ONLY items it marks [mine]; work on another lane is "
+                f"not yours -- `journal claim --driver {driver}` refuses it "
+                f"(exit 3) and autodrive fires a separate drive on that lane. "
+                f"Pass `--driver {driver}` to `journal step-done` too; when it "
+                f"prints a `handoff:` line, release the task right away "
+                f"(`journal release <id> --driver {driver} --next-action "
+                f"\"handoff ...\"`) and re-sweep. When nothing actionable is "
+                f"[mine] but other lanes still have work, end the drive "
+                f"WITHOUT the idle-maintenance tail (lane-idle: their drives "
+                f"take it; the daemon decides maintenance)"
+            )
     else:
         claim = "Claim each task with `--allow-api-drive`"
         own = (
@@ -184,7 +205,7 @@ def default_prompt(driver: str | None) -> str:
     return (
         "You are an Operator-authorized automatic journal driver "
         "(`tigerharness autodrive`). This is a SANCTIONED programmatic "
-        "drive: the usual 'never drive from claude -p / cron / API' "
+        "drive: the usual 'never drive from a headless CLI / cron / API' "
         "boundary is deliberately lifted for THIS process by explicit "
         "Operator authorization. Drive the journal now using the "
         "drive-journal skill -- sweep, pick exactly one actionable task, "
@@ -199,7 +220,7 @@ def default_prompt(driver: str | None) -> str:
         "its only model call is one bounded /compact turn per heavy idle "
         "lane) and the team's sweep-memory skill (self-gating via its "
         f"split gate + watermark + lease{own}; its summarize work runs "
-        "in Task-tool sub-agents, which THIS session may spawn). Then "
+        "in helper sessions (sub-agents), which THIS session may spawn). Then "
         "stop cleanly."
     )
 
@@ -218,6 +239,7 @@ def config_to_dict(cfg: AutodriveConfig) -> dict[str, Any]:
         "notify": cfg.notify,
         "notify_channel": cfg.notify_channel,
         "journal_root": cfg.journal_root,
+        "lanes": cfg.lanes,
     }
 
 
@@ -235,6 +257,7 @@ def config_from_state(state: dict[str, Any]) -> AutodriveConfig:
         notify=state.get("notify", DEFAULT_NOTIFY),
         notify_channel=state.get("notify_channel"),
         journal_root=state.get("journal_root"),
+        lanes=bool(state.get("lanes", True)),
     )
 
 
@@ -469,6 +492,215 @@ def probe_queue(cfg: AutodriveConfig) -> str:
         return QUEUE_ACTIONABLE
 
 
+# ----- the lane probe (ADR 0012) -----
+
+@dataclass(frozen=True)
+class LaneWork:
+    """One vendor/model lane that has actionable work: what to run it on
+    and which persona the drive runs as (the owner of the lane's
+    highest-priority item, or the configured driver when it lives on this
+    lane)."""
+
+    key: str
+    backend: str
+    model: str | None
+    driver: str
+    items: int
+    #: For a *sweep* lane (``probe_sweep_lanes``): the personas on the lane
+    #: with un-swept sessions, in roster order.
+    personas: tuple[str, ...] = ()
+
+
+def maintenance_prompt(driver: str, *, lane: str, personas: tuple[str, ...]) -> str:
+    """The instruction handed to a per-lane memory-sweep fire (ADR 0012,
+    part 2): sweep exactly these personas, own-only, on this lane's vendor
+    -- never drive the (drained) queue."""
+    names = ", ".join(personas)
+    return (
+        "You are an Operator-authorized automatic maintenance session "
+        "(`tigerharness autodrive`, lane " + lane + ", running as " + driver +
+        "). The journal queue is drained -- do NOT drive it. Your one job: "
+        "refresh tiger-memory for the personas on YOUR lane that have "
+        "un-swept sessions: " + names + ". For each persona P in that order, "
+        "run the sweep-memory skill in OWN-ONLY mode: "
+        "`tiger-memory --config memories/P/tiger-memory.config.yaml "
+        "sweep-plan --own-persona P --own-only` (P's own config; use the "
+        "`tiger-memory` invocation the skill describes), then follow the "
+        "skill's procedure for that run exactly: stage, one helper session "
+        "(sub-agent) per stack writes the cards, `ingest-staged`, "
+        "`compact-plan`/`compact-apply`, `rebuild`, `sweep-done`, and "
+        "`sweep-complete` with the run's claim token. A `not_due` or `busy` "
+        "answer means skip that persona. Helper sessions run in THIS "
+        "session's own vendor, which is exactly why this fire exists. When "
+        "every listed persona is done, run `tigerharness slack-bridge "
+        "compact-idle` once (self-gating) and stop cleanly."
+    )
+
+
+def probe_sweep_lanes(cfg: AutodriveConfig) -> list[LaneWork]:
+    """Lanes with personas whose memory has un-swept sessions, **without a
+    model call** (ADR 0012, part 2).
+
+    For every roster persona with a tiger-memory config, the split gate's
+    own pending check (``has_pending_source``, in lockstep with staging)
+    decides whether a sweep would stage anything; pending personas are
+    grouped by lane. The **home lane** -- the configured driver's, else
+    the team default persona's -- is left out: the ordinary maintenance
+    drive sweeps it (its sweep-memory run passes ``--lane-of``), so a
+    one-vendor team keeps exactly its old single maintenance fire. Each
+    remaining entry's ``driver`` is the lane's first pending persona, and
+    ``personas`` lists the pending ones. Fail-soft like the other probes:
+    no journal root / team root, the memory extra missing, or any error
+    returns ``[]`` and the daemon falls back to the single maintenance fire.
+    A persona whose config cannot be loaded is skipped, not fatal.
+    """
+    if not cfg.journal_root:
+        return []
+    try:
+        from ..journal import lanes as _lanes
+        from ..journal.scaffold import resolve_default_persona
+        from ..tiger_memory.config import load_config
+        from ..tiger_memory.lifecycle import has_pending_source
+        from ..tiger_memory.store import Store
+        from ..tiger_memory.sweep import enumerate_persona_configs
+        from ..vendors import read_personas_yaml
+
+        team_root = _lanes.team_root_for(Path(cfg.journal_root))
+        if team_root is None:
+            return []
+        data = read_personas_yaml(team_root)
+        home_persona = cfg.driver or resolve_default_persona(team_root)
+        home_lane = _lanes.lane_of(team_root, home_persona, data=data)
+        # Cheap first: which personas live on another lane at all? On a
+        # one-vendor roster that is nobody, and no memory config is opened.
+        others = [
+            t for t in enumerate_persona_configs(team_root / "memories")
+            if _lanes.lane_of(team_root, t.name, data=data) != home_lane
+        ]
+        if not others:
+            return []
+        buckets: dict[Any, list[str]] = {}
+        order: list[Any] = []
+        for target in others:
+            try:
+                mcfg = load_config(target.config_path)
+                if not has_pending_source(mcfg, Store(mcfg.store.root)):
+                    continue
+            except Exception as exc:  # noqa: BLE001 -- one broken config skips one persona
+                log.warning(
+                    "autodrive: sweep probe skipped %s (%s: %s)",
+                    target.name, type(exc).__name__, exc,
+                )
+                continue
+            lane = _lanes.lane_of(team_root, target.name, data=data)
+            if lane not in buckets:
+                buckets[lane] = []
+                order.append(lane)
+            buckets[lane].append(target.name)
+        return [
+            LaneWork(
+                key=lane.key, backend=lane.backend, model=lane.model,
+                driver=buckets[lane][0],
+                items=len(buckets[lane]), personas=tuple(buckets[lane]),
+            )
+            for lane in order
+        ]
+    except Exception as exc:
+        log.warning(
+            "autodrive sweep-lane probe failed (%s: %s); the single "
+            "maintenance fire sweeps instead", type(exc).__name__, exc,
+        )
+        return []
+
+
+def probe_lanes(cfg: AutodriveConfig) -> list[LaneWork]:
+    """Group the queue's actionable work by lane, **without a model call**.
+
+    Same sweep as :func:`probe_queue` (so the same archive/materialize side
+    effects, once more on an actionable cycle), then each actionable task
+    and deferred entry is attributed to its owner persona
+    (``journal.lanes.work_owner``) and the owner to a lane. The result is
+    one entry per lane with work, in a stable order.
+
+    Fail-soft, like the queue probe: no journal root, no team root (a
+    personal journal has no lanes), or any error -- including a malformed
+    vendor in personas.yaml -- returns ``[]``, and :func:`run_loop` then
+    fires the single default drive exactly as before ADR 0012.
+    """
+    if not cfg.journal_root:
+        return []
+    try:
+        from ..journal import lanes as _lanes
+        from ..journal.deferred import list_deferred
+        from ..journal.paths import JournalPaths
+        from ..journal.scaffold import resolve_default_persona
+        from ..journal.sweep import sweep
+        from ..vendors import read_personas_yaml
+
+        paths = JournalPaths(Path(cfg.journal_root))
+        team_root = _lanes.team_root_for(paths.root)
+        if team_root is None:
+            return []
+        data = read_personas_yaml(team_root)
+        result = sweep(paths)
+        owners: list[str | None] = [
+            _lanes.work_owner(paths, s) for s in result.actionable()
+        ]
+        owners += [
+            _lanes.deferred_owner(paths, did) for did in list_deferred(paths)
+        ]
+        buckets: dict[Any, list[str | None]] = {}
+        order: list[Any] = []
+        for owner in owners:
+            lane = _lanes.lane_of(team_root, owner, data=data)
+            if lane not in buckets:
+                buckets[lane] = []
+                order.append(lane)
+            buckets[lane].append(owner)
+        configured = cfg.driver
+        configured_lane = _lanes.lane_of(team_root, configured, data=data)
+        default_persona = resolve_default_persona(team_root)
+        out: list[LaneWork] = []
+        for lane in order:
+            names = buckets[lane]
+            candidates = [n for n in names if n]
+            if configured and lane == configured_lane:
+                driver = configured
+            elif candidates:
+                driver = candidates[0]
+            elif (
+                default_persona
+                and _lanes.lane_of(team_root, default_persona, data=data) == lane
+            ):
+                driver = default_persona
+            else:
+                driver = None
+            if not driver:
+                log.warning(
+                    "autodrive: lane %s has work but no persona to drive it "
+                    "as; skipping", lane.key,
+                )
+                continue
+            out.append(LaneWork(
+                key=lane.key, backend=lane.backend, model=lane.model,
+                driver=driver, items=len(names),
+            ))
+        return out
+    except Exception as exc:
+        log.warning(
+            "autodrive lane probe failed (%s: %s); firing the default drive",
+            type(exc).__name__, exc,
+        )
+        return []
+
+
+LaneProbeFn = Callable[[AutodriveConfig], list[LaneWork]]
+
+#: Why a cycle declined to fire although work was ready: every lane with
+#: work already has a drive of ours out (one drive per lane at a time).
+SKIP_LANES_BUSY = "lanes busy - every lane with work already has a drive out"
+
+
 # ----- the drive + the loop -----
 
 async def run_one_drive(
@@ -506,13 +738,20 @@ async def run_one_drive(
 
 # ----- notification text builders -----
 
-def heartbeat_text(fire_no: int, at: str, in_flight: int) -> str:
+def heartbeat_text(
+    fire_no: int, at: str, in_flight: int, *, lane: str | None = None,
+    driver: str | None = None,
+) -> str:
     """The fire heartbeat (parent message): a fixed-shape pulse whose rhythm
-    is the health signal. Detail rides in the threaded completion reply."""
-    return (
+    is the health signal. Detail rides in the threaded completion reply.
+    A lane fire (ADR 0012) names its lane and driver persona."""
+    text = (
         f"autodrive heartbeat - fire #{fire_no} launched {at} "
         f"(in-flight {in_flight})"
     )
+    if lane:
+        text += f" lane={lane} as {driver or '(none)'}"
+    return text
 
 
 def _truncate_summary(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
@@ -690,6 +929,12 @@ class _Fire:
     #: True when this fire was launched *because* the queue went idle -- i.e.
     #: it is the maintenance drive. Its completion is what arms the auto-stop.
     maintenance: bool = False
+    #: The lane this fire runs on (ADR 0012), or None for a single default
+    #: drive / the maintenance drive. One drive per lane is out at a time.
+    lane: str | None = None
+    #: True for a per-lane memory-sweep fire (idle path, ADR 0012 part 2).
+    #: It never arms the auto-stop; a failing one is not retried this run.
+    sweep: bool = False
 
 
 async def run_loop(
@@ -705,9 +950,33 @@ async def run_loop(
     notifier: Notifier | None = None,
     probe: ProbeFn = probe_queue,
     confirm_exit: ConfirmExitFn | None = None,
+    lane_probe: LaneProbeFn = probe_lanes,
+    clock: Callable[[], float] = time.monotonic,
+    sweep_lane_probe: LaneProbeFn = probe_sweep_lanes,
 ) -> int:
     """Fire a fresh drive on a fixed cadence; never wait for it. Returns
     the number of drives *launched*.
+
+    **Lanes (ADR 0012).** With ``cfg.lanes`` on, an actionable cycle asks
+    ``lane_probe`` which vendor/model lanes have work and fires one drive
+    per lane -- as a persona on that lane, on that lane's backend and model
+    -- keeping at most one drive per lane in flight. A cycle whose lanes all
+    have a drive out pulses ``SKIP_LANES_BUSY``. The maintenance drive and a
+    daemon pinned by ``--backend``/``--model``/``--prompt`` keep the single
+    default fire. A drive that completes *cleanly* wakes the loop early
+    (its release may have handed a workflow step to another lane), subject
+    to a per-lane floor of ``MIN_INTERVAL_SECONDS`` between fires on the
+    same lane so a fast no-op drive cannot turn the cadence into a storm.
+
+    **Memory sweeps per lane (ADR 0012, part 2).** On an idle cycle with
+    nothing in flight, ``sweep_lane_probe`` asks which lanes *other than
+    the maintenance drive's own* hold personas with un-swept sessions;
+    while any does, the daemon fires **one** sweep session for the first
+    such lane (as a persona on it, with :func:`maintenance_prompt`) instead
+    of the maintenance drive, and only once none is left does the ordinary
+    maintenance fire run (sweeping its own lane) and arm the auto-stop. A
+    sweep fire that errors marks its lane failed for this daemon run so it
+    cannot pin the daemon open.
 
     Each cycle probes the queue (:func:`probe_queue`, plain Python, no model
     call), and when there is work to do posts a heartbeat (the parent
@@ -769,6 +1038,43 @@ async def run_loop(
     exit_reason = EXIT_STOP_REQUESTED
     in_flight: list[_Fire] = []
     notif_tasks: list[asyncio.Task[Any]] = []
+    # Early-wake plumbing (ADR 0012): a cleanly completed drive sets the
+    # event; the interval sleep races against it. ``last_fire_at`` holds
+    # the per-lane floor; ``woke_early`` marks a cycle that skipped the
+    # rest of its interval so the floor applies to it.
+    wake = asyncio.Event()
+    last_fire_at: dict[str | None, float] = {}
+    woke_early = False
+    # Lanes whose memory-sweep fire errored this run (ADR 0012 part 2):
+    # skipped thereafter so a broken vendor cannot hold the daemon open.
+    failed_sweep_lanes: set[str] = set()
+
+    def _on_fire_done(task: "asyncio.Task[Any]") -> None:
+        if task.cancelled() or task.exception() is not None:
+            return
+        wake.set()
+
+    async def _sleep_or_wake(secs: float) -> None:
+        """Sleep one interval, or less when a drive completes cleanly.
+        Without lanes it is exactly ``sleep(secs)``."""
+        nonlocal woke_early
+        woke_early = False
+        if not cfg.lanes:
+            await sleep(secs)
+            return
+        sleeper = asyncio.ensure_future(sleep(secs))
+        waker = asyncio.ensure_future(wake.wait())
+        done, _ = await asyncio.wait(
+            {sleeper, waker}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in (sleeper, waker):
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(sleeper, waker, return_exceptions=True)
+        wake.clear()
+        if waker in done and sleeper not in done:
+            woke_early = True
+            log.info("autodrive: woke early -- a drive completed")
 
     def _schedule_update(thread: str | None, text: str) -> None:
         notif_tasks.append(
@@ -821,6 +1127,8 @@ async def run_loop(
         if fire.maintenance and fire.fire_no == launched:
             maintenance_done = True
         if is_error:
+            if fire.sweep and fire.lane is not None:
+                failed_sweep_lanes.add(fire.lane)
             log.warning("autodrive drive failed: %s", outcome)
             record_tick(
                 state_file,
@@ -893,12 +1201,14 @@ async def run_loop(
                 )
                 maintenance_done = False
                 await _pulse_skip(SKIP_RESCUE_HELD)
-                await sleep(cfg.interval_seconds)
+                await _sleep_or_wake(cfg.interval_seconds)
                 continue
             # Nothing of ours is running, so the crash is somebody else's
             # and genuinely ours to pick up.
             verdict = QUEUE_ACTIONABLE
         is_maintenance = False
+        is_sweep = False
+        fires_now: list[tuple[AutodriveConfig, str | None]] | None = None
         if verdict == QUEUE_IDLE:
             if maintenance_done and not in_flight:
                 # Queue drained AND the idle-maintenance tail has run. There
@@ -925,12 +1235,41 @@ async def run_loop(
                 # A drive is still finishing; let it settle before deciding.
                 log.info("autodrive: queue idle, waiting on in-flight drive")
                 await _pulse_skip(SKIP_WAITING)
-                await sleep(cfg.interval_seconds)
+                await _sleep_or_wake(cfg.interval_seconds)
                 continue
-            # First idle cycle: fire the maintenance drive (its prompt ends
-            # with compact-idle + sweep-memory) and arm the auto-stop.
-            is_maintenance = True
-            log.info("autodrive: queue idle -- firing maintenance drive")
+            # Per-lane memory sweeps first (ADR 0012 part 2): while a lane
+            # holds personas with un-swept sessions, fire one sweep session
+            # for it on its own vendor. Only when none is left does the
+            # ordinary maintenance drive run (and arm the auto-stop).
+            if cfg.lanes:
+                pending = [
+                    lw for lw in await asyncio.to_thread(sweep_lane_probe, cfg)
+                    if lw.key not in failed_sweep_lanes
+                ]
+                if pending:
+                    lw = pending[0]
+                    log.info(
+                        "autodrive: queue idle -- firing memory sweep for lane "
+                        "%s (%s)", lw.key, ", ".join(lw.personas),
+                    )
+                    is_sweep = True
+                    fires_now = [(
+                        replace(
+                            cfg,
+                            driver=lw.driver,
+                            backend=lw.backend,
+                            model=lw.model,
+                            prompt=maintenance_prompt(
+                                lw.driver, lane=lw.key, personas=lw.personas,
+                            ),
+                        ),
+                        lw.key,
+                    )]
+            if fires_now is None:
+                # First idle cycle: fire the maintenance drive (its prompt
+                # ends with compact-idle + sweep-memory) and arm the auto-stop.
+                is_maintenance = True
+                log.info("autodrive: queue idle -- firing maintenance drive")
         elif verdict == QUEUE_BUSY:
             # A live session owns the in-flight task; a fire would only
             # sweep, see busy, and exit. Skip it and keep the daemon alive.
@@ -944,35 +1283,85 @@ async def run_loop(
             await _pulse_skip(
                 (SKIP_BUSY_PREFIX + detail) if detail else SKIP_BUSY
             )
-            await sleep(cfg.interval_seconds)
+            await _sleep_or_wake(cfg.interval_seconds)
             continue
         else:
             maintenance_done = False
 
-        launched += 1
-        # Post the heartbeat first so its `ts` is the thread handle the
-        # completion update replies under. to_thread keeps a slow Slack POST
-        # off the event loop; the notifier never raises.
-        thread = await asyncio.to_thread(
-            notifier.heartbeat,
-            heartbeat_text(launched, now(), len(in_flight) + 1),
-        )
-        task = asyncio.create_task(run_drive(cfg, backend=backend))
-        in_flight.append(
-            _Fire(
-                task=task,
-                thread=thread,
-                fire_no=launched,
-                maintenance=is_maintenance,
+        # --- what to fire: one default drive, or one drive per lane ---
+        if fires_now is not None:
+            pass  # a per-lane sweep fire was chosen above
+        elif is_maintenance or not cfg.lanes:
+            fires_now = [(cfg, None)]
+        else:
+            lane_work = await asyncio.to_thread(lane_probe, cfg)
+            if not lane_work:
+                fires_now = [(cfg, None)]
+            else:
+                fires_now = []
+                for lw in lane_work:
+                    if any(f.lane == lw.key for f in in_flight):
+                        continue  # one drive per lane at a time
+                    since = clock() - last_fire_at.get(lw.key, float("-inf"))
+                    if woke_early and since < MIN_INTERVAL_SECONDS:
+                        log.info(
+                            "autodrive: lane %s fired %.0fs ago; holding "
+                            "until the floor", lw.key, since,
+                        )
+                        continue
+                    fires_now.append((
+                        replace(
+                            cfg,
+                            driver=lw.driver,
+                            backend=lw.backend,
+                            model=lw.model,
+                            prompt=default_prompt(lw.driver, lane=lw.key),
+                        ),
+                        lw.key,
+                    ))
+                if not fires_now:
+                    log.info("autodrive: every lane with work has a drive out")
+                    await _pulse_skip(SKIP_LANES_BUSY)
+                    await _sleep_or_wake(cfg.interval_seconds)
+                    continue
+
+        for fire_cfg, lane in fires_now:
+            launched += 1
+            # Post the heartbeat first so its `ts` is the thread handle the
+            # completion update replies under. to_thread keeps a slow Slack
+            # POST off the event loop; the notifier never raises.
+            thread = await asyncio.to_thread(
+                notifier.heartbeat,
+                heartbeat_text(
+                    launched, now(), len(in_flight) + 1,
+                    lane=lane, driver=fire_cfg.driver,
+                ),
             )
-        )
-        record_fire(
-            state_file,
-            fire_count=launched,
-            at=now(),
-            in_flight=len(in_flight),
-        )
-        log.info("autodrive fire %d launched", launched)
+            task = asyncio.create_task(run_drive(fire_cfg, backend=backend))
+            task.add_done_callback(_on_fire_done)
+            in_flight.append(
+                _Fire(
+                    task=task,
+                    thread=thread,
+                    fire_no=launched,
+                    maintenance=is_maintenance,
+                    lane=lane,
+                    sweep=is_sweep,
+                )
+            )
+            last_fire_at[lane] = clock()
+            record_fire(
+                state_file,
+                fire_count=launched,
+                at=now(),
+                in_flight=len(in_flight),
+            )
+            log.info(
+                "autodrive fire %d launched%s", launched,
+                f" (lane {lane} as {fire_cfg.driver})" if lane else "",
+            )
+            if max_ticks is not None and launched >= max_ticks:
+                break
 
         if max_ticks is not None and launched >= max_ticks:
             exit_reason = EXIT_MAX_TICKS
@@ -980,7 +1369,7 @@ async def run_loop(
         if should_stop is not None and should_stop():
             exit_reason = EXIT_STOP_REQUESTED
             break
-        await sleep(cfg.interval_seconds)
+        await _sleep_or_wake(cfg.interval_seconds)
 
     # Drain: wait for every still-running drive so its result is recorded
     # before the daemon exits. Errors are captured (not raised) so one bad

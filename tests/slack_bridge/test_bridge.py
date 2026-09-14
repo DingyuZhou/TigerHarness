@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1169,3 +1170,167 @@ class TestTigerMemoryTriggerGating:
         ) as mock_trigger:
             await b._get_or_open_thread("thread-1", "Hi")
         mock_trigger.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Per-persona backends (ADR 0011)
+# ---------------------------------------------------------------------------
+
+class TestPerPersonaBackends:
+    """Each persona's turns run on its own vendor's backend; a thread
+    whose persona changed vendor starts over instead of resuming a
+    foreign session id; `/compact` is skipped off `claude_p`."""
+
+    def _ctx(self, tmp_path: Path, *, default: str = "Ayako"):
+        from tigerharness.slack_bridge.bridge import PersonaSlot, TeamBridgeContext
+        personas = {
+            "Ayako": PersonaSlot(
+                name="Ayako",
+                agent_config=AgentConfig(name="Ayako", instructions="x"),
+                backend_name="claude_p",
+            ),
+            "Rukawa": PersonaSlot(
+                name="Rukawa",
+                agent_config=AgentConfig(name="Rukawa", instructions="y", model="gpt-6-astra"),
+                backend_name="codex_exec",
+            ),
+        }
+        return TeamBridgeContext(
+            team_name="t", slack_app_token="xapp", slack_bot_token="xoxb",
+            allowed_user_ids=frozenset({"U0CEO"}), agent_cwd=str(tmp_path),
+            personas=personas, default_persona=default,
+            tiger_memory_trigger="off",
+            default_backend_name="claude_p",
+        )
+
+    @staticmethod
+    def _backend(session_id: str = "sess"):
+        @dataclass
+        class _Sess:
+            id: str = session_id
+            async def close(self):
+                return None
+        be = AsyncMock()
+        be.open_session = AsyncMock(return_value=_Sess())
+        return be
+
+    def _bridge(self, tmp_path: Path, *, backends=None):
+        claude = self._backend("claude-sess")
+        codex = self._backend("codex-sess")
+        if backends is None:
+            backends = {"claude_p": claude, "codex_exec": codex}
+        downloader = MagicMock()
+        downloader.download = AsyncMock(return_value=None)
+        store = ThreadStore(tmp_path / "threads.json")
+        b = SlackBridge(
+            team_ctx=self._ctx(tmp_path), backend=claude, store=store,
+            downloader=downloader, backends=backends,
+        )
+        return b, claude, codex, store
+
+    def test_backend_for_routes_by_slot(self, tmp_path: Path):
+        b, claude, codex, _ = self._bridge(tmp_path)
+        assert b._backend_for("Ayako") is claude
+        assert b._backend_for("Rukawa") is codex
+        assert b._backend_for("ghost") is claude  # unknown persona: lane default
+
+    def test_without_a_map_everyone_shares_the_backend(self, tmp_path: Path):
+        b, claude, codex, _ = self._bridge(tmp_path, backends={})
+        assert b._backend_for("Rukawa") is claude
+
+    def test_missing_backend_in_map_is_a_construction_error(self, tmp_path: Path):
+        with pytest.raises(ValueError, match=r"not given: \['codex_exec'\]"):
+            self._bridge(tmp_path, backends={"claude_p": self._backend()})
+
+    def test_build_team_bridge_instantiates_one_backend_per_vendor(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from tigerharness.slack_bridge import bridge as bridge_mod
+        made: list[tuple[str, str | None]] = []
+
+        def fake_get_backend(name, **kw):
+            made.append((name, kw.get("cwd")))
+            return self._backend(name)
+
+        monkeypatch.setattr(bridge_mod, "get_backend", fake_get_backend)
+        b = bridge_mod.build_team_bridge(
+            self._ctx(tmp_path), state_path=tmp_path / "threads.json",
+        )
+        assert sorted(made) == [("claude_p", str(tmp_path)), ("codex_exec", str(tmp_path))]
+        assert set(b._backends) == {"claude_p", "codex_exec"}
+        assert b._backend is b._backends["claude_p"]
+
+    @pytest.mark.asyncio
+    async def test_resume_on_the_persona_backend(self, tmp_path: Path):
+        b, claude, codex, store = self._bridge(tmp_path)
+        store.set("t1", "old-codex", persona="Rukawa", backend="codex_exec")
+        state = await b._get_or_open_thread("t1", "Hi")
+        codex.open_session.assert_awaited_once_with(resume_id="old-codex")
+        claude.open_session.assert_not_awaited()
+        assert state.persona == "Rukawa"
+
+    @pytest.mark.asyncio
+    async def test_vendor_change_opens_a_fresh_session(self, tmp_path: Path, caplog):
+        b, claude, codex, store = self._bridge(tmp_path)
+        # The thread was opened when Rukawa still ran on claude_p.
+        store.set("t1", "old-claude", persona="Rukawa", backend="claude_p")
+        with caplog.at_level(logging.WARNING, logger="tigerharness.slack_bridge.bridge"):
+            await b._get_or_open_thread("t1", "Hi")
+        codex.open_session.assert_awaited_once_with(resume_id=None)
+        assert "was on backend claude_p, now runs on codex_exec" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_legacy_record_counts_as_claude(self, tmp_path: Path):
+        b, claude, codex, store = self._bridge(tmp_path)
+        store.set("t1", "old-1", persona="Ayako")   # pre-field record
+        store.set("t2", "old-2", persona="Rukawa")  # pre-field record, persona now on codex
+        await b._get_or_open_thread("t1", "Hi")
+        claude.open_session.assert_awaited_once_with(resume_id="old-1")
+        await b._get_or_open_thread("t2", "Hi")
+        codex.open_session.assert_awaited_once_with(resume_id=None)
+
+    @pytest.mark.asyncio
+    async def test_turn_runs_on_persona_backend_and_records_it(self, tmp_path: Path):
+        from unittest.mock import patch
+        from tigerharness.slack_bridge.idle_compact import IdleCompactConfig
+
+        b, claude, codex, store = self._bridge(tmp_path)
+        journal_root = tmp_path / "journal"
+        (journal_root / "active").mkdir(parents=True)
+        b._idle_compact_cfg = IdleCompactConfig(
+            enabled=True, journal_root=journal_root,
+            threshold_fraction=0.30, context_window_tokens=200_000,
+        )
+        fake_result = MagicMock()
+        fake_result.final_output = "Hello from Rukawa"
+        fake_result.stop_reason = "end_turn"
+        fake_result.cost_usd = None
+        fake_result.usage = {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 30_000,
+            "cache_read_input_tokens": 50_000,
+        }
+        seen: list[tuple[object, str]] = []
+
+        async def fake_run(backend_, cfg_, prompt, **kw):
+            seen.append((backend_, prompt))
+            return fake_result
+
+        with patch(
+            "tigerharness.slack_bridge.bridge.detect_persona",
+            new=AsyncMock(return_value=("Rukawa", 0.0)),
+        ), patch(
+            "tigerharness.slack_bridge.bridge.run_with_retry", side_effect=fake_run,
+        ):
+            say = AsyncMock()
+            event = {"channel_type": "im", "user": "U0CEO", "text": "hello", "ts": "1.1"}
+            await b.handle_message(event, say)
+
+        # The turn went to the codex backend, and no /compact followed it
+        # even though the usage was hot: compaction is a claude_p turn.
+        assert [be for be, _ in seen] == [codex]
+        assert all(prompt != "/compact" for _, prompt in seen)
+        state = list(b._threads.values())[0]
+        assert state.idle_compacted is False
+        rec = ThreadStore(tmp_path / "threads.json").get_record("1.1")
+        assert rec is not None and rec.backend == "codex_exec" and rec.persona == "Rukawa"
