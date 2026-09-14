@@ -210,6 +210,9 @@ _PRIOR_SKILL_HASHES: dict[str, set[str]] = {
         "cca9e089f6f7609654a4bc63cba75763b8ee49c03021c7edfd84f96ddb834795",
     },
     "tigerharness-basics": {
+        # 2026-09-14 (99f6eda): docs-currency wording, before the review pass
+        # (lane-view sentence, autodrive in the frontmatter).
+        "28be0a53999ee47a4e04ae04df850d3944d195505221502a18a1295824a7e8c8",
         # 2026-09-13 (91240ae): the v0.6.0 wording, before the 2026-09-14
         # docs-currency pass (vendor/goal/traits flags, defer, drive lanes,
         # codex memory source, team knobs in configs/.env).
@@ -333,7 +336,7 @@ _CURRENT_SKILL_HASHES: dict[str, str] = {
     "journal-new": "426d575dbce6cfb1bce5c66946a2f20bc580123f8a46a2bbe2ed3562da5f72b2",
     "slack-notify": "1d6e910cf773bc5d6506cd0ac2ced8429ab5b9a8c49ca79fc5b437eae4210173",
     "sweep-memory": "fed46d260479de281cc1c324ad98cb594943176064683f5a00de62481b2212cd",
-    "tigerharness-basics": "28be0a53999ee47a4e04ae04df850d3944d195505221502a18a1295824a7e8c8",
+    "tigerharness-basics": "0de43d39363f534913196a124bb7c676936ba526be8194ea387706137c12c65c",
     "workflow-append-steps": "231e5ad5fb3f75be6590455824887fc2a58e1340a14255b0e7a3c29b39228e14",
 }
 
@@ -690,9 +693,10 @@ manual -- before substantive work. Other key locations:
 - **`configs/personas.yaml`** -- the roster, the default persona, and the
   team's default model vendor (`default_vendor` / `default_model`; a
   persona entry may override with its own `vendor:` / `model:`). A
-  persona's vendor + model is also its **drive lane**: `journal sweep` /
-  `claim` / `step-done --driver <you>` only take work whose owner persona
-  is on your lane (`claim` exits 3 otherwise; `--any-lane` overrides).
+  persona's vendor + model is also its **drive lane**: `journal sweep
+  --driver <you>` marks work `[mine]` or not yours, and `claim` /
+  `step-done --driver <you>` refuse other-lane work (exit 3; `--any-lane`
+  overrides).
 - **`.claude/skills/<name>/SKILL.md`** -- the team's skills (drive-journal,
   journal-new, sweep-memory, ...), written once for every vendor.
   Claude Code discovers them there; `.agents/skills` is a symlink to the
@@ -1517,6 +1521,22 @@ def _append_persona_to_yaml(
         # a fresh personas.yaml below.
         if not text.endswith("\n"):
             text += "\n"
+        # One exception: a team scaffold whose roster is still EMPTY
+        # (create_team pre-writes the preamble + vendor block + a bare
+        # `personas:` before the first recruit). Nobody has managed
+        # that file by hand yet, so seed `default_persona` exactly as
+        # the fresh-file branch below would -- the first recruit is the
+        # team default, which AGENTS.md and `journal new` rely on.
+        if "default_persona:" not in text and not re.search(
+            r"^  - name: ", text, re.M,
+        ):
+            text = re.sub(
+                r"^personas:[ \t]*\n",
+                lambda m: _PERSONAS_YAML_DEFAULT_PERSONA_LINE.format(
+                    persona=persona,
+                ) + m.group(0),
+                text, count=1, flags=re.M,
+            )
         yaml_path.write_text(text + entry)
         return True
     # Fresh file: write preamble + default_persona line + entry. The
@@ -2245,7 +2265,8 @@ def main(argv: list[str] | None = None) -> int:
              "version, leave hand-edited ones untouched. .gitignore: "
              "append any missing line from the shipped template "
              "(append-only -- nothing is removed or rewritten). "
-             "Idempotent.",
+             ".agents/skills: the symlink Codex discovers skills through "
+             "is recreated if missing. Idempotent.",
     )
     parser.add_argument(
         "--refresh-skills",

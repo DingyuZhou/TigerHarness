@@ -14,7 +14,7 @@ store:
 
 sources:
   - kind: claude_code
-    project_path: /home/tigerleap/.claude/projects/-tmp-claude-1000--home-tigerleap-projects-tiger-teams-Shohoku-3c5f9ba4-d2f3-4841-9c41-75b75280e922-scratchpad-regen-tigers/
+    project_path: ~/.claude/projects/<encoded-team-root>/
     # ^ Where Claude Code WILL write transcripts for this team.
     #   The dir is created on the first claude_p dispatch.
     # Filter: only ingest threads where the bridge stored

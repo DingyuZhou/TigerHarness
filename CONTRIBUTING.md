@@ -21,7 +21,7 @@ uv run pytest --cov=tigerharness --cov-report=term-missing
 uv run pytest tests/tiger_memory/test_lifecycle_full.py -v
 ```
 
-Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[tool.coverage.report] fail_under = 100`). Current: **100.00%** (2500+ tests).
+Coverage threshold: **100%** line + branch (enforced in `pyproject.toml`'s `[tool.coverage.report] fail_under = 100`). Current: **100.00%** (3,800+ tests).
 
 > **Trap:** plain `uv run pytest` does NOT enforce the floor -- the
 > gate only fires with `--cov` (second command above). A green plain
@@ -86,8 +86,9 @@ src/tigerharness/
         gen_service.py       systemd unit generator
         migrate.py           threads.json migration tool
     tiger_memory/            Persistent bounded memory (3 stores: skills / must_remember / topics)
-        cli.py               CLI (init, rebuild, pin, state, plan, ingest-*, compact-*, card-check,
-                             team-events-compact-*, sweep-*, check, search, forget, doctor)
+        cli.py               CLI (init, rebuild, pin, migrate-to-topics, state, plan, ingest-*,
+                             build-reduce-prompts, compact-*, card-check, team-events-compact-*,
+                             sweep-*, check, search, forget, doctor)
         config.py            YAML config loader + validation
         lifecycle.py         Extraction -> ingest core + fresh-start rebuild
         bounded_store.py     Bounded-store engine + forget guard
@@ -109,7 +110,8 @@ src/tigerharness/
         store.py             On-disk layout + atomic write + locking
         frontmatter.py       YAML frontmatter parser/writer
         sources/             Source adapters: claude_code + codex (shared base _transcripts.py),
-                             journal_worklog; docs / auto_memory parse but are inert
+                             journal_worklog; slack_thread rides the claude_code adapter;
+                             docs has an unconstructed adapter, auto_memory none
         summarizers/         Summarizer backends (anthropic, mock)
         templates/           Briefing README template
     journal/                 File-based subscription backend (kind=task + kind=workflow)
@@ -145,14 +147,25 @@ examples/
                              (regenerate after scaffold or skill changes; see "Examples" below)
     tiger-memory.config.yaml Standalone memory config reference
     env.example              Standalone team configs/.env template (Slack tokens + team knobs)
-    slack-bridge-multi.service  Reference systemd unit for the multi-team bridge
+    slack-bridge-multi.service
+                             Reference systemd unit for the multi-team bridge
 docs/
     INDEX.md                 Docs home: one-hop router + must-not-miss rules (start here)
-    agent_sdk.md, autodrive.md, autodrive-notifications.md, slack-bridge.md,
-    tiger-memory.md, tiger-memory-sweep-protocol.md, DESIGN-memory.md,
-    per-persona-journal-memory.md, journal.md, journal-workflow-mode.md,
-    journal-instant-resume.md, journal-operator-questions.md,
-    subscription-backend.md, code-review-standard.md
+    overall.md               Redirect stub to INDEX.md
+    agent_sdk.md             Agent SDK reference (backends, per-persona vendors)
+    autodrive.md             The periodic journal driver (+ drive lanes)
+    autodrive-notifications.md  Its Slack heartbeats and drive summaries
+    journal.md               Journal / subscription backend, end to end
+    journal-workflow-mode.md kind=workflow compile + graph walk
+    journal-instant-resume.md  How a crashed / idle task resumes
+    journal-operator-questions.md  Parking a task on an Operator question
+    subscription-backend.md  Rails / billing + the status.json schema
+    per-persona-journal-memory.md  The persona-stamped worklog memory rail
+    slack-bridge.md          The 1..N-lane Socket Mode bridge
+    tiger-memory.md          Bounded memory stores, CLI, config
+    tiger-memory-sweep-protocol.md  The team-wide memory sweep
+    DESIGN-memory.md         Memory design rationale
+    code-review-standard.md  The review standard
     adr/                     Architecture Decision Records 0001-0013
                              (annotated list in docs/INDEX.md)
 ```
@@ -162,6 +175,38 @@ That is the set `tigerharness init` installs into a team, and the one
 `tests/test_skill_hash_guard.py` guards. (A top-level `skills/` tree
 existed until 2026-08-14; it was packaged nowhere, drifted behind the
 bundle, and was removed.)
+
+## Examples
+
+`examples/tigers/` is not hand-edited: it is the literal output of the
+scaffolder, so a reader sees exactly what `tigerharness init` writes.
+Regenerate it whenever a scaffold template, `.gitignore` template or
+bundled skill changes (a bundled-skill edit also rolls its hash in
+`init.py`, see "Project structure"):
+
+```bash
+rm -rf examples/tigers && tmp=$(mktemp -d) \
+  && uv run tigerharness init --team tigers --persona chief --yes --dir "$tmp" \
+  && uv run tigerharness init --team tigers --persona scout --yes --dir "$tmp" \
+  && for p in chief scout; do \
+       uv run tigerharness tiger-memory --config "$tmp/tigers/memories/$p/tiger-memory.config.yaml" init; done \
+  && cp -a "$tmp/tigers" examples/tigers \
+  && sed -i 's#^\(    project_path: \).*#\1~/.claude/projects/<encoded-team-root>/#' \
+       examples/tigers/memories/*/tiger-memory.config.yaml \
+  && git add -A examples/tigers
+```
+
+Two deliberate deviations from a raw scaffold, both in that recipe: the
+memory store is initialized by hand (init's own auto-init is
+intermittently flaky -- see the README's known limitations), which is
+what leaves the tracked `memories/<persona>/journal/.gitkeep`; and
+`project_path` -- a machine-specific encoding of the team root -- is
+rewritten to a placeholder. `init` does not seed a `journal_worklog`
+source; teams add one per `docs/per-persona-journal-memory.md`.
+The nested `.gitignore` keeps the generated `configs/.env` out of git.
+The standalone files next to it (`tiger-memory.config.yaml`,
+`env.example`, `slack-bridge-multi.service`) are hand-maintained
+references.
 
 ## Adding a new module
 

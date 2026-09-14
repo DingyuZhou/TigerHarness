@@ -102,7 +102,7 @@ plain `claude -p` subprocess (a persona may run on `codex exec` instead —
   `TIGERHARNESS_AUTODRIVE_AUTOSTART` and it becomes self-driving: scheduling
   work starts it, a drained queue stops it, and an idle tick costs a file
   walk instead of a model session ([adr/0010](adr/0010-self-driving-journal.md)).
-- **Logs.** Every CLI reads `TIGERHARNESS_LOG_LEVEL` (default WARNING) via one
+- **Logs.** Every CLI reads `TIGERHARNESS_LOG_LEVEL` (default WARNING; `notify` runs at INFO) via one
   helper; one named logger per module; `tests/test_logging_audit.py` enforces
   coverage.
 

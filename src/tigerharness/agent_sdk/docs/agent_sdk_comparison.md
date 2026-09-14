@@ -1,6 +1,7 @@
 # Anthropic Agent SDK vs. OpenAI Agents SDK — Common Interface (v2)
 
-> **Design record (2025-11).** Current behaviour is the code under
+> **Design record** (written around Nov 2025 against the upstream SDKs of
+> that time; folded into tigerharness in May 2026). Current behaviour is the code under
 > `src/tigerharness/agent_sdk/` and its reference `docs/agent_sdk.md`.
 > Since this was written a fourth backend shipped: `codex_exec`, a
 > subprocess over OpenAI's `codex exec` with the same shape as the

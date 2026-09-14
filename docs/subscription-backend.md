@@ -538,7 +538,9 @@ only happens inside an interactive session a human started.
 [`autodrive`](autodrive.md) is the single Operator-authorized break in that
 rule, and it rests on one load-bearing fact: **each vendor CLI a drive runs
 on (`claude -p`, `codex exec`) bills its own subscription, not an API key.**
-Re-confirmed by the Operator on 2026-08-12, and for both CLIs on 2026-09-13.
+Re-confirmed by the Operator on 2026-08-12 and again on 2026-09-13 ("no more
+subscription limitation for `claude -p`"); `codex exec` bills the ChatGPT
+subscription by construction ([ADR 0011](adr/0011-model-vendors-per-persona.md)).
 
 [ADR 0010](adr/0010-self-driving-journal.md) moved autodrive's *trigger* from
 a human hand to a queue write: with `TIGERHARNESS_AUTODRIVE_AUTOSTART` set in

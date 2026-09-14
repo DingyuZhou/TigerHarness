@@ -1,6 +1,6 @@
 ---
 name: tigerharness-basics
-description: The basics of operating a tigerharness team -- what each `tigerharness` CLI sub-command does (init, dismiss, journal, tiger-memory, slack-bridge), the team file structure init scaffolds (what is source-of-truth vs generated), how to recruit a new persona onto an existing team, and how a workflow task is created from a playbook. Use when someone asks "how do I add a persona / team member", "what does tigerharness init do", "where do playbooks live", "what is this folder for", "how do I update the bundled skills", or any other how-does-my-own-team-work question.
+description: The basics of operating a tigerharness team -- what each `tigerharness` CLI sub-command does (init, dismiss, journal, tiger-memory, slack-bridge, autodrive), the team file structure init scaffolds (what is source-of-truth vs generated), how to recruit a new persona onto an existing team, and how a workflow task is created from a playbook. Use when someone asks "how do I add a persona / team member", "what does tigerharness init do", "where do playbooks live", "what is this folder for", "how do I update the bundled skills", or any other how-does-my-own-team-work question.
 ---
 
 # tigerharness-basics
@@ -127,7 +127,8 @@ view (`[mine]` vs. not yours), `journal claim --driver` refuses
 other-lane work with **exit 3** (`--any-lane` overrides, for a hand
 drive when no drive on that vendor exists), and `step-done --driver`
 prints a `handoff:` cue when the next step belongs to another lane.
-A single-vendor team never sees any of this. Whether a Slack-triggered
+A single-vendor team never sees a refusal or a handoff cue (every
+item reads `[mine]`). Whether a Slack-triggered
 session may drive at all is the team knob
 `TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in `configs/.env` (ADR 0013).
 

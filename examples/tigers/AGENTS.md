@@ -36,7 +36,11 @@ manual -- before substantive work. Other key locations:
   -- the team's curated reference base.
 - **`configs/personas.yaml`** -- the roster, the default persona, and the
   team's default model vendor (`default_vendor` / `default_model`; a
-  persona entry may override with its own `vendor:` / `model:`).
+  persona entry may override with its own `vendor:` / `model:`). A
+  persona's vendor + model is also its **drive lane**: `journal sweep
+  --driver <you>` marks work `[mine]` or not yours, and `claim` /
+  `step-done --driver <you>` refuse other-lane work (exit 3; `--any-lane`
+  overrides).
 - **`.claude/skills/<name>/SKILL.md`** -- the team's skills (drive-journal,
   journal-new, sweep-memory, ...), written once for every vendor.
   Claude Code discovers them there; `.agents/skills` is a symlink to the
@@ -45,7 +49,9 @@ manual -- before substantive work. Other key locations:
   the task at hand.
 - A journal's **`OPERATING.md`** governs task/queue work; drive it through
   the `drive-journal` skill and `tigerharness journal` CLIs -- never
-  hand-edit journal state.
+  hand-edit journal state. Whether a Slack-spawned session may drive is
+  the team knob `TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in `configs/.env`
+  (off by default: then Slack schedules, never drives).
 
 ## Runtime glossary (the vendor-neutral words the skills use)
 

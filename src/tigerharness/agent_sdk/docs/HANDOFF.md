@@ -36,7 +36,7 @@ code (OpenAI's `openai-agents` is the remaining stub).
 | Python 3.11+ | everything | system / pyenv |
 | `claude` CLI on `PATH` | running `claude_p` against real Claude | install Claude Code (see anthropic.com/claude-code), then run `claude` once to log in |
 | `codex` CLI on `PATH` | running `codex_exec` against real Codex | install the Codex CLI, then `codex login` |
-| `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage` | running tests | `uv sync --extra all` (the `dev` dependency group) |
+| `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage` | running tests | `uv sync --extra all` (extras + the default `dev` group) |
 | `pydantic` (v1 or v2) | one test exercises pydantic-as-output_schema | optional, `pip install pydantic` |
 | `mypy` | optional type check (not in the dev group) | `pip install mypy` |
 
@@ -101,7 +101,7 @@ before implementing the stub backends — the public surfaces drift.
     ├── test_claude_p.py          ← the bulk; argv/stdin/runtime/edge cases
     ├── test_codex_exec.py        ← the codex exec twin
     ├── test_anthropic_sdk.py / test_stub_backends.py / test_retry.py
-    ├── test_examples.py / test_coverage_push.py
+    └── test_examples.py / test_coverage_push.py
 ```
 
 > **Layout note:** the SDK was folded into the tigerharness package in
@@ -327,7 +327,7 @@ annotations`).
 
 ```bash
 # One-time dev setup (from the tigerharness repo root):
-uv sync --extra all                          # dev group: pytest, pytest-asyncio, pytest-cov, coverage
+uv sync --extra all                          # extras + the default dev group (pytest, pytest-asyncio, pytest-cov, coverage)
 
 # Use the package (uv run puts the venv on PATH):
 uv run python -m tigerharness.agent_sdk.examples.basic    # needs `claude` CLI on PATH

@@ -30,6 +30,12 @@ personas_dir: ../personas
 default_vendor: claude
 default_model: ""
 
+# Default persona used by `tigerharness journal new --kind task` when
+# --persona is omitted. The first persona seeded by `tigerharness init`
+# is set here automatically; edit to point at a different team member
+# as the team grows.
+default_persona: chief
+
 personas:
   - name: chief
     cwd: ..

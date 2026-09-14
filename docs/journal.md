@@ -355,7 +355,6 @@ reintroduce programmatic billing and defeat the subscription model.
 Driving only happens inside an interactive agent session (Claude Code
 or Codex).
 
-
 ## Drive lanes (which vendor does the work)
 
 A **lane** is one vendor + model, what `tigerharness.vendors` resolves a
