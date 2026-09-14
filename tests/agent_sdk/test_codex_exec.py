@@ -688,3 +688,30 @@ class TestReviewPass:
 
     def test_toml_string_escapes_del(self) -> None:
         assert _toml_string("a\x7fb") == '"a\\u007Fb"'
+
+
+class TestStdinClosedEarly:
+    """A CLI that exits before reading its prompt must report its exit,
+    not raise asyncio's "Connection lost" from the stdin flush (a race
+    that only ever bit on fast CI runners)."""
+
+    @asyncio_test
+    async def test_drain_connection_lost_is_not_fatal(self, codex_ok: Path, monkeypatch) -> None:
+        import asyncio as _asyncio
+
+        async def lost(self):
+            raise ConnectionResetError("Connection lost")
+        monkeypatch.setattr(_asyncio.StreamWriter, "drain", lost)
+        backend = CodexExecBackend(cli=str(codex_ok))
+        result = await backend.run(AgentConfig(name="x"), "hi")
+        # The fake still ran to completion (its stdin was closed, which it
+        # reads as EOF) and the stream parsed normally.
+        assert result.final_output == "Hello there."
+
+    @asyncio_test
+    async def test_real_early_exit_with_a_large_prompt(self, make_cli) -> None:  # type: ignore[no-untyped-def]
+        cli = make_cli("codex-exit-fast", "import sys; sys.stderr.write('boom'); sys.exit(7)")
+        backend = CodexExecBackend(cli=str(cli))
+        events = await _collect(backend.run_stream(AgentConfig(name="x"), "x" * (4 * 1024 * 1024)))
+        assert events[-1].stop_reason == "error"
+        assert any(isinstance(e, ErrorEvent) and "exited with code 7" in e.message for e in events)

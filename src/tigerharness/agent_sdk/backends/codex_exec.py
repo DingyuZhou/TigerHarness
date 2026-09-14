@@ -446,6 +446,16 @@ class _CodexStreamHandle(BaseStreamHandle):
             assert proc.stdin is not None
             proc.stdin.write(self._stdin_payload.encode("utf-8"))
             await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # The CLI exited (or closed stdin) before reading the prompt --
+            # a bad flag, a missing login, an instant crash. Not fatal here:
+            # the nonzero exit and its stderr are reported below, and a
+            # fast exit must not turn into a "Connection lost" traceback
+            # that hides the real error (seen as a CI-only race).
+            log.info(
+                "%s closed stdin before the prompt was delivered",
+                self._argv[0],
+            )
         finally:
             try:
                 proc.stdin.close()  # type: ignore[union-attr]
