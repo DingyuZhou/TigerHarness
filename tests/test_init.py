@@ -3250,3 +3250,21 @@ class TestAgentsSkillsLink:
         assert rc == 0
         assert "--vendor/--model are ignored" in capsys.readouterr().err
         assert "default_vendor: claude" in (team / "configs" / "personas.yaml").read_text()
+
+
+class TestVendorCliWarningIsHostIndependent:
+    """Both sides of the "is the vendor's CLI on PATH?" check must be
+    exercised regardless of the host: CI has no `claude`, a dev box has
+    one, and neither may decide the coverage gate."""
+
+    def test_cli_present_prints_no_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ):
+        from tigerharness import init as init_mod
+        monkeypatch.setattr(init_mod.shutil, "which", lambda name: f"/opt/bin/{name}")
+        rc = main([
+            "--dir", str(tmp_path), "--team", "tigers", "--persona", "chief",
+            "--yes", "--no-slack", "--no-memory",
+        ])
+        assert rc == 0
+        assert "is not on PATH" not in capsys.readouterr().err
