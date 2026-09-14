@@ -925,3 +925,30 @@ class TestFactoryIntegration:
         cfg = AgentConfig(name="x")
         result = await backend.run(cfg, "hi")
         assert result.final_output == "Hello there."
+
+
+class TestStdinClosedEarly:
+    """See the codex_exec counterpart: a CLI gone before the prompt flush
+    must not surface as ConnectionResetError."""
+
+    @asyncio_test
+    async def test_drain_broken_pipe_is_not_fatal(self, cli_success: Path, monkeypatch) -> None:
+        import asyncio as _asyncio
+
+        async def gone(self):
+            raise BrokenPipeError("[Errno 32] Broken pipe")
+        monkeypatch.setattr(_asyncio.StreamWriter, "drain", gone)
+        backend = ClaudePBackend(cli=str(cli_success))
+        result = await backend.run(AgentConfig(name="x"), "hi")
+        assert result.stop_reason == "end_turn"
+        assert result.final_output == "Hello there."
+
+    @asyncio_test
+    async def test_real_early_exit_with_a_large_prompt(self, make_cli) -> None:  # type: ignore[no-untyped-def]
+        # The CI race, made deterministic: a prompt far bigger than the
+        # pipe buffer cannot be flushed before a CLI that never reads
+        # stdin has exited, so drain() sees the closed pipe for certain.
+        cli = make_cli("exit-fast", "import sys; sys.stderr.write('boom'); sys.exit(7)")
+        backend = ClaudePBackend(cli=str(cli))
+        result = await backend.run(AgentConfig(name="x"), "x" * (4 * 1024 * 1024))
+        assert result.stop_reason == "error"
