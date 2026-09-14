@@ -348,9 +348,10 @@ The Python + CLI stack above is **complete and 100%-tested**, and the
 bridge wiring + convenience CLIs that activate it have **shipped**:
 
 1. **Trigger — done (config flag).** `TeamBridgeContext.
-   tiger_memory_trigger` (`bridge.py:115`) selects the mechanism. Default
-   `"rebuild"` fires `_trigger_tiger_memory_rebuild` (`bridge.py:587`,
-   dispatched at `bridge.py:565`): a detached, plain `tiger-memory
+   tiger_memory_trigger` (`slack_bridge/bridge.py`) selects the mechanism.
+   Default `"rebuild"` fires `_trigger_tiger_memory_rebuild` (same module,
+   dispatched after a completed turn; grep the symbol names rather than
+   line numbers, which drift): a detached, plain `tiger-memory
    rebuild` — since the topic-store revamp (ADR 0007) that verb is pure
    Python (format gate + briefing regenerate), **no model call, no
    flags**, so the trigger is cheap and billing-neutral. Setting the flag

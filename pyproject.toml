@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "TigerHarness"
 version = "0.6.0"
-description = "A generic Claude Code agent harness: iterative task execution, Slack integration, and persistent memory management."
+description = "A vendor-agnostic agent harness for Claude Code and OpenAI Codex: iterative task execution, Slack integration, and persistent memory management."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-keywords = ["agent", "claude", "anthropic", "harness", "memory"]
+keywords = ["agent", "claude", "anthropic", "codex", "openai", "chatgpt", "slack", "harness", "memory"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 dependencies = []  # agent_sdk is now a subpackage; backends are opt-in extras.
 
@@ -32,8 +33,8 @@ memory = [
     "pyyaml>=6.0",
 ]
 # Pulls in Anthropic's official Claude Agent SDK for the anthropic_sdk
-# backend. Without this extra, only the `claude_p` (subprocess) backend
-# is functional; `get_backend("anthropic_sdk")` raises a clear error
+# backend. Without this extra, only the `claude_p` and `codex_exec`
+# (subprocess) backends are functional; `get_backend("anthropic_sdk")` raises a clear error
 # telling users to install with this extra.
 anthropic = [
     "claude-agent-sdk>=0.1.0",
@@ -55,7 +56,7 @@ Homepage = "https://github.com/DingyuZhou/TigerHarness"
 Repository = "https://github.com/DingyuZhou/TigerHarness"
 Issues = "https://github.com/DingyuZhou/TigerHarness/issues"
 Changelog = "https://github.com/DingyuZhou/TigerHarness/releases"
-Documentation = "https://github.com/DingyuZhou/TigerHarness#readme"
+Documentation = "https://github.com/DingyuZhou/TigerHarness/blob/main/docs/INDEX.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tigerharness"]

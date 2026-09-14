@@ -3,7 +3,8 @@
 ## At a glance
 - **What:** `tigerharness autodrive` — a small detached daemon that fires
   **"drive the journal"** on a fixed cadence via the backend-agnostic
-  [agent SDK](agent_sdk.md) (default backend `claude -p`). Fire every N
+  [agent SDK](agent_sdk.md) (backend resolved per driver persona: `claude -p`
+  or `codex exec`, see [drive lanes](#drive-lanes-one-drive-per-vendormodel-with-work-adr-0012)). Fire every N
   seconds and do **not** wait — overlap is allowed; each fire is a fresh,
   context-clean session. **Not** built on Claude Code's `/loop`.
 - **When you need it:** the Operator wants the journal queue worked
@@ -16,7 +17,8 @@
 - **Must-not-miss:** the journal is **human-triggered by design** (see
   [subscription-backend.md](subscription-backend.md)). autodrive is the
   deliberate, **Operator-authorized** exception, and it is **only safe while
-  `claude -p` bills the subscription** rather than API tokens. Set
+  the vendor CLI a drive runs on (`claude -p` / `codex exec`) bills its
+  subscription** rather than API tokens. Set
   `--max-budget` and use `autodrive stop`. If billing ever changes, set
   `TIGERHARNESS_AUTODRIVE_AUTOSTART=0` — that reverts the whole system to
   human-triggered with no code change.
@@ -29,13 +31,14 @@ The journal has "no programmatic driver by design": a CLI/cron/API driver is a
 programmatic entry point that would bill token-metered API instead of the
 monthly subscription, defeating the whole [subscription
 backend](subscription-backend.md) model. autodrive is the one sanctioned
-break, and it stands on a single load-bearing fact: **`claude -p` currently
-bills the subscription, not the API.** The per-tick prompt says so explicitly,
+break, and it stands on a single load-bearing fact: **the vendor CLIs a drive
+runs on (`claude -p`, `codex exec`) currently bill their subscriptions, not an
+API.** The per-tick prompt says so explicitly,
 so the spawned agent (which would otherwise refuse, per the `drive-journal`
 skill) knows this drive is authorized.
 
-If Anthropic flips `claude -p` to API billing, an unattended autodrive spends
-real dollars on **every tick**. That is the risk the guardrails below exist to
+If a vendor flips its CLI (`claude -p` or `codex exec`) to API billing, an
+unattended autodrive spends real dollars on **every tick**. That is the risk the guardrails below exist to
 contain — keep them loud, and stop the daemon if you are unsure billing is
 still on the subscription.
 
@@ -54,7 +57,7 @@ model session:
 | `idle` | nothing actionable, nothing busy | fire the maintenance tail once, then **stop** |
 
 The probe is non-AI Python, so an **idle interval costs a file walk instead of
-a whole `claude -p` session**. It is deliberately fail-soft: if the probe
+a whole vendor-CLI session**. It is deliberately fail-soft: if the probe
 raises, the verdict degrades to `actionable` (the pre-ADR-0010 always-fire
 behaviour), because an over-fire costs one drive while a false `idle` would
 strand the entire queue.
@@ -412,11 +415,14 @@ Default is **off in the package** and **on in a team's `configs/.env`**: the
 harness ships to users whose billing situation we do not know, so a team turns
 this on deliberately, in a file it owns.
 
-**The Slack rail is unchanged.** A Slack-triggered session still cannot claim
-a task (`journal claim` refuses it mechanically). What changes is that its
-`defer` now rings a bell for a *separate, detached, Operator-authorized*
-daemon — the rail boundary holds because the Slack session is still not the
-driver. See [subscription-backend.md](subscription-backend.md).
+**The Slack rail is unchanged by autodrive.** A Slack-triggered session
+still cannot claim a task (`journal claim` refuses it mechanically) unless
+the team opts in with `TIGERHARNESS_JOURNAL_SLACK_DRIVES=1` in its
+`configs/.env` ([ADR 0013](adr/0013-slack-drives-team-setting.md)). What
+autodrive changes is that a Slack session's `defer` now rings a bell for a
+*separate, detached, Operator-authorized* daemon — the rail boundary holds
+because the Slack session is still not the driver. See
+[subscription-backend.md](subscription-backend.md).
 
 ### How it runs
 

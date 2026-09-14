@@ -1,0 +1,7 @@
+# Where this team lives and what it works on.
+# All paths are relative to the team root (this file's
+# directory's parent). Sessions start at the team root, so
+# prose and config reference paths from here -- see the
+# team's knowledge/path-conventions doc.
+team_root: .
+# project: ../tigerharness  # <- set me: path to the repo this team works on

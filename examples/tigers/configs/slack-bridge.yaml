@@ -1,0 +1,29 @@
+# Multi-lane slack-bridge fragment for team 'tigers'.
+# Loaded by tigerharness.slack_bridge.multi.load_multi() via the
+# top-level slack-bridge.yaml index.
+
+# Persona used when the user's first DM doesn't address a specific
+# team member. ANY persona in this team's configs/personas.yaml is
+# reachable -- a user can DM "Hi <name>" to talk to that member.
+# This default kicks in only when no name was addressed.
+default_persona: chief
+
+# Slack user IDs allowed to DM this team's bot. Required (non-empty list).
+# Find your user ID at api.slack.com/methods/users.list, or the Slack
+# app -> Profile -> ... menu -> Copy member ID.
+allowed_user_ids: []  # TODO: add at least one user ID before starting the bridge
+
+# Where this lane persists its thread -> session map. Must be unique
+# across lanes (the multi loader rejects duplicates).
+state_dir: ~/.local/state/slack-bridge/tigers
+
+# Optional overrides (defaults shown):
+# env: configs/.env
+# agent_cwd: .
+
+# Idle compaction (ADR 0004): when this lane's journal is idle and the
+# session's context is heavy, compact it between tasks so the next task
+# starts lean. On by default for new teams; set to false to opt this
+# lane out. The journal root auto-resolves to <team>/journal -- there
+# is no path to configure.
+idle_compact: true

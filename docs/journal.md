@@ -29,7 +29,8 @@ File-based, human-driven subscription backend (Phase 1 + Phase 1.5 + Phase 2 + P
 
 ## What it does
 
-Runs agent work through the **interactive** Claude Code app so the
+Runs agent work through an **interactive** agent session (Claude Code
+or Codex, per the driver persona's vendor) so the
 work counts against a monthly subscription instead of token-billed
 API usage. Durable state lives on disk in a `journal/` folder; a
 human-triggered skill drains the queue continuously per session.
@@ -351,7 +352,9 @@ tigerharness journal step-done --task <id> --step <id> --verdict APPROVE \
 The driver is **skill-only by design**: there is no
 `tigerharness journal drive` CLI because a CLI driver would
 reintroduce programmatic billing and defeat the subscription model.
-Driving only happens inside an interactive Claude Code session.
+Driving only happens inside an interactive agent session (Claude Code
+or Codex).
+
 
 ## Drive lanes (which vendor does the work)
 
@@ -466,8 +469,8 @@ in [`journal-workflow-mode.md`](journal-workflow-mode.md).
 ## Skills
 
 Shipped from `src/tigerharness/_bundled_skills/` and installed into a
-team's `.claude/skills/` by `tigerharness init`. (The top-level `skills/`
-directory is an unshipped stale duplicate — do not edit it.)
+team's `.claude/skills/` by `tigerharness init` (with `.agents/skills`
+symlinked to the same folder so Codex discovers them too).
 
 - `journal-new/` — scaffolder skill (CLI form is the primary; the skill
   is a thin wrapper). Teaches both `kind=task` and `kind=workflow` modes.
@@ -494,8 +497,10 @@ on subsequent runs — once you've edited it, it's yours.
   are explicitly out of scope. The heartbeat acts as a soft lease;
   see [`subscription-backend.md` — "How serial execution is
   enforced"](subscription-backend.md) for the race-window discussion.
-- **Replacing the api backend.** The two coexist (Phase 2 config
-  switch); pick `subscription` (default) or `api` per task.
+- **Replacing the api backend.** The legacy api-backed runners were
+  removed outright ([ADR 0003](adr/0003-remove-legacy-runners.md)); the
+  journal is the only rail, and the planned per-task config switch never
+  shipped.
 - **Automating the interactive app.** No keystroke automation. The
   human trigger is the design.
 

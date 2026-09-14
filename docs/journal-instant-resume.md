@@ -66,7 +66,8 @@ Candidate mechanism (to verify at implementation):
 |---|---|---|---|---|
 | `in_progress` | **no** (detached) | — | **idle / resumable** | **resume now (zero wait)** |
 | `in_progress` | yes | fresh (`< stuck_timeout`) | **busy** (live driver) | skip — don't collide |
-| `in_progress` | yes | stale (`>= stuck_timeout`) | **crashed** | reclaim (rescue), re-attach |
+| `in_progress` | yes | stale (`>= stuck_timeout`), task dir also untouched that long | **crashed** | reclaim (rescue), re-attach |
+| `in_progress` | yes | stale, but a task-dir file changed within `stuck_timeout` | **busy** (heartbeat lag, proof of life) | skip — wait one more sweep |
 | `pending` | — | — | new | start only if nothing `in_progress` |
 | `blocked` | — | — | blocked | skip, surface |
 
@@ -109,8 +110,9 @@ drive resume. With this change that hand-off is **instant** (detached →
 immediately resumable) instead of a 30-minute stall — a brief
 context-boundary blink, nothing more. Something still has to launch the
 next drive: a loop (now safe at **any** interval — the old "no short
-loop" caveat disappears) or a manual run. The driver does **not**
-self-relaunch (see Decisions §4).
+loop" caveat disappears), the [`autodrive`](autodrive.md) daemon
+(ADR 0010), or a manual run. The driver does **not** self-relaunch
+(see Decisions §4).
 
 ## Interaction with finish-before-start
 
@@ -131,8 +133,10 @@ update.
   re-read to confirm you won. This is the one genuinely load-bearing bit
   of the implementation.
 - **Crash mid-work:** attached + stale → reclaimed after `stuck_timeout`
-  (unchanged crash path). Heartbeat cadence ≤10 min keeps a *legit* long
-  operation from being misread as a crash (same risk as today).
+  (unchanged crash path), with one second opinion: recent writes in the
+  task dir are proof of life, so a stale heartbeat with fresh files is
+  judged **busy** and re-checked next sweep. Heartbeat cadence ≤10 min
+  keeps a *legit* long operation from being misread as a crash.
 - **Crash exactly at hand-off:** if it dies right after clearing the
   token, the task is simply idle and the next drive resumes it.
   Harmless.

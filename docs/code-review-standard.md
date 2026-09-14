@@ -48,7 +48,11 @@ this change and would maintain it."
 2. CLI commands follow the repo's exit-code contract: `0` success,
    `1` validation/content failure (machine-readable envelope on stdout
    where the command emits JSON), `2` operator error (bad arguments,
-   missing files — message on stderr). New commands keep this shape.
+   missing files — message on stderr), `3` refused by policy (the lane
+   gate in `journal claim` / `step-done`, a sweep claim token that no
+   longer holds the lease), `4` a command-specific measurement result
+   (`tiger-memory card-check` over-bound). New commands keep this shape
+   and document any code above `2`.
 3. Error messages name the thing that failed and the path to fix it
    ("no active workflow task with id X at <path>"), not just the
    failure.

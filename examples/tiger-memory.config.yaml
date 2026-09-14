@@ -17,9 +17,12 @@ sources:
   - kind: codex
     # OpenAI Codex session rollouts (personas on `vendor: chatgpt`). The
     # tree is global, so `cwd: auto` keeps only sessions opened in this
-    # team root; `persona:` / `include_unattributed:` work as above.
+    # team root; `persona:` / `include_unattributed:` work as on
+    # `claude_code` below.
     sessions_path: ~/.codex/sessions
     cwd: auto
+    # persona: researcher
+    # include_unattributed: true
   - kind: claude_code
     # Replace with your actual Claude Code project path.
     # Find yours under ~/.claude/projects/ — the directory name encodes
@@ -100,6 +103,13 @@ memory:
                               # sections only; the daily window is exempt)
     overflow_limit: 50000
 
+# prefilter: transcript pre-filter applied before staging (optional;
+# defaults shown). Each flag is an independent off-switch.
+prefilter:
+  enabled: true
+  drop_tool_results: true
+  drop_system_reminders: true
+
 # memory_extract: per-section word budgets for the extraction prompt
 # (optional; defaults shown). max_output_words caps the whole bundle.
 memory_extract:
@@ -110,5 +120,3 @@ memory_extract:
   team_event_words: 15        # per-EVENT line length hint (team event log)
   max_output_words: 600
 
-# briefing: session-start assembly knobs (optional).
-briefing:

@@ -5,7 +5,8 @@ each doc opens with an "At a glance" so you get the answer cheaply and only
 read `## Details` when you need to.
 
 TigerHarness (Python 3.11+, MIT; version per the PyPI badge in the
-[README](../README.md)) is a Claude Code agent harness: teams of named AI
+[README](../README.md)) is a vendor-agnostic agent harness (Claude Code or
+OpenAI Codex per persona): teams of named AI
 personas run against real codebases with iterative execution, Slack
 integration, and persistent per-persona memory. Zero hard dependencies —
 every integration is an optional extra; the default execution backend is a
@@ -34,6 +35,8 @@ plain `claude -p` subprocess (a persona may run on `codex exec` instead —
 | Use the backend-agnostic agent SDK | [agent_sdk.md](agent_sdk.md) |
 | Put a persona (or the whole team) on ChatGPT via `codex exec` instead of Claude | [adr/0011](adr/0011-model-vendors-per-persona.md), [slack-bridge.md](slack-bridge.md#per-persona-model-vendors), [agent_sdk.md](agent_sdk.md#choosing-a-backend-per-persona-model-vendors) |
 | Understand which vendor does a journal task (drive lanes, `claim` exit 3, the `handoff:` cue) | [adr/0012](adr/0012-drive-lanes.md), [journal.md](journal.md#drive-lanes-which-vendor-does-the-work), [autodrive.md](autodrive.md#drive-lanes-one-drive-per-vendormodel-with-work-adr-0012) |
+| Ingest a Codex persona's sessions into memory, or sweep one vendor/model lane | [tiger-memory.md](tiger-memory.md), [tiger-memory-sweep-protocol.md](tiger-memory-sweep-protocol.md), [adr/0012](adr/0012-drive-lanes.md) |
+| Bring an existing team current (refresh bundled skills, the `.agents/skills` symlink, `.gitignore`) | [README](../README.md#bundled-agent-skills-claude-code--codex) (`tigerharness init --refresh`) |
 | Make the queue self-driving (scheduling starts the daemon, draining stops it) | [adr/0010](adr/0010-self-driving-journal.md), [autodrive.md](autodrive.md) |
 | Read past design decisions | [adr/](adr/) (0001 workflow-runner, 0002 phase 2, 0003 remove legacy runners, 0004 bridge idle compaction, 0005 pydantic-ai, 0006 incremental memory sweep, 0007 topic-store revamp, 0008 team event log, 0009 remove single-tenant bridge, 0010 self-driving journal, 0011 model vendors per persona, 0012 drive lanes, 0013 Slack drives as a team setting) |
 
@@ -47,8 +50,8 @@ plain `claude -p` subprocess (a persona may run on `codex exec` instead —
   either way. See [adr/0013](adr/0013-slack-drives-team-setting.md),
   [subscription-backend.md](subscription-backend.md) and
   [slack-bridge.md](slack-bridge.md#journal-tasks-over-slack-scheduling-discipline).
-- **Auto-start is safe only while `claude -p` bills the subscription.** If
-  that changes, set `TIGERHARNESS_AUTODRIVE_AUTOSTART=0` — no code change.
+- **Auto-start is safe only while each vendor CLI (`claude -p`, `codex exec`)
+  bills its subscription.** If that changes, set `TIGERHARNESS_AUTODRIVE_AUTOSTART=0` — no code change.
   See [autodrive.md](autodrive.md).
 - **Cross-root dismiss safety** — `dismiss` tears down only the operated
   root's bridge, scoped by content (the 2026-06-12 incident class). See
@@ -60,8 +63,8 @@ plain `claude -p` subprocess (a persona may run on `codex exec` instead —
 ## At a glance (the rest of the system)
 
 - **One execution rail.** `journal` is the execution path: a file-based
-  subscription backend that routes agent work through the interactive Claude
-  Code app, billing a monthly subscription instead of token-metered API. The
+  subscription backend that routes agent work through the interactive agent
+  app (Claude Code or Codex, per persona), billing a monthly subscription instead of token-metered API. The
   legacy API-billed runners were removed ([adr/0003](adr/0003-remove-legacy-runners.md)).
 - **Journal.** Scaffolds single-persona tasks (`kind=task`) and multi-persona
   workflows (`kind=workflow`) from team playbooks; **20 CLI verbs** cover the

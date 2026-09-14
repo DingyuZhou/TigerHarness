@@ -10,14 +10,16 @@
   2026-06-12 cross-root incident class) — see "The bridge: one process, 1..N
   lanes" below.
 
-Slack Socket Mode bridge that connects allowlisted users to a Claude
-Code agent via DM or @mention.
+Slack Socket Mode bridge that connects allowlisted users to a team
+persona's agent (Claude Code or Codex, per the persona's vendor) via DM
+or @mention.
 
 ## What it does
 
 1. Listens for Slack DMs and @mentions via Socket Mode (no public URL needed).
 2. Downloads any file attachments and stages them on disk.
-3. Dispatches the message to a `claude -p` backend session.
+3. Dispatches the message to the persona's vendor backend session
+   (`claude -p` or `codex exec`).
 4. Posts the agent's reply back into the same Slack thread.
 5. Persists thread-to-session mappings so conversations survive restarts.
 
@@ -34,7 +36,7 @@ AsyncApp (slack-bolt)
 SlackBridge
     |-- ThreadStore (persist thread->session)
     |-- FileDownloader (stage attachments)
-    |-- agent-sdk backend (claude_p)
+    |-- agent-sdk backend (per-persona vendor: claude_p / codex_exec)
     v
 Reply posted to thread
 ```
@@ -52,6 +54,9 @@ Reply posted to thread
 | `notify.py` | Outbound: SlackNotifier (text DM + file upload) + CLI |
 | `multi.py` | Multi-team bridge loader (per-team lanes from a bridges config) |
 | `router.py` | One-shot LLM persona routing (sticky per thread) |
+| `idle_compact.py` | Idle compaction pass (ADR 0004): one `/compact` turn on an idle, oversized `claude_p` session; other vendors skipped |
+| `progress.py` | Turn-progress heartbeats to the ops-log channel for long turns |
+| `notify_health.py` | Transport-health sidecar for the notifier, read back by `autodrive status` |
 | `migrate.py` | threads.json migration tool |
 | `gen_service.py` | systemd unit generator (Linux) |
 | `__main__.py` | Daemon entry point with graceful shutdown |

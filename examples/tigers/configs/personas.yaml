@@ -2,7 +2,7 @@
 # Personas registry for tigerharness (journal, slack-bridge).
 #
 # Load this file by pointing the env var at it (absolute or relative path):
-#     export TIGERHARNESS_PERSONAS_CONFIG=path/to/tigers/configs/personas.yaml
+#     export TIGERHARNESS_PERSONAS_CONFIG='path/to/tigers/configs/personas.yaml'
 #
 # `personas_dir`, `cwd`, and `extra.add_dirs` are resolved relative to
 # THIS FILE'S directory, not your cwd at load time, so the team folder
@@ -43,7 +43,7 @@ personas:
     cwd: ..
     prompt_file: scout/prompt
     description: "scout on team tigers"
-    # vendor: chatgpt   # this persona runs on `codex exec` instead
+    # vendor: default   # claude | chatgpt | default (the team's default_vendor)
     # model: default    # a model id, or default (= default_model while on the team's vendor, else the vendor CLI's own)
     # extra:
     #   add_dirs: [../skills]   # uncomment to expose team-shared skills

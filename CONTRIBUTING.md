@@ -4,7 +4,7 @@
 
 ```bash
 git clone https://github.com/DingyuZhou/TigerHarness.git
-cd tigerharness
+cd TigerHarness
 uv sync --extra all
 ```
 
@@ -48,9 +48,12 @@ by section ("standard §2").
 ```
 src/tigerharness/
     __init__.py              Top-level package
-    cli.py                   Unified CLI entry point
-    init.py                  Project scaffolding (tigerharness init)
+    cli.py                   Unified CLI entry point (init / dismiss / journal / tiger-memory / slack-bridge / autodrive)
+    init.py                  Project scaffolding (tigerharness init; --refresh brings a team current)
     dismiss.py               Symmetric teardown (tigerharness dismiss)
+    vendors.py               Model vendors (ADR 0011): vendor -> backend/CLI map and
+                             per-persona vendor/model resolution from configs/personas.yaml
+    _logging.py              Logging setup (TIGERHARNESS_LOG_LEVEL); tests/test_logging_audit.py enforces its use
     py.typed                 PEP 561 type stub marker
     _bundled_skills/         The SKILL.md set `tigerharness init` installs
                              into a team. Hash-gated by init.py's two
@@ -60,14 +63,31 @@ src/tigerharness/
         factory.py           get_backend / register_backend / list_backends
         retry.py             run_with_retry (exponential backoff)
         errors.py            Exception hierarchy
+        backends/            claude_p (claude -p), codex_exec (codex exec),
+                             anthropic_sdk (claude-agent-sdk), openai_sdk (stub)
+    autodrive/               Periodic journal driver daemon (ADR 0010; one drive per lane, ADR 0012)
+        cli.py               start / stop / status
+        runner.py            The loop: non-AI probes, lane drives, rescue hold, auto-stop
+        settings.py          Team knobs read from configs/.env (TIGERHARNESS_AUTODRIVE_*)
+        notifier.py          Slack heartbeats + threaded drive summaries
     slack_bridge/            Slack Socket Mode bridge
-        bridge.py            Event handler + dispatch
+        bridge.py            Event handler + dispatch (one backend per vendor, per persona)
+        multi.py             Multi-team loader (lanes index -> per-team bridges)
         config.py            Env-var-driven config loader
         downloader.py        File attachment download
         notify.py            Outbound DM/file CLI
-        persistence.py       Thread -> session mapping
+        notify_health.py     Transport-health sidecar for notify
+        persistence.py       Thread -> session (+ backend) mapping
+        idle_compact.py      Idle compaction pass (ADR 0004; claude_p sessions only)
+        progress.py          Turn-progress heartbeats to the ops-log channel
+        reconnect.py         Socket liveness watchdog + catch-up replay
+        history.py           Thread-history fetch for untracked-thread joins
+        router.py            One-shot LLM persona routing
+        gen_service.py       systemd unit generator
+        migrate.py           threads.json migration tool
     tiger_memory/            Persistent bounded memory (3 stores: skills / must_remember / topics)
-        cli.py               CLI (init, rebuild, pin, state, ingest-*, compact-*, sweep-*, check, search, forget, doctor)
+        cli.py               CLI (init, rebuild, pin, state, plan, ingest-*, compact-*, card-check,
+                             team-events-compact-*, sweep-*, check, search, forget, doctor)
         config.py            YAML config loader + validation
         lifecycle.py         Extraction -> ingest core + fresh-start rebuild
         bounded_store.py     Bounded-store engine + forget guard
@@ -80,7 +100,7 @@ src/tigerharness/
         prefilter.py         Transcript pre-filter
         executor.py          In-session sub-agent write-back to the stores
         cursor.py            Per-session incremental-sweep cursors
-        sweep.py             Team-sweep gating (non-AI bookkeeping)
+        sweep.py             Team-sweep gating (non-AI bookkeeping; per-lane restriction)
         state.py             State snapshot payload (tiger-memory state)
         check.py             Store-format validation gate
         inspect_tools.py     Operator read/fix loop (search / forget / doctor)
@@ -88,37 +108,53 @@ src/tigerharness/
         migrate_topics.py    One-off migration to the topic-store model
         store.py             On-disk layout + atomic write + locking
         frontmatter.py       YAML frontmatter parser/writer
-        sources/             Source adapters (claude_code, journal_worklog, docs)
+        sources/             Source adapters: claude_code + codex (shared base _transcripts.py),
+                             journal_worklog; docs / auto_memory parse but are inert
         summarizers/         Summarizer backends (anthropic, mock)
         templates/           Briefing README template
     journal/                 File-based subscription backend (kind=task + kind=workflow)
-        cli.py               new / list / status / sweep / claim / release / step-done
+        cli.py               20 verbs: new / list / status / sweep / claim / release / step-done /
+                             defer / materialize / answer / abort / ... (see `journal --help`)
         compile_cli.py       Compile subcommands (compile-context ... validate-personas)
         models.py            status.json schema + state machine
         scaffold.py          Task / workflow scaffolding
-        sweep.py             Lazy sweep (archive + fresh/stale classify)
+        sweep.py             Lazy sweep (archive + idle/busy/crashed classify)
+        lanes.py             Drive lanes (ADR 0012): work owner + vendor/model lane gate
+        deferred.py          The deferred/ inbox (cheap Slack-side scheduling)
+        drive_sessions.py    Registry of drive sessions (memory double-count suppression)
+        paths.py             Journal root resolution (team root / TIGERHARNESS_JOURNAL_DIR)
+        walk.py              Workflow graph-walk state
+        worklog.py           Persona-stamped worklog notes
+        schedule.py          Recurring schedule definitions (DEPRECATED, ADR 0010)
         operating_template.py  OPERATING.md contract shipped into each journal
         wfcore/              Workflow compile core (models, drafter, critique
                              prompts, Tier-1 validators, trailer parser)
 tests/
-    agent_sdk/               Agent SDK tests
+    agent_sdk/               Agent SDK tests (incl. test_codex_exec.py)
     slack_bridge/            Slack bridge tests
     tiger_memory/            Tiger memory tests
-    journal/                 Journal backend tests (incl. wfcore/)
+    journal/                 Journal backend tests (incl. wfcore/ and lanes)
+    test_autodrive*.py       Autodrive daemon + self-driving tests
+    test_vendors.py          Vendor / policy resolution tests
+    test_init.py             Scaffolder tests
+    test_skill_hash_guard.py Bundled-skill manifest guard
+    test_docs_refs_guard.py  Docs cross-reference guard
     test_main_modules.py     __main__.py entrypoint tests
 examples/
-    tigers/                  Sample team scaffolded by `tigerharness init`
+    tigers/                  Sample team scaffolded by `tigerharness init --yes`
+                             (regenerate after scaffold or skill changes; see "Examples" below)
     tiger-memory.config.yaml Standalone memory config reference
-    env.example              Standalone Slack bridge env template
+    env.example              Standalone team configs/.env template (Slack tokens + team knobs)
+    slack-bridge-multi.service  Reference systemd unit for the multi-team bridge
 docs/
-    agent_sdk.md             Agent SDK reference
-    slack-bridge.md          Slack bridge module README
-    tiger-memory.md          Tiger memory module README
-    journal.md               Journal / subscription-backend operator quickstart
-    subscription-backend.md  Subscription backend concept + status.json schema
-    journal-workflow-mode.md kind=workflow compile + graph-walk deep dive
-    adr/                     Architecture Decision Records (0003: legacy
-                             runner removal + write-guard migration)
+    INDEX.md                 Docs home: one-hop router + must-not-miss rules (start here)
+    agent_sdk.md, autodrive.md, autodrive-notifications.md, slack-bridge.md,
+    tiger-memory.md, tiger-memory-sweep-protocol.md, DESIGN-memory.md,
+    per-persona-journal-memory.md, journal.md, journal-workflow-mode.md,
+    journal-instant-resume.md, journal-operator-questions.md,
+    subscription-backend.md, code-review-standard.md
+    adr/                     Architecture Decision Records 0001-0013
+                             (annotated list in docs/INDEX.md)
 ```
 
 Skills live in exactly one place: `src/tigerharness/_bundled_skills/`.
@@ -135,6 +171,11 @@ bundle, and was removed.)
 4. If it has optional dependencies, add an extra in `pyproject.toml`.
 5. Write a module README in `docs/<module>.md`.
 6. Run `uv run pytest --cov=tigerharness --cov-report=term-missing` and verify coverage.
+7. A new **model vendor** is registered in `src/tigerharness/vendors.py`
+   (`VENDOR_BACKENDS`, the alias map, `VENDOR_CLIS`) with its backend under
+   `src/tigerharness/agent_sdk/backends/`; everything else (bridge,
+   autodrive lanes, idle compaction, `init`'s vendor menu) resolves through
+   that module.
 
 ## Adding a custom persona
 

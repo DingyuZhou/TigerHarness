@@ -1,8 +1,13 @@
 # agent_sdk
 
-Backend-agnostic Python interface for running LLM agents. Today it ships with
-a working `claude -p` subprocess backend; you can swap in the official
-`claude-agent-sdk` or OpenAI's `openai-agents` later by changing one string.
+Backend-agnostic Python interface for running LLM agents. It ships three
+working backends — `claude_p` (a `claude -p` subprocess), `codex_exec` (a
+`codex exec` subprocess, OpenAI's Codex CLI) and `anthropic_sdk` (the
+official `claude-agent-sdk`) — plus an `openai_sdk` stub. Callers swap
+them by changing one string, and a team picks one per persona through
+`configs/personas.yaml` (`vendor: claude | chatgpt`, resolved by
+`tigerharness.vendors`; see
+[`docs/agent_sdk.md`](../../../docs/agent_sdk.md#choosing-a-backend-per-persona-model-vendors)).
 
 ## Why
 
@@ -18,30 +23,24 @@ workspace map and open work.
 
 ## Install
 
-The SDK has no required third-party Python dependencies. To use the
-`claude_p` backend you need the Claude Code CLI on `PATH`. Install
-Claude Code from anthropic.com/claude-code, then verify:
+The SDK is a sub-package of the `tigerharness` distribution and has no
+required third-party Python dependencies:
+
+```bash
+pip install tigerharness              # or: uv add tigerharness
+pip install 'tigerharness[anthropic]' # adds the anthropic_sdk backend
+```
+
+The subprocess backends need their CLI on `PATH`: `claude_p` needs the
+Claude Code CLI (install from anthropic.com/claude-code), `codex_exec`
+needs the Codex CLI signed in with `codex login`. Verify:
 
 ```bash
 claude --version
+codex --version
 ```
 
-The project root (one level up from this README, at `agent-sdk/`) ships a
-`pyproject.toml`. From a sibling project in the workspace, depend on it
-with uv:
-
-```toml
-# in your sibling project's pyproject.toml
-[project]
-dependencies = ["agent-sdk"]
-
-[tool.uv.sources]
-agent-sdk = { path = "../agent-sdk", editable = true }
-```
-
-Or with pip from the project root: `pip install -e .`.
-
-Requires Python 3.10+ (uses PEP 604 union types, `match` statements, and
+Requires Python 3.11+ (uses PEP 604 union types, `match` statements, and
 `from __future__ import annotations`).
 
 ## Quick start
@@ -66,6 +65,7 @@ asyncio.run(main())
 | Name | Status | Notes |
 |---|---|---|
 | `claude_p` | working | Spawns `claude -p` per call. Always available. Subprocess transport over stream-json. |
+| `codex_exec` | working | Spawns `codex exec --json` per call (OpenAI's Codex CLI, ChatGPT-subscription billed; `codex exec resume` for later turns). Always available; needs `codex` on `PATH`. |
 | `anthropic_sdk` | working | Wraps Anthropic's official `claude-agent-sdk`. Install with `pip install tigerharness[anthropic]`. Supports built-in tools, sessions, cancellation, and approval callbacks. |
 | `openai_sdk` | stub | Future: `pip install openai-agents`. Will support function tools, hosted tools, handoffs, and approval-loop wrappers. |
 
@@ -74,6 +74,9 @@ Switch backends by changing the factory call — caller code stays identical:
 ```python
 # Subprocess transport, always available
 backend = get_backend("claude_p")
+
+# Same agent code on OpenAI's Codex CLI
+backend = get_backend("codex_exec")
 
 # Same agent code, but now via the official claude-agent-sdk
 backend = get_backend("anthropic_sdk")
@@ -172,7 +175,7 @@ See `examples/` — recommended reading order:
 Run any of them with:
 
 ```bash
-python -m agent_sdk.examples.basic
+python -m tigerharness.agent_sdk.examples.basic
 ```
 
 ## `claude_p` extras
@@ -193,28 +196,31 @@ Schema dict or a pydantic model — v1 or v2). The CLI populates
 `structured_output` in its result event, which `RunResult.final_output`
 reflects.
 
+`codex_exec` reads the same keys where Codex has an equivalent
+(`permission_mode` maps onto Codex's sandbox/approval flags, `add_dirs`,
+`env`, `cli_args`; `output_schema` becomes `--output-schema`) and logs
+and ignores the rest, so a config written for `claude_p` runs unchanged.
+The full mapping is in [`docs/agent_sdk.md`](../../../docs/agent_sdk.md).
+
 ## Testing
 
-The pytest suite lives at `agent_sdk/tests/` (excluded from the wheel). From
-the project root:
+The pytest suite lives at `tests/agent_sdk/` in the tigerharness repo
+(outside the wheel). From the repo root:
 
 ```bash
 # One-time dev setup
-uv sync --group dev
+uv sync --extra all
 
-# Run the full suite (160 tests, ~3 seconds)
-uv run pytest
+# Run the SDK tests
+uv run pytest tests/agent_sdk -q
 
-# With coverage (uses .coveragerc which excludes examples and tests)
-uv run coverage run -m pytest && uv run coverage report -m
-
-# Type-check the package
-uv run mypy --python-version 3.10 agent_sdk
+# The whole repo with its coverage gate (100% line + branch,
+# configured under [tool.coverage] in pyproject.toml)
+uv run pytest -q --cov=tigerharness --cov-report=term
 ```
 
-The tests use a set of fake `claude` shell scripts as stand-ins for the real
-CLI, so the suite runs without Claude Code installed. Coverage of the
-`agent_sdk/` source is at 100%.
+The tests use fake `claude` / `codex` shell scripts as stand-ins for the
+real CLIs, so the suite runs without either installed.
 
 ## Limitations of `claude_p`
 
@@ -227,5 +233,7 @@ CLI, so the suite runs without Claude Code installed. Coverage of the
 - One subprocess per `run_stream` call; multi-turn happens via `--resume`
 - `cancel()` sends SIGINT; `after_turn=True` is a hint, not a hard guarantee
 
-For any of those features, switch to the `anthropic_sdk` backend once it's
-implemented (the interface stays the same).
+For any of those features, switch to the `anthropic_sdk` backend (the
+interface stays the same). `codex_exec` shares the same limitations, and
+additionally ignores `max_turns`, `max_budget_usd`, `disallowed_tools`,
+`settings` and `builtin_tools` (Codex has no per-run flag for them).

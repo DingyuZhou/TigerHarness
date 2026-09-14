@@ -70,13 +70,14 @@ so every completion lands under the right heartbeat.
    A skip pulse is a parent message with no thread: there is no drive, so
    there is no completion to thread under it.
 
-   The three reasons, and what each tells you:
+   The four reasons, and what each tells you:
 
    | Reason | Means |
    | --- | --- |
    | `queue busy - a live session owns the in-flight task` | Someone is working; nothing for the daemon to add. |
    | `queue idle - waiting on an in-flight drive` | The daemon's own drive is still settling. |
    | `rescue held - a drive is already out` | The queue shows a crashed task, but the daemon has a drive in flight and will not pile a second session onto it. See [autodrive.md](autodrive.md#the-daemon-never-rescues-on-top-of-its-own-drive). |
+   | `lanes busy - every lane with work already has a drive out` | Mixed-vendor teams only: each vendor/model lane that has work already has its one drive in flight. See [autodrive.md](autodrive.md#drive-lanes-one-drive-per-vendormodel-with-work-adr-0012). |
 
    A `rescue held` pulse repeating for many cycles is worth a look: it means
    an in-flight drive is not landing. That is a *reported* stall, which is

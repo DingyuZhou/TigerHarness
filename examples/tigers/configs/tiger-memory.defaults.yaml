@@ -1,0 +1,34 @@
+# Team-level tiger-memory defaults (team 'tigers').
+# Shared by all personas. Per-persona configs inherit these values;
+# any key a persona sets in its own tiger-memory.config.yaml wins.
+# Docs: https://github.com/DingyuZhou/TigerHarness/blob/main/docs/tiger-memory.md
+
+summarizer:
+  backend: anthropic
+  model: claude-sonnet-4-6
+  prompts: default/v1
+
+rebuild:
+  idle_threshold_hours: 1
+  rebuild_timeout_minutes: 60
+
+# Team-sweep gating (package defaults shown; floor 12 keeps memory at
+# most ~half a day stale for a single-operator team).
+sweep:
+  floor_hours: 24
+  max_personas: 3
+
+# Team-wide event log (ADR 0008): a lazy, dated who-did-what ledger at
+# memories/team/events.md, appended by every persona's sweep ingest.
+# These are the package defaults -- spelled out so team-level tuning is
+# a one-line edit. All lengths are characters.
+memory:
+  team_events:
+    enabled: true
+    recent_days: 30        # daily sections younger than this never compact
+    year_after_days: 400   # a month folds into its year this long after year end
+    month_max_chars: 1200  # target size of one folded month section
+    year_max_chars: 1000   # target size of one folded year section
+    max_length: 40000      # size backstop over the FOLDED tiers (month+year
+                           # sections only; the daily window is exempt)
+    overflow_limit: 50000  # (hysteresis: backstop trims only at/over this)

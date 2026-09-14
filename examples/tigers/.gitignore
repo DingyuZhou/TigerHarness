@@ -1,7 +1,31 @@
-# Tigerharness team -- secrets and runtime memory state
+# Tigerharness team -- secrets and runtime state
 configs/.env
-memories/*/archive/
-memories/*/journal/
 memories/*/briefing/
 memories/*/cache/
 memories/*/state.json
+# Transient staging dirs: the prompts / summary cards / manifests that the
+# in-session memory sweep and the between-task idle compaction stage and then
+# consume (each run rmtrees + rebuilds its dir). They embed raw transcript
+# content -- never commit them.
+memories/*/.sweep-staging/
+memories/*/.compact-staging/
+# Machine-local store state, living INSIDE the memory journal: operator_id,
+# rebuild timestamps, cost counters. Never share it -- the operator id is what
+# keeps concurrent writers collision-free. The path is deliberately specific:
+# memories/*/journal/ itself IS version-controlled (see below).
+memories/*/journal/.state.json
+# Live coordination state, mutated by every sweep -- committing it lets a
+# branch merge/revert resurrect an old claim or roll cursors back. The
+# store files, not these, are the durable ledger (a cursor rollback only
+# re-processes, never skips).
+memories/.tiger-memory-sweep.json
+memories/*/.sweep-cursors.json
+memories/*/.last-sweep-report.json
+# The team-root journal/ is the subscription-backend task queue: status.json
+# heartbeats, progress.md, worklog/, locks -- runtime state, not source. The
+# leading slash matters: it pins this to the ROOT journal/ only, so the
+# per-persona memories/*/journal/ stays tracked.
+/journal/
+# memories/*/archive/ and memories/*/journal/ are version-controlled (they
+# hold the memory summaries). .gitkeep files inside them ensure the empty
+# dirs are tracked.
