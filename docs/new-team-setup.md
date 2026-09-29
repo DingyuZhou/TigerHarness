@@ -1352,20 +1352,44 @@ its `vendor:` never took effect, or pyyaml is missing (Stage 0).
 
 ### Appendix — environment variable inventory
 
-Audited from source in both directions. A forward grep for
-`TIGERHARNESS_[A-Z0-9_]*` yields 23 tokens, but one of them —
-`TIGERHARNESS_IDLE_COMPACT_` — is **not a variable**: it is a string literal
-split across two source lines inside a log message in `idle_compact.py`, and
-it is the only token of the 23 with zero exact-quoted occurrences. The real
-count is **22**. A forward grep alone also **under-reports**, because
-setup-critical variables do not carry the prefix at all.
+Audited from source in both directions, **re-measured at v0.6.1** rather than
+carried over. A forward grep for `TIGERHARNESS_[A-Z0-9_]*` over `src/` now
+yields **31 tokens**, of which **two are not variables**:
 
-There are four read mechanisms, and a table built from only the first
-silently misses the rest: a direct `os.environ.get("NAME")`; a **lane's env
-dict** (`e.get("NAME")` in `idle_compact.py`, `env.get(...)` in `multi.py`);
-module-level constants (`INTERVAL_ENV = "TIGERHARNESS_..."` in
-`autodrive/settings.py`, resolved against `self.env`, which defaults to
-`os.environ`); and tuples of candidates (`CHANNEL_ENV_VARS` in `progress.py`).
+- `TIGERHARNESS_IDLE_COMPACT_` — a string literal split across two source lines
+  inside a log message (`idle_compact.py:78-79`).
+- `TIGERHARNESS_AUTODRIVE_` — a prose glob, `TIGERHARNESS_AUTODRIVE_*`, inside a
+  bundled skill (`_bundled_skills/tigerharness-basics/SKILL.md:207`).
+
+Both have **zero** exact-quoted occurrences, which is the test. So the real
+count is **29 prefixed variables**, and a forward grep alone still
+**under-reports**, because setup-critical variables do not carry the prefix at
+all (`SLACK_*`, `TIGER_MEMORY_*`, `SSL_CERT_FILE`, `XDG_*`).
+
+There are **six** read mechanisms, and a table built from only the first
+silently misses the rest:
+
+1. a direct `os.environ.get("NAME")`;
+2. a **lane's env dict** (`e.get("NAME")` in `idle_compact.py`, `env.get(...)`
+   in `multi.py`) — the Stage 4 trap;
+3. module-level constants (`INTERVAL_ENV = "TIGERHARNESS_..."` in
+   `autodrive/settings.py`, resolved against `self.env`, which defaults to
+   `os.environ`);
+4. tuples of candidates (`CHANNEL_ENV_VARS` in `progress.py`);
+5. **`Settings.get`** (`autodrive/settings.py:167-176`), which reads the process
+   env **and then the team's `configs/.env`** (`TEAM_ENV_REL`, `:57`). This is
+   the one a pure-`os.environ` model misses entirely, and it is why ADR 0013's
+   knob and every `TIGERHARNESS_AUTODRIVE_*` value can live in a file rather
+   than an export;
+6. **`reconnect.py`'s `_env_flag` / `_env_number`** (`:56-69`), whose flags
+   default **`True`** — the opposite of every opt-in flag in the table below.
+
+**ADR 0011 (per-persona model vendors) contributed no environment variables at
+all**, and that is by design, not an omission: vendor and model live in
+`configs/personas.yaml` because env is per process while the choice is per
+persona. The ADR lists the `.env` route explicitly among its rejected
+alternatives (`docs/adr/0011-model-vendors-per-persona.md:163-165`). Stop
+looking for one.
 
 **Day-one verdicts.** *Required* = set it or the feature is off or broken.
 *Optional* = a working default exists. *Set for you* = written by the system;
@@ -1405,6 +1429,27 @@ do not set it by hand.
 | `ALLOWED_SLACK_USER_IDS` | `notify.py` | legacy alias; prefer `SLACK_ALLOWED_USER_IDS` |
 | `TIGER_MEMORY_CLI` | `multi.py` | optional; lane's memory CLI override |
 | `XDG_STATE_HOME` | `journal/paths.py`, `persistence.py` | environment-supplied; read, never set by you |
+| `TIGERHARNESS_JOURNAL_SLACK_DRIVES` | `journal/cli.py:89`, via `Settings.flag` | **setup-critical** (ADR 0013); off when unset — may a Slack session drive? (Stage 7) |
+| `TIGERHARNESS_SLACK_WATCHDOG` | `reconnect.py:96` | optional; **default `True`** — an opt-OUT, unlike every flag above |
+| `TIGERHARNESS_SLACK_WATCHDOG_STALE_S` | `reconnect.py:98` | optional; default 30.0 |
+| `TIGERHARNESS_SLACK_WATCHDOG_POLL_S` | `reconnect.py:101` | optional; default 5.0 |
+| `TIGERHARNESS_SLACK_CATCHUP` | `reconnect.py:268` | optional; **default `True`** — also an opt-out |
+| `TIGERHARNESS_SLACK_CATCHUP_MAX_AGE_S` | `reconnect.py:270` | optional; default 3600.0 |
+| `TIGERHARNESS_SLACK_CATCHUP_MAX_MESSAGES` | `reconnect.py:273` | optional; default 50 |
+| `XDG_RUNTIME_DIR` | `autodrive/cli.py:308` | environment-supplied; **absent means no `systemd-run --user --scope` isolation for the autodrive daemon** (Stage 6) |
+
+**40 rows, and none of them is dead** — every one still resolves to a
+live read in `src/` at v0.6.1; I checked each non-prefixed row by name as well.
+The arithmetic closes, which is the point of re-measuring: **29 prefixed
+rows** here versus the **29 real prefixed variables** the forward grep
+found, plus 11 that carry no prefix. If those two numbers ever
+disagree again, the table is behind the code.
+Four of the eight new rows are **opt-outs that default `True`**, which is worth
+noticing: the watchdog and the catch-up are already on, so the thing you set
+them for is turning them *off*. And `XDG_RUNTIME_DIR` is in the same class as
+`XDG_STATE_HOME` — you do not set it, but its absence silently changes Stage 6:
+with no per-user runtime dir there is no user bus, so the daemon is spawned
+without the `systemd-run --user --scope` wrapper.
 
 ## See also
 
