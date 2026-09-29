@@ -1489,6 +1489,45 @@ class TestMain:
         assert not (tmp_path / "tigers" / "configs" / ".env").exists()
         assert not (tmp_path / "tigers" / "memories" / "scout").exists()
 
+    def test_multi_team_no_slack_warning_names_no_nonexistent_flag(
+        self, tmp_path: Path, capsys,
+    ):
+        """The --multi-team + --no-slack warning must only name flags that
+        exist.
+
+        It used to end "or re-run init for this team with `--slack`" -- there
+        is no --slack flag in the parser, so a reader following the advice
+        gets `unrecognized arguments`. The recovery that works is re-running
+        without --no-slack (or filling configs/.env by hand).
+        """
+        rc = main([
+            "--dir", str(tmp_path),
+            "--persona", "scout",
+            "--team", "tigers",
+            "--multi-team",
+            "--no-slack",
+            "--no-memory",
+            "--yes",
+        ])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "--multi-team is on but --no-slack is set" in err
+        # The defect: a flag that does not exist.
+        assert "`--slack`" not in err
+        # Pin the recovery against the real parser rather than against
+        # prose: every flag the warning names must appear in `--help`.
+        flags = {
+            a.rstrip(".,;:)")
+            for a in err.replace("`", " ").split()
+            if a.startswith("--")
+        }
+        assert flags, "the warning should name at least one flag"
+        with pytest.raises(SystemExit):
+            main(["--help"])
+        help_text = capsys.readouterr().out
+        unknown = {f for f in flags if f not in help_text}
+        assert not unknown, f"warning names flag(s) --help does not: {unknown}"
+
     def test_yes_with_no_persona_defaults_to_assistant(self, tmp_path: Path):
         rc = main(["--dir", str(tmp_path), "--yes"])
         assert rc == 0

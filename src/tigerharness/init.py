@@ -1946,8 +1946,9 @@ def init(
         print(
             "warning: --multi-team is on but --no-slack is set. The "
             "index will be created, but the bridge can't run without "
-            "Slack tokens. Enable Slack later (manually fill in "
-            "configs/.env) or re-run init for this team with `--slack`.",
+            "Slack tokens. Enable Slack later by filling in "
+            "configs/.env by hand, or by re-running init for this team "
+            "without --no-slack.",
             file=sys.stderr,
         )
 
