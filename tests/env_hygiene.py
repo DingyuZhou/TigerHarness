@@ -115,3 +115,61 @@ def env_name_literals(root: Path | None = None) -> dict[str, list[str]]:
                 where = f"{path.relative_to(root)}:{node.lineno}"
                 found.setdefault(node.value, set()).add(where)
     return {name: sorted(locs) for name, locs in sorted(found.items())}
+
+
+#: Node types that mean the env var name was *built* rather than written:
+#: an f-string, a concatenation or ``%``, or a call such as ``.format()``
+#: / ``.join()`` / ``.upper()``.
+_COMPUTED_NAME_NODES = (ast.JoinedStr, ast.BinOp, ast.Call, ast.IfExp)
+
+
+def _is_environ(node: ast.AST) -> bool:
+    """``os.environ`` (or any alias ending ``.environ``), as a receiver."""
+    return isinstance(node, ast.Attribute) and node.attr == "environ"
+
+
+def _is_getenv(node: ast.AST) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == "getenv"
+
+
+def computed_env_reads(root: Path | None = None) -> list[str]:
+    """Locations where an ``os.environ`` key is a *computed* expression.
+
+    :func:`env_name_literals` rests on one assumption: a variable has to be
+    named as a literal somewhere to be read at all. That assumption is true
+    of this package today -- every dynamic read resolves to a name written
+    down nearby (``_logging.py``'s ``ENV_VAR`` constant, ``progress.py``'s
+    ``CHANNEL_ENV_VARS`` chain, ``notify.py``'s candidate-spelling tuple) --
+    but nothing enforces it, and an assumption a guard depends on silently
+    is the shape of defect this whole task exists to remove.
+
+    So it is checked instead of assumed. A name passed through a variable is
+    fine (the literal still exists to be found); a name *assembled* --
+    ``os.environ.get(f"TIGERHARNESS_{suffix}")`` -- is not, because no scan
+    can enumerate it and the guard would go on reporting completeness it no
+    longer has.
+
+    Scope is ``os.environ`` and ``os.getenv``, the ambient channel itself.
+    ``Settings.get`` funnels into ``self.env``, which *is* ``os.environ``;
+    its keys are literals or module constants today and the shape scan
+    covers them.
+    """
+    root = PACKAGE_ROOT if root is None else root
+    bad: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            key: ast.AST | None = None
+            if isinstance(node, ast.Subscript) and _is_environ(node.value):
+                key = node.slice
+            elif isinstance(node, ast.Call) and node.args:
+                func = node.func
+                if isinstance(func, ast.Attribute) and (
+                    (func.attr in ("get", "pop", "setdefault")
+                     and _is_environ(func.value))
+                    or _is_getenv(func)
+                ):
+                    key = node.args[0]
+            if key is not None and isinstance(key, _COMPUTED_NAME_NODES):
+                bad.append(f"{path.relative_to(root)}:{node.lineno}")
+    return sorted(bad)

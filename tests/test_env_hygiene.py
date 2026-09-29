@@ -41,7 +41,11 @@ from tests.conftest import (
     SCRUBBED_NOT_IN_SOURCE,
     RealDaemonSpawnBlocked,
 )
-from tests.env_hygiene import PACKAGE_ROOT, env_name_literals
+from tests.env_hygiene import (
+    PACKAGE_ROOT,
+    computed_env_reads,
+    env_name_literals,
+)
 
 #: Names that must appear in any correct scan, one per read mechanism listed
 #: in :mod:`tests.env_hygiene`. Without this the forward guard passes
@@ -111,6 +115,47 @@ class TestScanIsSound:
         found = env_name_literals(tmp_path)
         assert "SOME_EXPORTED_CONSTANT" not in found
         assert "SOME_REAL_ENV_VAR" in found
+
+
+class TestTheScanCannotQuietlyGoBlind:
+    """Two limits Anzai flagged when correcting the PRD's figures. Both are
+    real; neither is left as a comment, because a limitation a guard
+    depends on and does not assert is the same defect in a new place."""
+
+    def test_no_env_read_uses_a_computed_name(self):
+        """The scan's load-bearing assumption -- that a variable is named as
+        a literal somewhere -- enforced rather than trusted.
+
+        Passing the name through a variable is fine; *assembling* it is not.
+        ``os.environ.get(f"TIGERHARNESS_{suffix}")`` is unenumerable by any
+        static scan, so the guard above would keep reporting a completeness
+        it had quietly lost."""
+        computed = computed_env_reads()
+        assert not computed, (
+            f"os.environ read(s) with a computed key at {computed}. The "
+            f"env-hygiene guard enumerates env vars by finding their names "
+            f"written as literals in src/; a name built at runtime is "
+            f"invisible to it and to every future reader. Name it as a "
+            f"module-level constant and index that instead."
+        )
+
+    def test_suite_cwd_is_not_a_team_root(self):
+        """The second contamination channel, which scrubbing cannot reach.
+
+        ``Settings.get`` reads ``os.environ`` **first, then the team's
+        ``configs/.env``**. The autouse fixture closes the first door only.
+        A suite whose cwd is a real team root reads that team's live knobs
+        through the second one with a pristine environment -- and
+        ``journal/paths.py:default_journal_root`` would resolve the team's
+        own ``journal/`` as well. Neither is something a scrub list can fix,
+        so assert the precondition that makes the scrub sufficient."""
+        cwd = Path.cwd()
+        assert not (cwd / "configs" / "personas.yaml").is_file(), (
+            f"pytest is running from inside a team root ({cwd}). Settings "
+            f"reads that team's configs/.env after os.environ, so its live "
+            f"knobs reach the suite through a channel the autouse env scrub "
+            f"cannot close. Run the suite from the package repo root."
+        )
 
 
 class TestEveryEnvNameIsAccountedFor:
