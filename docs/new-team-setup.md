@@ -1297,7 +1297,7 @@ rest are the same class.
 
 ### Stage 10 — Is the team actually alive?
 
-Run all eight from the team root. Every one of them can fail.
+Run all **nine** from the team root. Every one of them can fail.
 
 | # | Check | Command | Alive looks like |
 |---|---|---|---|
@@ -1305,23 +1305,50 @@ Run all eight from the team root. Every one of them can fail.
 | 2 | Project path real | `cat configs/repos.yaml` | an **uncommented** `project:` key (relative is fine) |
 | 3 | Bridge replies | DM the bot from an allowlisted account | a reply in thread |
 | 4 | **Ops-log armed** | grep the bridge log for `heartbeats ARMED` | the ARMED line naming your channel |
-| 5 | **Autodrive known** | `tigerharness autodrive status` | a state report with interval + a real driver — **not** `autodrive: stopped (no state file)` |
-| 6 | **Queue reachable** | `tigerharness journal sweep` | counts matching what you scaffolded |
+| 5 | **Autodrive known** | `tigerharness autodrive status` | a multi-line state report whose `driver:` is a real persona and whose `backend:` / `model:` / `lanes:` rows say what a drive will run on (Stage 6) |
+| 6 | **Queue reachable** | `tigerharness journal list` (or `sweep --driver <P>` inside a drive) | counts matching what you scaffolded; with `--driver`, a lane verdict and `[mine]` markers |
 | 7 | Memory healthy | `tiger-memory ... check` | exit status 0 (**not** `doctor` — see Stage 8) |
-| 8 | **Compile trio present** | `tigerharness journal validate-personas .` | exit 0 + `ok: ... has all of [...]` (see Stage 3) |
+| 8 | **Compile roles resolve** | `tigerharness journal validate-personas .` | exit 0 + `ok: ... has all of [...]` — and if it fails, the fix is `configs/workflow.yaml`, not renaming people (Stage 7) |
+| 9 | **Vendor CLI present** | `grep -E '^default_vendor\|^default_model' configs/personas.yaml` then `command -v claude` / `command -v codex` | the CLI named by your `default_vendor` resolves to a path |
 
 Checks 4, 5 and 6 are the three that were silently false on Inkstone. If you
-verify nothing else, verify those. Check 8 fails on **every** freshly scaffolded
-team that has not been told which personas compile workflows — it is the one
-below that costs you a crashed task rather than a missing feature.
+verify nothing else, verify those.
 
-> **Check 6 is the one that is not read-only.** `journal sweep` archives every
-> `done` task and can materialize deferred inbox entries into the queue —
+**Check 5 has a second failure string, and it is the same one a never-configured
+team gets.** `autodrive stop` calls `clear_state`, so after a clean stop `status`
+also reports `autodrive: stopped (no state file)` (Stage 6). Read the *report*,
+not the absence: a live daemon shows `driver:` naming a real persona and the
+`backend:` / `model:` / `lanes:` rows; `(none)` in `driver:` is a daemon that
+will fire and attribute its work nowhere.
+
+**Check 6 is the one that is not read-only, so this row names `list` first.**
+See the note below.
+
+**Check 8 fails on every freshly scaffolded team** that has not been told which
+personas compile workflows — it is the one here that costs you a crashed task
+rather than a missing feature. The names it asks for are *defaults*, so write a
+three-line `configs/workflow.yaml` mapping `drafter` / `akagi` / `ayako` onto
+your own personas (Stage 7).
+
+**Check 9 is new, and it is a day-one silent failure.** A team whose
+`default_vendor` names a vendor whose CLI is not installed scaffolds perfectly
+and then cannot drive anything: `init` only *warns* about the missing CLI
+(Stage 0), and every later symptom looks like something else. `claude` is the CLI
+for `default_vendor: claude`, `codex` for `chatgpt`; check both if any persona
+carries its own `vendor:`. The bridge's own startup line
+`lane <l> persona <p> runs on <vendor>/<model> (<source>)` (Stage 4) is the
+cross-check — a persona resolving to `claude` when you expected `chatgpt` means
+its `vendor:` never took effect, or pyyaml is missing (Stage 0).
+
+> **Why check 6 names `list` rather than `sweep`.** `journal sweep` archives
+> every `done` task and can materialize deferred inbox entries into the queue —
 > `journal --help` describes it as *"archive done tasks, classify in_progress
-> as idle/busy/crashed, summarise. Side-effecting."* That is fine on day one,
-> when the queue is yours and empty. Once the team is working, re-run this row
-> as `tigerharness journal list`, which reads the same trays and changes
-> nothing.
+> as idle/busy/crashed, summarise. Side-effecting."* On day one, with an empty
+> queue that is yours, running `sweep` is fine and gives you the richer output.
+> Once the team is working it is not a check you want to repeat casually, so the
+> row names `tigerharness journal list`, which reads the same trays and changes
+> nothing. Inside an actual drive, `sweep --driver <Persona>` is the right form
+> — it is the only way to see the lane view and verdict (Stage 7).
 
 ### Appendix — environment variable inventory
 
