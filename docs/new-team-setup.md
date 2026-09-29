@@ -499,21 +499,56 @@ not optional.
 | `state_dir` | yes | resolves to the lane's `threads.json` |
 | `env` | no (default `configs/.env`) | the lane's env file |
 | `agent_cwd` | no (default `.`) | where the agent session starts |
-| `allowed_user_ids` | no | falls back to `SLACK_ALLOWED_USER_IDS` in the env file |
-| `tiger_memory_trigger` | no (default `rebuild`) | valid values in `VALID_TIGER_MEMORY_TRIGGERS`: `rebuild`, `off` |
-| `idle_compact` | no | bridge idle compaction — **`init` scaffolds it `true`**; set `false` to opt this lane *out* |
+| `allowed_user_ids` | **required by one of two** — see below | else `SLACK_ALLOWED_USER_IDS` in the env file |
+| `tiger_memory_trigger` | no (default `rebuild`) | valid values in `VALID_TIGER_MEMORY_TRIGGERS`: `rebuild`, `off` — mind the YAML 1.1 trap below |
+| `idle_compact` | no (**default off when the key is absent**) | bridge idle compaction — `init` scaffolds it `true`; set `false` to opt this lane *out* |
+
+**`allowed_user_ids` is not optional; it is required by one of two routes.**
+`None` or `[]` falls back to `SLACK_ALLOWED_USER_IDS` in the lane's env file,
+and if *that* is empty too `load_multi` **raises** (`multi.py:374-383`). Note
+`init` scaffolds the fragment with `allowed_user_ids: []` and a TODO
+(`init.py:934`), which the loader treats exactly as absent — so a freshly
+scaffolded lane will not start until you fill one of the two. Whatever you
+supply is then validated by `_validate_allowed_user_ids` (`multi.py:142-156`):
+a **non-empty list** of non-empty strings, each starting with `U` or `W`.
+
+**`idle_compact` defaults off when the key is absent** — `spec.get(
+"idle_compact", False)` (`multi.py:237`) — and `_coerce_flag`
+(`multi.py:196-206`) reads **anything it does not recognise as `False`** rather
+than erroring, so a typo'd value leaves the lane silently opted out. Only
+`true` / `"true"` / `"yes"` / `"on"` / `"1"` turn it on.
+
+**`tiger_memory_trigger` has a YAML 1.1 trap.** A bare `off` parses to the bool
+`False`, and the loader deliberately recovers that back to the string `"off"`
+because `off` is a real mode; but a truthy bool (`on`, `yes`, `true`) maps to
+`"on"`, which is **not** a valid mode, and raises
+(`slack_bridge/config.py:39-47`). Quote it if you want to be sure: `"off"`.
 
 #### The lane env file
 
 `SLACK_APP_TOKEN` (must start with `xapp-`) and `SLACK_BOT_TOKEN` (must start
 with `xoxb-`) go in the lane's `.env`. `multi.load_multi` validates both
-prefixes and refuses to start otherwise. Two lanes may **not** share an
-`SLACK_APP_TOKEN` — each lane needs a distinct Slack app.
+prefixes and refuses to start otherwise. `_check_lane_uniqueness`
+(`multi.py:432-448`) then rejects **two** kinds of collision, not one: two
+lanes sharing an `SLACK_APP_TOKEN` (Slack rejects two Socket Mode connections
+to one app), and two lanes sharing a `state_path` (they would corrupt each
+other's `threads.json`). So each lane needs a distinct Slack app **and** a
+distinct `state_dir`.
 
 Allowlist: `allowed_user_ids` in the fragment, else `SLACK_ALLOWED_USER_IDS`
 in the env file (comma/whitespace separated). `notify` also accepts the legacy
 spelling `ALLOWED_SLACK_USER_IDS`, but `SLACK_ALLOWED_USER_IDS` is canonical —
 use it.
+
+**Two more variables belong in that file**, and neither is a token:
+
+- `TIGER_MEMORY_CLI` — read straight off the lane's env into the lane config
+  (`multi.py:422`).
+- `TIGERHARNESS_JOURNAL_SLACK_DRIVES` — ADR 0013's team knob (Stage 7).
+  The **bridge** never reads it; the **journal** does, via `Settings.flag`,
+  which looks at the process environment and then the team's `configs/.env`.
+  Since the lane env file defaults to exactly that path, this is where it
+  goes.
 
 > **Trap — lane `env_vars` vs the process environment.** `_load_env_file`
 > parses the lane's env file **without** writing into `os.environ`. That
@@ -533,9 +568,23 @@ TIGERHARNESS_BRIDGES_CONFIG=<teams-root>/slack-bridge.yaml \
   uv run python -m tigerharness.slack_bridge
 ```
 
-**Verify:** each lane logs its startup tagged `lane=<name>`. Then DM the bot
-from an allowlisted account and confirm a reply. A DM that is silently ignored
-almost always means the sending user is not in the allowlist.
+**Verify:** each lane logs its startup tagged `lane=<name>`. Three lines per
+lane are worth reading by name, because together they prove the lane loaded the
+config you think it did:
+
+- `lane %r tokens loaded (bot=%s app=%s)` (`multi.py:365-368`) — redacted, so
+  its presence is the signal, not its contents.
+- `lane %r persona %r runs on %s (%s)` (`multi.py:406-409`) — **one line per
+  persona naming the vendor and model it resolved to, and where that came
+  from.** This is the ADR 0011 surface a day-one reader needs: if a persona you
+  expected on `chatgpt` prints `claude`, its `vendor:` never took effect (or
+  pyyaml is missing — Stage 0).
+- `lane=%s registered -- cwd=%s personas=%s allowed_users=%s`
+  (`slack_bridge/__main__.py:272-277`) — the resolved roster and allowlist.
+
+Then DM the bot from an allowlisted account and confirm a reply. A DM that is
+silently ignored almost always means the sending user is not in the
+allowlist.
 
 For a long-running deployment, render a systemd user unit rather than
 hand-writing one:
