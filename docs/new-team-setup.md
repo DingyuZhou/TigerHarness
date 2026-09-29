@@ -759,12 +759,23 @@ self-drives.** Autodrive is a detached daemon that periodically fires "drive
 the journal."
 
 It is **off unless you opt in**, and it is the deliberate, Operator-authorized
-exception to the journal's human-triggered rule — safe only while `claude -p`
-bills the subscription rather than API tokens.
+exception to the journal's human-triggered rule.
+
+**The old justification for that exception — "safe only while `claude -p` bills
+the subscription" — no longer describes what the daemon does.** Since 0.6.0 a
+drive runs on the *driver persona's* vendor, and on a multi-lane team the daemon
+fires one drive per lane, each with its own backend and model
+(`autodrive/runner.py:1311-1319`, built by `probe_lanes`
+`runner.py:616-695`, dispatched through `get_backend(cfg.backend)`
+`runner.py:722-736`). So the cost shape is whatever each lane's vendor
+charges, and ADR 0013's header retires the cost premise outright. The reason to
+opt in deliberately is unchanged — an unattended process spends *something* on
+your behalf — but do not reason about it as a `claude -p`-only rail.
 
 Settings resolve **flag > process env > the team's `configs/.env` > built-in
-default**. The env-var name constants live in `autodrive/settings.py`; the
-interval default and floor live in `autodrive/runner.py`:
+default** — **for the six knobs in the table below, and not for the two after
+it.** The env-var name constants live in `autodrive/settings.py`; the interval
+default and floor live in `autodrive/runner.py`:
 
 | Constant | Env var | Default |
 |---|---|---|
@@ -779,14 +790,68 @@ interval default and floor live in `autodrive/runner.py`:
 `Settings.notify_channel` accepts `DM_SENTINEL` (`"dm"`, case-insensitive) at
 any layer to force the Operator DM.
 
-Set `TIGERHARNESS_AUTODRIVE_AUTOSTART` in the team's `configs/.env` to make
-the queue self-driving: `ensure_running` is called after `journal new`,
-`defer`, and `materialize` write to the queue. It is idempotent, never fatal,
-and opt-in — scheduling work starts the daemon, draining the queue stops it,
-and steady state is *no process running*.
+**Two more knobs exist and they have NO env var** — do not look for one:
+
+| Flag | Default layer |
+|---|---|
+| `--backend` | accepts a backend name (`claude_p`, `codex_exec`) **or** a vendor name (`claude`, `chatgpt`) (`autodrive/cli.py:829-838`) |
+| `--model` | (`autodrive/cli.py:839-846`) |
+
+Their default does not come from the environment at all; it comes from
+`configs/personas.yaml` via `resolve_drive_backend`
+(`autodrive/cli.py:187-224`): **the flag > the driver persona's `vendor:` /
+`model:` (else the team's `default_vendor` / `default_model`) > `claude_p`
+unpinned.** One subtlety worth knowing before you pass `--backend`: a model id
+belongs to one vendor, so a persona's `model:` is applied only when the drive
+actually runs on that persona's backend — an explicit `--backend` that differs
+gets **no** model unless `--model` says which. A malformed `vendor:` in
+`personas.yaml` raises rather than quietly starting the daemon on the other
+vendor's bill.
+
+There is also a **derived** setting, `lanes`, which you never set directly:
+`start` computes `lanes = not (args.backend or args.model or args.prompt)`
+(`autodrive/cli.py:438`, field at `runner.py:164`). Pinning any of those three
+pins every drive to one shape, so lane fan-out stands down.
+
+Set `TIGERHARNESS_AUTODRIVE_AUTOSTART` in the team's `configs/.env` to make the
+queue self-driving: `ensure_running` is called after **four** verbs write to the
+queue — `journal new`, `defer`, `materialize`, **and `answer`**
+(`journal/cli.py:1110` is the `answer` site; `autodrive/cli.py:547` names all
+four). `answer` matters more than it looks: it is the verb that returns a parked
+`needs_input` task to `active/`, so without it a task the Operator just
+unblocked would sit there until something else rang the bell. It is idempotent,
+never fatal, and opt-in — scheduling work starts the daemon, draining the queue
+stops it, and steady state is *no process running*.
 
 **Consider setting `--max-budget`.** Uncapped is a legitimate choice, but it
 should be a decision, not an accident.
+
+#### One daemon, one drive per lane (ADR 0012)
+
+"A detached daemon that periodically fires 'drive the journal'" is now the
+**single-lane special case**. On a team whose personas do not all share one
+vendor+model, the daemon is a **fan-out coordinator**: each tick it probes which
+*lanes* have work and fires one drive per lane
+(`autodrive/runner.py:1296-1330`). What that buys you, and what it constrains:
+
+- **At most one drive per lane in flight** (`runner.py:1303-1304`) — a slow lane
+  never gets two drives stacked on it, and a busy lane does not block the
+  others.
+- **An early wake is floored** at `MIN_INTERVAL_SECONDS`
+  (`runner.py:1305-1311`): a lane that fired seconds ago holds until the floor,
+  and logs that it is holding.
+- **When every lane with work already has a drive out**, the tick does not fire
+  and does not go silent either: it emits a skip pulse,
+  `SKIP_LANES_BUSY` = `"lanes busy - every lane with work already has a drive
+  out"` (`runner.py:701`, `:1322-1327`). Seeing that repeatedly is healthy
+  saturation, not a stall.
+- **The idle path fires a per-lane memory sweep** instead
+  (`probe_sweep_lanes`, `runner.py:540-613`).
+
+The practical consequence for setup: `--driver` no longer determines which
+vendor the daemon runs on by itself — the lane probe does, per lane. Pin
+`--backend` / `--model` / `--prompt` only when you genuinely want one shape for
+every drive, because that is exactly what turns fan-out off.
 
 Manual control:
 
@@ -797,11 +862,30 @@ uv run tigerharness autodrive stop
 ```
 
 The **stop brake** is cooperative-then-forceful: `stop` sets `stop_requested`
-in the state file and signals the daemon's process group with `SIGTERM`.
-State lives in `.autodrive.json` under the journal root (alongside
-`.autodrive.lock` and `.autodrive.log`), carrying `pid`, `in_flight`,
-`fire_count`, `tick_count`, `stop_requested`, `last_stop_reason`,
-`last_cost_usd`, and `last_error`.
+in the state file and signals the daemon's process group with `SIGTERM`. Note
+that `stop` then calls `clear_state` (`autodrive/cli.py:707`), so **after a
+clean stop `status` reports "no state file"** — the same string a team that
+never enabled autodrive gets. A *stale* state file means something killed the
+daemon without `stop` running.
+
+State lives in `.autodrive.json` (alongside `.autodrive.lock` and
+`.autodrive.log`) and carries **23 keys**: the twelve-key config projection
+`config_to_dict` writes — `interval_seconds`, `driver`, `backend`, `model`,
+`max_budget_usd`, `permission_mode`, `prompt`, `cwd`, `notify`,
+`notify_channel`, `journal_root`, `lanes` (`runner.py:229-243`) — plus eleven
+runtime counters: `pid`, `started_at`, `fire_count`, `last_fire_at`,
+`in_flight`, `tick_count`, `last_tick_at`, `stop_requested`,
+`last_stop_reason`, `last_cost_usd`, `last_error` (`autodrive/cli.py:484-497`).
+`backend`, `model` and `lanes` are the ones worth reading after a vendor change.
+
+**Which journal root?** Not `--journal-dir`. The state file anchors to the
+**team-canonical** journal — when you run the command from a team root, that
+team's `<team>/journal` regardless of any override (`_state_root`,
+`autodrive/cli.py:240-247`), so a second `start` anywhere in the team finds the
+live pid and is refused. If you pass a `--journal-dir` that disagrees, `status`
+prints a three-line `read:` anchor naming the file it actually read
+(`autodrive/cli.py:600-603`) rather than answering about a journal you did not
+ask about.
 
 `TURN_SCOPED_ENV_VARS` — `TIGERHARNESS_SLACK_THREAD_TS` and
 `TIGERHARNESS_SLACK_CHANNEL` — are scrubbed at the daemon spawn boundary, so a
@@ -824,27 +908,45 @@ survive the check. Both branches, so you can tell them apart:
 autodrive: stopped (no state file)
 ```
 
-**Enabled and alive** — a multi-line state report headed `autodrive:
-running`:
+**Enabled and alive** — a multi-line state report headed `autodrive: running`.
+The labels are character-exact and so is the order (`autodrive/cli.py:648-677`):
 
 ```
 autodrive: running
   pid:          <pid>
   journal:      <team-root>/journal
   interval:     600s
+  backend:      claude_p
+  model:        <model or (backend default)>
   driver:       <Persona>
+  lanes:        on (one drive per vendor/model lane with work)
   max_budget:   <usd or None>
+  notify:       slack -> <channel or operator DM>
+  started_at:   <iso8601>
   fire_count:   <n> (drives launched)
+  last_fire_at: <iso8601 or (none yet)>
   in_flight:    <n> (running now)
   done_count:   <n> (drives completed)
+  last_done_at: <iso8601 or (none yet)>
 ```
 
-**Enabled but dead** — the same report headed `autodrive: stopped (stale
-state file)`, with a `note:` saying the counters are frozen at the daemon's
-last write. Do not read this as the first case: a stale state file means the
-daemon *was* configured and is not running now (SIGKILL, OOM, reboot), and
-`in_flight: 1 (last recorded, daemon not running)` is how it tells you it
-died mid-drive.
+`backend:`, `model:` and `lanes:` are the vendor rows — the fastest way to see
+what a drive will actually run on. Two rows are **conditional** and appear only
+when the field is set: `last_stop:` and `last_error:`.
+
+**Enabled but dead** — the same report headed `autodrive: stopped (stale state
+file)`, preceded by a two-line `note:` saying the counters are frozen at the
+daemon's last write. Do not read this as the first case: a stale state file
+means the daemon *was* configured and is not running now (SIGKILL, OOM,
+reboot), and `in_flight: 1 (last recorded, daemon not running)` is how it tells
+you it died mid-drive.
+
+**"Never enabled = exactly one line" holds in the common case only.** Two
+things can add lines to *any* branch, including that one: the three-line
+`read:` anchor when `--journal-dir` disagrees with the team-canonical root, and
+`notify_failures:` / `notify_last_error:` when the notify sidecar has recorded
+failures (`autodrive/cli.py:625`, `:630-631`, `:676-677`). Both are silent when
+there is nothing to report, so seeing extra lines is information, not noise.
 
 Confirm the reported `driver:` is a real persona in `configs/personas.yaml`
 — `(none)` prints there when no driver resolved, which is a daemon that will
