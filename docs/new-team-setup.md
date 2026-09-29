@@ -37,15 +37,49 @@ Python 3.11+ and [`uv`](https://docs.astral.sh/uv/). TigerHarness has zero
 hard dependencies; every integration is an optional extra, so **install the
 extras for the features you intend to turn on** — Slack in particular.
 
+**You also need at least one vendor CLI on `PATH`**, because that is what
+actually runs your personas. Since 0.6.0 each persona runs on a *vendor*
+(ADR 0011): `claude` needs the `claude` CLI, `chatgpt` needs `codex`
+(`vendors.py:93-96`). `init` warns when the vendor you pick has no CLI
+installed (`init.py:2022-2029`) — it does not fail, so the team scaffolds fine
+and then cannot drive anything. Install the CLI for whichever vendor you name
+in Stage 1, and both if the team will be mixed.
+
 The extras are declared under `[project.optional-dependencies]` in
 `pyproject.toml`:
 
 | Extra | Turns on |
 |---|---|
 | `slack` | the bridge, `notify`, ops-log heartbeats (Stages 4–5) |
-| `memory` | tiger-memory's YAML config (Stage 8) |
-| `anthropic` | the `anthropic_sdk` agent backend; without it only `claude_p` works |
+| `memory` | **pyyaml — effectively mandatory, see below** |
+| `anthropic` | the `anthropic_sdk` agent backend only |
 | `all` | all of the above |
+
+**`memory` is not a Stage 8 extra.** Its only content is pyyaml
+(`pyproject.toml:32-34`), and pyyaml gates far more than tiger-memory's config:
+
+- per-persona vendor/model resolution — without it `read_personas_yaml` logs a
+  warning and returns `None`, so **every persona silently resolves to the
+  built-in vendor `claude`** (`vendors.py:200-208`);
+- the multi-lane bridge loader, which does not degrade: `_load_yaml` raises
+  `SystemExit` telling you to install it (`slack_bridge/multi.py:100-104`). That
+  blocks **Stage 4**, not Stage 8;
+- `notify`'s config read (`slack_bridge/notify.py:119`), the journal's roster
+  and alias reads (`journal/scaffold.py:438` and its siblings), and workflow
+  compilation (`journal/compile_cli.py:784`).
+
+Treat it as required.
+
+**`anthropic` is narrower than it looks.** Four backends are registered
+(`agent_sdk/factory.py:98-101`): `claude_p`, `codex_exec`, `anthropic_sdk`, and
+`openai_sdk` (a stub). Only `anthropic_sdk` needs this extra. **`codex_exec` —
+the whole `chatgpt` half of per-persona vendors — is stdlib-only and needs no
+extra at all**, just the `codex` CLI on `PATH`; `pyproject.toml:35-38` says so
+in its own comment. And nothing on the shipped rails uses `anthropic_sdk`: the
+bridge (`slack_bridge/bridge.py:1361`), idle compaction (`idle_compact.py:496`)
+and even the summarizer *named* "anthropic"
+(`tiger_memory/summarizers/anthropic.py:79`) all call `get_backend("claude_p")`.
+Install it only if you are writing code against the SDK backend yourself.
 
 A team that will use Slack **and** memory wants `[all]`, or at minimum
 `[slack,memory]`. Install bare and Stages 4, 5 and 8 fail later, at import
@@ -79,12 +113,27 @@ Expected: the sub-command list — `init`, `dismiss`, `tiger-memory (tm)`,
 `slack-bridge (sb)`, `journal (j)`, `autodrive (ad)`. If `tigerharness` is
 not found, nothing below will work; fix this first.
 
-**Optional but recommended:** set `TIGERHARNESS_LOG_LEVEL` (read in
-`_logging.py`, valid values `CRITICAL` / `ERROR` / `WARNING` / `INFO` /
-`DEBUG`) to `INFO` for the whole setup session. Several verifications in this
-runbook read a log line, and the two most important ones — the ops-log
-readiness lines in Stage 5 — are logged at INFO. At the default level you
-will not see them and cannot tell a configured team from a broken one.
+That list is the whole of `_usage()` (`cli.py:62-73`), and it is complete for
+what it claims — but the dispatcher behind it is a hand-rolled string match
+(`cli.py:26-59`), not argparse, so it accepts a few spellings `--help` never
+mentions: underscore aliases `tiger_memory` and `slack_bridge` (`cli.py:32`,
+`:41`), and a sub-dispatch hidden under `slack-bridge` that routes
+`gen-service` (Stage 5) and `compact-idle` to different modules before falling
+through to the notify CLI (`cli.py:45-50`). Anything else exits **2** with
+`unknown command:` and the usage block.
+
+**Optional:** set `TIGERHARNESS_LOG_LEVEL` (read in `_logging.py`, valid
+values `CRITICAL` / `ERROR` / `WARNING` / `INFO` / `DEBUG`) to `INFO` for the
+setup session. It governs the CLIs that route through `configure_cli_logging`.
+
+**It does not affect the bridge**, and you do not need it for Stage 5.
+`slack_bridge/__main__.py:83` calls
+`logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)` — a
+hardcoded INFO with `force=True`, so the daemon ignores the variable entirely
+and `_logging.py` says as much: the bridge "keeps its own richer handler setup
+in `slack_bridge/__main__.py` (journald-aware)". Stage 5's ops-log readiness
+lines are therefore **always visible** in the bridge log, whatever this
+variable is set to.
 
 ### Stage 1 — `tigerharness init`
 
@@ -499,10 +548,12 @@ or re-run `gen-service` — it prints `# Save as: ~/.config/systemd/user/<name>`
 on **stderr** (stdout is the unit file itself, so `gen-service > unit` stays
 clean). The derivation is deterministic, so re-running never renames anything.
 
-> Requires `TIGERHARNESS_LOG_LEVEL=INFO` (Stage 0). At a coarser level both
-> lines are invisible and you are back to guessing. Under systemd the level
-> must be set **in the unit's environment**, not in your shell — same
-> lane-vs-shell distinction as the channel itself.
+> **You do not need to set a log level for this.** Both lines are always
+> visible: the bridge daemon hardcodes `basicConfig(level=logging.INFO, ...,
+> force=True)` (`slack_bridge/__main__.py:83`) and so ignores
+> `TIGERHARNESS_LOG_LEVEL` entirely — under systemd as much as in your shell.
+> The lane-vs-shell distinction is real for the *channel* (below); it never
+> applied to the log level.
 
 ### Stage 6 — autodrive
 
@@ -869,7 +920,7 @@ do not set it by hand.
 | `TIGERHARNESS_TEAMS_DIR` | `journal/scaffold.py` | optional; overrides teams dir in `resolve_team_root` |
 | `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT` | `journal/sweep.py` | optional; default 1800s |
 | `TIGER_MEMORY_CONFIG` | `tiger_memory/config.py` | optional; else pass `--config` |
-| `TIGERHARNESS_LOG_LEVEL` | `_logging.py` | optional; **set `INFO` during setup** |
+| `TIGERHARNESS_LOG_LEVEL` | `_logging.py` | optional; CLIs only — the bridge daemon ignores it |
 | `TIGERHARNESS_IDLE_COMPACT` | `idle_compact.py` | optional; opt-in, read from the **lane** |
 | `TIGERHARNESS_IDLE_COMPACT_JOURNAL` | `idle_compact.py` | required *if* idle-compact is on |
 | `TIGERHARNESS_IDLE_COMPACT_THRESHOLD` | `idle_compact.py` | optional; default 0.30 |
