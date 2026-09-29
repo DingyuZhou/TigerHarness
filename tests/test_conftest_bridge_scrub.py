@@ -15,7 +15,14 @@ import pytest
 # The bridge-injected vars the conftest autouse fixture scrubs (kept in sync
 # with tests/conftest.py BRIDGE_ENV_VARS; asserted below so neither can shrink
 # unnoticed in a bridge env).
-NAMED_BRIDGE_VARS = ("TIGERHARNESS_SLACK_THREAD_TS", "TIGERHARNESS_BRIDGES_CONFIG")
+NAMED_BRIDGE_VARS = (
+    "TIGERHARNESS_SLACK_THREAD_TS",
+    "TIGERHARNESS_BRIDGES_CONFIG",
+    # The other half of the claim gate THREAD_TS opens (ADR 0013). Named here
+    # because this guard's whole value is being run from inside a bridge
+    # session / autodrive drive, which is where this var is ambient.
+    "TIGERHARNESS_JOURNAL_SLACK_DRIVES",
+)
 
 
 @pytest.mark.parametrize("var", NAMED_BRIDGE_VARS)

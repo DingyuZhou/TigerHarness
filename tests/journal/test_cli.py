@@ -2200,22 +2200,12 @@ class TestClaimRailGuard:
     belongs to ``TestSlackDrivesTeamSetting``."""
 
     KNOB = "TIGERHARNESS_JOURNAL_SLACK_DRIVES"
-
-    @pytest.fixture(autouse=True)
-    def _no_ambient_slack_drives(self, monkeypatch):
-        """Clear ADR 0013's knob for every test in this class.
-
-        Without this the refusals below measure the HOST, not the code. A
-        team that has adopted ADR 0013 sets
-        TIGERHARNESS_JOURNAL_SLACK_DRIVES=1 in its configs/.env, and its
-        autodrive daemon exports that into every session it spawns --
-        including one that runs this suite. The knob short-circuits the
-        guard to "allowed", so ``claim`` returns 0 where these tests expect
-        1, and the failure appears only on that host while CI, where the
-        knob is unset, stays green. ``test_default_off_depends_on_the_knob``
-        pins the coupling this fixture exists for.
-        """
-        monkeypatch.delenv(self.KNOB, raising=False)
+    # The knob is cleared for every test by the autouse scrub in
+    # tests/conftest.py (JOURNAL_RAIL_ENV_VARS) -- one home for the whole
+    # defect class, not a fixture per class. Without it these refusals
+    # measure the host: on a team that adopted ADR 0013 the knob is in
+    # configs/.env and its drives export it, so `claim` returns 0 where this
+    # class expects 1. test_default_off_depends_on_the_knob pins the coupling.
 
     def test_default_off_depends_on_the_knob(self, journal_dir, monkeypatch):
         """Both directions of the same call, with ambient env the ONLY
