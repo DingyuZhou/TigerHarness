@@ -442,8 +442,10 @@ persona at the charter first, so an unfilled `TODO` is read by every session.
 **2. The compile trio may not exist yet — and this bites at first workflow.**
 Workflow compilation needs three personas (roles `drafter`/`akagi`/`ayako`).
 `init` does **not** write `configs/workflow.yaml`, so `resolve_compile_personas`
-returns the hard-coded defaults **Anzai / Akagi / Ayako** — names your new team
-almost certainly does not have:
+falls back to its **built-in defaults** — Anzai / Akagi / Ayako — names your new
+team almost certainly does not have. They are defaults, not a hard-coded
+requirement: `configs/workflow.yaml` remaps the three roles onto your own
+personas, aliases included (Stage 7):
 
 ```bash
 tigerharness journal validate-personas .
@@ -986,13 +988,30 @@ Other `new` flags: `--brief-file`, `--captain`, `--team`, `--title`, `--slug`,
 `--kind workflow` reads `<team-root>/workflow/<playbook>.md` and **exits with
 an error if that file does not exist** — `init` does not create `workflow/`,
 so create it and add at least one playbook before promising the team workflow
-mode. Playbook names are validated against a conservative pattern, so a path
-like `../../etc` is rejected at CLI time.
+mode.
+
+Playbook names are validated against `^[A-Za-z0-9][A-Za-z0-9._-]*$`
+(`_PLAYBOOK_NAME_RE`, `scaffold.py:174`), so a path like `../../etc` is
+rejected. Note **where**: the check is inside `new_workflow_task`
+(`scaffold.py:823-827`), *after* `_cmd_new_workflow` has already built the path
+and stat'd it (`journal/cli.py:329-337`) — so a name with a separator fails the
+file-not-found check first. Either way it is exit 2 with nothing scaffolded, but
+the error you see may not be the one you expect.
 
 Before any disk write, `new_workflow_task` calls `validate_personas` on the
-union of the compile trio and the persona names referenced in the playbook,
-raising `MissingPersonaError` when any is missing. Nothing is scaffolded on
-failure. Pre-flight it:
+union of the compile-role personas and the persona names referenced in the
+playbook, raising `MissingPersonaError` when any is missing. Nothing is
+scaffolded on failure.
+
+**The compile trio is no longer hard-coded.** `_required_workflow_personas`
+(`scaffold.py:714-726`) takes the **team-configured** compile-role personas plus
+any playbook reference that matches your roster — including aliases, resolved
+before the intersection, so a playbook addressing a persona by nickname is still
+recognised. Names the playbook mentions that are *not* in the roster are treated
+as English prose, not as persona typos. `configs/workflow.yaml` is the override
+(`compile_cli.py:1367-1372`); Anzai / Akagi / Ayako are only the **defaults**.
+So the fix for a fresh team is a three-line `workflow.yaml` naming your own
+personas — not renaming people to match ours. Pre-flight it:
 
 ```bash
 uv run tigerharness journal validate-personas <Team>
@@ -1005,21 +1024,84 @@ conversation **verbatim** in `deferred/` with no playbook read, no compile and
 no model call. A later drive turns it into a real task with `journal
 materialize <deferred-id>`.
 
-#### The drive rail — who may drive
+#### The drive rail — who may drive, and it is now a team setting
 
-A **Slack-triggered session may schedule journal work but must never drive
-it**; driving belongs to the subscription rail. `journal claim` enforces this
-mechanically: it refuses when `TIGERHARNESS_SLACK_THREAD_TS` is set in the
-environment unless `--allow-api-drive` is passed. Autodrive is the sanctioned
-exception (Stage 6).
+**A Slack-triggered session may always SCHEDULE journal work. Whether it may
+DRIVE is your team's decision** (ADR 0013) — the older flat rule "Slack
+schedules, never drives" is now just the **default**, not the law.
+
+The knob is `TIGERHARNESS_JOURNAL_SLACK_DRIVES` (`journal/cli.py:85-99`), read
+through the same dependency-free reader autodrive uses: the process environment
+first, then the team's `configs/.env` (Stage 2). Set it to `1` there and
+bridge-spawned sessions drive exactly like an interactive one.
+
+`journal claim` is where this is enforced, and it is worth knowing the exact
+shape because three of the four cases look alike from outside
+(`journal/cli.py:1125-1157`):
+
+| Situation | Result |
+|---|---|
+| `TIGERHARNESS_SLACK_THREAD_TS` absent | no gate at all — an interactive session never carries the marker |
+| marker set **and** `--allow-api-drive` passed | allowed, and **the knob is never read** (short-circuit, `journal/cli.py:1135-1136`) |
+| marker set, no flag, knob truthy | allowed, with a `log.info` naming the knob |
+| marker set, no flag, knob falsey | **exit 1**, refusal printed, **before any mutation** |
+
+Two boundaries that are easy to get wrong: the gate lives **only on `claim`** —
+not on `release`, `step-done`, `sweep` or `answer` — and it runs before any
+status read or write, so a refused claim provably changes nothing. Autodrive
+remains the separate sanctioned exception (Stage 6).
 
 Driving verbs: `sweep` (archive done, classify in-progress as idle / busy /
-crashed), `claim` (`--driver`, `--allow-api-drive`), `release` (`--state`,
-`--output`, `--next-action`, `--question`), `step-done` (`--task`, `--step`,
-`--verdict`, `--output`) for workflow graph walks, and `answer` to reopen a
-task parked on an Operator question. `--driver` is what attributes work to a
-persona's memory store, so a drive that omits it produces no per-persona
-record.
+crashed), `claim`, `release`, `step-done` for workflow graph walks, and `answer`
+to reopen a task parked on an Operator question. Their full flag sets are
+larger than the two or three each that used to be listed here:
+
+| Verb | Flags |
+|---|---|
+| `claim` | `--format`, `--stuck-timeout`, `--driver`, `--drive-thread`, `--any-lane`, `--allow-api-drive` (`journal/cli.py:2290-2340`) |
+| `release` | `--session-ref`, `--driver`, `--state`, `--output`, `--next-action`, `--question` (`:2370-2388`) |
+| `step-done` | `--task`, `--step`, `--verdict`, `--output`, `--driver`, `--any-lane` |
+
+#### `--driver` is the drive's LANE IDENTITY, not just a memory label
+
+`--driver` does attribute work to a persona's memory store — but since ADR 0012
+it also decides **which work this drive is allowed to touch**. Omit it and you
+switch the lane gate off entirely: the source says so in as many words, *"No
+`--driver` = no lane identity = no gate"* (`journal/cli.py:1207`;
+`lanes.py:169`).
+
+What `--driver` turns on:
+
+- **`sweep --driver <P>` grows a lane view.** Each actionable item and inbox
+  entry is marked `  [mine]` or
+  `  [lane <k> -- not yours; owner <o or 'team default'>]` (`_lane_suffix`,
+  `journal/cli.py:853-858`), under a header naming your driver and lane, and
+  followed by a **lane verdict** (`:767-769`). The verdict is one of three
+  (`_lane_verdict`, `:829-850`): `mine` — pick one; `other-lanes` — nothing is
+  yours, **end the drive without the idle-maintenance tail**, because the other
+  lanes' own drives will take the rest; `idle` — nothing actionable anywhere.
+  `--format json` adds `driver`, `driver_lane`, `lanes`, `actionable_mine`,
+  `actionable_other_lane`, `deferred_lanes`, `deferred_mine` and
+  `lane_verdict` (`:750-762`).
+- **`claim --driver` refuses another lane's work with exit 3**
+  (`journal/cli.py:1203-1221`, helper `_refuse_if_other_lane` `:861-881`),
+  read-only, nothing written. A **malformed `vendor:`** in `personas.yaml` is a
+  different failure: **exit 2** (`:872-873`), so a typo there never quietly
+  starts work on the other vendor.
+- **`step-done --driver` applies the same gate, also exit 3**
+  (`journal/cli.py:1658-1662`) — a step note must never be recorded as work
+  done on the wrong vendor. And when the **next** step belongs to another lane
+  it prints a `handoff:` line (`:1717-1733`, printed `:1761-1767`, JSON key
+  `handoff` `:1744`) telling you to release the task so a drive on that lane
+  picks it up. It is advisory and fail-soft — the walk has already advanced.
+- **`--any-lane` is the deliberate override, and it exists on exactly those two
+  verbs** — `claim` (`:2322`) and `step-done` (`:2459`) — and nowhere else.
+
+Ownership is resolved in `journal/lanes.py`: `work_owner` (`:132-152`) for a
+task, `step_owner` (`:127-129`) for a compiled step, `deferred_owner`
+(`:176-185`) for an inbox entry, `lane_of` (`:93-98`) for a persona's lane, and
+`lane_check` (`:155-173`) for the comparison. A single-vendor team has one lane
+and never notices any of this.
 
 The sweep's heartbeat staleness threshold is
 `TIGERHARNESS_JOURNAL_STUCK_TIMEOUT`, defaulting to
