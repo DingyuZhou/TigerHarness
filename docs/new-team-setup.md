@@ -1140,15 +1140,42 @@ claims the sweep under a soft lease; the gate is a staleness floor
 (`sweep.floor_hours`, default `DEFAULT_STALENESS_FLOOR_HOURS` = 24.0), a
 per-wake persona cap (`sweep.max_personas`, default `DEFAULT_MAX_PERSONAS` =
 3) and a lease (`sweep.lease_seconds`, default `DEFAULT_LEASE_SECONDS` =
-1800.0). Each claim ends in `sweep-complete` (advances the team watermark) or
-`sweep-release` (drops the claim without advancing it). State lives in
-`SWEEP_STATE_FILENAME` = `.tiger-memory-sweep.json`.
+1800.0). State lives in `SWEEP_STATE_FILENAME` = `.tiger-memory-sweep.json`.
+
+**`sweep-plan` has three outcomes, not two**: `claimed`, `not_due` (inside the
+floor with no own-persona sources — the cheap common case), or `busy` (someone
+else holds the lease) — `sweep.py:171-183`. Only the first hands you a claim.
+
+Each claim then ends in `sweep-complete` or `sweep-release`, and
+**`sweep-complete` advances the team watermark only for a `scope: "team"`
+claim.** An `own-only` run deliberately leaves it untouched
+(`sweep.py:269-276`, `:317-323`), because bumping it would silently postpone the
+team's floor-due sweep by a whole window every time one persona's sources fired.
+`sweep-complete` is also **refused** — returning `False`, changing nothing — on
+a claim-token mismatch, or while roster personas are still pending, unless
+`force` is passed (`sweep.py:288-289` for the token check, `:294-315` for the
+pending-persona refusal). So "I ran sweep-complete" is not the
+same as "the watermark moved"; a team whose sweeps never seem to go quiet is
+worth checking here first.
 
 `rebuild` regenerates a persona's session-start briefing — `README.md`,
 `MANIFEST.md`, `UNPROCESSED.md`, `must_remember.md`, `skill_index.md`,
-`topic_index.md`, plus `skills/` and `topics/` detail files. It is **pure
-local computation with no model or API call**, so it is always safe to run
-standalone to refresh a briefing that has drifted behind the store.
+`topic_index.md`, plus `skills/` and `topics/` detail files. It is **pure local
+computation with no model or API call**, so it is always safe to run standalone
+to refresh a briefing that has drifted behind the store.
+
+It is not, however, *purely* a regeneration, and two side effects are worth
+knowing before you reach for it:
+
+- It writes a hidden `.fingerprint` over the store files
+  (`FINGERPRINT_NAME`, `briefing.py:48`, written at `:115-117`). That is how a
+  later rebuild can skip when nothing changed. Being hidden, it does not
+  disturb the `ls` check below.
+- It runs `check_all(cfg, store, fix=True)` first
+  (`lifecycle.py:1342-1343`, inside `rebuild` at `:1312-1353`) and logs a
+  warning naming any store it repaired. So a `rebuild` can quietly fix
+  mechanical drift — good, but it means a store that "was fine after rebuild"
+  may have been repaired rather than found clean. Read the log.
 
 **Verify:**
 
@@ -1183,6 +1210,18 @@ These are the flags that mean something is actually wrong:
 - `<Persona>: <store> over_overflow (<n> chars, max <m>)` — a store past its
   bound that compaction has not yet reclaimed.
 - `<Persona>: config error (...)` — that persona's config does not load.
+- `<Persona>: last compact-apply left still_over: <stores>`
+  (`inspect_tools.py:322-326`) — the previous compaction ran and did **not**
+  get the named store back under its bound. Distinct from `over_overflow`: that
+  one says a store is too big, this one says the thing meant to fix it already
+  tried and failed.
+
+One format correction, since the collision flag is the one you will see most:
+the slug field is **every distinct spelling joined by `/`**, not a single slug.
+Entries are grouped by `_norm_slug` (`inspect_tools.py:283`, grouped at
+`:372-374`, rendered `:383-386`), so a real line can read
+`topic slug collision: drive-lanes/Drive-Lanes across Akagi, Anzai` — which is
+two personas *and* two spellings, and still expected.
 
 Then confirm the briefing a persona actually reads at session start exists:
 
