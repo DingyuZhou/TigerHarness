@@ -37,13 +37,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from collections.abc import Callable
 from typing import Any
 
 from ..agent_sdk.types import Event, RunStart, ToolCall
-from .notify import _Creds, SlackNotifier, _load_slack_bridge_dotenv
+from .notify import (
+    _Creds,
+    SlackNotifier,
+    _read_slack_bridge_dotenv,
+    _resolve_env,
+)
 
 
 log = logging.getLogger("tigerharness.slack_bridge.progress")
@@ -407,10 +411,16 @@ def resolve_progress_channel() -> str | None:
     An or-chain would let ``TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL=""``
     win and silently disable the feature, which is indistinguishable
     from "not configured".
+
+    Both candidates are resolved through ``notify._resolve_env`` --
+    ``os.environ`` first, then the team ``.env`` parsed here into a local
+    dict. Reading the file this way rather than through the old loader's
+    ``os.environ`` injection is what keeps a heartbeat lookup from
+    exporting that whole file to the rest of the process.
     """
-    _load_slack_bridge_dotenv()
+    env_file = _read_slack_bridge_dotenv()
     for name in CHANNEL_ENV_VARS:
-        value = os.environ.get(name, "").strip()
+        value = _resolve_env(name, env_file).strip()
         if value:
             return value
     return None
@@ -456,6 +466,17 @@ def _notifier_for_token(bot_token: str) -> SlackNotifier | None:
     unreachable by construction. That makes the "no DM fallback" rule a
     structural property here rather than a convention a later edit could
     break.
+
+    ``_Creds.env_file`` is left at its empty default for the same reason:
+    a lane must not pick up another lane's ``.env``. The consequence is
+    that a lane-scoped heartbeat resolves ``SSL_CERT_FILE`` from
+    ``os.environ`` alone. That is not a loss -- before the loader stopped
+    injecting, the only way a lane heartbeat saw an ``.env`` trust store
+    was if some *other* caller had already exported one into this process,
+    which on a multi-lane box meant the first lane's file serving every
+    lane. Giving the lane its own trust store means passing its parsed
+    ``env_vars`` down from ``multi.py``, which is deliberately out of
+    scope here.
     """
     token = (bot_token or "").strip()
     if not token:

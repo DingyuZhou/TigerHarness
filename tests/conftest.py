@@ -7,12 +7,20 @@ and env-sensitive tests false-fail in both directions: with
 ``TIGERHARNESS_SLACK_THREAD_TS`` set the journal claim-gate refuses the
 "bridge" session by design (~23 claim/sweep tests), and with ambient
 ``SLACK_BOT_TOKEN``/allowlist vars the notify fallback finds real creds,
-so the NullNotifier degradation tests flip. ``notify``'s ``.env`` loader
-also writes loaded keys straight into ``os.environ``, so one test can
-pollute the rest of the run. This autouse fixture scrubs the family
-before every test, making the suite environment-independent regardless
-of where ``uv run pytest`` is invoked; ``delenv(raising=False)`` makes it
-a no-op in a clean env.
+so the NullNotifier degradation tests flip. This autouse fixture scrubs
+the family before every test, making the suite environment-independent
+regardless of where ``uv run pytest`` is invoked;
+``delenv(raising=False)`` makes it a no-op in a clean env.
+
+``notify``'s ``.env`` loader used to write every key it loaded straight
+into ``os.environ``, which added a *second* source of contamination:
+one test loading a fixture ``.env`` polluted the rest of the run, and
+``monkeypatch`` could not undo a write it had not made. That is fixed --
+the reader returns a dict (``notify._read_slack_bridge_dotenv``) -- and
+the fix is held in place by ``TestNothingWritesTheProcessEnvironment`` in
+``tests/test_env_hygiene.py``. Scrubbing per-test rather than per-session
+is now belt-and-braces; it stays, because an ambient dev shell remains a
+live channel and per-test is the cheaper thing to keep than to re-derive.
 
 The list below is no longer kept in sync by hand.
 ``tests/test_env_hygiene.py`` reads ``src/`` for every env-var-shaped
@@ -98,12 +106,17 @@ JOURNAL_RAIL_ENV_VARS = (
 #: apiece on a 3.8 GiB box; that memory pressure is what let the OOM killer
 #: take the Slack bridge down.
 #:
-#: An unclean dev shell is only half of it. ``slack_bridge/notify.py``
-#: writes every key it loads from a team ``.env`` straight into
-#: ``os.environ`` and leaves it there, so a single test loading a fixture
-#: ``.env`` that contains ``AUTOSTART=1`` turns it on for the whole rest of
-#: the session -- and ``monkeypatch`` cannot undo a write it did not make.
-#: Scrubbing before *every* test is what breaks that propagation.
+#: An unclean dev shell used to be only half of it.
+#: ``slack_bridge/notify.py`` wrote every key it loaded from a team
+#: ``.env`` straight into ``os.environ`` and left it there, so a single
+#: test loading a fixture ``.env`` that contained ``AUTOSTART=1`` turned it
+#: on for the whole rest of the session -- and ``monkeypatch`` cannot undo
+#: a write it did not make. That propagation channel is closed at the
+#: source now (the reader returns a dict; see
+#: ``TestNothingWritesTheProcessEnvironment``), which is why the dev shell
+#: is the whole of it again. Scrubbing before *every* test is kept anyway:
+#: it is the cheap half of a defence whose expensive half is a fleet of
+#: orphaned daemons.
 AUTODRIVE_ENV_VARS = (
     "TIGERHARNESS_AUTODRIVE_AUTOSTART",
     "TIGERHARNESS_AUTODRIVE_INTERVAL",

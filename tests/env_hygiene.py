@@ -189,3 +189,86 @@ def computed_env_reads(root: Path | None = None) -> list[str]:
             if key is not None and isinstance(key, _COMPUTED_NAME_NODES):
                 bad.append(f"{path.relative_to(root)}:{node.lineno}")
     return sorted(bad)
+
+
+#: ``os.environ`` mutators. ``pop`` / ``setdefault`` / ``clear`` /
+#: ``update`` are the dict-API spellings, and the three dunders are the
+#: same operations spelled explicitly -- included because a guard that
+#: only understands the sugar is one ``__setitem__`` away from going
+#: blind, and both were *measured* to really mutate the environment rather
+#: than assumed to. ``putenv`` / ``unsetenv`` are the ``os``-level ones,
+#: listed because they mutate the process environment without ``environ``
+#: appearing anywhere in the expression -- a scan keyed only on
+#: ``environ`` would walk straight past them.
+_ENVIRON_MUTATOR_METHODS = frozenset({
+    "setdefault", "update", "pop", "clear",
+    "__setitem__", "__delitem__", "__ior__",
+})
+_OS_LEVEL_MUTATORS = frozenset({"putenv", "unsetenv"})
+
+
+def environ_write_sites(root: Path | None = None) -> list[str]:
+    """Locations where the package **writes** the process environment.
+
+    The counterpart to :func:`computed_env_reads`, and the guard behind
+    ``TestNothingWritesTheProcessEnvironment``. Reading ambient config is
+    ordinary; *writing* it is not, because the write outlives the call: it
+    is visible to every later reader in the process and is copied wholesale
+    into every child spawned with ``{**os.environ}`` (``claude_p.py``,
+    ``codex_exec.py``).
+
+    That is not hypothetical. ``slack_bridge/notify.py``'s ``.env`` loader
+    used to do exactly this -- ``if key and key not in os.environ:
+    os.environ[key] = value`` over every line of a team's ``.env`` -- so one
+    Slack post exported that whole file, unrelated secrets included, for the
+    life of the process. ``tests/conftest.py`` had to scrub before *every*
+    test because one test loading a fixture ``.env`` could turn
+    ``TIGERHARNESS_AUTODRIVE_AUTOSTART`` on for the rest of the run, and
+    ``monkeypatch`` cannot undo a write it did not make.
+
+    Scoped to the ambient channel itself, exactly as
+    :func:`computed_env_reads` is: ``some_dict["K"] = v`` is an ordinary
+    assignment and flagging it would bury the signal.
+
+    A write is reported by location rather than name because the name is
+    usually a variable at a write site (the loader's was ``key``), so there
+    is nothing for the shape scan to find -- which is precisely why this
+    needed its own detector rather than another register entry.
+
+    Locations are de-duplicated: one expression can legitimately match two
+    branches below (``os.environ |= d`` is both an ``AugAssign`` and a
+    Store-context ``environ`` attribute), and reporting the same line twice
+    reads as two defects.
+    """
+    root = PACKAGE_ROOT if root is None else root
+    bad: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            hit = False
+            if isinstance(node, ast.Subscript) and _is_environ(node.value):
+                # ``os.environ[k]`` in a *read* context is fine; only Store
+                # (assignment) and Del (``del os.environ[k]``) are writes.
+                hit = isinstance(node.ctx, (ast.Store, ast.Del))
+            elif isinstance(node, ast.AugAssign):
+                # ``os.environ |= {...}`` -- verified to really mutate the
+                # environment, and invisible to the Subscript check above
+                # because there is no subscript.
+                hit = _is_environ(node.target)
+            elif isinstance(node, ast.Attribute) and node.attr == "environ":
+                # ``os.environ = {...}`` / ``del os.environ`` -- replacing
+                # the attribute outright, which every later reader in the
+                # process sees. Only the attribute form: a bare
+                # ``environ = ...`` is a local rebind, and flagging it would
+                # fire on any innocent variable of that name.
+                hit = isinstance(node.ctx, (ast.Store, ast.Del))
+            elif isinstance(node, ast.Call):
+                func = node.func
+                hit = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in _ENVIRON_MUTATOR_METHODS
+                    and _is_environ(func.value)
+                ) or any(_named(func, name) for name in _OS_LEVEL_MUTATORS)
+            if hit:
+                bad.add(f"{path.relative_to(root)}:{node.lineno}")
+    return sorted(bad)

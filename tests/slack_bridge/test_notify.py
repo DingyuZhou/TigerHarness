@@ -14,7 +14,8 @@ from tigerharness.slack_bridge.notify import (
     SlackNotifier,
     _Creds,
     _load_creds,
-    _load_slack_bridge_dotenv,
+    _read_slack_bridge_dotenv,
+    _resolve_env,
     _put_bytes,
     _resolve_dm_channel,
     _resolve_target_user_id,
@@ -402,24 +403,79 @@ class TestCliWithMocks:
 # ---------------------------------------------------------------------------
 
 class TestDotenvLoading:
+    """The reader returns a dict; :func:`_resolve_env` states precedence.
+
+    Every assertion here is on the returned mapping, never on
+    ``os.environ`` -- which is the point of the pair. The leak itself has
+    its own file (``test_notify_env_isolation.py``).
+    """
+
     def test_loads_from_env_file(self, monkeypatch, tmp_path):
         env_file = tmp_path / ".env"
         env_file.write_text("SLACK_BOT_TOKEN=xoxb-from-file\nSLACK_CEO_USER_ID=U0FILE\n")
         monkeypatch.setenv("TIGERHARNESS_SLACK_ENV", str(env_file))
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("SLACK_CEO_USER_ID", raising=False)
-        _load_slack_bridge_dotenv()
-        import os
-        assert os.environ.get("SLACK_BOT_TOKEN") == "xoxb-from-file"
+        parsed = _read_slack_bridge_dotenv()
+        assert parsed["SLACK_BOT_TOKEN"] == "xoxb-from-file"
+        assert _resolve_env("SLACK_BOT_TOKEN", parsed) == "xoxb-from-file"
 
     def test_env_vars_not_overwritten(self, monkeypatch, tmp_path):
+        """``os.environ`` beats the file -- the precedence the old
+        ``if key not in os.environ`` guard expressed, now stated once in
+        :func:`_resolve_env`."""
         env_file = tmp_path / ".env"
         env_file.write_text("SLACK_BOT_TOKEN=from-file\n")
         monkeypatch.setenv("TIGERHARNESS_SLACK_ENV", str(env_file))
         monkeypatch.setenv("SLACK_BOT_TOKEN", "already-set")
-        _load_slack_bridge_dotenv()
-        import os
-        assert os.environ["SLACK_BOT_TOKEN"] == "already-set"
+        parsed = _read_slack_bridge_dotenv()
+        # The file value is still *parsed* -- it simply does not win.
+        assert parsed["SLACK_BOT_TOKEN"] == "from-file"
+        assert _resolve_env("SLACK_BOT_TOKEN", parsed) == "already-set"
+
+    def test_a_blank_env_var_still_shadows_the_file(self, monkeypatch, tmp_path):
+        """Presence, not non-emptiness, is what wins -- a faithful port of
+        the old guard. ``SLACK_BOT_TOKEN=`` exported means "no token", and
+        must not silently fall through to a token in the file."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("SLACK_BOT_TOKEN=from-file\n")
+        monkeypatch.setenv("TIGERHARNESS_SLACK_ENV", str(env_file))
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "")
+        assert _resolve_env("SLACK_BOT_TOKEN", _read_slack_bridge_dotenv()) == ""
+
+    def test_absent_everywhere_is_the_empty_string(self, monkeypatch):
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        assert _resolve_env("SLACK_BOT_TOKEN", {}) == ""
+        assert _resolve_env("SLACK_BOT_TOKEN", None) == ""
+
+    def test_a_line_with_an_empty_key_contributes_nothing(self, monkeypatch, tmp_path):
+        """``=value`` clears the "no ``=``" skip but has no key once
+        stripped, so the ``if key:`` guard must drop it rather than filing
+        it under ``""``.
+
+        This branch used to be reached incidentally, through the other half
+        of the old ``if key and key not in os.environ`` conjunction. With
+        the ``os.environ`` half gone an empty key is the only way to take
+        it, so it needs its own case.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "=orphan-value\n"
+            "   =also-orphan\n"
+            "SLACK_BOT_TOKEN=xoxb-ok\n"
+        )
+        monkeypatch.setenv("TIGERHARNESS_SLACK_ENV", str(env_file))
+        assert _read_slack_bridge_dotenv() == {"SLACK_BOT_TOKEN": "xoxb-ok"}
+
+    def test_no_candidate_file_returns_an_empty_dict(self, monkeypatch, tmp_path):
+        """The ``{}`` return is what makes every consumer's ``env_file``
+        argument safe to pass unconditionally."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        with patch.object(
+            Path, "exists", autospec=True, return_value=False
+        ):
+            assert _read_slack_bridge_dotenv() == {}
 
     def test_loads_from_cwd_configs_env(self, monkeypatch, tmp_path):
         """Team-folder convention: `tigerharness init` puts the team's
@@ -438,10 +494,9 @@ class TestDotenvLoading:
         # The team root must NOT also have a top-level .env or that one
         # wins (it appears earlier in the candidates list -- intentional).
         assert not (team_root / ".env").exists()
-        _load_slack_bridge_dotenv()
-        import os
-        assert os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-team-configs"
-        assert os.environ["SLACK_CEO_USER_ID"] == "U0CFG"
+        parsed = _read_slack_bridge_dotenv()
+        assert parsed["SLACK_BOT_TOKEN"] == "xoxb-from-team-configs"
+        assert parsed["SLACK_CEO_USER_ID"] == "U0CFG"
 
     def test_cwd_dotenv_beats_configs_dotenv(self, monkeypatch, tmp_path):
         """If both <cwd>/.env and <cwd>/configs/.env exist, the top-level
@@ -455,9 +510,21 @@ class TestDotenvLoading:
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-        _load_slack_bridge_dotenv()
-        import os
-        assert os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-root"
+        assert _read_slack_bridge_dotenv()["SLACK_BOT_TOKEN"] == "xoxb-from-root"
+
+    def test_first_existing_file_wins_outright(self, monkeypatch, tmp_path):
+        """The candidate loop ``return``s after the first existing file --
+        it does NOT merge later candidates in. Asserted on a key the
+        second file has and the first does not, so a future "merge all
+        candidates" rewrite cannot pass here quietly."""
+        (tmp_path / ".env").write_text("SLACK_BOT_TOKEN=xoxb-from-root\n")
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / ".env").write_text("SLACK_CEO_USER_ID=U0ONLY_IN_CONFIGS\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TIGERHARNESS_SLACK_ENV", raising=False)
+        parsed = _read_slack_bridge_dotenv()
+        assert parsed == {"SLACK_BOT_TOKEN": "xoxb-from-root"}
 
 
 class TestResolveTargetUserIdFromYaml:
