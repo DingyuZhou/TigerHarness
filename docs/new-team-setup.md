@@ -300,8 +300,11 @@ persona whose `prompt.md` is already there.
 
 ```bash
 cd <teams-root>/<Team>
-ls configs/ && cat configs/personas.yaml
+ls -a configs/ && cat configs/personas.yaml
 ```
+
+**`-a` is load-bearing**: `configs/.env` is a dotfile, so a plain `ls configs/`
+never lists it and you would conclude it is missing.
 
 Expected: `personas.yaml`, `repos.yaml`, `tiger-memory.defaults.yaml`, `.env`
 — **and `slack-bridge.yaml`**, because this runbook told you to say yes to
