@@ -624,11 +624,31 @@ own parsed env dict** and hands the result to `TeamBridgeContext`'s
 non-empty and only falls back to scanning `os.environ` via
 `resolve_progress_channel` when it is `None`.
 
-**That fallback is a single-tenant leftover and it does not fire in any
-supported deployment.** The single-tenant bridge was removed; every bridge is
-multi-lane now, and `resolve_progress_channel`'s own docstring says it "finds
-nothing" there — *the lane field is the fix and not the fallback*. So a value
+**That fallback is a single-tenant leftover, and on a multi-lane bridge it
+finds nothing.** The single-tenant *entrypoint* was removed (ADR 0009), so on
+every deployment you set up from this runbook the lane field is what carries the
+channel — `build_turn_progress`'s own docstring is the source of the phrase:
+"a reporter that resolved its own config would find nothing on a multi-lane
+deployment" (`progress.py:485-487`), repeated in the inline comment at
+`:498-501` — *the lane field is the fix and not the fallback*. So a value
 exported in your shell reaches nothing, exactly as Stage 4's trap says.
+
+Two precisions, because the shorter version of this claim is wrong in both
+directions:
+
+- **It is not "never".** `build_bridge` is still kept as the documented way to
+  embed a one-persona bridge (`bridge.py:1349-1362`), and there
+  `progress_channel` has no lane to come from, so the fallback does fire. If
+  you are embedding rather than running the multi-lane daemon, the process
+  environment is your route.
+- **The fallback is not a plain `os.environ` scan.** `resolve_progress_channel`
+  first calls `_load_slack_bridge_dotenv` (`progress.py:411`), which **writes
+  into `os.environ`** from the first existing file among
+  `$TIGERHARNESS_SLACK_ENV`, `./.env`, `./configs/.env`, and the package
+  parent's `.env` (`notify.py:37-66`), skipping keys already set. So "the
+  process environment" here can include a file you did not know was being
+  read — which is a second way a channel can appear to work in one directory
+  and not another.
 
 #### Two accepted names
 
@@ -641,9 +661,13 @@ name works, in this order, first **non-empty** value winning:
 
 Both are accepted, so a team can already be configured under the second name.
 Empty does **not** count as set — that is deliberate: an or-chain would let
-`TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL=""` win and silently disable the
-feature, a state the source itself calls *indistinguishable from "not
-configured."* Set it in the **lane's env file** (Stage 4's trap).
+`TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL=""` win and silently disable the feature,
+a state `resolve_progress_channel`'s docstring calls *indistinguishable from
+"not configured"* (`progress.py:405-410`). The same rule applies one level up:
+`build_turn_progress` computes `resolved = (channel or "").strip() or None`
+(`progress.py:502`), so a lane whose `progress_channel` is the **empty string**
+takes the fallback exactly as a `None` would. Set it in the **lane's env file**
+(Stage 4's trap).
 
 There is deliberately **no DM fallback**. An unset channel does not reroute
 anywhere; it simply turns the feature off.
@@ -658,12 +682,21 @@ the bridge, send one message, and read the log:
   `progress: slack creds present but no ops-log channel (set TIGERHARNESS_BRIDGE_PROGRESS_CHANNEL); turn progress heartbeats are off`
 
 Grep the bridge log for `heartbeats ARMED`. Its presence is proof; its absence
-with the second line present is a precise diagnosis. This exists exactly so
-you do not have to wait five minutes to learn the feature is off —
-`_announce_ready` fires **once per lane** per process, guarded by `_ANNOUNCED`
-keyed on `(lane, channel)`. So the line appears **once per lane**, not once per
-process: on a multi-lane bridge, look for *your* lane's line, and note that a
-lane you did not configure staying silent is expected, not a fault.
+with the second line present is a precise diagnosis. This exists exactly so you
+do not have to wait five minutes to learn the feature is off.
+
+**Only the ARMED line is once-per-lane.** `_announce_ready` is guarded by
+`_ANNOUNCED` keyed on `(lane, channel)`, so the ARMED line appears once per lane
+per process: on a multi-lane bridge look for *your* lane's line, and a lane you
+did not configure staying silent is expected, not a fault. The
+**not-configured** line has no such guard — `build_turn_progress` logs it on
+every call (`progress.py:505-510`), i.e. **once per Slack message**, so a
+misconfigured lane repeats it for as long as you keep talking to it. Useful, and
+worth expecting before you conclude something is looping.
+
+One cosmetic note so you can match the line you actually see: when the lane name
+is `None` (the embedded single-persona case), the ARMED line renders
+`ARMED for this bridge` rather than a lane name (`progress.py:445`).
 
 **Where the log is.** Two deployments, two places:
 
@@ -677,19 +710,40 @@ so under systemd there is **no log file to `tail`** — the usual reason this
 verification stalls.
 
 `<your-unit>` is **not** a fixed name. `derive_unit_name` builds it per teams
-root as `slack-bridge-<basename>-<hash6>.service`, where the hash is the first
-6 hex of a SHA-256 over the *full resolved path* — so two roots sharing a
-basename (`~/a/teams`, `~/b/teams`) never collide on one unit. A root at
-`~/projects/tiger-teams` yields `slack-bridge-tiger-teams-4a9e4a.service`.
-Don't guess it; get it one of two ways:
+root as `slack-bridge-<basename>-<hash6>.service`, where the basename is first
+**sanitized** — `re.sub(r"[^A-Za-z0-9_.-]+", "-", resolved.name)`, falling back
+to `root` if nothing survives (`gen_service.py:56`) — and the hash is the first
+6 hex of a SHA-256 over the *full resolved path*, so two roots sharing a
+basename (`~/a/teams`, `~/b/teams`) never collide on one unit.
+
+Because the digest covers the **expanded** path, a worked example is only ever
+true for one `$HOME`: a root at `/home/tigerleap/projects/tiger-teams` yields
+`slack-bridge-tiger-teams-4a9e4a.service`, and the same relative layout under a
+different home yields a different digest. Don't guess it; get it one of two
+ways:
 
 ```bash
 systemctl --user list-units 'slack-bridge-*'   # what is actually running
 ```
 
-or re-run `gen-service` — it prints `# Save as: ~/.config/systemd/user/<name>`
-on **stderr** (stdout is the unit file itself, so `gen-service > unit` stays
-clean). The derivation is deterministic, so re-running never renames anything.
+or re-run `gen-service` — it prints **three** lines on **stderr** (stdout is
+the unit file itself, so `gen-service > unit` stays clean):
+
+```
+# Save as: ~/.config/systemd/user/<name>
+# Then:    systemctl --user daemon-reload
+#          systemctl --user enable --now <name>
+```
+
+(`gen_service.py:196-200`.) The derivation is deterministic, so re-running never
+renames anything.
+
+**`gen-service` is Linux-only.** On any other platform it emits **no unit at
+all**: it prints a warning naming your `sys.platform` and the command to run
+yourself (`<venv-python> -m tigerharness.slack_bridge` with
+`TIGERHARNESS_BRIDGES_CONFIG` set) and **exits 1**
+(`gen_service.py:161-170`). So on macOS this row of the table does not apply and
+you supply your own supervisor.
 
 > **You do not need to set a log level for this.** Both lines are always
 > visible: the bridge daemon hardcodes `basicConfig(level=logging.INFO, ...,
