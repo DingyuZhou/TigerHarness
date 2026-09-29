@@ -315,27 +315,70 @@ explains how to recover.
 
 ### Stage 2 — `configs/`
 
-Four files, three of which `init` wrote for you.
+**Up to six files, up to five of which `init` wrote for you.** The count
+depends on your flags: `configs/.env` is written unless `--no-slack`
+(`init.py:1443-1447`), and `configs/slack-bridge.yaml` is written on the
+multi-team path (Stage 1). Only `configs/workflow.yaml` is never scaffolded.
 
 - **`configs/personas.yaml`** — the roster, plus the `default_persona` field
   the session bootstrap reads. Each entry may carry an `aliases:` list; the
   journal resolves persona names through that alias map, so an alias is the
   supported way to let the Operator address a persona by nickname.
+
+  **It also carries the team's vendor policy, and this is the file where
+  ADR 0011 lives.** A new team's header gets a `default_vendor` /
+  `default_model` block (`_PERSONAS_YAML_VENDOR_BLOCK`, `init.py:519-532`), and
+  every persona entry gets two commented hints,
+  `# vendor: default   # claude | chatgpt | default` and `# model: default`
+  (`_PERSONA_ENTRY`, `init.py:551-560`). Uncomment them to move one persona off
+  the team default. The rules, read in `vendors.py`:
+
+  - `default_vendor` is `claude` unless you said otherwise
+    (`DEFAULT_VENDOR`, `vendors.py:85`), and a vendor maps to a backend:
+    `{"claude": "claude_p", "chatgpt": "codex_exec"}` (`vendors.py:64-67`).
+  - `""`, `default`, `inherit` and `team` all mean "not set, inherit"
+    (`_INHERIT`, `vendors.py:90`).
+  - **A persona that switches vendor and names no model does NOT inherit
+    `default_model`** (`vendors.py:316-319`) — a model id belongs to one
+    vendor, so it would be meaningless on the other. It falls back to that
+    vendor CLI's own default.
+  - The parse path is `read_personas_yaml` (`vendors.py:183-219`) ->
+    `team_default_policy` (`:246-276`) -> `resolve_model_policy` (`:279-325`).
+
+  **Scaffolded for a NEW team only** (`init.py:2013-2021`). On an existing team
+  `init` prints a stderr note instead (`init.py:1971-1978`) — so a team created
+  before 0.6.0 has no vendor block and you add it by hand.
 - **`configs/repos.yaml`** — the path-indirection map, written by
   `_scaffold_repos_yaml`. Prose and config reference paths relative to the
   team root; this file is the single place a machine-specific layout is
   recorded, which is what makes a team folder portable between machines.
   `_detect_project_dir` auto-captures a nearby TigerHarness checkout: it walks
   up from the team dir at most 3 levels and, at each level, scans the
-  *immediate child directories* for a `pyproject.toml` whose `[project] name`
-  is `tigerharness`, first hit in sorted order winning. When nothing matches it
-  writes a **placeholder**, never a silent guess — so check this file and fix
-  the placeholder if the auto-capture missed. A captured path is written
+  *immediate child directories* of the **parent**, skipping the directory it
+  came from (`init.py:1097`, `:1107`), for a `pyproject.toml` matching
+  `re.search(r'^name\s*=\s*"tigerharness"', text, MULTILINE|IGNORECASE)`
+  (`init.py:1117-1120`) — first hit in sorted order winning. Two consequences
+  worth knowing: the test is **case-insensitive and not scoped to the
+  `[project]` table**, so a `name = "TigerHarness"` anywhere in the file
+  matches; and because the current directory is excluded, **a checkout sitting
+  inside the team folder is never found**. When nothing matches it writes a
+  **placeholder**, never a silent guess, *and* prints a stderr hint
+  (`init.py:1148-1152`) — a louder signal at run time than the grep-for-`#`
+  check below. A captured path is written
   **relative to the team root**, not absolute; that is what makes the team
   folder portable between machines, so a relative value here is correct and
   is not the failure mode.
 - **`configs/tiger-memory.defaults.yaml`** — team-wide memory defaults.
   Stage 8.
+- **`configs/.env`** — tokens *and* **the team-settings file**. This is not
+  just a secrets holder: it is the second layer every `Settings` lookup reads
+  after the process environment, so team-wide knobs live here — every
+  `TIGERHARNESS_AUTODRIVE_*` value (Stage 6) and
+  `TIGERHARNESS_JOURNAL_SLACK_DRIVES`, the ADR 0013 knob that decides whether
+  Slack-spawned sessions may drive the journal (Stage 7). Written unless
+  `--no-slack`.
+- **`configs/slack-bridge.yaml`** — the per-team bridge lane fragment, written
+  on the multi-team path. Stage 4.
 - **`configs/workflow.yaml`** — optional, not scaffolded. Only to override
   `compile_personas`.
 
@@ -358,6 +401,10 @@ line:
 Absolute versus relative is not the signal — relative is the norm. A
 still-commented `project:` means every persona instruction that says "the
 project" points nowhere.
+
+The file `init` writes is not just that one line: it carries a four-line
+comment header and a `team_root: .` key as well (`init.py:1153-1161`), so a
+`cat` that shows only `project:` means someone edited it down.
 
 ### Stage 3 — Persona prompts and the charter
 
