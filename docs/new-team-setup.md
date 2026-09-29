@@ -42,8 +42,11 @@ actually runs your personas. Since 0.6.0 each persona runs on a *vendor*
 (ADR 0011): `claude` needs the `claude` CLI, `chatgpt` needs `codex`
 (`vendors.py:93-96`). `init` warns when the vendor you pick has no CLI
 installed (`init.py:2022-2029`) — it does not fail, so the team scaffolds fine
-and then cannot drive anything. Install the CLI for whichever vendor you name
-in Stage 1, and both if the team will be mixed.
+and then cannot drive anything. Install the CLI for whichever vendor you name in
+Stage 1, and both if the team will be mixed. **Where to get them, and the
+cold-boot `PATH` trap that bites under systemd, are in the
+[README](../README.md#requirements)** — this stage deliberately does not
+duplicate them.
 
 The extras are declared under `[project.optional-dependencies]` in
 `pyproject.toml`:
@@ -817,6 +820,14 @@ There is also a **derived** setting, `lanes`, which you never set directly:
 `start` computes `lanes = not (args.backend or args.model or args.prompt)`
 (`autodrive/cli.py:438`, field at `runner.py:164`). Pinning any of those three
 pins every drive to one shape, so lane fan-out stands down.
+
+**A word on "lane", because this doc uses it for two different things.**
+Everywhere up to here — all of Stages 4 and 5 — a *lane* is a **Slack bridge
+lane**, one team served by the one bridge process. From this point on in Stage 6,
+and throughout Stage 7, a *lane* is a **drive lane**: one vendor+model
+combination that personas run on (ADR 0012). They are unrelated. The next
+sub-section defines the second sense; if you have only read Stages 0-5 so far,
+read it before this `lanes` setting makes sense.
 
 Set `TIGERHARNESS_AUTODRIVE_AUTOSTART` in the team's `configs/.env` to make the
 queue self-driving: `ensure_running` is called after **four** verbs write to the
