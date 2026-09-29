@@ -769,6 +769,16 @@ the journal."
 It is **off unless you opt in**, and it is the deliberate, Operator-authorized
 exception to the journal's human-triggered rule.
 
+> **"Lane" changes meaning here, and this is the only warning you get.** Every
+> use of *lane* **before** this point in the document — the at-a-glance path at
+> the top, Stage 0's note on the `memory` extra, Stage 1's and Stage 2's
+> `configs/slack-bridge.yaml` mentions, and all of Stages 4 and 5 — means a
+> **Slack bridge lane**: one team served by the one bridge process. From here to
+> the end of Stage 7, *lane* means a **drive lane**: one vendor+model combination
+> that personas run on (ADR 0012). The two are unrelated, and the rest of this
+> stage uses only the second sense. "One daemon, one drive per lane" below is
+> where it is defined.
+
 **The old justification for that exception — "safe only while `claude -p` bills
 the subscription" — no longer describes what the daemon does.** Since 0.6.0 a
 drive runs on the *driver persona's* vendor, and on a multi-lane team the daemon
@@ -820,14 +830,6 @@ There is also a **derived** setting, `lanes`, which you never set directly:
 `start` computes `lanes = not (args.backend or args.model or args.prompt)`
 (`autodrive/cli.py:438`, field at `runner.py:164`). Pinning any of those three
 pins every drive to one shape, so lane fan-out stands down.
-
-**A word on "lane", because this doc uses it for two different things.**
-Everywhere up to here — all of Stages 4 and 5 — a *lane* is a **Slack bridge
-lane**, one team served by the one bridge process. From this point on in Stage 6,
-and throughout Stage 7, a *lane* is a **drive lane**: one vendor+model
-combination that personas run on (ADR 0012). They are unrelated. The next
-sub-section defines the second sense; if you have only read Stages 0-5 so far,
-read it before this `lanes` setting makes sense.
 
 Set `TIGERHARNESS_AUTODRIVE_AUTOSTART` in the team's `configs/.env` to make the
 queue self-driving: `ensure_running` is called after **four** verbs write to the

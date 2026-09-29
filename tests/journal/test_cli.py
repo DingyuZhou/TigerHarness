@@ -2196,8 +2196,9 @@ class TestClaimRailGuard:
 
     Subject: the DEFAULT-OFF behaviour. ADR 0013's team knob is read from
     the process env first, so a class asserting the default must SET the
-    default -- see ``_no_ambient_slack_drives``. The knob-on behaviour
-    belongs to ``TestSlackDrivesTeamSetting``."""
+    default -- done for every test here by ``JOURNAL_RAIL_ENV_VARS`` in the
+    autouse scrub in ``tests/conftest.py``. The knob-on behaviour belongs to
+    ``TestSlackDrivesTeamSetting``."""
 
     KNOB = "TIGERHARNESS_JOURNAL_SLACK_DRIVES"
     # The knob is cleared for every test by the autouse scrub in
