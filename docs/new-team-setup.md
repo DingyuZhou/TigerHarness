@@ -1250,26 +1250,50 @@ rest are the same class.
 4. **`SSL_CERT_FILE` and `TIGERHARNESS_SLACK_ENV` are needed together for
    `notify`.** `_ssl_context` reads `SSL_CERT_FILE`;
    `_load_slack_bridge_dotenv` reads `TIGERHARNESS_SLACK_ENV` to find the
-   `.env` when it is not in the default location. Set one without the other
-   and `notify` degrades with a **WARNING** — visible in logs, invisible to a
-   caller who only checks the exit status. → verify by sending yourself one
-   real message: `uv run tigerharness slack-bridge text "setup check"`.
+   `.env` when it is not in the default location.
+
+   **Be precise about which half is exit-invisible, because the command below
+   does report its failures.** `_cmd_text` returns **2** when creds are not
+   configured and **1** when the send fails (`notify.py:534-543`), so a caller
+   checking the exit status does catch both of those. The rung that degrades
+   silently is **TLS trust**: an `SSL_CERT_FILE` that is missing, unreadable, or
+   not a CA bundle logs a WARNING and *falls through to the next rung*
+   (`notify.py:208-215`), and the send can then still succeed and **exit 0**. So
+   the exit status is a real signal for creds and delivery, and no signal at all
+   for which trust store you ended up on. → verify by sending yourself one real
+   message and *reading the log as well as the exit code*:
+   `uv run tigerharness slack-bridge text "setup check"`.
 5. **Scaffold-time-only writes never refresh an existing team.** `init` writes
    with `_write_if_missing`, so a team scaffolded months ago does not gain
    newly-shipped files. `init --refresh` is the escape hatch: it installs
    missing bundled skills, refreshes any skill still byte-identical to a
-   previously-shipped version, **leaves hand-edited skills untouched**, and
-   appends missing lines to `.gitignore` (append-only — nothing is removed or
-   rewritten). It does **not** touch `personas.yaml`, `.env`, prompts, the
-   charter, or an existing `.claude/settings.json`. `--refresh-skills` is a
-   retained alias that now syncs `.gitignore` too. Idempotent:
+   previously-shipped version, **leaves hand-edited skills untouched**, appends
+   missing lines to `.gitignore` (append-only — nothing is removed or
+   rewritten), **and recreates the `.agents/skills` symlink when it is missing**
+   (`init.py:2296`, helper `ensure_agents_skills_link` `:1231-1264`, documented
+   in `--refresh`'s own help at `:2267-2269`). That last one matters for any
+   team scaffolded before the symlink shipped: without it a Codex persona has no
+   skills at all (Stage 1). It does **not** touch `personas.yaml`, `.env`,
+   prompts, the charter, or an existing `.claude/settings.json`.
+   `--refresh-skills` is a retained alias that now syncs `.gitignore` too.
+   Idempotent:
 
    ```bash
    uv run tigerharness init --refresh --team <Team>
    ```
 
-   Expected when current: `Nothing to do -- bundled skills and .gitignore are
-   already up to date`.
+   Expected when current — and note the real line is longer than the prefix
+   this runbook used to quote (`init.py:2298-2302`):
+
+   ```
+   Nothing to do -- bundled skills and .gitignore are already up to date under <team>/.
+   ```
+
+   It may be followed by ` (N hand-edited skill(s) left unchanged.)`
+   (`init.py:2303-2307`). And the no-op branch is gated on `link is None` as
+   well (`init.py:2297`), so **a team missing its `.agents/skills` symlink will
+   not print "Nothing to do"** even when every skill is current — it will report
+   the work it did instead. Do not read that as drift.
 
 ### Stage 10 — Is the team actually alive?
 
