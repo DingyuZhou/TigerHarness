@@ -139,6 +139,44 @@ class TestTheScanCannotQuietlyGoBlind:
             f"module-level constant and index that instead."
         )
 
+    # The check above passes by finding nothing, which is exactly how a
+    # broken detector looks. Against real ``src/`` it has only ever
+    # returned ``[]``, and ``--cov=src/tigerharness`` does not measure
+    # ``tests/``, so the coverage gate cannot notice a detection branch
+    # that never runs. These exercise each form on a synthetic module.
+    @pytest.mark.parametrize("read", [
+        pytest.param('os.environ.get(f"TIGERHARNESS_{x}")', id="fstring"),
+        pytest.param('os.environ.get("TIGERHARNESS_" + x)', id="concat"),
+        pytest.param('os.environ.get("TIGERHARNESS_{}".format(x))', id="format"),
+        pytest.param('os.environ[f"TIGERHARNESS_{x}"]', id="subscript"),
+        pytest.param('os.getenv(f"TIGERHARNESS_{x}")', id="getenv"),
+        pytest.param('os.environ.pop(f"TIGERHARNESS_{x}", None)', id="pop"),
+        pytest.param('os.environ.get(A if x else B)', id="ifexp"),
+        pytest.param('environ.get(f"TIGERHARNESS_{x}")', id="bare-environ"),
+        pytest.param('getenv(f"TIGERHARNESS_{x}")', id="bare-getenv"),
+    ])
+    def test_computed_forms_are_detected(self, tmp_path: Path, read: str):
+        (tmp_path / "m.py").write_text(f"v = {read}\n", encoding="utf-8")
+        assert computed_env_reads(tmp_path) == ["m.py:1"], (
+            f"a computed env-var name written as {read} is not detected"
+        )
+
+    @pytest.mark.parametrize("read", [
+        pytest.param('os.environ.get("TIGERHARNESS_LITERAL")', id="literal"),
+        pytest.param('os.environ.get(ENV_VAR)', id="module-constant"),
+        pytest.param('os.environ[ENV_VAR]', id="constant-subscript"),
+        pytest.param('some_dict.get(f"computed_{x}")', id="not-environ"),
+        pytest.param('cfg.env.get(f"computed_{x}")', id="injected-dict"),
+    ])
+    def test_acceptable_forms_are_not_flagged(self, tmp_path: Path, read: str):
+        """A name passed through a variable is fine -- the literal still
+        exists somewhere for the shape scan to find. And a computed key on
+        a mapping that is *not* ``os.environ`` is an ordinary dict lookup;
+        flagging those would bury the signal in thousands of false hits,
+        which is why the check is scoped to the ambient channel itself."""
+        (tmp_path / "m.py").write_text(f"v = {read}\n", encoding="utf-8")
+        assert computed_env_reads(tmp_path) == []
+
     def test_suite_cwd_is_not_a_team_root(self):
         """The second contamination channel, which scrubbing cannot reach.
 

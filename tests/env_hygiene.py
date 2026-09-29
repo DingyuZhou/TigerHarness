@@ -123,13 +123,26 @@ def env_name_literals(root: Path | None = None) -> dict[str, list[str]]:
 _COMPUTED_NAME_NODES = (ast.JoinedStr, ast.BinOp, ast.Call, ast.IfExp)
 
 
+def _named(node: ast.AST, name: str) -> bool:
+    """``os.<name>`` or a bare ``<name>``.
+
+    The bare form matters: ``from os import environ`` would otherwise walk
+    straight past an attribute-only check, and the package would have lost
+    the guarantee without anything saying so. No module imports it that way
+    today -- which is the moment to make sure one cannot start quietly.
+    """
+    return (
+        (isinstance(node, ast.Attribute) and node.attr == name)
+        or (isinstance(node, ast.Name) and node.id == name)
+    )
+
+
 def _is_environ(node: ast.AST) -> bool:
-    """``os.environ`` (or any alias ending ``.environ``), as a receiver."""
-    return isinstance(node, ast.Attribute) and node.attr == "environ"
+    return _named(node, "environ")
 
 
 def _is_getenv(node: ast.AST) -> bool:
-    return isinstance(node, ast.Attribute) and node.attr == "getenv"
+    return _named(node, "getenv")
 
 
 def computed_env_reads(root: Path | None = None) -> list[str]:
@@ -164,11 +177,14 @@ def computed_env_reads(root: Path | None = None) -> list[str]:
                 key = node.slice
             elif isinstance(node, ast.Call) and node.args:
                 func = node.func
-                if isinstance(func, ast.Attribute) and (
-                    (func.attr in ("get", "pop", "setdefault")
-                     and _is_environ(func.value))
-                    or _is_getenv(func)
-                ):
+                # ``getenv`` is checked without an Attribute gate so the
+                # bare ``from os import getenv`` form is covered too.
+                environ_method = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in ("get", "pop", "setdefault")
+                    and _is_environ(func.value)
+                )
+                if environ_method or _is_getenv(func):
                     key = node.args[0]
             if key is not None and isinstance(key, _COMPUTED_NAME_NODES):
                 bad.append(f"{path.relative_to(root)}:{node.lineno}")
