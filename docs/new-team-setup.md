@@ -141,7 +141,23 @@ variable is set to.
 first if it does not exist.
 
 **Operator supplies:** the team name, the first persona's name, the team's
+default model vendor, optionally a default model id, and the team's
 one-sentence goal.
+
+**On a NEW team, interactively, two questions come before the goal** — added in
+0.6.0 with per-persona vendors (ADR 0011), and they are not in this runbook's
+older transcripts:
+
+1. `Which model vendor should this team use by default?` — a menu whose
+   options carry literal backticks, ``claude (runs `claude`)`` /
+   ``chatgpt (runs `codex`)``, default the first (`init.py:1979-1986`).
+2. ``Default <vendor> model id (Enter for the `<cli>` CLI's own default)`` —
+   free text, Enter accepts the vendor CLI's default (`init.py:1989-1996`).
+
+Both are skipped by `--vendor` / `--model`, and both are skipped entirely on an
+**existing** team (they are gated on `is_new_team`), where `init` instead prints
+a stderr note telling you to edit `configs/personas.yaml`
+(`init.py:1971-1978`).
 
 ```bash
 cd <teams-root>
@@ -151,17 +167,24 @@ uv run tigerharness init --team <Team> --persona <Persona> \
 
 #### Where it creates things — read this before you run it
 
-`init`'s search root is `--dir`, which **defaults to the current
-directory**. `discover_teams` returns `[search_root]` when the search root is
-*itself* a team (it treats any directory containing `configs/personas.yaml`
-as a team), otherwise it scans the immediate children.
+`init`'s search root is `--dir`, which **defaults to the current directory**.
+What happens next depends entirely on which flags you passed, and the trap is
+that **the form this runbook prescribes above is the dangerous one.**
 
-The consequence, and it is the trap that bites on your *second* team: a bare
-`init` run **from inside an existing team folder** does not create a new team
-next to it, and it does not cleanly extend the one you are standing in
-either. It creates a **nested team inside the current one** —
-`<Team>/<Team>/` with its own `configs/personas.yaml` listing only the new
-persona, while the outer team's roster stays exactly as it was.
+`discover_teams` is consulted in exactly one case: when `--team` *and*
+`--team-dir` are both absent (`init.py:1869-1870`). Then you get the team
+picker, and because it treats any directory containing
+`configs/personas.yaml` as a team, a bare interactive `init` run **from inside
+an existing team folder lists that team first, at `default_idx=0`**, and
+choosing it sets `final_team_dir = existing[idx]` (`init.py:1880-1883`) — it
+**cleanly extends** the team you are standing in. That path is safe.
+
+The nesting comes from `--team`. With `--team <Team>` and no `--team-dir`,
+`discover_teams` is never called at all; the code takes
+`final_team_dir = (root / team).resolve()` (`init.py:1903`). Run that from
+inside `<Team>/` and `root` is `<Team>/`, so you get **`<Team>/<Team>/`** — a
+nested team with its own `configs/personas.yaml` listing only the new persona,
+while the outer team's roster stays exactly as it was.
 
 That shape is the reason to care. The wreckage looks plausible: a directory
 tree that reads like a team, a persona that resolves nowhere the Operator is
@@ -169,9 +192,9 @@ looking, and an outer roster that is *silently missing someone*. Nothing
 errors. If you have already done it, the tell is a team directory whose name
 appears twice in the path.
 
-**Run `init` from the teams root (the parent), or pass `--dir` / `--team-dir`
-explicitly.** `TIGERHARNESS_TEAMS_DIR` does not protect you here — it is read
-by the journal, not by `init`.
+**So: run the `--team` form from the teams root (the parent), or pass
+`--team-dir` explicitly.** `TIGERHARNESS_TEAMS_DIR` does not protect you here
+— it is read by the journal, not by `init`.
 
 #### The flags that matter on day one
 
@@ -182,6 +205,9 @@ by the journal, not by `init`.
 | `--team-dir` | explicit team directory (default `<search-root>/<team>`) |
 | `--dir` | where to search for existing teams (default `.`) |
 | `--goal` | seeds the charter's Mission section with the Operator's words |
+| `--vendor` | a **new** team's `default_vendor`: `claude` or `chatgpt`; skips the vendor prompt, and `--yes` takes `claude` (`init.py:2246-2252`) |
+| `--model` | a **new** team's `default_model` for that vendor; blank means the vendor CLI's own default (`init.py:2253-2258`) |
+| `--refresh-skills` | alias for `--refresh`, kept for older scripts — note it now syncs `.gitignore` too (`init.py:2271-2276`) |
 | `--traits` | recorded **verbatim** in `prompt.md` for the persona to expand later |
 | `--multi-team` | create the top-level `slack-bridge.yaml` index — **say yes** (Stage 4) |
 | `--no-multi-team` | skip the index; the bridge then needs one created by hand |
@@ -203,6 +229,22 @@ Team-level, via `create_team`: `.gitignore`, `configs/personas.yaml`,
 `settings.json` (carrying `TIGERHARNESS_PERSONAS_CONFIG` pointed at
 `configs/personas.yaml`) plus the bundled skills installed by
 `install_bundled_skills`.
+
+**Plus `.agents/skills`, which is easy to miss and load-bearing.**
+`_scaffold_claude_dir` also creates the symlink
+`<team>/.agents/skills -> ../.claude/skills` (`init.py:1216`, helper
+`ensure_agents_skills_link` `init.py:1231-1264`). That symlink is **Codex's
+only door to the team's skills** — Claude Code reads `.claude/skills`
+directly, Codex reads `.agents/skills`. It can fail quietly: if something
+non-symlink already sits at that path, or the symlink cannot be created, the
+helper logs a warning and returns `None` (`init.py:1247-1253`), and a Codex
+persona then simply has no skills. Stage 9's `--refresh` recreates it.
+
+**And in multi-team mode, two more files.** When the top-level
+`slack-bridge.yaml` index exists, `_maybe_register_slack_bridge_lane`
+(`init.py:1717-1748`) writes the per-team fragment
+`configs/slack-bridge.yaml` and appends the team to that index — both
+idempotent, and both skipped entirely under `--no-multi-team`.
 
 **Know these by name.** The bundled skills are the team's capability surface,
 and a team that does not know a skill exists never uses it — that is Inkstone
@@ -261,10 +303,15 @@ cd <teams-root>/<Team>
 ls configs/ && cat configs/personas.yaml
 ```
 
-Expected: `personas.yaml`, `repos.yaml`, `tiger-memory.defaults.yaml`, `.env`;
-and your persona listed in `personas.yaml`. If `personas.yaml` is missing, the
-directory is not a team and every later `journal` command will resolve
-somewhere else.
+Expected: `personas.yaml`, `repos.yaml`, `tiger-memory.defaults.yaml`, `.env`
+— **and `slack-bridge.yaml`**, because this runbook told you to say yes to
+`--multi-team` and that writes the per-team lane fragment as well. Your
+persona should be listed in `personas.yaml`, and on a new team so should
+`default_vendor` / `default_model` (Stage 2). If `personas.yaml` is missing,
+the directory is not a team and every later `journal` command will resolve
+somewhere else. If `slack-bridge.yaml` is missing but you asked for
+`--multi-team`, the top-level index did not exist when `init` ran — Stage 4
+explains how to recover.
 
 ### Stage 2 — `configs/`
 
