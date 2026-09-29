@@ -1175,10 +1175,12 @@ def _scaffold_claude_dir(team_dir: Path) -> list[Path]:
 
     - ``TIGERHARNESS_PERSONAS_CONFIG`` wired up automatically, so
       tigerharness components find the team's personas.
-    - the bundled skills (``drive-journal``, ``journal-new``,
-      ``slack-notify``, ``workflow-append-steps``,
-      ``tigerharness-basics``), so agents know how to drive the
-      journal, send Slack messages, and operate their own team.
+    - the bundled skills -- all seven in ``_CURRENT_SKILL_HASHES``:
+      ``drive-journal``, ``journal-new``, ``journal-autodrive``,
+      ``sweep-memory``, ``slack-notify``, ``workflow-append-steps``,
+      ``tigerharness-basics`` -- so agents know how to drive the
+      journal, run the memory sweep, send Slack messages, and operate
+      their own team.
 
     Skills are read from the ``_bundled_skills/`` directory shipped
     inside the tigerharness package. If a skill file already exists on
@@ -1946,8 +1948,9 @@ def init(
         print(
             "warning: --multi-team is on but --no-slack is set. The "
             "index will be created, but the bridge can't run without "
-            "Slack tokens. Enable Slack later (manually fill in "
-            "configs/.env) or re-run init for this team with `--slack`.",
+            "Slack tokens. Enable Slack later by filling in "
+            "configs/.env by hand, or by re-running init for this team "
+            "without --no-slack.",
             file=sys.stderr,
         )
 

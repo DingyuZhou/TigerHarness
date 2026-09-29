@@ -526,9 +526,10 @@ def cmd_start(
         print("  notify: none (muted; use `autodrive status` for health)")
     if cfg.max_budget_usd is None:
         print(
-            "  note:  no --max-budget set. claude -p bills the "
-            "subscription TODAY, but set a per-drive cap before that "
-            "changes."
+            "  note:  no --max-budget set. Each drive runs on its lane's "
+            "vendor CLI (ADR 0011/0012), so what an uncapped daemon spends "
+            "is whatever those vendors charge -- set a per-drive cap if "
+            "that is not a decision you want made by default."
         )
     print("  stop:  tigerharness autodrive stop")
     return 0
@@ -550,9 +551,11 @@ def ensure_running(
     Three properties matter more than the happy path:
 
     - **Opt-in.** A no-op unless ``TIGERHARNESS_AUTODRIVE_AUTOSTART`` is set
-      in the process env or the team's ``configs/.env``. Auto-start is only
-      safe while ``claude -p`` bills the subscription, and the harness ships
-      to deployments we cannot see (see ADR 0010 / docs/autodrive.md).
+      in the process env or the team's ``configs/.env``. Opt-in because the
+      harness ships to deployments we cannot see and an unattended daemon
+      spends on someone else's account: since ADR 0011/0012 each drive runs
+      on its lane's vendor CLI, so there is no single billing rail to reason
+      about (see ADR 0010 / ADR 0013 / docs/autodrive.md).
     - **Never fatal.** Any failure logs and returns False. The task is
       already safely on disk; losing the daemon must not lose the task, and
       a scheduling command must not start failing because a daemon did not.

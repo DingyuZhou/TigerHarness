@@ -801,9 +801,13 @@ def new_workflow_task(
     2. Derive title from ``--title`` arg, else first H1 of the brief,
        else fall back to ``"workflow"``.
     3. Validate every required persona exists on disk under the team
-       root: the hard-coded compile trio (Anzai/Akagi/Ayako) plus the
-       playbook-extracted references. Raise ``MissingPersonaError``
-       on any miss -- no journal artifact is written.
+       root: the team's compile-role personas plus the
+       playbook-extracted references (see
+       ``_required_workflow_personas``). The three roles resolve from
+       ``configs/workflow.yaml`` when the team has one, with
+       Anzai/Akagi/Ayako as the built-in DEFAULTS -- not a hard-coded
+       trio. Raise ``MissingPersonaError`` on any miss -- no journal
+       artifact is written.
     4. Mint a task-id; collision-check both ``active/`` and ``done/``.
     5. Build a fresh ``Status`` via ``Status.new_workflow``.
     6. Write the task dir + ``task_brief.md`` + ``playbook_snapshot.md``

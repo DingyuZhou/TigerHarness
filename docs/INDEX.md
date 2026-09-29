@@ -18,6 +18,7 @@ plain `claude -p` subprocess (a persona may run on `codex exec` instead —
 | I want to… | Read |
 |---|---|
 | Install / scaffold a team, see the layout, choose extras | [README](../README.md) |
+| Stand up a **brand-new team** from zero to fully operational, step by step, with a verification per step | [new-team-setup.md](new-team-setup.md) |
 | Contribute / commit conventions / the review standard | [CONTRIBUTING](../CONTRIBUTING.md), [code-review-standard.md](code-review-standard.md) |
 | Understand the journal (subscription backend) end to end | [journal.md](journal.md) |
 | Run a multi-persona **workflow** (compile + graph walk) | [journal-workflow-mode.md](journal-workflow-mode.md) |

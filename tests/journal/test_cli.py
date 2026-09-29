@@ -2192,7 +2192,44 @@ class TestClaimRailGuard:
     """The cost-discipline rail guard: a bridge-spawned session (the
     slack bridge exports TIGERHARNESS_SLACK_THREAD_TS into every turn)
     may only SCHEDULE journal tasks, never drive them. The guard runs
-    before any status read, so a refused claim changes nothing."""
+    before any status read, so a refused claim changes nothing.
+
+    Subject: the DEFAULT-OFF behaviour. ADR 0013's team knob is read from
+    the process env first, so a class asserting the default must SET the
+    default -- done for every test here by ``JOURNAL_RAIL_ENV_VARS`` in the
+    autouse scrub in ``tests/conftest.py``. The knob-on behaviour belongs to
+    ``TestSlackDrivesTeamSetting``."""
+
+    KNOB = "TIGERHARNESS_JOURNAL_SLACK_DRIVES"
+    # The knob is cleared for every test by the autouse scrub in
+    # tests/conftest.py (JOURNAL_RAIL_ENV_VARS) -- one home for the whole
+    # defect class, not a fixture per class. Without it these refusals
+    # measure the host: on a team that adopted ADR 0013 the knob is in
+    # configs/.env and its drives export it, so `claim` returns 0 where this
+    # class expects 1. test_default_off_depends_on_the_knob pins the coupling.
+
+    def test_default_off_depends_on_the_knob(self, journal_dir, monkeypatch):
+        """Both directions of the same call, with ambient env the ONLY
+        difference -- which is why this class clears the knob.
+
+        Deliberately self-contained: it sets each state explicitly rather
+        than relying on the autouse fixture, so it cannot pass vacuously on
+        a host whose environment happens to be clean.
+        """
+        monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")
+        paths = JournalPaths(root=journal_dir)
+        _seed(paths, "t1", state=State.PENDING)
+        _seed(paths, "t2", state=State.PENDING)
+
+        # Knob on -> the team permits Slack drives, so the claim lands.
+        monkeypatch.setenv(self.KNOB, "1")
+        assert main(["--journal-dir", str(journal_dir),
+                     "claim", "t1", "--driver", "Anzai"]) == 0
+
+        # Knob absent -> the default rail applies and the claim is refused.
+        monkeypatch.delenv(self.KNOB, raising=False)
+        assert main(["--journal-dir", str(journal_dir),
+                     "claim", "t2", "--driver", "Anzai"]) == 1
 
     def test_bridge_env_refuses_claim(self, journal_dir, monkeypatch, capsys):
         monkeypatch.setenv("TIGERHARNESS_SLACK_THREAD_TS", "555.42")

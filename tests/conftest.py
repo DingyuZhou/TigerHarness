@@ -55,6 +55,23 @@ BRIDGE_ENV_VARS = (
     "ALLOWED_SLACK_USER_IDS",
 )
 
+#: The journal rail knob, scrubbed for the same reason as
+#: ``TIGERHARNESS_SLACK_THREAD_TS`` and inseparable from it: the two are the
+#: halves of one gate (``journal/cli.py:1125-1157``). THREAD_TS decides whether
+#: the gate fires at all; this knob (ADR 0013) decides which way it answers.
+#: Scrubbing only the first protects the ~23 tests that never set it, and
+#: leaves exposed exactly the tests that set it DELIBERATELY to assert the
+#: default-off rail -- which is the whole of ``TestClaimRailGuard``. A team
+#: that adopted ADR 0013 puts the knob in ``configs/.env``, from where
+#: ``Settings.get`` reads it after ``os.environ`` and its autodrive daemon
+#: exports it into every session it spawns, including one running this suite:
+#: ``claim`` then returns 0 where those tests expect 1, and the suite is red on
+#: that host and green in CI. Kept its own family because it is journal-rail,
+#: not Slack-family, and the grouping should say so.
+JOURNAL_RAIL_ENV_VARS = (
+    "TIGERHARNESS_JOURNAL_SLACK_DRIVES",
+)
+
 #: The autodrive family, scrubbed for a sharper reason than the Slack one:
 #: ``TIGERHARNESS_AUTODRIVE_AUTOSTART`` does not merely skew an assertion,
 #: it makes the suite **spawn real detached daemons**.
@@ -103,7 +120,9 @@ TLS_ENV_VARS = (
 )
 
 #: Everything the autouse fixture unsets.
-SCRUBBED_ENV_VARS = BRIDGE_ENV_VARS + AUTODRIVE_ENV_VARS + TLS_ENV_VARS
+SCRUBBED_ENV_VARS = (
+    BRIDGE_ENV_VARS + JOURNAL_RAIL_ENV_VARS + AUTODRIVE_ENV_VARS + TLS_ENV_VARS
+)
 
 
 class RealDaemonSpawnBlocked(BaseException):
