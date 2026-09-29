@@ -650,13 +650,21 @@ directions:
   you are embedding rather than running the multi-lane daemon, the process
   environment is your route.
 - **The fallback is not a plain `os.environ` scan.** `resolve_progress_channel`
-  first calls `_load_slack_bridge_dotenv` (`progress.py:411`), which **writes
-  into `os.environ`** from the first existing file among
-  `$TIGERHARNESS_SLACK_ENV`, `./.env`, `./configs/.env`, and the package
-  parent's `.env` (`notify.py:37-66`), skipping keys already set. So "the
+  first calls `_read_slack_bridge_dotenv`, which **parses** the first existing
+  file among `$TIGERHARNESS_SLACK_ENV`, `./.env`, `./configs/.env`, and the
+  package parent's `.env` into a dict, then resolves each candidate name
+  `os.environ`-first and file-second through `notify._resolve_env`. So "the
   process environment" here can include a file you did not know was being
   read — which is a second way a channel can appear to work in one directory
   and not another.
+
+  It **does not write** to `os.environ`. It used to: every key of that file,
+  Slack-related or not, was exported process-wide by the first Slack post and
+  then inherited by every `claude -p` / `codex exec` child spawned with
+  `{**os.environ}`. If you are debugging an older deployment and find a team
+  `.env`'s keys in an agent session's environment, that is where they came
+  from; `tests/test_env_hygiene.py::TestNothingWritesTheProcessEnvironment`
+  is the guard that keeps it from coming back.
 
 #### Two accepted names
 
@@ -1264,9 +1272,20 @@ rest are the same class.
    touch `os.environ`. A shell export is invisible to the bridge; set lane
    config in the lane's env file. → Stage 4.
 4. **`SSL_CERT_FILE` and `TIGERHARNESS_SLACK_ENV` are needed together for
-   `notify`.** `_ssl_context` reads `SSL_CERT_FILE`;
-   `_load_slack_bridge_dotenv` reads `TIGERHARNESS_SLACK_ENV` to find the
-   `.env` when it is not in the default location.
+   `notify`.** `_ssl_context` reads `SSL_CERT_FILE` — from `os.environ`, and
+   then from the parsed team `.env` handed to it by `_load_creds`;
+   `_read_slack_bridge_dotenv` reads `TIGERHARNESS_SLACK_ENV` to find that
+   `.env` when it is not in the default location. `TIGERHARNESS_SLACK_ENV`
+   itself can therefore never come *from* the file.
+
+   A trust store you set only in the team `.env` reaches the notifier, and
+   only the notifier: nothing exports it to the rest of the process or to
+   child sessions. If you want a host-level trust store for everything a
+   bridge or autodrive daemon spawns — `uv`, `git`, `curl` inside an agent
+   session — put it in the supervisor's own environment: the `Environment=`
+   / `EnvironmentFile=` of the unit `gen-service` renders (Stage 4), where a
+   process-wide setting belongs. Older deployments got this by accident, via
+   the `.env` injection described above.
 
    **Be precise about which half is exit-invisible, because the command below
    does report its failures.** `_cmd_text` returns **2** when creds are not

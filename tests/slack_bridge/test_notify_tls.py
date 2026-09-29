@@ -87,12 +87,18 @@ def _restored(*names: str):
 
     Not ``monkeypatch``, and not an unconditional ``del``, for one measured
     reason each. ``monkeypatch.delenv(name, raising=False)`` on an *absent*
-    key records no undo entry, so a key the code under test writes into
-    ``os.environ`` afterwards (which is exactly what
-    ``_load_slack_bridge_dotenv`` does) survives into every later test.
-    An unconditional ``del`` is itself the leak on a host where
-    ``SSL_CERT_FILE`` was exported before pytest started -- and a host that
-    has been through this incident is precisely that host.
+    key records no undo entry, so a later ``os.environ[name] = ...`` -- which
+    the rung tests below do directly, since ``SSL_CERT_FILE`` is their input
+    -- survives into every later test. An unconditional ``del`` is itself
+    the leak on a host where ``SSL_CERT_FILE`` was exported before pytest
+    started -- and a host that has been through this incident is precisely
+    that host.
+
+    Historical note: the first reason used to be the *production* loader
+    writing into ``os.environ``. It no longer does (the reader returns a
+    dict; see ``notify._read_slack_bridge_dotenv``), which is asserted by
+    ``test_a_real_team_dotenv_never_reaches_os_environ`` below. The
+    fixture stays because the tests still write the variable themselves.
     """
     prior = {name: os.environ.get(name) for name in names}
     try:
@@ -152,10 +158,16 @@ def broken_host(tmp_path):
     :func:`test_fixture_reproduces_the_broken_host`.
 
     ``TIGERHARNESS_SLACK_ENV`` points at an **empty file that exists**: the
-    loader's candidate loop returns after the first candidate that exists,
+    reader's candidate loop returns after the first candidate that exists,
     so this short-circuits ``cwd/.env``, ``cwd/configs/.env`` and the
     package ``.env`` in one line. A non-existent path would NOT neutralize
     -- the candidate is skipped and the loop falls through to ``cwd/.env``.
+
+    That short-circuit is now belt-and-braces rather than load-bearing: the
+    reader returns a dict and writes nothing, so a team ``.env`` in the
+    tests' cwd can no longer reach ``os.environ`` at all. It is kept
+    because it also keeps a stray file out of any ``env_file`` a test
+    threads through ``_ssl_context`` deliberately.
     """
     empty_capath = tmp_path / "emptycapath"
     empty_capath.mkdir()
@@ -286,14 +298,15 @@ def test_embedded_bundles_are_parseable_and_distinct(one_cert_bundle, certifi_bu
 
 
 def test_fixture_survives_a_real_dotenv_and_try_load(broken_host, tmp_path, monkeypatch):
-    """The negative control is dismantled by the code under test unless the
-    loader is neutralized -- ``_load_slack_bridge_dotenv`` sets keys *not
-    already present*, and "SSL_CERT_FILE unset" is exactly that condition.
+    """The negative control survives a real ``try_load()`` against a real
+    team ``.env`` that carries ``SSL_CERT_FILE``.
 
     The hazard is constructed here rather than depended on: cwd is a team
-    directory whose ``configs/.env`` carries ``SSL_CERT_FILE``. Without the
-    neutralizer this test's last assertion fails; with it, the fixture
-    holds through a real ``try_load()``.
+    directory whose ``configs/.env`` carries the variable. This used to
+    need the fixture's ``TIGERHARNESS_SLACK_ENV`` neutralizer, because the
+    loader set keys *not already present* and "SSL_CERT_FILE unset" was
+    exactly that condition. It no longer does -- see the next test, which
+    removes the neutralizer and still holds.
     """
     team = tmp_path / "team"
     (team / "configs").mkdir(parents=True)
@@ -311,12 +324,15 @@ def test_fixture_survives_a_real_dotenv_and_try_load(broken_host, tmp_path, monk
     assert "SSL_CERT_FILE" not in os.environ
 
 
-def test_dotenv_loader_would_restore_it_without_the_neutralizer(tmp_path, monkeypatch):
-    """Proves the neutralizer is load-bearing rather than decorative.
+def test_a_real_team_dotenv_never_reaches_os_environ(tmp_path, monkeypatch):
+    """The inverse of the test this replaces.
 
-    Same team ``.env`` as above, but with ``TIGERHARNESS_SLACK_ENV`` unset:
-    one real loader call puts ``SSL_CERT_FILE`` straight back. If this ever
-    goes green, the fixture above has stopped protecting anything.
+    Its predecessor asserted that one real loader call put ``SSL_CERT_FILE``
+    *back into* ``os.environ`` -- the leak, pinned as a fact so the
+    fixture's neutralizer could be shown to be load-bearing. The reader
+    returns a dict now, so the same arrangement must leave the process
+    environment untouched **with the neutralizer removed**, and hand the
+    value back where :func:`_ssl_context` can be given it explicitly.
     """
     team = tmp_path / "team"
     (team / "configs").mkdir(parents=True)
@@ -327,8 +343,81 @@ def test_dotenv_loader_would_restore_it_without_the_neutralizer(tmp_path, monkey
     with _restored(*_ENV_KEYS):
         os.environ.pop("SSL_CERT_FILE", None)
         os.environ.pop("TIGERHARNESS_SLACK_ENV", None)
-        notify._load_slack_bridge_dotenv()
-        assert os.environ.get("SSL_CERT_FILE") == "/some/bundle/from/dotenv.crt"
+        parsed = notify._read_slack_bridge_dotenv()
+        assert "SSL_CERT_FILE" not in os.environ
+        assert parsed["SSL_CERT_FILE"] == "/some/bundle/from/dotenv.crt"
+        assert notify._resolve_env("SSL_CERT_FILE", parsed) == (
+            "/some/bundle/from/dotenv.crt"
+        )
+
+
+def test_dotenv_ssl_cert_file_still_wins_rung1_end_to_end(
+    broken_host, cafile_spy, one_cert_bundle, certifi_bundle, tmp_path, monkeypatch
+):
+    """Constraint 1, the whole arc: ``SSL_CERT_FILE`` set **only** in a team
+    ``.env`` still reaches :func:`_ssl_context` and still beats an available
+    ``certifi``.
+
+    This is the regression the explicit-threading design exists to prevent.
+    It goes through the real plumbing -- ``try_load`` -> ``_Creds.env_file``
+    -> ``_slack_post_json`` -> ``_ssl_context`` -- rather than calling
+    ``_ssl_context`` with a hand-built dict, because the failure mode being
+    guarded is a *missing hand-off* at one of those seams, which a direct
+    call cannot see.
+
+    ``broken_host`` guarantees ``SSL_CERT_FILE`` is absent from
+    ``os.environ``, so the file really is the only source; its
+    ``TIGERHARNESS_SLACK_ENV`` neutralizer is overridden here because this
+    test needs the team ``.env`` to be the file that wins.
+    """
+    team = tmp_path / "team"
+    (team / "configs").mkdir(parents=True)
+    (team / "configs" / ".env").write_text(
+        f"SSL_CERT_FILE={one_cert_bundle}\n"
+        "SLACK_BOT_TOKEN=xoxb-from-dotenv\n"
+        "SLACK_CEO_USER_ID=U0CEO\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(team)
+    with _restored("TIGERHARNESS_SLACK_ENV"):
+        os.environ.pop("TIGERHARNESS_SLACK_ENV", None)
+        notifier = SlackNotifier.try_load()
+        assert notifier is not None
+        # The token came from the file too -- same file, same trust store.
+        assert notifier._creds.bot_token == "xoxb-from-dotenv"
+        assert "SSL_CERT_FILE" not in os.environ
+        with patch(
+            "tigerharness.slack_bridge.notify.urllib.request.urlopen",
+            return_value=_json_response({"ok": True}),
+        ):
+            assert notifier.dm_text("hi") is True
+
+    # Rung 1 from the file, with rung 2 (certifi) available: a precedence
+    # claim, not "the only candidate was chosen".
+    assert cafile_spy == [str(one_cert_bundle)]
+    assert cafile_spy[0] != certifi_bundle
+
+
+def test_creds_repr_does_not_leak_the_parsed_dotenv(tmp_path, monkeypatch):
+    """``_Creds.env_file`` is ``repr=False`` on purpose: it holds a whole
+    ``.env``, so an ordinary dataclass repr would print the operator's
+    unrelated secrets into any traceback that rendered one."""
+    team = tmp_path / "team"
+    (team / "configs").mkdir(parents=True)
+    (team / "configs" / ".env").write_text(
+        "SLACK_BOT_TOKEN=xoxb-from-dotenv\n"
+        "SLACK_CEO_USER_ID=U0CEO\n"
+        "UNRELATED_SECRET=sk-do-not-print-me\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(team)
+    with _restored("TIGERHARNESS_SLACK_ENV"):
+        os.environ.pop("TIGERHARNESS_SLACK_ENV", None)
+        notifier = SlackNotifier.try_load()
+    assert notifier is not None
+    assert notifier._creds.env_file["UNRELATED_SECRET"] == "sk-do-not-print-me"
+    assert "sk-do-not-print-me" not in repr(notifier._creds)
+    assert "UNRELATED_SECRET" not in repr(notifier._creds)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,15 @@ Two surfaces:
 2. **CLI** -- `python -m tigerharness.slack_bridge.notify <subcommand>`.
 
 Both use the same auth: ``SLACK_BOT_TOKEN`` env var + a target user id.
+
+Config resolution is **read-only with respect to the process
+environment**: :func:`_read_slack_bridge_dotenv` parses the team ``.env``
+into a dict, :func:`_resolve_env` states the ``os.environ``-beats-file
+precedence once, and the dict is threaded explicitly to every consumer
+(notably :func:`_ssl_context`, so ``SSL_CERT_FILE`` still reaches rung 1).
+Nothing here writes to ``os.environ`` -- a Slack post must not export an
+operator's unrelated secrets to the rest of the process and to every
+child it spawns.
 """
 
 from __future__ import annotations
@@ -19,7 +28,8 @@ import ssl
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -34,9 +44,30 @@ _API_BASE = "https://slack.com/api"
 # Credential resolution
 # ---------------------------------------------------------------------------
 
-def _load_slack_bridge_dotenv() -> None:
-    """If the slack-bridge .env exists and the relevant vars aren't
-    already in os.environ, parse it manually."""
+def _read_slack_bridge_dotenv() -> dict[str, str]:
+    """Parse the first slack-bridge ``.env`` that exists into a dict,
+    **without touching** ``os.environ``. Returns ``{}`` when no candidate
+    file exists.
+
+    Candidates, first existing one winning outright:
+    ``$TIGERHARNESS_SLACK_ENV`` -> ``<cwd>/.env`` ->
+    ``<cwd>/configs/.env`` -> ``<package parent>/.env``.
+
+    This used to write every parsed key into ``os.environ`` and leave it
+    there for the life of the process -- so one Slack post exported a
+    team's whole ``.env``, secrets for unrelated services included, to
+    everything downstream (including every child process spawned with
+    ``{**os.environ}``). Callers now receive the dict and resolve through
+    :func:`_resolve_env`, which states the precedence in one place. This
+    mirrors ``multi.py:_load_env_file``, the same shape one layer over.
+
+    The hand-rolled parser stays rather than moving to ``dotenv_values``:
+    ``python-dotenv`` is only in the ``slack`` / ``all`` extras, while this
+    module is reached from ``journal/cli.py`` and ``autodrive/notifier.py``
+    on a bare install with no extras at all. ``multi.py`` can afford to
+    ``SystemExit`` on a missing dotenv because it *is* the bridge daemon;
+    a journal release notice cannot.
+    """
     candidates: list[Path] = []
     env_override = os.environ.get("TIGERHARNESS_SLACK_ENV", "").strip()
     if env_override:
@@ -54,6 +85,10 @@ def _load_slack_bridge_dotenv() -> None:
     for env_path in candidates:
         if not env_path.exists():
             continue
+        # Declared inside the loop, and returned from inside it, so "the
+        # first existing file wins outright" is the shape of the code
+        # rather than a comment on it: later candidates are never merged in.
+        parsed: dict[str, str] = {}
         for line in env_path.read_text().splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -61,12 +96,29 @@ def _load_slack_bridge_dotenv() -> None:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-        return
+            if key:
+                parsed[key] = value
+        return parsed
+    return {}
 
 
-def _resolve_target_user_id() -> str | None:
+def _resolve_env(name: str, env_file: Mapping[str, str] | None = None) -> str:
+    """One name, resolved ``os.environ`` first and the parsed ``.env``
+    second. The single statement of precedence for every name in this
+    module.
+
+    "First" means **present**, not non-empty, which is a faithful port of
+    the old loader's ``if key not in os.environ`` guard: a variable
+    exported as the empty string shadowed the file then and still does,
+    so ``SLACK_BOT_TOKEN=`` in the environment keeps meaning "no token"
+    rather than silently falling through to the file.
+    """
+    if name in os.environ:
+        return os.environ[name]
+    return (env_file or {}).get(name, "")
+
+
+def _resolve_target_user_id(env_file: Mapping[str, str] | None = None) -> str | None:
     """Resolution order: explicit env override -> multi-team yaml ->
     allowlist env vars -> None.
 
@@ -81,15 +133,21 @@ def _resolve_target_user_id() -> str | None:
     notify-only spelling ``ALLOWED_SLACK_USER_IDS``. Both accept
     comma/whitespace-separated ids, matching the bridge loader's
     format; the first usable id wins.
+
+    ``env_file`` is the parsed team ``.env`` from
+    :func:`_read_slack_bridge_dotenv`; every "env" lookup here goes
+    through :func:`_resolve_env`, so the file is consulted only after
+    the process environment. Omitting it reads the process environment
+    alone.
     """
-    override = os.environ.get("SLACK_CEO_USER_ID", "").strip()
+    override = _resolve_env("SLACK_CEO_USER_ID", env_file).strip()
     if override:
         return override
     from_yaml = _first_allowed_user_from_yaml(Path.cwd() / "configs" / "slack-bridge.yaml")
     if from_yaml:
         return from_yaml
     for env_name in ("SLACK_ALLOWED_USER_IDS", "ALLOWED_SLACK_USER_IDS"):
-        for entry in re.split(r"[,\s]+", os.environ.get(env_name, "")):
+        for entry in re.split(r"[,\s]+", _resolve_env(env_name, env_file)):
             if entry:
                 return entry
     return None
@@ -147,13 +205,27 @@ def _first_allowed_user_from_yaml(path: Path) -> str | None:
 class _Creds:
     bot_token: str
     target_user_id: str
+    #: The parsed team ``.env`` these creds came from, carried so the
+    #: transports can resolve ``SSL_CERT_FILE`` from the same file the
+    #: token came from. It replaces the old ``os.environ`` injection as
+    #: the route from :func:`_load_creds` to :func:`_ssl_context`.
+    #:
+    #: ``repr=False`` is not cosmetic: this dict is a whole ``.env``, so
+    #: an ordinary dataclass repr would print bot tokens (and whatever
+    #: else the operator keeps in that file) into any traceback or log
+    #: line that happens to render a ``_Creds``. ``compare=False`` keeps
+    #: the generated ``__eq__``/``__hash__`` over the two scalar fields,
+    #: which an unhashable dict field would otherwise break.
+    env_file: Mapping[str, str] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
 
 def _load_creds() -> _Creds | None:
     """Returns None if either piece is missing."""
-    _load_slack_bridge_dotenv()
-    token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
-    target = _resolve_target_user_id()
+    env_file = _read_slack_bridge_dotenv()
+    token = _resolve_env("SLACK_BOT_TOKEN", env_file).strip()
+    target = _resolve_target_user_id(env_file)
     if not token:
         log.warning("notify: SLACK_BOT_TOKEN not set; skipping")
         return None
@@ -163,21 +235,30 @@ def _load_creds() -> _Creds | None:
             "SLACK_ALLOWED_USER_IDS); skipping"
         )
         return None
-    return _Creds(bot_token=token, target_user_id=target)
+    return _Creds(
+        bot_token=token, target_user_id=target, env_file=env_file
+    )
 
 
 # ---------------------------------------------------------------------------
 # TLS trust store
 # ---------------------------------------------------------------------------
 
-def _ssl_context() -> ssl.SSLContext:
+def _ssl_context(env_file: Mapping[str, str] | None = None) -> ssl.SSLContext:
     """Build the TLS context for an outbound post, most specific rung first:
     ``SSL_CERT_FILE`` -> ``certifi.where()`` -> the interpreter default.
 
     Built **per call, never at import and never cached**: the team ``.env``
     is parsed inside :func:`SlackNotifier.try_load`, not at import, so a
     context built at import time would read ``SSL_CERT_FILE`` before the
-    ``.env`` had set it and silently skip the operator's explicit choice.
+    ``.env`` was available and silently skip the operator's explicit choice.
+
+    ``env_file`` is how that ``.env`` value reaches rung 1 now that the
+    loader no longer writes into ``os.environ``. Every transport passes
+    ``self._creds.env_file``, so the trust store and the bot token always
+    come from the same file. Called with no dict -- which is what the CLI
+    surfaces and the unit tests do -- it reads the process environment
+    alone, exactly as before.
 
     A configured rung that does not work falls through to the next one
     rather than raising -- one typo in an ``.env`` must not take down every
@@ -189,7 +270,7 @@ def _ssl_context() -> ssl.SSLContext:
     host correctly.
     """
     candidates: list[tuple[str, str]] = []
-    cert_file = os.environ.get("SSL_CERT_FILE", "").strip()
+    cert_file = _resolve_env("SSL_CERT_FILE", env_file).strip()
     if cert_file:
         candidates.append(("SSL_CERT_FILE", cert_file))
     try:
@@ -241,7 +322,13 @@ def _record_transport_result(
 # Low-level HTTP
 # ---------------------------------------------------------------------------
 
-def _slack_post_json(endpoint: str, token: str, payload: dict) -> dict[str, Any]:
+def _slack_post_json(
+    endpoint: str,
+    token: str,
+    payload: dict,
+    *,
+    env_file: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{_API_BASE}/{endpoint}",
@@ -252,7 +339,7 @@ def _slack_post_json(endpoint: str, token: str, payload: dict) -> dict[str, Any]
             "Content-Type": "application/json; charset=utf-8",
         },
     )
-    ctx = _ssl_context()
+    ctx = _ssl_context(env_file)
     try:
         with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
             raw = resp.read()
@@ -264,7 +351,13 @@ def _slack_post_json(endpoint: str, token: str, payload: dict) -> dict[str, Any]
     return json.loads(raw.decode("utf-8"))
 
 
-def _slack_post_form(endpoint: str, token: str, payload: dict) -> dict[str, Any]:
+def _slack_post_form(
+    endpoint: str,
+    token: str,
+    payload: dict,
+    *,
+    env_file: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     import urllib.parse
     data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -276,7 +369,7 @@ def _slack_post_form(endpoint: str, token: str, payload: dict) -> dict[str, Any]
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
     )
-    ctx = _ssl_context()
+    ctx = _ssl_context(env_file)
     try:
         with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
             raw = resp.read()
@@ -288,10 +381,15 @@ def _slack_post_form(endpoint: str, token: str, payload: dict) -> dict[str, Any]
     return json.loads(raw.decode("utf-8"))
 
 
-def _resolve_dm_channel(token: str, user_id: str) -> str | None:
+def _resolve_dm_channel(
+    token: str, user_id: str, *, env_file: Mapping[str, str] | None = None
+) -> str | None:
     """Open (or fetch) the DM channel id for a given user id."""
     result = _slack_post_form(
-        "conversations.open", token, {"users": user_id, "return_im": "true"}
+        "conversations.open",
+        token,
+        {"users": user_id, "return_im": "true"},
+        env_file=env_file,
     )
     if not result.get("ok"):
         log.warning(
@@ -303,9 +401,11 @@ def _resolve_dm_channel(token: str, user_id: str) -> str | None:
     return channel.get("id")
 
 
-def _put_bytes(url: str, data: bytes) -> bool:
+def _put_bytes(
+    url: str, data: bytes, *, env_file: Mapping[str, str] | None = None
+) -> bool:
     req = urllib.request.Request(url, data=data, method="POST")
-    ctx = _ssl_context()
+    ctx = _ssl_context(env_file)
     try:
         with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
             status = resp.status
@@ -329,7 +429,12 @@ class SlackNotifier:
 
     @classmethod
     def try_load(cls) -> "SlackNotifier | None":
-        """Build from env + .env. Returns None if creds incomplete."""
+        """Build from env + ``.env``. Returns None if creds incomplete.
+
+        The parsed ``.env`` is carried on the returned notifier's
+        ``_Creds`` rather than exported into ``os.environ``, so the
+        process this runs in is unchanged by having sent a message.
+        """
         creds = _load_creds()
         if creds is None:
             return None
@@ -352,7 +457,10 @@ class SlackNotifier:
         if thread_ts:
             payload["thread_ts"] = thread_ts
         result = _slack_post_json(
-            "chat.postMessage", self._creds.bot_token, payload
+            "chat.postMessage",
+            self._creds.bot_token,
+            payload,
+            env_file=self._creds.env_file,
         )
         if not result.get("ok"):
             log.warning(
@@ -411,7 +519,9 @@ class SlackNotifier:
             target_channel = channel
         else:
             target_channel = _resolve_dm_channel(
-                self._creds.bot_token, self._creds.target_user_id
+                self._creds.bot_token,
+                self._creds.target_user_id,
+                env_file=self._creds.env_file,
             )
             if target_channel is None:
                 log.warning(
@@ -424,6 +534,7 @@ class SlackNotifier:
             "files.getUploadURLExternal",
             self._creds.bot_token,
             {"filename": path.name, "length": size},
+            env_file=self._creds.env_file,
         )
         if not step1.get("ok"):
             log.warning(
@@ -440,7 +551,7 @@ class SlackNotifier:
             )
             return False
 
-        if not _put_bytes(upload_url, data):
+        if not _put_bytes(upload_url, data, env_file=self._creds.env_file):
             log.warning("notify.dm_file step2 (raw upload) failed")
             return False
 
@@ -456,6 +567,7 @@ class SlackNotifier:
             "files.completeUploadExternal",
             self._creds.bot_token,
             complete_payload,
+            env_file=self._creds.env_file,
         )
         if not step3.get("ok"):
             log.warning(

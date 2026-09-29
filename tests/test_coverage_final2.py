@@ -55,13 +55,13 @@ class TestBridgeEventHandlerBodies:
         assert len(bridge.app._listeners) > 0 or len(bridge.app._listener_runner.listeners) > 0 if hasattr(bridge.app, '_listener_runner') else True
 
 
-# ----- notify.py:53 (env loading comment/blank skip) ---------------------
+# ----- notify.py .env parsing (comment/blank/no-equals skip) --------------
 
 class TestNotifyEnvLoadCommentSkip:
-    """Line 53: blank/comment lines in .env are skipped."""
+    """Blank, comment and ``=``-less lines are skipped by the parser."""
 
     def test_comment_and_blank_skipped(self, tmp_path: Path, monkeypatch):
-        from tigerharness.slack_bridge.notify import _load_slack_bridge_dotenv as _load_env
+        from tigerharness.slack_bridge.notify import _read_slack_bridge_dotenv
 
         env_file = tmp_path / ".env"
         env_file.write_text(
@@ -70,12 +70,13 @@ class TestNotifyEnvLoadCommentSkip:
             "SLACK_BOT_TOKEN=xoxb-from-env\n"
             "no-equals-sign\n"
         )
-        # Clear existing env vars to see the effect
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.setenv("TIGERHARNESS_SLACK_ENV", str(env_file))
 
-        _load_env()
-        assert os.environ.get("SLACK_BOT_TOKEN") == "xoxb-from-env"
+        # The skipped lines contribute no keys, and the reader leaves the
+        # process environment alone.
+        assert _read_slack_bridge_dotenv() == {"SLACK_BOT_TOKEN": "xoxb-from-env"}
+        assert "SLACK_BOT_TOKEN" not in os.environ
 
 
 # ----- notify.py:231, 274 (dm_file with channel and thread_ts) -----------
@@ -94,9 +95,13 @@ class TestNotifyDmFileChannelAndThread:
 
         call_count = 0
 
-        def mock_form(endpoint, token, payload):
+        def mock_form(endpoint, token, payload, *, env_file=None):
             nonlocal call_count
             call_count += 1
+            # The parsed .env is threaded to every transport so the trust
+            # store comes from the same file as the token; these creds were
+            # built by hand, so it is the empty default.
+            assert env_file == {}
             if "getUploadURLExternal" in endpoint:
                 return {
                     "ok": True,

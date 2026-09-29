@@ -908,7 +908,7 @@ def test_c1b_build_passes_the_default_interval_through(
         progress_mod.SlackNotifier, "try_load", staticmethod(lambda: None)
     )
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     assert build_turn_progress("h")._interval_s == 300.0
     assert build_turn_progress("h", interval_s=1.0)._interval_s == 1.0
@@ -918,7 +918,7 @@ def test_channel_precedence_prefers_the_bridge_specific_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     monkeypatch.setenv(CHANNEL_ENV_VARS[0], "C-BRIDGE")
     monkeypatch.setenv(CHANNEL_ENV_VARS[1], "C-NOTIFY")
@@ -929,7 +929,7 @@ def test_channel_falls_through_to_the_notify_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     monkeypatch.setenv(CHANNEL_ENV_VARS[1], "C-NOTIFY")
     assert resolve_progress_channel() == "C-NOTIFY"
@@ -941,7 +941,7 @@ def test_empty_value_does_not_count_as_set(
     """An or-chain would let an empty override win and silently disable
     the feature — indistinguishable from "not configured"."""
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     monkeypatch.setenv(CHANNEL_ENV_VARS[0], "   ")
     monkeypatch.setenv(CHANNEL_ENV_VARS[1], "C-NOTIFY")
@@ -952,7 +952,7 @@ def test_no_channel_configured_resolves_to_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     assert resolve_progress_channel() is None
 
@@ -976,7 +976,7 @@ def test_build_returns_an_inert_reporter_when_unconfigured(
         progress_mod.SlackNotifier, "try_load", staticmethod(lambda: None)
     )
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     reporter = build_turn_progress("h")
     assert isinstance(reporter, TurnProgress)
@@ -994,7 +994,7 @@ def test_c5b_failure_2_logs_creds_without_a_channel(
         staticmethod(lambda: _FakeNotifier()),
     )
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
         reporter = build_turn_progress("h")
@@ -1017,7 +1017,7 @@ def test_build_returns_a_live_reporter_when_fully_configured(
         staticmethod(lambda: _FakeNotifier()),
     )
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
     monkeypatch.setenv(CHANNEL_ENV_VARS[0], "C-OPS")
@@ -1087,7 +1087,7 @@ def test_each_lane_posts_with_its_own_token(
     2's turns would post under lane 1's bot identity.
     """
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     one = build_turn_progress(
         "h", bot_token="xoxb-one", channel="C-ONE", lane="TeamOne"
@@ -1117,7 +1117,7 @@ def test_lane_without_a_token_is_inert_not_crashing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     reporter = build_turn_progress(
         "h", bot_token="", channel="C-LANE", lane="Shohoku"
@@ -1132,7 +1132,7 @@ def test_blank_lane_channel_falls_back_to_the_process_environment(
     """The embedded single-team bridge keeps working unchanged: it has
     no lane channel to declare, so the process environment still wins."""
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     monkeypatch.setenv(CHANNEL_ENV_VARS[0], "C-FROM-ENV")
     reporter = build_turn_progress(
@@ -1185,7 +1185,7 @@ def test_armed_heartbeats_announce_themselves_once(
     until a turn happened to run past the interval."""
     monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
         build_turn_progress(
@@ -1207,7 +1207,7 @@ def test_readiness_line_does_not_repeat_every_turn(
     would log a line per message the bridge ever handles."""
     monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
         for _ in range(5):
@@ -1226,7 +1226,7 @@ def test_each_lane_announces_separately(
     """One quiet lane in a multi-lane bridge must still be visible."""
     monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
         build_turn_progress(
@@ -1249,7 +1249,7 @@ def test_inert_reporter_never_claims_to_be_armed(
 ) -> None:
     monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     for name in CHANNEL_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -1268,7 +1268,7 @@ def test_enabled_is_the_public_readiness_seam(
     """The documented probe must not have to read a private attribute."""
     monkeypatch.setattr(progress_mod, "_ANNOUNCED", set())
     monkeypatch.setattr(
-        progress_mod, "_load_slack_bridge_dotenv", lambda: None
+        progress_mod, "_read_slack_bridge_dotenv", lambda: {}
     )
     live = build_turn_progress(
         "h", bot_token="xoxb-1", channel="C-OPS", lane="Shohoku"

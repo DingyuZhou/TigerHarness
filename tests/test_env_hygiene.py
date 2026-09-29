@@ -45,6 +45,7 @@ from tests.env_hygiene import (
     PACKAGE_ROOT,
     computed_env_reads,
     env_name_literals,
+    environ_write_sites,
 )
 
 #: Names that must appear in any correct scan, one per read mechanism listed
@@ -343,3 +344,103 @@ class TestRealDaemonSpawnGuardIsWired:
         here rather than by a fleet of orphaned daemons."""
         assert not issubclass(RealDaemonSpawnBlocked, Exception)
         assert issubclass(RealDaemonSpawnBlocked, BaseException)
+
+
+class TestNothingWritesTheProcessEnvironment:
+    """The production-side twin of the scrub, and the reason the scrub had
+    to run before *every* test rather than once per session.
+
+    ``slack_bridge/notify.py``'s ``.env`` loader wrote every key it parsed
+    into ``os.environ`` and left it there -- so one Slack post exported a
+    team's whole ``.env`` (unrelated secrets included) to the rest of the
+    process and to every child spawned with ``{**os.environ}``. The
+    registers above answer "is this variable accounted for?"; they cannot
+    answer "did something *set* it?", because a write site names its key
+    through a variable (``os.environ[key] = value``) and so has no literal
+    for the shape scan to find. Hence a detector of its own.
+    """
+
+    def test_no_environ_write_in_src(self):
+        writes = environ_write_sites()
+        assert not writes, (
+            f"the package writes the process environment at {writes}. A "
+            f"write outlives the call: every later reader in the process "
+            f"sees it, every child spawned with {{**os.environ}} inherits "
+            f"it, and monkeypatch cannot undo it. Parse config into a dict "
+            f"and pass it explicitly -- see "
+            f"notify._read_slack_bridge_dotenv / _resolve_env, and "
+            f"multi._load_env_file."
+        )
+
+    # As with the computed-read detector: this passes by finding nothing,
+    # which is how a broken detector also looks, and ``--cov=src`` does not
+    # measure ``tests/``. Each form is exercised on a synthetic module.
+    @pytest.mark.parametrize("write", [
+        pytest.param('os.environ["X_Y"] = v', id="subscript-assign"),
+        pytest.param('del os.environ["X_Y"]', id="subscript-del"),
+        pytest.param('os.environ.update(d)', id="update"),
+        pytest.param('os.environ.setdefault("X_Y", v)', id="setdefault"),
+        pytest.param('os.environ.pop("X_Y", None)', id="pop"),
+        pytest.param('os.environ.clear()', id="clear"),
+        pytest.param('os.putenv("X_Y", v)', id="putenv"),
+        pytest.param('os.unsetenv("X_Y")', id="unsetenv"),
+        pytest.param('environ["X_Y"] = v', id="bare-environ"),
+        pytest.param('putenv("X_Y", v)', id="bare-putenv"),
+        # Measured, not assumed: both of these really do mutate the
+        # process environment, and neither is a subscript or a sugared
+        # method call, so each needed its own branch in the detector.
+        pytest.param('os.environ |= d', id="augassign-ior"),
+        pytest.param('environ |= d', id="bare-augassign-ior"),
+        pytest.param('os.environ.__setitem__("X_Y", v)', id="dunder-setitem"),
+        pytest.param('os.environ.__delitem__("X_Y")', id="dunder-delitem"),
+        pytest.param('os.environ.__ior__(d)', id="dunder-ior"),
+        pytest.param('os.environ = {}', id="attribute-rebind"),
+        pytest.param('del os.environ', id="attribute-del"),
+    ])
+    def test_every_write_form_is_detected(self, tmp_path: Path, write: str):
+        (tmp_path / "m.py").write_text(f"{write}\n", encoding="utf-8")
+        assert environ_write_sites(tmp_path) == ["m.py:1"], (
+            f"an os.environ write spelled {write} is not detected"
+        )
+
+    def test_the_exact_loader_body_would_be_caught(self, tmp_path: Path):
+        """The incident itself as a fixture, not a paraphrase.
+
+        A guard justified by a specific past defect should be shown to
+        catch that defect. This is ``_load_slack_bridge_dotenv``'s former
+        body, verbatim in shape: the conditional write inside two loops,
+        keyed on a variable so no literal exists to find.
+        """
+        (tmp_path / "m.py").write_text(
+            "def _load_slack_bridge_dotenv():\n"
+            "    for env_path in candidates:\n"
+            "        for line in env_path.read_text().splitlines():\n"
+            "            key, _, value = line.partition('=')\n"
+            "            if key and key not in os.environ:\n"
+            "                os.environ[key] = value\n",
+            encoding="utf-8",
+        )
+        assert environ_write_sites(tmp_path) == ["m.py:6"]
+
+    @pytest.mark.parametrize("read", [
+        pytest.param('v = os.environ["X_Y"]', id="subscript-read"),
+        pytest.param('v = os.environ.get("X_Y")', id="get"),
+        pytest.param('v = "X_Y" in os.environ', id="contains"),
+        pytest.param('some_dict["X_Y"] = v', id="not-environ-assign"),
+        pytest.param('parsed.setdefault("X_Y", v)', id="not-environ-setdefault"),
+        pytest.param('env_file.pop("X_Y", None)', id="not-environ-pop"),
+        pytest.param('parsed |= d', id="not-environ-augassign"),
+        pytest.param('for environ in xs: pass', id="bare-name-loop-target"),
+        pytest.param('environ = {}', id="bare-name-rebind"),
+        pytest.param('cfg.environ', id="attribute-read"),
+    ])
+    def test_reads_and_other_mappings_are_not_flagged(
+        self, tmp_path: Path, read: str
+    ):
+        """``os.environ[k]`` in a load context is an ordinary read, and a
+        mutation of some *other* mapping is an ordinary assignment. Both
+        are what the fixed code does -- ``_resolve_env`` reads
+        ``os.environ[name]`` and builds a plain dict -- so flagging either
+        would make the guard fire on the fix."""
+        (tmp_path / "m.py").write_text(f"{read}\n", encoding="utf-8")
+        assert environ_write_sites(tmp_path) == []
